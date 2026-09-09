@@ -240,7 +240,11 @@ export function buildWorkerPrompt(task) {
   ].join('\n');
 }
 
-export class MockCodingWorker {
+export class CodingWorker {
+  async execute() { throw new Error('CodingWorker.execute must be implemented'); }
+}
+
+export class MockCodingWorker extends CodingWorker {
   async execute() { return { status: 'completed', summary: 'Mock worker performed no filesystem writes', output: '' }; }
 }
 
@@ -249,8 +253,11 @@ function workerEnvironment() {
   return Object.fromEntries(allowed.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
 }
 
-export class CodexSdkWorker {
-  constructor({ CodexClient = Codex, environment = workerEnvironment } = {}) { Object.assign(this, { CodexClient, environment }); }
+export class CodexSdkWorker extends CodingWorker {
+  constructor({ CodexClient = Codex, environment = workerEnvironment } = {}) {
+    super();
+    Object.assign(this, { CodexClient, environment });
+  }
 
   async execute(task, { workspace, timeoutMs }) {
     const controller = new AbortController();
@@ -397,7 +404,14 @@ export class GitHubAdapter {
 
   async checks(project, sha) {
     const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`));
-    const checks = (data.check_runs ?? []).map((check) => ({ name: check.name, status: check.status, conclusion: check.conclusion, detailsUrl: check.details_url }));
+    const checks = (data.check_runs ?? []).map((check) => ({
+      name: check.name,
+      status: check.status,
+      conclusion: check.conclusion,
+      startedAt: check.started_at,
+      completedAt: check.completed_at,
+      detailsUrl: check.details_url
+    }));
     return { state: ciState(checks), checks };
   }
 
@@ -432,10 +446,14 @@ export class DeterministicPlanner {
   }
 }
 
-export function evaluate(results) {
+export function evaluate(results, { retryable = false } = {}) {
+  if (results.ci?.state === 'pending') return { decision: 'WAITING', reasons: ['CI is still pending'] };
   const required = ['worker', 'diff', 'test', 'typecheck', 'lint', 'build', 'commit', 'push', 'pullRequest', 'ci'];
   const missing = required.filter((name) => results[name]?.ok !== true);
-  return { decision: missing.length ? 'FAIL' : 'PASS', reasons: missing.length ? missing.map((name) => `${name} did not pass`) : ['All deterministic engineering criteria passed'] };
+  return {
+    decision: missing.length ? (retryable ? 'NEEDS_RETRY' : 'FAIL') : 'PASS',
+    reasons: missing.length ? missing.map((name) => `${name} did not pass`) : ['All deterministic engineering criteria passed']
+  };
 }
 
 export function report(run) {
@@ -532,13 +550,20 @@ export class Orchestrator {
     this.assertDeadline(run);
     await this.localGit.assertWorkingBranch(project, run.workingBranch);
     const beforeHead = await this.localGit.head(project);
-    const task = { ...run.plan.codingTask, previousFailure: run.lastWorkerFailure };
+    const task = {
+      ...run.plan.codingTask,
+      workspace: project.workspace,
+      branch: run.workingBranch,
+      previousFailure: run.lastWorkerFailure
+    };
     const workerResult = await this.worker.execute(task, { workspace: project.workspace, timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, Math.max(1_000, run.deadlineAt - Date.now())) });
     run = await this.updateRun(run.id, (saved) => { saved.workerAttempts += 1; saved.results.worker = { ok: workerResult.status === 'completed', ...safeJson(workerResult) }; });
     await this.event(run.id, 'worker', 'coding_task.completed', { status: workerResult.status, attempt: run.workerAttempts });
     if (workerResult.status !== 'completed') return this.retryOrFail(run, workerResult.output || 'worker failed');
+    const afterWorker = await this.localGit.inspect(project);
+    if (afterWorker.remote !== run.results.branch.remote) return this.fail(run.id, 'worker_mutated_git_remote');
     await this.localGit.assertWorkingBranch(project, run.workingBranch);
-    if (await this.localGit.head(project) !== beforeHead) return this.fail(run.id, 'worker_mutated_git_history');
+    if (afterWorker.initialHead !== beforeHead) return this.fail(run.id, 'worker_mutated_git_history');
     const paths = await this.localGit.assertSafeChangedPaths(project);
     run = await this.updateRun(run.id, (saved) => { saved.results.diff = { ok: paths.length > 0, paths }; });
     if (!paths.length) return this.retryOrFail(run, 'worker produced no diff');

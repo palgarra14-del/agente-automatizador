@@ -50,6 +50,10 @@ class FakeLocalGit {
     return { initialHead: this.currentHead, workingBranch: this.current, repository: 'fake', remote: 'https://github.com/owner/repo.git', status: '' };
   }
 
+  async inspect() {
+    return { initialHead: this.currentHead, currentBranch: this.current, remote: 'https://github.com/owner/repo.git' };
+  }
+
   async assertWorkingBranch(_project, branch) { assert.equal(this.current, branch); }
   async head() { return this.currentHead; }
   async assertSafeChangedPaths() { return ['docs/worker-fixture.md']; }
@@ -263,4 +267,6 @@ test('approval is distinct from execution and resume creates the approved pull r
 
 test('deterministic evaluator fails incomplete engineering evidence', () => {
   assert.equal(evaluate({ worker: { ok: true } }).decision, 'FAIL');
+  assert.equal(evaluate({ worker: { ok: true } }, { retryable: true }).decision, 'NEEDS_RETRY');
+  assert.equal(evaluate({ ci: { state: 'pending' } }).decision, 'WAITING');
 });
