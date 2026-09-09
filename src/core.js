@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve, sep } from 'node:path';
@@ -201,7 +202,15 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
   if (!command) throw new Error(`Command not allowlisted: ${name}`);
   if (/[;&|`$<>\n\r]/.test(command)) throw new Error('Unsafe configured command');
   if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '' };
-  const [binary, ...args] = command.split(/\s+/);
+  let [binary, ...args] = command.split(/\s+/);
+  const npmCli = [
+    resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    process.env.ProgramFiles ? resolve(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js') : null
+  ].find((candidate) => candidate && existsSync(candidate));
+  if (process.platform === 'win32' && binary === 'npm' && npmCli) {
+    args = [npmCli, ...args];
+    binary = process.execPath;
+  }
   const result = await processRunner(binary, args, { cwd: project.workspace, env: { CI: 'true' }, timeoutMs });
   return { name, command, ...result };
 }

@@ -128,6 +128,22 @@ test('command runner uses a fixed allowlist, a shell-free runner, and dry-run', 
   await assert.rejects(() => runCommand(project({ commands: { test: 'node --version; rm -rf /' } }), 'test'));
 });
 
+test('command runner finds npm through the current Node installation on Windows', async () => {
+  const calls = [];
+  const configured = project({ commands: { test: 'npm test' } });
+  const result = await runCommand(configured, 'test', {
+    processRunner: async (binary, args) => {
+      calls.push({ binary, args });
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 };
+    }
+  });
+  assert.equal(result.ok, true);
+  if (process.platform === 'win32') {
+    assert.equal(calls[0].binary, process.execPath);
+    assert.match(calls[0].args[0], /npm-cli\.js$/);
+  }
+});
+
 test('worker prompt redacts secrets and Codex SDK receives constrained thread options', async () => {
   let invocation = {};
   class FakeCodex {
