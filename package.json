@@ -1,0 +1,17 @@
+{
+  "name": "engineering-orchestrator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "agent": "./src/cli.js" },
+  "scripts": { "start": "node src/cli.js", "test": "node --test", "typecheck": "node --check src/*.js", "lint": "node scripts/lint.js", "build": "node scripts/build.js" },
+  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.2",
+    "eslint": "^10.10.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.0"
+  }
+}
