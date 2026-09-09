@@ -11,4 +11,6 @@ node src/cli.js approvals
 node src/cli.js run --project self --goal "Plan only" --dry-run
 ```
 
-Run `npm test`, `npm run typecheck`, `npm run lint` and `npm run build`. Projects live in `config/projects.json`; state/audit events are stored in `.agent/state.json` and never committed.
+Run `npm test`, `npm run typecheck`, `npm run lint` and `npm run build`. Projects live in `config/projects.json`; state/audit events are stored in `.agent/state.json` and never committed. Approving an action only records approval: `agent resume <runId>` marks unsupported actions as **approved, execution not implemented**; it never merges or deploys.
+
+Active v0.1 budgets are `maxTasks`, `commandTimeoutMs` and `maxRuntimeMinutes`. `maxIterations`, `maxModelCalls` and `maxWorkerAttempts` are reserved for v0.2 worker/model loops.
