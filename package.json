@@ -1,11 +1,21 @@
 {
   "name": "engineering-orchestrator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "bin": { "agent": "./src/cli.js" },
-  "scripts": { "start": "node src/cli.js", "test": "node --test", "typecheck": "node --check src/*.js", "lint": "node scripts/lint.js", "build": "node scripts/build.js" },
-  "engines": { "node": ">=22" },
+  "bin": {
+    "agent": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test",
+    "typecheck": "node --check src/core.js && node --check src/cli.js",
+    "lint": "eslint . --max-warnings 0",
+    "build": "node scripts/build.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.2",
@@ -13,5 +23,8 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.153.4"
   }
 }
