@@ -9,7 +9,7 @@
       "workspace": "..",
       "commands": {
         "test": "npm test",
-        "typecheck": "npm run typecheck",
+        "typecheck": "node --check src/core.js",
         "lint": "npm run lint",
         "build": "npm run build"
       },

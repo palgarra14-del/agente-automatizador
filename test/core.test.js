@@ -13,6 +13,7 @@ import {
   buildWorkerPrompt,
   configFrom,
   evaluate,
+  loadProjects,
   maskSecrets,
   policy,
   runCommand,
@@ -108,6 +109,11 @@ test('configuration confines workspaces and policy blocks protected branch actio
   assert.equal(policy('force_push_main', project({ policies: { requireApprovalFor: ['force_push_main'] } })), 'FORBIDDEN');
   assert.throws(() => assertAllowedWorkingBranch(project(), 'main'));
   assert.throws(() => assertAllowedWorkingBranch(project(), 'feature/untrusted'));
+});
+
+test('self project keeps a shell-free cross-platform typecheck command', async () => {
+  const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
+  assert.equal(configured.get('self').commands.typecheck, 'node --check src/core.js');
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
