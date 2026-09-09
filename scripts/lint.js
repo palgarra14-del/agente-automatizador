@@ -1,0 +1,1 @@
+import { readdir,readFile } from 'node:fs/promises';let f=(await readdir('src')).filter(x=>x.endsWith('.js')).map(x=>`src/${x}`),bad=[];for(let x of f){if((await readFile(x,'utf8')).includes('\t'))bad.push(`${x}: tabs forbidden`)}if(bad.length){console.error(bad.join('\n'));process.exit(1)}console.log(`lint PASS (${f.length} files)`);
