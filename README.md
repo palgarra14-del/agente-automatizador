@@ -31,4 +31,4 @@ The project commands, protected branches, branch pattern, approvals, and budgets
 - `create_branch`, commit, and push are safe operations. A project can require approval for PR creation. Merge and production deploy are approval-required but deliberately have no execution handler. Force-push to `main` and protected-branch deletion are forbidden.
 - CI ends as `pending`, `success`, `failure`, or `timeout`; failed checks can cause at most `maxWorkerAttempts` worker attempts. There is no automatic merge.
 
-See [architecture](docs/ARCHITECTURE.md), [security](docs/SECURITY.md), and [Codex integration](docs/CODEX_INTEGRATION.md) for implementation detail.
+See [architecture](docs/ARCHITECTURE.md), [security](docs/SECURITY.md), [Codex integration](docs/CODEX_INTEGRATION.md), and the [real smoke-test record](docs/V0.2-SMOKE-TEST.md) for implementation detail.
