@@ -8,6 +8,7 @@
       "protectedBranches": ["main"],
       "workspace": "..",
       "workspaceStrategy": "managed",
+      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
       "commands": {
         "install": "npm ci",
         "test": "npm test",
@@ -43,6 +44,7 @@
       "protectedBranches": ["main"],
       "workspace": "..",
       "workspaceStrategy": "managed",
+      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
       "commands": {
         "install": "pnpm install --frozen-lockfile",
         "test": "pnpm test",

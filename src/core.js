@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { delimiter, dirname, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
 
@@ -47,6 +47,8 @@ const protectedFilePattern = /(^|\/)(?:\.env(?:\.|$)|.*\.(?:pem|key)$|secrets?(?
 const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization)/i;
 const defaultAcceptance = ['test', 'typecheck', 'lint', 'build', 'ci'];
 const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
+const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth)/i;
+const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 
 function isWithin(parent, child) {
   const rel = relative(parent, child);
@@ -65,6 +67,17 @@ function clip(value, size = 8_000) {
 
 function safeJson(value) {
   return JSON.parse(maskSecrets(JSON.stringify(value)));
+}
+
+export function safeCommandEnvironment(commandEnvironment = {}) {
+  if (!commandEnvironment || typeof commandEnvironment !== 'object' || Array.isArray(commandEnvironment)) throw new Error('commandEnvironment must be an object');
+  const environment = Object.fromEntries(systemEnvironmentNames.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+  for (const [name, value] of Object.entries(commandEnvironment)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || commandEnvironmentForbiddenPattern.test(name)) throw new Error(`Unsafe command environment variable: ${name}`);
+    if (typeof value !== 'string') throw new Error(`Command environment value must be a string: ${name}`);
+    environment[name] = value;
+  }
+  return environment;
 }
 
 export function maskSecrets(value) {
@@ -132,6 +145,8 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   const deployment = input.deployment ?? { provider: 'none' };
   if (!['none', 'vercel'].includes(deployment.provider)) throw new Error('Unsupported deployment provider');
   if (deployment.provider === 'vercel' && (!deployment.projectId || !deployment.teamId)) throw new Error('Vercel projectId and teamId are required');
+  safeCommandEnvironment(input.commandEnvironment ?? {});
+  const commandEnvironment = safeJson(input.commandEnvironment ?? {});
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -141,6 +156,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     managedWorkspaceRoot,
     acceptance: { require: [...acceptance] },
     deployment,
+    commandEnvironment,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -195,7 +211,7 @@ export class JsonStore {
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
-export async function runProcess(command, args, { cwd, env, timeoutMs = 30_000 } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
@@ -207,7 +223,8 @@ export async function runProcess(command, args, { cwd, env, timeoutMs = 30_000 }
       settled = true;
       resolveResult({ ...result, timedOut, stdout: clip(stdout), stderr: clip(stderr), durationMs: Date.now() - startedAt });
     };
-    const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, shell: false, windowsHide: true });
+    const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : { ...safeCommandEnvironment(), ...env };
+    const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeoutMs);
     child.stdout.on('data', (data) => { stdout += data; });
     child.stderr.on('data', (data) => { stderr += data; });
@@ -238,7 +255,12 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
     args = [pnpmCli, ...args];
     binary = process.execPath;
   }
-  const result = await processRunner(binary, args, { cwd: project.workspace, env: { CI: 'true' }, timeoutMs });
+  const result = await processRunner(binary, args, {
+    cwd: project.workspace,
+    env: safeCommandEnvironment({ CI: 'true', ...project.commandEnvironment }),
+    timeoutMs,
+    inheritEnvironment: false
+  });
   return { name, command, ...result };
 }
 
@@ -251,11 +273,21 @@ export function managedWorkspacePath(project, runId) {
   return { root, projectDirectory, workspace };
 }
 
-async function rejectSymlink(path) {
-  try {
-    if ((await lstat(path)).isSymbolicLink()) throw new Error(`Managed workspace path cannot be a symlink: ${path}`);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+export async function assertSafePathChain(path) {
+  const target = resolve(path);
+  const root = parse(target).root;
+  const segments = relative(root, target).split(sep).filter(Boolean);
+  let current = root;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = resolve(current, segments[index]);
+    try {
+      const details = await lstat(current);
+      if (details.isSymbolicLink()) throw new Error(`Managed workspace path cannot contain a symlink: ${current}`);
+      if (index < segments.length - 1 && !details.isDirectory()) throw new Error(`Managed workspace path component is not a directory: ${current}`);
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
   }
 }
 
@@ -278,17 +310,17 @@ export class WorkspaceManager {
   async prepare(project, runId) {
     const details = this.describe(project, runId);
     if (!details.managed) return details;
-    await mkdir(details.projectDirectory, { recursive: true });
-    await rejectSymlink(details.root);
-    await rejectSymlink(details.projectDirectory);
+    await assertSafePathChain(details.workspace);
     if (existsSync(details.workspace)) throw new Error(`Managed workspace already exists: ${details.workspace}`);
+    await mkdir(details.projectDirectory, { recursive: true });
+    await assertSafePathChain(details.workspace);
     const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
     const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
       timeoutMs: project.budgets.commandTimeoutMs
     });
     if (!clone.ok || clone.timedOut) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
-    await rejectSymlink(details.workspace);
+    await assertSafePathChain(details.workspace);
     return { ...details, remoteUrl, clone: { ok: true, durationMs: clone.durationMs, exitCode: clone.exitCode } };
   }
 }
@@ -472,7 +504,10 @@ export class GitHubAdapter {
   async inspect(project) {
     const repository = await this.request(this.path(project));
     const branch = await this.request(this.path(project, `/branches/${encodeURIComponent(project.defaultBranch)}`));
-    return { provider: 'github', status: 'ok', repository: repository.full_name, defaultBranch: repository.default_branch, head: branch.commit.sha };
+    return {
+      provider: 'github', status: 'ok', repository: repository.full_name, defaultBranch: repository.default_branch,
+      defaultBranchProtected: typeof branch.protected === 'boolean' ? branch.protected : 'unknown', head: branch.commit.sha
+    };
   }
 
   async createPullRequest(project, { branch, title, body }) {
@@ -585,7 +620,8 @@ export function report(run) {
   const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.simulated ? 'SIMULATED' : result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
   const deployment = run.deployment ?? run.results?.deployment;
-  return `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  return reportText.replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`);
 }
 
 export class Orchestrator {
