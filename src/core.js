@@ -224,12 +224,13 @@ function executionFrom(input = {}) {
 }
 
 export function maskSecrets(value) {
+  const secretField = '[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization|cookie|session)[A-Za-z0-9_-]*';
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
     .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}]+/gi, '$1[REDACTED]')
-    .replace(/("(?:api[_-]?key|token|secret|password|credential|authorization)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[REDACTED]"')
-    .replace(/('(?:api[_-]?key|token|secret|password|credential|authorization)'\s*:\s*)'(?:\\.|[^'\\])*'/gi, "$1'[REDACTED]'")
-    .replace(/\b((?:api[_-]?key|token|secret|password|credential|authorization)\s*[=:]\s*)[^\s"']+/gi, '$1[REDACTED]');
+    .replace(new RegExp(`("${secretField}"\\s*:\\s*)"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
+    .replace(new RegExp(`('${secretField}'\\s*:\\s*)'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
+    .replace(new RegExp(`\\b(${secretField}\\s*[=:]\\s*)[^\\s"']+`, 'gi'), '$1[REDACTED]');
 }
 
 export function transition(run, nextStatus) {
