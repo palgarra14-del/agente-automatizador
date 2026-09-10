@@ -226,13 +226,17 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
     resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     process.env.ProgramFiles ? resolve(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js') : null
   ].find((candidate) => candidate && existsSync(candidate));
+  const pnpmCli = [
+    ...((process.env.PATH ?? '').split(delimiter).map((directory) => resolve(directory, '..', '..', 'node', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'))),
+    resolve(dirname(process.execPath), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+  ].find((candidate) => existsSync(candidate));
   if (process.platform === 'win32' && binary === 'npm' && npmCli) {
     args = [npmCli, ...args];
     binary = process.execPath;
   }
-  if (process.platform === 'win32' && ['pnpm', 'corepack'].includes(binary)) {
-    const executable = (process.env.PATH ?? '').split(delimiter).map((directory) => resolve(directory, `${binary}.cmd`)).find((candidate) => existsSync(candidate));
-    if (executable) binary = executable;
+  if (process.platform === 'win32' && binary === 'pnpm' && pnpmCli) {
+    args = [pnpmCli, ...args];
+    binary = process.execPath;
   }
   const result = await processRunner(binary, args, { cwd: project.workspace, env: { CI: 'true' }, timeoutMs });
   return { name, command, ...result };
