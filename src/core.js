@@ -69,7 +69,7 @@ function safeJson(value) {
 
 export function maskSecrets(value) {
   return String(value)
-    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
     .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
     .replace(/\b((?:api[_-]?key|token|secret|password|credential)\s*[=:]\s*)[^\s"']+/gi, '$1[REDACTED]');
 }
@@ -549,7 +549,7 @@ export class DeterministicPlanner {
       objective: String(goal),
       repositoryContext: { repository: `${project.repository.owner}/${project.repository.name}`, defaultBranch: project.defaultBranch },
       constraints: ['Modify only the authorized workspace.', 'Do not commit, push, merge, deploy, or modify secrets.', 'Keep the change small and safe.'],
-      acceptanceCriteria: ['A focused code or documentation diff exists.', 'Configured tests, typecheck, lint, and build pass.', 'A pull request is created and CI succeeds.']
+      acceptanceCriteria: ['A focused code or documentation diff exists.', `Configured evidence passes: ${project.acceptance.require.join(', ')}.`, 'A pull request is created and CI succeeds.']
     };
     return {
       summary: `Engineering plan for: ${task.objective}`,
@@ -577,7 +577,7 @@ export function report(run) {
   const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.simulated ? 'SIMULATED' : result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
   const deployment = run.deployment ?? run.results?.deployment;
-  return `PROJECT\n${run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  return `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
 }
 
 export class Orchestrator {
@@ -595,7 +595,8 @@ export class Orchestrator {
 
   async create(project, goal, dryRun = false) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
-    const run = { id, projectId: project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), dryRun, budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const createdAt = new Date().toISOString();
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -604,7 +605,7 @@ export class Orchestrator {
   assertDeadline(run) { if (Date.now() > run.deadlineAt) throw new Error('maxRuntimeMinutes'); }
 
   async fail(runId, reason) {
-    const run = await this.updateRun(runId, (current) => { current.failureReason = clip(reason, 1_000); if (![RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.COMPLETED].includes(current.status)) transition(current, RunStatus.FAILED); });
+    const run = await this.updateRun(runId, (current) => { current.failureReason = clip(reason, 1_000); if (![RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.COMPLETED].includes(current.status)) transition(current, RunStatus.FAILED); current.durationMs = Date.now() - new Date(current.createdAt).getTime(); });
     await this.event(runId, 'orchestrator', 'run.failed', { reason });
     return run;
   }
@@ -718,6 +719,7 @@ export class Orchestrator {
       saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.'] };
       transition(saved, RunStatus.EVALUATING);
       transition(saved, RunStatus.COMPLETED);
+      saved.durationMs = Date.now() - new Date(saved.createdAt).getTime();
     });
     await this.event(run.id, 'orchestrator', 'dry_run.simulated', { workingBranch, baseHead: repository.head, workspace: workspace.workspace });
     return updated;
@@ -800,6 +802,7 @@ export class Orchestrator {
     return this.updateRun(run.id, (saved) => {
       saved.evaluation = evaluate(saved.results, { required: project.acceptance.require });
       transition(saved, saved.evaluation.decision === 'PASS' ? RunStatus.COMPLETED : RunStatus.FAILED);
+      saved.durationMs = Date.now() - new Date(saved.createdAt).getTime();
     });
   }
 
