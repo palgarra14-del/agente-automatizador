@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.4
+# Engineering Orchestrator — v0.5
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -13,7 +13,7 @@ A CLI-first, policy-governed engineering loop for registered repositories. It tu
 
 ## Quick start
 
-Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
+Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
 
 ```bash
 npm ci
@@ -26,7 +26,7 @@ node src/cli.js resume <runId>
 
 Add `--dry-run` to persist the plan and a zero-write simulation. It does not create a workspace or clone, create or switch branches, invoke the worker or checks, commit, push, create a PR, query Vercel, or write to GitHub.
 
-The project commands, protected branches, branch pattern, approvals, change policy, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, and default-branch protection without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
+The project commands, protected branches, branch pattern, approvals, change policy, execution provider, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, branch protection, and execution isolation availability without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 
 ## Guarantees and boundaries
 
@@ -35,8 +35,9 @@ The project commands, protected branches, branch pattern, approvals, change poli
 - The worker receives a redacted structured task, never GitHub/OpenAI credentials, and cannot choose commits, pushes, PRs, merge, deployment, or validation commands.
 - The orchestrator runs only configured commands without a shell. It refuses path traversal, protected files such as `.env`, working branches outside the allowlist, protected-branch pushes, and changes to Git history made by the worker.
 - v0.4 evaluates the actual diff after the worker, after every configured command, and immediately before commit. `.env` variants, PEM/key files, secret/credential paths, `.git`, and workspace escapes fail. Project budgets default to 8 files / 500 diff lines (LeadFinder: 3 / 200). Package manifests and lockfiles, workflows, scripts, deployment configuration, Dockerfiles, and security/auth-sensitive diffs require a recorded approval before those actions proceed. That approval is bound to a SHA-256 change-set fingerprint; an altered diff becomes stale and needs fresh approval, and the commit must match the final governed fingerprint.
+- v0.5 makes post-worker commands an execution-provider concern. The registered projects use `container-required`: the Docker image must already exist locally or the run fails before executing a check. Docker is invoked with `--pull never`, so it cannot download an image as a fallback. Post-worker containers receive exactly one writable workspace bind mount, no HOME/SSH/Git/Codex credential mounts, no Docker socket, no privileged mode, a read-only root filesystem, a writable `/tmp` tmpfs, dropped Linux capabilities, `no-new-privileges`, a non-root user, resource limits, timeouts, and `--network none`. A pre-worker `install` may use its default container network; it is never rerun automatically after the worker alters package metadata.
 - Scope input is deliberately simple: repeat `--allowed-path <relative-root>` and `--forbidden-path <relative-root>` as needed. They are literal repository-relative roots, not a task DSL; the orchestrator independently verifies the resulting paths after the worker finishes.
 - `create_branch`, commit, and push are safe operations. A project can require approval for PR creation. Merge and production deploy are approval-required but deliberately have no execution handler. Force-push to `main` and protected-branch deletion are forbidden.
 - CI ends as `pending`, `success`, `failure`, or `timeout`; failed checks can cause at most `maxWorkerAttempts` worker attempts. A configured Vercel provider only observes preview deployments and treats `READY`, `ERROR`, `NOT_FOUND`, `TIMEOUT`, and `NOT_CONFIGURED` explicitly. There is no automatic merge.
 
-The agent itself is a CLI and is not hosted on Vercel. See [architecture](docs/ARCHITECTURE.md), [cross-repository workspaces](docs/CROSS_REPO.md), [Vercel observation](docs/VERCEL_INTEGRATION.md), [security](docs/SECURITY.md), and the smoke-test records for implementation detail.
+The agent itself is a CLI and is not hosted on Vercel. See [architecture](docs/ARCHITECTURE.md), [safe command execution](docs/V0.5-SAFE-COMMAND-EXECUTION.md), [cross-repository workspaces](docs/CROSS_REPO.md), [Vercel observation](docs/VERCEL_INTEGRATION.md), and [security](docs/SECURITY.md) for implementation detail.

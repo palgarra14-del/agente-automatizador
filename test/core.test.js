@@ -6,10 +6,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CodexSdkWorker,
+  DockerContainerExecution,
+  LocalSanitizedExecution,
   GitHubAdapter,
   JsonStore,
   LocalGitAdapter,
   Orchestrator,
+  ProjectCommandRunner,
   RunStatus,
   VercelDeploymentProvider,
   WorkspaceManager,
@@ -219,7 +222,8 @@ test('doctor reports governed project readiness without exposing configuration s
   const result = await doctor(leadfinderProject(), {
     github: { inspect: async () => ({ defaultBranchProtected: false }) },
     codexAvailable: () => true,
-    environment: {}
+    environment: {},
+    executionRunner: { doctor: async () => ({ configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'YES', containerAvailable: 'YES', postWorkerNetwork: 'DENIED (--network none)', hostFallback: 'NONE (FAIL-SAFE)' }) }
   });
   assert.equal(result.githubConnectivity, 'YES');
   assert.equal(result.codexAvailable, 'YES');
@@ -227,6 +231,7 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.vercelToken, 'NO');
   assert.equal(result.branchProtection, 'NO');
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
+  assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
@@ -261,6 +266,137 @@ test('command runner finds npm through the current Node installation on Windows'
     assert.equal(calls[0].binary, process.execPath);
     assert.match(calls[0].args[0], /npm-cli\.js$/);
   }
+});
+
+test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
+  const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
+  for (const id of ['self', 'leadfinder']) {
+    assert.equal(configured.get(id).execution.provider, 'container-required');
+    assert.equal(configured.get(id).execution.image, 'node:22-bookworm-slim');
+  }
+  assert.throws(() => project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), /cannot use a host fallback/);
+  assert.throws(() => project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', user: 'root' } }), /numeric uid:gid/);
+});
+
+test('v0.5 container execution uses only a workspace mount with no post-worker network, host home, SSH, or Docker socket', async () => {
+  const calls = [];
+  const runner = async (binary, args, options) => {
+    calls.push({ binary, args, options });
+    if (args[0] === 'version') return { ok: true, exitCode: 0, stdout: '27.0', stderr: '' };
+    if (args[0] === 'image' && args[1] === 'inspect') return { ok: true, exitCode: 0, stdout: 'image', stderr: '' };
+    return { ok: true, exitCode: 0, stdout: 'PASS', stderr: '', durationMs: 1 };
+  };
+  const configured = project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', resources: { memoryMb: 256, cpuCount: 1, pidsLimit: 64 } } });
+  const result = await new DockerContainerExecution({ processRunner: runner }).execute(configured, 'test', { stage: 'post-worker' });
+  assert.equal(result.ok, true);
+  const container = calls.at(-1);
+  assert.equal(container.binary, 'docker');
+  assert.deepEqual(container.args.slice(0, 5), ['run', '--pull', 'never', '--rm', '--init']);
+  assert.match(container.args[container.args.indexOf('--name') + 1], /^agent-command-[0-9a-f-]+$/);
+  assert.equal(container.args[container.args.indexOf('--network') + 1], 'none');
+  for (const flag of ['--read-only', '--tmpfs', '--cap-drop', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--user']) assert.ok(container.args.includes(flag));
+  assert.equal(container.args.filter((value) => String(value).includes('type=bind,')).length, 1);
+  assert.match(container.args[container.args.indexOf('--mount') + 1], /dst=\/workspace$/);
+  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|HOME|--privileged/i.test(String(value))), false);
+  assert.equal(container.options.env.GITHUB_TOKEN, undefined);
+  assert.equal(container.options.env.VERCEL_TOKEN, undefined);
+  assert.equal(container.options.env.HOME, undefined);
+  assert.equal(container.options.inheritEnvironment, false);
+  assert.equal(container.options.restrictEnvironment, true);
+  assert.equal(container.options.timeoutMs, configured.budgets.commandTimeoutMs);
+});
+
+test('v0.5 force-removes a named container after a timed out project command', async () => {
+  const calls = [];
+  const runner = async (_binary, args) => {
+    calls.push(args);
+    if (args[0] === 'version' || (args[0] === 'image' && args[1] === 'inspect')) return { ok: true, exitCode: 0, stdout: 'ok', stderr: '' };
+    if (args[0] === 'rm') return { ok: true, exitCode: 0, stdout: '', stderr: '' };
+    return { ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'timeout' };
+  };
+  const result = await new DockerContainerExecution({ processRunner: runner }).execute(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test');
+  assert.equal(result.timedOut, true);
+  assert.equal(result.cleanup.attempted, true);
+  assert.equal(result.cleanup.ok, true);
+  const cleanup = calls.find((args) => args[0] === 'rm');
+  assert.deepEqual(cleanup.slice(0, 2), ['rm', '--force']);
+  assert.equal(cleanup[2], result.cleanup.containerName);
+});
+
+test('v0.5 allows network only for pre-worker bootstrap and never pulls a missing image', async () => {
+  const calls = [];
+  const availableRunner = async (_binary, args) => {
+    calls.push(args);
+    if (args[0] === 'version' || (args[0] === 'image' && args[1] === 'inspect')) return { ok: true, exitCode: 0, stdout: 'ok', stderr: '' };
+    return { ok: true, exitCode: 0, stdout: '', stderr: '' };
+  };
+  const configured = project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }, commands: { install: 'npm ci', test: 'npm test', typecheck: 'node --version', lint: 'npm test', build: 'npm test' } });
+  await new DockerContainerExecution({ processRunner: availableRunner }).execute(configured, 'install', { stage: 'bootstrap' });
+  assert.equal(calls.at(-1).includes('--network'), false);
+  assert.equal(calls.some((args) => args[0] === 'pull'), false);
+  const unavailable = new DockerContainerExecution({ processRunner: async (_binary, args) => args[0] === 'version' ? { ok: true, exitCode: 0, stdout: 'ok', stderr: '' } : { ok: false, exitCode: 1, stdout: '', stderr: 'missing image' } });
+  const blocked = await unavailable.execute(configured, 'test', { stage: 'post-worker' });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.stderr, /execution_provider_unavailable/);
+});
+
+test('v0.5 container-required fails safe and local fallback is only explicit', async () => {
+  let localCalls = 0;
+  const local = { availability: async () => ({ available: true, provider: 'local-sanitized', sandboxed: false }), execute: async () => { localCalls += 1; return { ok: true, execution: { provider: 'local-sanitized' } }; } };
+  const unavailableContainer = { availability: async () => ({ available: false, provider: 'container', reason: 'Docker unavailable' }), probe: async () => ({ available: false, reason: 'Docker unavailable' }) };
+  const required = new ProjectCommandRunner({ localExecution: local, containerExecution: unavailableContainer });
+  const blocked = await required.run(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test');
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.stderr, /execution_provider_unavailable/);
+  assert.equal(localCalls, 0);
+  const fallback = new ProjectCommandRunner({ localExecution: local, containerExecution: unavailableContainer });
+  const run = await fallback.run(project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), 'test');
+  assert.equal(run.ok, true);
+  assert.equal(localCalls, 1);
+});
+
+test('v0.5 command selection is fixed by project configuration and cannot be overridden by a worker option', async () => {
+  let containerCalls = 0;
+  let localCalls = 0;
+  const selected = new ProjectCommandRunner({
+    containerExecution: { availability: async () => ({ available: true, provider: 'container', sandboxed: true }), probe: async () => ({ available: true }), execute: async () => { containerCalls += 1; return { ok: true, execution: { provider: 'container' } }; } },
+    localExecution: { availability: async () => ({ available: true, provider: 'local-sanitized' }), execute: async () => { localCalls += 1; return { ok: true, execution: { provider: 'local-sanitized' } }; } }
+  });
+  const result = await selected.run(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test', { executionProvider: 'local-sanitized' });
+  assert.equal(result.execution.provider, 'container');
+  assert.equal(containerCalls, 1);
+  assert.equal(localCalls, 0);
+});
+
+test('v0.5 runs install only before the worker and never reruns it after a sensitive package change', async () => {
+  const localGit = new GovernedFakeGit(governedChangeSet(['package.json'], { contentFingerprint: 'package-after-worker' }));
+  const commandCalls = [];
+  const configured = project({
+    commands: { install: 'node --version', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    acceptance: { require: ['install', 'test', 'typecheck', 'lint', 'build', 'ci'] },
+    execution: { provider: 'local-sanitized' }
+  });
+  const orchestrator = new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name, options) => { commandCalls.push({ name, stage: options.stage ?? 'post-worker' }); return { name, ok: true, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  const waiting = await orchestrator.run(configured, 'Do not reinstall package metadata changed by the worker');
+  assert.equal(waiting.status, RunStatus.WAITING_APPROVAL);
+  assert.deepEqual(commandCalls, [{ name: 'install', stage: 'bootstrap' }]);
+  await orchestrator.decideApproval(waiting.pendingAction.approvalId, true);
+  const completed = await orchestrator.resume(waiting.id, configured);
+  assert.equal(completed.status, RunStatus.COMPLETED);
+  assert.equal(commandCalls.filter(({ name }) => name === 'install').length, 1);
+});
+
+test('v0.5 doctor distinguishes an unavailable container from an explicit local fallback', async () => {
+  const unavailableContainer = { availability: async () => ({ available: false, provider: 'container', reason: 'Docker unavailable' }), probe: async () => ({ available: false, reason: 'Docker unavailable' }) };
+  const executionRunner = new ProjectCommandRunner({ localExecution: new LocalSanitizedExecution({ processRunner: async () => ({ ok: true }) }), containerExecution: unavailableContainer });
+  const result = await doctor(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), { github: { inspect: async () => ({}) }, codexAvailable: () => true, environment: {}, executionRunner });
+  assert.deepEqual(result.execution, {
+    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
+  });
+  assert.match(formatDoctor(result), /CONTAINER AVAILABLE\nNO/);
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {

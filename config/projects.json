@@ -9,6 +9,11 @@
       "workspace": "..",
       "workspaceStrategy": "managed",
       "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
+      "execution": {
+        "provider": "container-required",
+        "image": "node:22-bookworm-slim",
+        "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
+      },
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [],
@@ -50,6 +55,11 @@
       "workspace": "..",
       "workspaceStrategy": "managed",
       "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
+      "execution": {
+        "provider": "container-required",
+        "image": "node:22-bookworm-slim",
+        "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
+      },
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [],

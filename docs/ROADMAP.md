@@ -12,9 +12,13 @@ The first governed engineering vertical slice is implemented: a real Codex SDK w
 
 Registered repositories receive isolated managed workspaces, controlled bootstrap commands, generic acceptance criteria, cross-repository PR/CI flow, and Vercel preview observation through a read-only adapter. The agent remains a CLI: it is not a Vercel deployment target. No automatic merge or production deployment exists.
 
-## v0.4 — current
+## v0.4 — complete
 
 Governed real engineering tasks add literal scope input, immutable forbidden-path enforcement, continuous policy evaluation after the worker and every validation command, fingerprint-bound sensitive approvals with stale-approval detection, final commit matching, per-project diff budgets, and a read-only doctor/preflight command. LeadFinder uses the strict 3-file / 200-line policy. The orchestrator still never merges pull requests or deploys production.
+
+## v0.5 — current
+
+Safe project-command execution adds the provider boundary, a real Docker implementation with no automatic pull, strict `container-required` fail-safe behavior, explicit local fallback only, command-resource limits, a no-network post-worker policy, and doctor evidence for the active isolation contract. It does not create product changes, merge pull requests, deploy production, or invoke v0.6 work.
 
 ## Deferred
 

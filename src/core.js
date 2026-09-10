@@ -165,6 +165,31 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
+function executionFrom(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('execution must be an object');
+  const provider = input.provider ?? 'local-sanitized';
+  if (!['local-sanitized', 'container', 'container-required'].includes(provider)) throw new Error('execution.provider must be local-sanitized, container, or container-required');
+  const fallbackProvider = input.fallbackProvider ?? 'none';
+  if (!['none', 'local-sanitized'].includes(fallbackProvider)) throw new Error('execution.fallbackProvider must be none or local-sanitized');
+  if (provider === 'container-required' && fallbackProvider !== 'none') throw new Error('container-required cannot use a host fallback');
+  const image = input.image;
+  if (provider !== 'local-sanitized' && (typeof image !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/@:-]*$/.test(image))) throw new Error('container execution requires a literal image name');
+  const user = input.user ?? '1000:1000';
+  if (!/^[0-9]+:[0-9]+$/.test(user)) throw new Error('execution.user must be a numeric uid:gid pair');
+  const resources = input.resources ?? {};
+  return {
+    provider,
+    fallbackProvider,
+    image,
+    user,
+    resources: {
+      memoryMb: positiveInteger(resources.memoryMb, 1024, 'execution.resources.memoryMb', 64),
+      cpuCount: positiveInteger(resources.cpuCount, 1, 'execution.resources.cpuCount'),
+      pidsLimit: positiveInteger(resources.pidsLimit, 128, 'execution.resources.pidsLimit')
+    }
+  };
+}
+
 export function maskSecrets(value) {
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
@@ -233,6 +258,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   safeCommandEnvironment(input.commandEnvironment ?? {});
   const commandEnvironment = safeJson(input.commandEnvironment ?? {});
   const changePolicy = changePolicyFrom(input.changePolicy);
+  const execution = executionFrom(input.execution);
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -244,6 +270,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     deployment,
     commandEnvironment,
     changePolicy,
+    execution,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -298,7 +325,7 @@ export class JsonStore {
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
-export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, outputLimit = 8_000, captureOutputDigest = false } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
@@ -311,7 +338,7 @@ export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_
       settled = true;
       resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
     };
-    const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : { ...safeCommandEnvironment(), ...env };
+    const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : restrictEnvironment ? { ...env } : { ...safeCommandEnvironment(), ...env };
     const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeoutMs);
     child.stdout.on('data', (data) => { stdout += data; stdoutHash?.update(data); });
@@ -321,12 +348,12 @@ export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_
   });
 }
 
-export async function runCommand(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, processRunner = runProcess } = {}) {
+function commandInvocation(project, name, { hostRuntime = false } = {}) {
   const command = project.commands[name];
   if (!command) throw new Error(`Command not allowlisted: ${name}`);
   if (/[;&|`$<>\n\r]/.test(command)) throw new Error('Unsafe configured command');
-  if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '' };
   let [binary, ...args] = command.split(/\s+/);
+  if (!hostRuntime) return { command, binary, args };
   const npmCli = [
     resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     process.env.ProgramFiles ? resolve(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js') : null
@@ -343,13 +370,142 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
     args = [pnpmCli, ...args];
     binary = process.execPath;
   }
-  const result = await processRunner(binary, args, {
-    cwd: project.workspace,
-    env: safeCommandEnvironment({ CI: 'true', ...project.commandEnvironment }),
-    timeoutMs,
-    inheritEnvironment: false
-  });
-  return { name, command, ...result };
+  return { command, binary, args };
+}
+
+export class ExecutionProvider {
+  async availability() { throw new Error('ExecutionProvider.availability must be implemented'); }
+  async execute() { throw new Error('ExecutionProvider.execute must be implemented'); }
+}
+
+export class LocalSanitizedExecution extends ExecutionProvider {
+  constructor({ processRunner = runProcess } = {}) { super(); this.processRunner = processRunner; }
+
+  async availability() {
+    return { available: true, provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'host-workspace', secrets: 'sanitized-environment-only', reason: 'Explicit local-sanitized provider; this is not container isolation.' };
+  }
+
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false } = {}) {
+    const { command, binary, args } = commandInvocation(project, name, { hostRuntime: true });
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'local-sanitized', sandboxed: false } };
+    const result = await this.processRunner(binary, args, {
+      cwd: project.workspace,
+      env: safeCommandEnvironment({ CI: 'true', ...project.commandEnvironment }),
+      timeoutMs,
+      inheritEnvironment: false
+    });
+    return { name, command, ...result, execution: { provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'workspace-cwd' } };
+  }
+}
+
+export class DockerContainerExecution extends ExecutionProvider {
+  constructor({ processRunner = runProcess, dockerBinary = 'docker' } = {}) { super(); Object.assign(this, { processRunner, dockerBinary }); }
+
+  dockerClientOptions(timeoutMs = 5_000) {
+    const environment = safeCommandEnvironment({ CI: 'true' });
+    for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) delete environment[name];
+    return { timeoutMs, env: environment, inheritEnvironment: false, restrictEnvironment: true };
+  }
+
+  async probe() {
+    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions());
+    return result.ok ? { available: true, provider: 'container', technology: 'docker', version: result.stdout.trim() || 'available' } : { available: false, provider: 'container', technology: 'docker', reason: clip(result.stderr || result.stdout || 'Docker daemon is unavailable', 300) };
+  }
+
+  async availability(project) {
+    const execution = project.execution;
+    const probe = await this.probe();
+    if (!probe.available) return probe;
+    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions());
+    if (!image.ok) return { ...probe, available: false, image: execution.image, reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
+    return { ...probe, image: execution.image, sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only', secrets: 'no host credential or home mounts' };
+  }
+
+  commandArguments(project, name, { stage = 'post-worker', containerName } = {}) {
+    const execution = project.execution;
+    const { command, binary, args } = commandInvocation(project, name);
+    const workspace = resolve(project.workspace);
+    const postWorker = stage !== 'bootstrap';
+    const containerArgs = [
+      'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
+      '--workdir', '/workspace',
+      '--mount', `type=bind,src=${workspace},dst=/workspace`,
+      '--read-only',
+      '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
+      '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges=true',
+      '--pids-limit', String(execution.resources.pidsLimit),
+      '--memory', `${execution.resources.memoryMb}m`,
+      '--memory-swap', `${execution.resources.memoryMb}m`,
+      '--cpus', String(execution.resources.cpuCount),
+      '--user', execution.user,
+      '--env', 'CI=true',
+      '--env', 'npm_config_cache=/tmp/npm-cache'
+    ];
+    for (const [key, value] of Object.entries(project.commandEnvironment)) containerArgs.push('--env', `${key}=${value}`);
+    if (postWorker) containerArgs.push('--network', 'none');
+    containerArgs.push(execution.image, binary, ...args);
+    return { command, containerArgs, postWorker };
+  }
+
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+    const containerName = `agent-command-${randomUUID()}`;
+    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName });
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
+    const available = await this.availability(project);
+    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
+    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(timeoutMs), cwd: project.workspace });
+    let cleanup;
+    if (result.timedOut) {
+      const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
+      cleanup = { attempted: true, ok: Boolean(removed.ok), containerName };
+    }
+    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled', filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
+  }
+}
+
+export class ProjectCommandRunner {
+  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution() } = {}) { Object.assign(this, { localExecution, containerExecution }); }
+
+  async availability(project) {
+    const execution = project.execution;
+    if (execution.provider === 'local-sanitized') return this.localExecution.availability(project);
+    const container = await this.containerExecution.availability(project);
+    if (container.available) return container;
+    if (execution.provider === 'container' && execution.fallbackProvider === 'local-sanitized') {
+      return { ...(await this.localExecution.availability(project)), configuredProvider: 'container', fallbackFrom: 'container', containerReason: container.reason };
+    }
+    return { ...container, configuredProvider: execution.provider, failSafe: true };
+  }
+
+  async doctor(project) {
+    const selected = await this.availability(project);
+    const container = await this.containerExecution.probe();
+    const unavailableContainerContract = !selected.available && project.execution.provider !== 'local-sanitized';
+    return {
+      configuredProvider: project.execution.provider,
+      selectedProvider: selected.provider,
+      sandboxAvailable: selected.sandboxed ? 'YES' : 'NO',
+      containerAvailable: container.available ? 'YES' : 'NO',
+      postWorkerNetwork: selected.sandboxed ? 'DENIED (--network none)' : unavailableContainerContract ? 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
+      hostFallback: selected.fallbackFrom ? 'EXPLICIT_LOCAL_SANITIZED' : project.execution.provider === 'local-sanitized' ? 'EXPLICIT_LOCAL_SANITIZED' : 'NONE (FAIL-SAFE)',
+      reason: selected.reason ?? selected.containerReason
+    };
+  }
+
+  async run(project, name, options = {}) {
+    const selected = await this.availability(project);
+    if (!selected.available) {
+      const { command } = commandInvocation(project, name);
+      return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${selected.reason}`, execution: { provider: project.execution.provider, failSafe: true } };
+    }
+    if (selected.provider === 'container') return this.containerExecution.execute(project, name, options);
+    return this.localExecution.execute(project, name, options);
+  }
+}
+
+export async function runCommand(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, processRunner = runProcess } = {}) {
+  return new LocalSanitizedExecution({ processRunner }).execute(project, name, { timeoutMs, dryRun });
 }
 
 export function managedWorkspacePath(project, runId) {
@@ -758,7 +914,7 @@ export function report(run) {
     .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
 }
 
-export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env } = {}) {
+export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner() } = {}) {
   let repository;
   let githubError;
   try {
@@ -767,6 +923,12 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     githubError = clip(error.message, 300);
   }
   const vercelConfigured = project.deployment?.provider === 'vercel' && Boolean(project.deployment.projectId && project.deployment.teamId);
+  let execution;
+  try {
+    execution = await executionRunner.doctor(project);
+  } catch (error) {
+    execution = { configuredProvider: project.execution.provider, selectedProvider: 'unavailable', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'NOT_AVAILABLE', hostFallback: 'NONE (FAIL-SAFE)', reason: clip(error.message, 300) };
+  }
   return {
     project: project.displayName ?? project.id,
     projectId: project.id,
@@ -779,17 +941,19 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     commandsConfigured: Object.keys(project.commands),
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
-    branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN'
+    branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
+    execution
   };
 }
 
 export function formatDoctor(result) {
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}`;
+  const execution = result.execution ?? {};
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nCONTAINER AVAILABLE\n${execution.containerAvailable ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
-  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), commandRunner = runCommand }) {
-    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, commandRunner });
+  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
+    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
   }
 
   async event(runId, component, event, details = {}) {
@@ -886,7 +1050,7 @@ export class Orchestrator {
   }
 
   async bootstrap(run, project) {
-    const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
+    const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())), stage: 'bootstrap' });
     const updated = await this.updateRun(run.id, (saved) => { saved.results.install = safeJson(result); });
     await this.event(run.id, 'workspace', 'install.completed', { ok: result.ok, durationMs: result.durationMs, exitCode: result.exitCode });
     if (!result.ok) return this.fail(run.id, `install failed: ${result.stderr || result.stdout}`);
