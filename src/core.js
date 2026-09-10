@@ -367,7 +367,7 @@ export class JsonStore {
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
-        if (Date.now() >= deadline) throw new Error('state_lock_timeout');
+        if (Date.now() >= deadline) throw new Error('state_lock_timeout', { cause: error });
         await new Promise((resolveWait) => setTimeout(resolveWait, this.lockPollMs));
       }
     }
@@ -375,15 +375,21 @@ export class JsonStore {
 
   async mutate(mutator) {
     await this.acquireLock();
+    let output;
+    let operationError = null;
     try {
       const data = await this.load();
-      const output = await mutator(data);
+      output = await mutator(data);
       await this.save(data);
-      return output;
-    } finally {
-      try { await unlink(this.lockFile); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    } catch (error) {
+      operationError = error;
     }
+    let unlockError = null;
+    try { await unlink(this.lockFile); }
+    catch (error) { if (error.code !== 'ENOENT') unlockError = error; }
+    if (operationError) throw operationError;
+    if (unlockError) throw unlockError;
+    return output;
   }
 
   async getRun(id) { return (await this.load()).runs[id]; }
