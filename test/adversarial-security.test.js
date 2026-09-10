@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalGitAdapter, configFrom, maskSecrets } from '../src/core.js';
+import { JsonStore, LocalGitAdapter, configFrom, evaluateChangePolicy, maskSecrets, runProcess } from '../src/core.js';
 
 test('secret masking redacts quoted JSON-style secret fields and authorization headers', () => {
   const input = JSON.stringify({
@@ -54,4 +54,56 @@ test('controlled git push disables repository-provided pre-push hooks', async ()
   const push = calls.find((args) => args[0] === 'push');
   assert.ok(push);
   assert.ok(push.includes('--no-verify'), `push hooks are still enabled: git ${push.join(' ')}`);
+});
+
+test('change governance accounts for changed bytes and per-file size, including binary files', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-binary-budget-'));
+  const project = configFrom({
+    id: 'binary-budget',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '..',
+    commands: { test: 'node --version' },
+    changePolicy: { budgets: { maxChangedFiles: 5, maxDiffLines: 100, maxChangedBytes: 64 * 1024, maxFileBytes: 64 * 1024 } },
+    budgets: { commandTimeoutMs: 5000 }
+  }, join(workspace, 'config'));
+
+  await runProcess('git', ['init'], { cwd: workspace, timeoutMs: 5000 });
+  await runProcess('git', ['config', 'user.email', 'agent@example.invalid'], { cwd: workspace, timeoutMs: 5000 });
+  await runProcess('git', ['config', 'user.name', 'Agent Test'], { cwd: workspace, timeoutMs: 5000 });
+  await writeFile(join(workspace, 'README.md'), 'baseline\n');
+  await runProcess('git', ['add', 'README.md'], { cwd: workspace, timeoutMs: 5000 });
+  await runProcess('git', ['commit', '--no-verify', '-m', 'baseline'], { cwd: workspace, timeoutMs: 5000 });
+  await writeFile(join(workspace, 'large.bin'), Buffer.alloc(128 * 1024, 0xa5));
+
+  const changeSet = await new LocalGitAdapter().inspectChangeSet(project);
+  assert.ok(Number.isInteger(changeSet.changedBytes) && changeSet.changedBytes >= 128 * 1024, 'changed byte accounting is missing');
+  assert.ok(changeSet.maxFileBytes >= 128 * 1024, 'per-file byte accounting is missing');
+  const decision = evaluateChangePolicy(project, changeSet);
+  assert.equal(decision.ok, false, 'a binary file over the configured byte budget was accepted');
+  assert.equal(decision.reason, 'change_budget_exceeded');
+});
+
+test('JsonStore does not lose updates when two agent processes mutate shared state concurrently', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-store-race-'));
+  const file = join(directory, 'state.json');
+  const first = new JsonStore(file);
+  const second = new JsonStore(file);
+  await first.save({ runs: {}, approvals: {}, events: [] });
+
+  let arrived = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const concurrentMutation = (store, id) => store.mutate(async (data) => {
+    arrived += 1;
+    if (arrived === 2) release();
+    await gate;
+    data.runs[id] = { id, status: 'created' };
+  });
+
+  await Promise.all([concurrentMutation(first, 'run-a'), concurrentMutation(second, 'run-b')]);
+  const final = await first.load();
+  assert.ok(final.runs['run-a'], 'concurrent mutation lost run-a');
+  assert.ok(final.runs['run-b'], 'concurrent mutation lost run-b');
 });
