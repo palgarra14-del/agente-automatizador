@@ -31,6 +31,7 @@ import {
   runCommand,
   report,
   remoteMatchesProject,
+  resolveExecutionUser,
   safeCommandEnvironment,
   transition,
   managedWorkspacePath
@@ -281,6 +282,22 @@ test('command runner finds npm through the current Node installation on Windows'
   }
 });
 
+test('v0.5 resolves container runtime user from the host without requiring root', () => {
+  const expected = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+    ? `${process.getuid()}:${process.getgid()}`
+    : '1000:1000';
+  assert.equal(resolveExecutionUser('host'), expected);
+  assert.equal(resolveExecutionUser('1234:5678'), '1234:5678');
+
+  const configured = project({
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim', user: 'host' }
+  });
+  assert.equal(configured.execution.user, 'host');
+  const execution = new DockerContainerExecution();
+  const { containerArgs } = execution.commandArguments(configured, 'test', { containerName: 'agent-test', gitMetadata: join(configured.workspace, '.git') });
+  assert.equal(containerArgs[containerArgs.indexOf('--user') + 1], expected);
+});
+
 test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
   assert.equal(configured.get('self').execution.provider, 'container-required');
@@ -413,7 +430,7 @@ test('v0.5 doctor distinguishes an unavailable container from an explicit local 
   const executionRunner = new ProjectCommandRunner({ localExecution: new LocalSanitizedExecution({ processRunner: async () => ({ ok: true }) }), containerExecution: unavailableContainer });
   const result = await doctor(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), { github: { inspect: async () => ({}) }, codexAvailable: () => true, environment: {}, executionRunner });
   assert.deepEqual(result.execution, {
-    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
+    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', runtimeUser: resolveExecutionUser('host'), gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
   });
   assert.match(formatDoctor(result), /DOCKER AVAILABLE\nNO/);
 });
