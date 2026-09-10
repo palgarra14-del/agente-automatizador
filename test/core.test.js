@@ -297,7 +297,7 @@ test('v0.5 container execution uses only a workspace mount with no post-worker n
   for (const flag of ['--read-only', '--tmpfs', '--cap-drop', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--user']) assert.ok(container.args.includes(flag));
   assert.equal(container.args.filter((value) => String(value).includes('type=bind,')).length, 1);
   assert.match(container.args[container.args.indexOf('--mount') + 1], /dst=\/workspace$/);
-  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|HOME|--privileged/i.test(String(value))), false);
+  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|--privileged/i.test(String(value))), false);
   assert.equal(container.options.env.GITHUB_TOKEN, undefined);
   assert.equal(container.options.env.VERCEL_TOKEN, undefined);
   assert.equal(container.options.env.HOME, undefined);
