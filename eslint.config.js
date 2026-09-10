@@ -1,7 +1,7 @@
 import js from '@eslint/js';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**', '.agent/**'] },
+  { ignores: ['dist/**', 'node_modules/**', '.agent/**', '.agent-workspaces/**'] },
   js.configs.recommended,
   {
     languageOptions: {

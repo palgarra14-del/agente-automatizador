@@ -7,7 +7,10 @@
       "workingBranchPattern": "agent/{runId}",
       "protectedBranches": ["main"],
       "workspace": "..",
+      "workspaceStrategy": "managed",
+      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
       "commands": {
+        "install": "npm ci",
         "test": "npm test",
         "typecheck": "node --check src/core.js",
         "lint": "npm run lint",
@@ -17,6 +20,8 @@
         "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
         "forbidden": ["force_push_main", "delete_protected_branch"]
       },
+      "acceptance": { "require": ["install", "test", "typecheck", "lint", "build", "ci"] },
+      "deployment": { "provider": "none" },
       "budgets": {
         "maxIterations": 3,
         "maxTasks": 10,
@@ -25,7 +30,50 @@
         "maxWorkerAttempts": 2,
         "commandTimeoutMs": 30000,
         "ciTimeoutMs": 600000,
-        "ciPollIntervalMs": 10000
+        "ciPollIntervalMs": 10000,
+        "deploymentTimeoutMs": 600000,
+        "deploymentPollIntervalMs": 15000
+      }
+    },
+    {
+      "id": "leadfinder",
+      "displayName": "LeadFinder",
+      "repository": { "owner": "palgarra14-del", "name": "Lead-finder" },
+      "defaultBranch": "main",
+      "workingBranchPattern": "agent/{runId}",
+      "protectedBranches": ["main"],
+      "workspace": "..",
+      "workspaceStrategy": "managed",
+      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
+      "commands": {
+        "install": "pnpm install --frozen-lockfile",
+        "test": "pnpm test",
+        "lint": "pnpm lint",
+        "build": "pnpm build"
+      },
+      "acceptance": { "require": ["install", "test", "lint", "build", "ci", "deployment"] },
+      "deployment": {
+        "provider": "vercel",
+        "projectId": "prj_ITEH4iBkj6DOmNukkKP2LilTbyrn",
+        "teamId": "team_WDwd9ZZgxEdlv4AS0oIP1num",
+        "requirePreviewReady": true
+      },
+      "pullRequest": { "titleTemplate": "Agent smoke: cross-repository {project} validation" },
+      "policies": {
+        "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
+        "forbidden": ["force_push_main", "delete_protected_branch"]
+      },
+      "budgets": {
+        "maxIterations": 3,
+        "maxTasks": 10,
+        "maxRuntimeMinutes": 25,
+        "maxModelCalls": 0,
+        "maxWorkerAttempts": 2,
+        "commandTimeoutMs": 300000,
+        "ciTimeoutMs": 600000,
+        "ciPollIntervalMs": 10000,
+        "deploymentTimeoutMs": 600000,
+        "deploymentPollIntervalMs": 15000
       }
     }
   ]

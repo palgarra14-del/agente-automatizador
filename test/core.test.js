@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +11,8 @@ import {
   LocalGitAdapter,
   Orchestrator,
   RunStatus,
+  VercelDeploymentProvider,
+  WorkspaceManager,
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
   configFrom,
@@ -18,7 +21,10 @@ import {
   maskSecrets,
   policy,
   runCommand,
-  transition
+  report,
+  safeCommandEnvironment,
+  transition,
+  managedWorkspacePath
 } from '../src/core.js';
 
 function project(overrides = {}) {
@@ -76,7 +82,7 @@ class FakeLocalGit {
 class FakeGitHub {
   constructor() { this.pullRequests = 0; this.ciCalls = 0; }
 
-  async inspect() { return { provider: 'github', status: 'ok', repository: 'owner/repo', defaultBranch: 'main', head: 'initial-head' }; }
+  async inspect(configured) { return { provider: 'github', status: 'ok', repository: `${configured.repository.owner}/${configured.repository.name}`, defaultBranch: 'main', head: 'initial-head' }; }
 
   async createPullRequest() {
     this.pullRequests += 1;
@@ -96,6 +102,37 @@ class FakeWorker {
     this.calls += 1;
     return { status: 'completed', summary: 'changed a fixture', output: '' };
   }
+}
+
+class FakeWorkspaceManager {
+  constructor() { this.prepareCalls = 0; this.describeCalls = 0; }
+
+  describe(configured, runId) {
+    this.describeCalls += 1;
+    return { workspace: join(configured.managedWorkspaceRoot, configured.id, runId), managed: true, retained: true };
+  }
+
+  async prepare(configured, runId) {
+    this.prepareCalls += 1;
+    return { ...this.describe(configured, runId), clone: { ok: true, durationMs: 1, exitCode: 0 }, remoteUrl: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+  }
+}
+
+class FakeDeployment {
+  constructor(result = { state: 'READY', ok: true, deploymentId: 'dpl_test', url: 'https://preview.test' }) { this.result = result; this.calls = 0; }
+  async waitForPreview() { this.calls += 1; return { provider: 'vercel', ...this.result }; }
+}
+
+function leadfinderProject(overrides = {}) {
+  return project({
+    id: 'leadfinder',
+    repository: { owner: 'owner', name: 'leadfinder' },
+    workspaceStrategy: 'managed',
+    commands: { install: 'node --version', test: 'node --version', lint: 'node --version', build: 'node --version' },
+    acceptance: { require: ['install', 'test', 'lint', 'build', 'ci', 'deployment'] },
+    deployment: { provider: 'vercel', projectId: 'prj_test', teamId: 'team_test', requirePreviewReady: true },
+    ...overrides
+  });
 }
 
 async function temporaryStore() {
@@ -159,6 +196,35 @@ test('command runner finds npm through the current Node installation on Windows'
   }
 });
 
+test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
+  const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    GITHUB_TOKEN: 'ghp_command_environment_test', VERCEL_TOKEN: 'vcp_command_environment_test',
+    OPENAI_API_KEY: 'sk-command_environment_test', CODEX_API_KEY: 'codex-command_environment_test'
+  });
+  try {
+    const result = await runCommand(project({ commands: { test: 'node test/fixtures/command-env.js' } }), 'test');
+    const observed = JSON.parse(result.stdout);
+    assert.equal(result.ok, true);
+    assert.equal(observed.pathAvailable, true);
+    assert.deepEqual(observed.credentials, { github: false, vercel: false, openai: false, codex: false });
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
+test('project command environment permits literal non-secret values only', () => {
+  assert.equal(safeCommandEnvironment({ NEXT_TELEMETRY_DISABLED: '1' }).NEXT_TELEMETRY_DISABLED, '1');
+  assert.throws(() => configFrom({
+    id: 'safe', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    commands: { test: 'node --version' }, commandEnvironment: { SERVICE_TOKEN: 'not-allowed' }
+  }));
+});
+
 test('worker prompt redacts secrets and Codex SDK receives constrained thread options', async () => {
   let invocation = {};
   class FakeCodex {
@@ -186,6 +252,26 @@ test('worker prompt redacts secrets and Codex SDK receives constrained thread op
   assert.equal(invocation.prompt.includes('ghp_hiddenToken'), false);
   assert.equal(invocation.prompt.includes('hidden'), false);
   assert.equal(buildWorkerPrompt({ authorization: 'Bearer abcdef123456' }).includes('abcdef123456'), false);
+});
+
+test('default worker environment excludes GitHub, Vercel, and OpenAI credentials', async () => {
+  let clientEnvironment;
+  class FakeCodex {
+    constructor(options) { clientEnvironment = options.env; }
+    startThread() { return { run: async () => ({ finalResponse: 'done' }) }; }
+  }
+  const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, { GITHUB_TOKEN: 'ghp_worker_test', VERCEL_TOKEN: 'vcp_worker_test', OPENAI_API_KEY: 'sk_worker_test', CODEX_API_KEY: 'codex_worker_test' });
+  try {
+    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute({ objective: 'fixture' }, { workspace: process.cwd(), timeoutMs: 100 });
+    for (const name of names) assert.equal(clientEnvironment[name], undefined);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
 });
 
 test('GitHub adapter maps check runs to pending, success, and failure without exposing its token', async () => {
@@ -249,6 +335,172 @@ test('dry-run persists a complete simulation without invoking worker, git writes
   assert.equal(commandCalls, 0);
   assert.equal(github.pullRequests, 0);
   assert.equal(run.results.worker.simulated, true);
+});
+
+test('GitHub inspection reports default-branch protection without changing repository settings', async () => {
+  const responses = [
+    { full_name: 'owner/repo', default_branch: 'main' },
+    { commit: { sha: 'base-sha' }, protected: true }
+  ];
+  const inspected = await new GitHubAdapter({ token: 'ghp_adapterToken', fetchImpl: async () => ({ ok: true, json: async () => responses.shift() }) }).inspect(project());
+  assert.equal(inspected.defaultBranchProtected, true);
+  assert.match(report({ id: 'run', status: 'created', goal: 'fixture', repository: inspected, results: {}, budgets: { maxWorkerAttempts: 1 } }), /DEFAULT BRANCH PROTECTION\ntrue/);
+});
+
+test('command runner resolves pnpm through its JavaScript entrypoint without a shell on Windows', async () => {
+  const calls = [];
+  const result = await runCommand(project({ commands: { test: 'pnpm test' } }), 'test', {
+    processRunner: async (binary, args) => { calls.push({ binary, args }); return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  assert.equal(result.ok, true);
+  if (process.platform === 'win32') {
+    assert.equal(calls[0].binary, process.execPath);
+    assert.match(calls[0].args[0], /pnpm\.mjs$/i);
+  }
+});
+
+test('managed workspaces are isolated under the configured root and clone only the configured repository', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-workspace-root-'));
+  const configured = configFrom({
+    id: 'leadfinder', repository: { owner: 'owner', name: 'leadfinder' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { install: 'node --version', test: 'node --version', lint: 'node --version', build: 'node --version' },
+    acceptance: { require: ['install', 'test', 'lint', 'build', 'ci'] }
+  }, join(root, 'host', 'config'));
+  const calls = [];
+  const manager = new WorkspaceManager({ processRunner: async (binary, args, options) => { calls.push({ binary, args, options }); return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' }; } });
+  const allocation = await manager.prepare(configured, 'agent-20260910-abcdef12');
+  assert.match(allocation.workspace, /leadfinder[\\/]agent-20260910-abcdef12$/);
+  assert.deepEqual(calls[0].args.slice(0, 4), ['clone', '--origin', 'origin', 'https://github.com/owner/leadfinder.git']);
+  assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
+  assert.throws(() => managedWorkspacePath(configured, '../other-project'));
+});
+
+test('a managed-root symlink fails before clone or any workspace write', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-workspace-symlink-'));
+  const host = join(root, 'host');
+  const outside = join(root, 'outside');
+  await Promise.all([mkdir(join(host, 'config'), { recursive: true }), mkdir(outside, { recursive: true })]);
+  try {
+    await symlink(outside, join(host, '.agent-workspaces'), 'junction');
+  } catch (error) {
+    t.skip(`symbolic links are unavailable in this environment: ${error.code ?? error.message}`);
+    return;
+  }
+  const configured = configFrom({
+    id: 'leadfinder', repository: { owner: 'owner', name: 'leadfinder' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed',
+    commands: { install: 'node --version', test: 'node --version', lint: 'node --version', build: 'node --version' }, acceptance: { require: ['install', 'test', 'lint', 'build', 'ci'] }
+  }, join(host, 'config'));
+  let cloneAttempted = false;
+  const manager = new WorkspaceManager({ processRunner: async () => { cloneAttempted = true; throw new Error('clone must not run'); } });
+  await assert.rejects(() => manager.prepare(configured, 'agent-20260910-abcdef12'), /symlink/);
+  assert.equal(cloneAttempted, false);
+  assert.equal(existsSync(join(outside, 'leadfinder')), false);
+});
+
+test('workspace clone and repository-identity failures stop before an external branch is created', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-workspace-failure-'));
+  const configured = configFrom({
+    id: 'leadfinder', repository: { owner: 'owner', name: 'leadfinder' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed',
+    commands: { install: 'node --version', test: 'node --version', lint: 'node --version', build: 'node --version' }, acceptance: { require: ['install', 'test', 'lint', 'build', 'ci'] }
+  }, join(root, 'host', 'config'));
+  const manager = new WorkspaceManager({ processRunner: async () => ({ ok: false, exitCode: 1, stderr: 'clone denied', stdout: '', durationMs: 1 }) });
+  await assert.rejects(() => manager.prepare(configured, 'agent-20260910-abcdef12'), /workspace_clone_failed/);
+  const github = new FakeGitHub();
+  github.inspect = async () => ({ provider: 'github', status: 'ok', repository: 'owner/other-repo', defaultBranch: 'main', head: 'initial-head' });
+  const workspaceManager = new FakeWorkspaceManager();
+  const localGit = new FakeLocalGit();
+  const run = await new Orchestrator({ store: await temporaryStore(), github, workspaceManager, localGit, worker: new FakeWorker(), commandRunner: async () => ({ ok: true }) }).run(leadfinderProject(), 'Reject a mismatched repository');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(workspaceManager.prepareCalls, 0);
+  assert.equal(localGit.prepareCalls, 0);
+});
+
+test('project isolation gives self and LeadFinder distinct managed workspaces and a worker failure stays unpublished', async () => {
+  const manager = new FakeWorkspaceManager();
+  const selfPath = manager.describe(project({ workspaceStrategy: 'managed' }), 'agent-20260910-aaaa1111').workspace;
+  const leadPath = manager.describe(leadfinderProject(), 'agent-20260910-aaaa1111').workspace;
+  assert.notEqual(selfPath, leadPath);
+  const failingWorker = { calls: 0, async execute() { this.calls += 1; return { status: 'failed', output: 'worker failed' }; } };
+  const github = new FakeGitHub();
+  const run = await new Orchestrator({ store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github, localGit: new FakeLocalGit(), worker: failingWorker, commandRunner: async (_project, name) => ({ name, ok: true }) }).run(leadfinderProject(), 'Stop failed worker');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(failingWorker.calls, 2);
+  assert.equal(github.pullRequests, 0);
+});
+
+test('cross-repository dry-run simulates workspace, install, Vercel, and publication with zero writes', async () => {
+  const workspaceManager = new FakeWorkspaceManager();
+  const localGit = new FakeLocalGit();
+  const github = new FakeGitHub();
+  const worker = new FakeWorker();
+  let commandCalls = 0;
+  const run = await new Orchestrator({ store: await temporaryStore(), workspaceManager, localGit, github, worker, commandRunner: async () => { commandCalls += 1; return { ok: true }; } })
+    .run(leadfinderProject(), 'Simulate a docs-only external change', { dryRun: true });
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.match(run.workspace, /leadfinder[\\/]agent-/);
+  assert.equal(workspaceManager.prepareCalls, 0);
+  assert.equal(worker.calls, 0);
+  assert.equal(commandCalls, 0);
+  assert.equal(localGit.prepareCalls, 0);
+  assert.equal(github.pullRequests, 0);
+  assert.equal(run.results.install.simulated, true);
+  assert.equal(run.results.deployment.simulated, true);
+});
+
+test('cross-repository happy path uses an isolated workspace, install, configured checks, and preview evidence', async () => {
+  const workspaceManager = new FakeWorkspaceManager();
+  const deploymentProvider = new FakeDeployment();
+  const commands = [];
+  const run = await new Orchestrator({
+    store: await temporaryStore(), workspaceManager, deploymentProvider, github: new FakeGitHub(), localGit: new FakeLocalGit(), worker: new FakeWorker(),
+    commandRunner: async (_project, name) => { commands.push(name); return { name, ok: true, exitCode: 0, durationMs: 1 }; }
+  }).run(leadfinderProject(), 'Create a docs-only external fixture');
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.equal(workspaceManager.prepareCalls, 1);
+  assert.deepEqual(commands, ['install', 'test', 'lint', 'build']);
+  assert.equal(deploymentProvider.calls, 1);
+  assert.equal(run.results.deployment.state, 'READY');
+});
+
+test('install failure stops before worker, push and PR creation', async () => {
+  const worker = new FakeWorker();
+  const github = new FakeGitHub();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github, localGit: new FakeLocalGit(), worker,
+    commandRunner: async (_project, name) => ({ name, ok: name !== 'install', stderr: name === 'install' ? 'install failed' : '' })
+  }).run(leadfinderProject(), 'Stop on bootstrap failure');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(worker.calls, 0);
+  assert.equal(github.pullRequests, 0);
+});
+
+test('push, PR, and Vercel failures leave coherent failed cross-repository runs', async () => {
+  class FailingPushGit extends FakeLocalGit { async push() { throw new Error('push failed'); } }
+  const pushRun = await new Orchestrator({ store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github: new FakeGitHub(), localGit: new FailingPushGit(), worker: new FakeWorker(), commandRunner: async (_p, name) => ({ name, ok: true }) }).run(leadfinderProject(), 'Exercise push failure');
+  assert.equal(pushRun.status, RunStatus.FAILED);
+  const failingPr = new FakeGitHub();
+  failingPr.createPullRequest = async () => { throw new Error('PR failed'); };
+  const prRun = await new Orchestrator({ store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github: failingPr, localGit: new FakeLocalGit(), worker: new FakeWorker(), commandRunner: async (_p, name) => ({ name, ok: true }) }).run(leadfinderProject(), 'Exercise PR failure');
+  assert.equal(prRun.status, RunStatus.FAILED);
+  const previewRun = await new Orchestrator({ store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment({ state: 'ERROR', ok: false }), github: new FakeGitHub(), localGit: new FakeLocalGit(), worker: new FakeWorker(), commandRunner: async (_p, name) => ({ name, ok: true }) }).run(leadfinderProject(), 'Exercise preview failure');
+  assert.equal(previewRun.status, RunStatus.FAILED);
+  assert.equal(previewRun.results.deployment.state, 'ERROR');
+});
+
+test('Vercel adapter accepts only an exact non-production commit and branch match', async () => {
+  const ready = new VercelDeploymentProvider({ token: 'vercel_test', fetchImpl: async () => ({ ok: true, json: async () => ({ deployments: [
+    { uid: 'dpl_production', state: 'READY', target: 'production', url: 'production.vercel.app', meta: { githubCommitSha: 'sha', githubCommitRef: 'agent/run' } },
+    { uid: 'dpl_wrong_branch', state: 'READY', target: null, url: 'wrong-branch.vercel.app', meta: { githubCommitSha: 'sha', githubCommitRef: 'agent/other' } },
+    { uid: 'dpl_ready', state: 'READY', target: null, url: 'preview.vercel.app', createdAt: 0, meta: { githubCommitSha: 'sha', githubCommitRef: 'agent/run' } }
+  ] }) }) });
+  const observed = await ready.waitForPreview(leadfinderProject(), { commitSha: 'sha', branch: 'agent/run' }, { timeoutMs: 10, pollIntervalMs: 1 });
+  assert.equal(observed.state, 'READY');
+  assert.equal(observed.deploymentId, 'dpl_ready');
+  assert.equal(observed.url, 'https://preview.vercel.app');
+  let now = 0;
+  const timeout = new VercelDeploymentProvider({ token: 'vercel_test', now: () => now, sleep: async () => { now += 2; }, fetchImpl: async () => ({ ok: true, json: async () => ({ deployments: [] }) }) });
+  const timed = await timeout.waitForPreview(leadfinderProject(), { commitSha: 'sha', branch: 'agent/run' }, { timeoutMs: 1, pollIntervalMs: 1 });
+  assert.equal(timed.state, 'TIMEOUT');
 });
 
 test('happy path persists branch, commit, push, PR, CI, evaluation, and report state', async () => {
