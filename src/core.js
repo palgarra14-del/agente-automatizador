@@ -207,8 +207,8 @@ function executionFrom(input = {}) {
   if (provider === 'container-required' && fallbackProvider !== 'none') throw new Error('container-required cannot use a host fallback');
   const image = input.image;
   if (provider !== 'local-sanitized' && (typeof image !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/@:-]*$/.test(image))) throw new Error('container execution requires a literal image name');
-  const user = input.user ?? '1000:1000';
-  if (!/^[0-9]+:[0-9]+$/.test(user)) throw new Error('execution.user must be a numeric uid:gid pair');
+  const user = input.user ?? 'host';
+  if (user !== 'host' && !/^[0-9]+:[0-9]+$/.test(user)) throw new Error('execution.user must be host or a numeric uid:gid pair');
   const resources = input.resources ?? {};
   return {
     provider,
@@ -221,6 +221,14 @@ function executionFrom(input = {}) {
       pidsLimit: positiveInteger(resources.pidsLimit, 128, 'execution.resources.pidsLimit')
     }
   };
+}
+
+export function resolveExecutionUser(user = 'host') {
+  if (user !== 'host') return user;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const gid = typeof process.getgid === 'function' ? process.getgid() : null;
+  if (Number.isInteger(uid) && uid >= 0 && Number.isInteger(gid) && gid >= 0) return `${uid}:${gid}`;
+  return '1000:1000';
 }
 
 export function maskSecrets(value) {
@@ -541,7 +549,7 @@ export class DockerContainerExecution extends ExecutionProvider {
       '--memory', `${execution.resources.memoryMb}m`,
       '--memory-swap', `${execution.resources.memoryMb}m`,
       '--cpus', String(execution.resources.cpuCount),
-      '--user', execution.user,
+      '--user', resolveExecutionUser(execution.user),
       '--env', 'CI=true',
       '--env', 'npm_config_cache=/tmp/npm-cache'
     ];
@@ -595,6 +603,7 @@ export class ProjectCommandRunner {
       imageAvailable: selected.imageAvailable ? 'YES' : 'NO',
       imagePinned: imageIsPinned(project.execution.image) ? 'YES' : 'NO',
       projectToolchain: `${project.toolchain.command}${project.toolchain.version ? ` ${project.toolchain.version}` : ''}`,
+      runtimeUser: resolveExecutionUser(project.execution.user),
       gitMetadata: selected.sandboxed ? 'READ ONLY' : unavailableContainerContract ? 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
       postWorkerNetwork: selected.sandboxed ? 'DENIED (--network none)' : unavailableContainerContract ? 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
       hostFallback: selected.fallbackFrom ? 'EXPLICIT_LOCAL_SANITIZED' : project.execution.provider === 'local-sanitized' ? 'EXPLICIT_LOCAL_SANITIZED' : 'NONE (FAIL-SAFE)',
