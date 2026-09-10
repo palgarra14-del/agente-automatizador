@@ -53,6 +53,19 @@ const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|cr
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
 const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 
+export function imageIsPinned(image) {
+  return typeof image === 'string' && /@sha256:[a-f0-9]{64}$/i.test(image);
+}
+
+export function remoteMatchesProject(remote, project) {
+  if (typeof remote !== 'string') return false;
+  const match = remote.trim().match(/^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/]+)\/([^/?#]+)\/?$/i);
+  if (!match) return false;
+  const owner = match[1].toLowerCase();
+  const name = match[2].replace(/\.git$/i, '').toLowerCase();
+  return owner === String(project.repository.owner).toLowerCase() && name === String(project.repository.name).toLowerCase();
+}
+
 function isWithin(parent, child) {
   const rel = relative(parent, child);
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !rel.includes(`..${sep}`));
@@ -165,6 +178,15 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
+function toolchainFrom(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('toolchain must be an object');
+  const command = input.command ?? 'npm';
+  if (!['npm', 'pnpm', 'node'].includes(command)) throw new Error('toolchain.command must be npm, pnpm, or node');
+  const version = input.version ?? null;
+  if (version !== null && (typeof version !== 'string' || !/^[0-9]+(?:\.[0-9]+){0,2}(?:[-+][A-Za-z0-9.-]+)?$/.test(version))) throw new Error('toolchain.version must be a version string');
+  return { command, version };
+}
+
 function executionFrom(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('execution must be an object');
   const provider = input.provider ?? 'local-sanitized';
@@ -259,6 +281,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   const commandEnvironment = safeJson(input.commandEnvironment ?? {});
   const changePolicy = changePolicyFrom(input.changePolicy);
   const execution = executionFrom(input.execution);
+  const toolchain = toolchainFrom(input.toolchain);
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -271,6 +294,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     commandEnvironment,
     changePolicy,
     execution,
+    toolchain,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -415,13 +439,22 @@ export class DockerContainerExecution extends ExecutionProvider {
   async availability(project) {
     const execution = project.execution;
     const probe = await this.probe();
-    if (!probe.available) return probe;
+    if (!probe.available) return { ...probe, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image) };
     const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions());
-    if (!image.ok) return { ...probe, available: false, image: execution.image, reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
-    return { ...probe, image: execution.image, sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only', secrets: 'no host credential or home mounts' };
+    if (!image.ok) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
+    return { ...probe, image: execution.image, imageAvailable: true, imagePinned: imageIsPinned(execution.image), sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only with read-only .git', secrets: 'no host credential or home mounts' };
   }
 
-  commandArguments(project, name, { stage = 'post-worker', containerName } = {}) {
+  async gitMetadataPath(project) {
+    const workspace = resolve(project.workspace);
+    const metadata = resolve(workspace, '.git');
+    if (!isWithin(workspace, metadata)) throw new Error('git_metadata_mount_escapes_workspace');
+    const details = await lstat(metadata);
+    if (!details.isDirectory() || details.isSymbolicLink()) throw new Error('git_metadata_mount_requires_real_directory');
+    return metadata;
+  }
+
+  commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git') } = {}) {
     const execution = project.execution;
     const { command, binary, args } = commandInvocation(project, name);
     const workspace = resolve(project.workspace);
@@ -430,6 +463,7 @@ export class DockerContainerExecution extends ExecutionProvider {
       'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
       '--workdir', '/workspace',
       '--mount', `type=bind,src=${workspace},dst=/workspace`,
+      '--mount', `type=bind,src=${gitMetadata},dst=/workspace/.git,readonly`,
       '--read-only',
       '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
       '--cap-drop', 'ALL',
@@ -450,7 +484,8 @@ export class DockerContainerExecution extends ExecutionProvider {
 
   async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
-    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName });
+    const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
+    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
     const available = await this.availability(project);
     if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
@@ -487,6 +522,11 @@ export class ProjectCommandRunner {
       selectedProvider: selected.provider,
       sandboxAvailable: selected.sandboxed ? 'YES' : 'NO',
       containerAvailable: container.available ? 'YES' : 'NO',
+      dockerAvailable: container.available ? 'YES' : 'NO',
+      imageAvailable: selected.imageAvailable ? 'YES' : 'NO',
+      imagePinned: imageIsPinned(project.execution.image) ? 'YES' : 'NO',
+      projectToolchain: `${project.toolchain.command}${project.toolchain.version ? ` ${project.toolchain.version}` : ''}`,
+      gitMetadata: selected.sandboxed ? 'READ ONLY' : unavailableContainerContract ? 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
       postWorkerNetwork: selected.sandboxed ? 'DENIED (--network none)' : unavailableContainerContract ? 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
       hostFallback: selected.fallbackFrom ? 'EXPLICIT_LOCAL_SANITIZED' : project.execution.provider === 'local-sanitized' ? 'EXPLICIT_LOCAL_SANITIZED' : 'NONE (FAIL-SAFE)',
       reason: selected.reason ?? selected.containerReason
@@ -658,9 +698,16 @@ export class LocalGitAdapter {
     const repository = (await this.git(['rev-parse', '--show-toplevel'], project)).stdout.trim();
     if (!isWithin(project.workspace, repository) || !isWithin(repository, project.workspace)) throw new Error('Workspace is not the repository root');
     const remote = (await this.git(['remote', 'get-url', 'origin'], project)).stdout.trim();
-    const expected = `${project.repository.owner}/${project.repository.name}`.toLowerCase();
-    if (!remote.toLowerCase().replace(/\.git$/, '').includes(expected)) throw new Error('Remote repository does not match project configuration');
+    if (!remoteMatchesProject(remote, project)) throw new Error('Remote repository does not match project configuration');
     return { repository, remote, currentBranch: await this.currentBranch(project), initialHead: await this.head(project), status: (await this.git(['status', '--porcelain'], project)).stdout };
+  }
+
+  async assertRepositoryState(project, { branch, head, remote } = {}) {
+    const inspection = await this.inspect(project);
+    if (branch && inspection.currentBranch !== branch) throw new Error(`Unexpected current branch: ${inspection.currentBranch}`);
+    if (head && inspection.initialHead !== head) throw new Error(`Unexpected HEAD: ${inspection.initialHead}`);
+    if (remote && inspection.remote !== remote) throw new Error('Unexpected origin remote');
+    return inspection;
   }
 
   async prepareWorkingBranch(project, runId, expectedBaseHead) {
@@ -731,7 +778,8 @@ export class LocalGitAdapter {
 
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
-  async commit(project, branch, message, { expectedChangeSetFingerprint } = {}) {
+  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote } = {}) {
+    await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     let changeSet = await this.inspectChangeSet(project);
     let { paths } = changeSet;
@@ -746,11 +794,12 @@ export class LocalGitAdapter {
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--message', safeMessage], project);
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project);
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
-  async push(project, branch) {
+  async push(project, branch, { expectedHead, expectedRemote } = {}) {
+    await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     assertAllowedWorkingBranch(project, branch);
     await this.git(['push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
@@ -948,7 +997,7 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
 
 export function formatDoctor(result) {
   const execution = result.execution ?? {};
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nCONTAINER AVAILABLE\n${execution.containerAvailable ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
@@ -1169,14 +1218,18 @@ export class Orchestrator {
     if (run.status !== RunStatus.TESTING) return run;
     const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
-    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, { expectedChangeSetFingerprint });
+    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, {
+      expectedChangeSetFingerprint,
+      expectedHead: run.results.branch.initialHead,
+      expectedRemote: run.results.branch.remote
+    });
     const expectedPaths = [...run.results.changePolicy.paths].sort();
     const committedPaths = [...(commit.committedPaths ?? [])].sort();
     if (commit.committedChangeSetFingerprint !== expectedChangeSetFingerprint || JSON.stringify(committedPaths) !== JSON.stringify(expectedPaths)) {
       return this.fail(run.id, 'committed_change_set_does_not_match_governed_change_set');
     }
     run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
-    const push = await this.localGit.push(project, run.workingBranch);
+    const push = await this.localGit.push(project, run.workingBranch, { expectedHead: run.finalHead, expectedRemote: run.results.branch.remote });
     run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
     if (!run.pullRequestNumber) {
       const approvalId = await this.requireApproval(run, 'create_pull_request', 'Publish validated engineering work for review', { branch: run.workingBranch, finalHead: run.finalHead }, project);

@@ -14,9 +14,10 @@
         "image": "node:22-bookworm-slim",
         "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
       },
+      "toolchain": { "command": "npm" },
       "changePolicy": {
         "forbiddenPaths": [],
-        "sensitivePaths": [],
+        "sensitivePaths": ["config/projects.json"],
         "budgets": { "maxChangedFiles": 8, "maxDiffLines": 500 }
       },
       "commands": {
@@ -57,9 +58,10 @@
       "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
       "execution": {
         "provider": "container-required",
-        "image": "node:22-bookworm-slim",
+        "image": "agent-node22-pnpm11:local",
         "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
       },
+      "toolchain": { "command": "pnpm", "version": "11.19.0" },
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [],

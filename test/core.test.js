@@ -24,11 +24,13 @@ import {
   evaluateChangePolicy,
   fingerprintChangeSet,
   formatDoctor,
+  imageIsPinned,
   loadProjects,
   maskSecrets,
   policy,
   runCommand,
   report,
+  remoteMatchesProject,
   safeCommandEnvironment,
   transition,
   managedWorkspacePath
@@ -80,8 +82,9 @@ class FakeLocalGit {
     return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
   }
 
-  async commit(_project, branch, _message, { expectedChangeSetFingerprint } = {}) {
+  async commit(_project, branch, _message, { expectedChangeSetFingerprint, ...options } = {}) {
     assert.equal(branch, this.current);
+    this.commitOptions = options;
     const changeSet = await this.inspectChangeSet();
     assert.equal(changeSet.changeSetFingerprint, expectedChangeSetFingerprint);
     this.commitCalls += 1;
@@ -91,7 +94,7 @@ class FakeLocalGit {
     return { message: 'agent: safe change', finalHead: this.currentHead, committedPaths: changeSet.paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
-  async push(_project, branch) { this.pushCalls += 1; return { branch, finalHead: this.currentHead }; }
+  async push(_project, branch, options = {}) { this.pushCalls += 1; this.pushOptions = options; return { branch, finalHead: this.currentHead }; }
 }
 
 function governedChangeSet(paths = ['src/worker-fixture.js'], { additions = 1, deletions = 0, contentFingerprint = 'content-a', sensitiveContent = false } = {}) {
@@ -190,8 +193,18 @@ test('configuration confines workspaces and policy blocks protected branch actio
 test('self project keeps a shell-free cross-platform typecheck command', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
   assert.equal(configured.get('self').commands.typecheck, 'node --check src/core.js');
+  assert.equal(configured.get('self').toolchain.command, 'npm');
+  assert.deepEqual(configured.get('leadfinder').toolchain, { command: 'pnpm', version: '11.19.0' });
   assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500 });
   assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200 });
+});
+
+test('v0.5 treats only the self control-plane project configuration as sensitive', async () => {
+  const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
+  const controlPlane = evaluateChangePolicy(configured.get('self'), { paths: ['config/projects.json'], changedFiles: 1, diffLines: 1 });
+  const ordinarySource = evaluateChangePolicy(configured.get('self'), { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1 });
+  assert.equal(controlPlane.classification, 'sensitive');
+  assert.equal(ordinarySource.classification, 'normal');
 });
 
 test('v0.4 change policy rejects forbidden files, workspace escape, scope violations, and over-budget diffs', () => {
@@ -270,15 +283,17 @@ test('command runner finds npm through the current Node installation on Windows'
 
 test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
-  for (const id of ['self', 'leadfinder']) {
-    assert.equal(configured.get(id).execution.provider, 'container-required');
-    assert.equal(configured.get(id).execution.image, 'node:22-bookworm-slim');
-  }
+  assert.equal(configured.get('self').execution.provider, 'container-required');
+  assert.equal(configured.get('self').execution.image, 'node:22-bookworm-slim');
+  assert.equal(configured.get('leadfinder').execution.provider, 'container-required');
+  assert.equal(configured.get('leadfinder').execution.image, 'agent-node22-pnpm11:local');
+  assert.equal(imageIsPinned('registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), true);
+  assert.equal(imageIsPinned(configured.get('leadfinder').execution.image), false);
   assert.throws(() => project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), /cannot use a host fallback/);
   assert.throws(() => project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', user: 'root' } }), /numeric uid:gid/);
 });
 
-test('v0.5 container execution uses only a workspace mount with no post-worker network, host home, SSH, or Docker socket', async () => {
+test('v0.5 container execution mounts workspace read-write and nested git metadata read-only with no other host mounts', async () => {
   const calls = [];
   const runner = async (binary, args, options) => {
     calls.push({ binary, args, options });
@@ -295,9 +310,13 @@ test('v0.5 container execution uses only a workspace mount with no post-worker n
   assert.match(container.args[container.args.indexOf('--name') + 1], /^agent-command-[0-9a-f-]+$/);
   assert.equal(container.args[container.args.indexOf('--network') + 1], 'none');
   for (const flag of ['--read-only', '--tmpfs', '--cap-drop', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--user']) assert.ok(container.args.includes(flag));
-  assert.equal(container.args.filter((value) => String(value).includes('type=bind,')).length, 1);
-  assert.match(container.args[container.args.indexOf('--mount') + 1], /dst=\/workspace$/);
-  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|--privileged/i.test(String(value))), false);
+  const mounts = container.args.filter((value) => String(value).includes('type=bind,'));
+  assert.equal(mounts.length, 2);
+  assert.equal(mounts.filter((value) => /dst=\/workspace(?:,|$)/.test(value)).length, 1);
+  assert.equal(mounts.some((value) => /dst=\/workspace(?:,|$).*readonly/.test(value)), false);
+  assert.equal(mounts.some((value) => /src=.*\.git,dst=\/workspace\/\.git,readonly$/.test(value)), true);
+  assert.equal(mounts.filter((value) => /dst=\/workspace\/\.git,readonly$/.test(value)).length, 1);
+  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|\.gitconfig|\.codex|--privileged|type=volume|--volume/i.test(String(value))), false);
   assert.equal(container.options.env.GITHUB_TOKEN, undefined);
   assert.equal(container.options.env.VERCEL_TOKEN, undefined);
   assert.equal(container.options.env.HOME, undefined);
@@ -394,9 +413,46 @@ test('v0.5 doctor distinguishes an unavailable container from an explicit local 
   const executionRunner = new ProjectCommandRunner({ localExecution: new LocalSanitizedExecution({ processRunner: async () => ({ ok: true }) }), containerExecution: unavailableContainer });
   const result = await doctor(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), { github: { inspect: async () => ({}) }, codexAvailable: () => true, environment: {}, executionRunner });
   assert.deepEqual(result.execution, {
-    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
+    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
   });
-  assert.match(formatDoctor(result), /CONTAINER AVAILABLE\nNO/);
+  assert.match(formatDoctor(result), /DOCKER AVAILABLE\nNO/);
+});
+
+test('v0.5 accepts only exact configured GitHub HTTPS or SSH origin remotes', () => {
+  const configured = project();
+  for (const remote of ['https://github.com/owner/repo.git', 'https://github.com/owner/repo', 'git@github.com:owner/repo.git', 'ssh://git@github.com/owner/repo.git']) {
+    assert.equal(remoteMatchesProject(remote, configured), true, remote);
+  }
+  for (const remote of ['https://github.com/owner/repo-evil.git', 'https://github.com/owner/repo.git.evil', 'https://evil.example/owner/repo.git', 'https://github.com/owner/repo/extra', 'git@github.com:owner/repository.git']) {
+    assert.equal(remoteMatchesProject(remote, configured), false, remote);
+  }
+});
+
+test('v0.5 revalidates repository identity before controlled commit and push and skips hooks', async () => {
+  const configured = project();
+  const adapter = new LocalGitAdapter();
+  const observed = [];
+  const changeSet = governedChangeSet();
+  adapter.assertRepositoryState = async (_project, expected) => { observed.push(expected); return { currentBranch: 'agent/test', initialHead: expected.head, remote: expected.remote }; };
+  adapter.assertWorkingBranch = async () => {};
+  adapter.inspectChangeSet = async () => changeSet;
+  adapter.head = async () => 'commit-head';
+  adapter.git = async (args) => {
+    if (args[0] === 'diff' && args[1] === '--cached') return { exitCode: 1, stdout: '', stderr: '' };
+    observed.push(args);
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+  await adapter.commit(configured, 'agent/test', 'safe change', {
+    expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
+    expectedHead: 'base-head',
+    expectedRemote: 'https://github.com/owner/repo.git'
+  });
+  await adapter.push(configured, 'agent/test', { expectedHead: 'commit-head', expectedRemote: 'https://github.com/owner/repo.git' });
+  assert.deepEqual(observed.filter((value) => !Array.isArray(value)), [
+    { branch: 'agent/test', head: 'base-head', remote: 'https://github.com/owner/repo.git' },
+    { branch: 'agent/test', head: 'commit-head', remote: 'https://github.com/owner/repo.git' }
+  ]);
+  assert.deepEqual(observed.find((args) => Array.isArray(args) && args[0] === 'commit').slice(0, 2), ['commit', '--no-verify']);
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
