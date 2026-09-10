@@ -11,6 +11,9 @@ test('secret masking redacts quoted JSON-style secret fields and authorization h
     api_key: 'generic-api-key-value',
     password: 'generic-password-value',
     credential: 'generic-credential-value',
+    access_token: 'generic-access-token-value',
+    client_secret: 'generic-client-secret-value',
+    session_cookie: 'generic-session-cookie-value',
     authorization: 'Basic Zm9vOmJhcg=='
   });
   const masked = maskSecrets(input);
@@ -19,6 +22,9 @@ test('secret masking redacts quoted JSON-style secret fields and authorization h
     'generic-api-key-value',
     'generic-password-value',
     'generic-credential-value',
+    'generic-access-token-value',
+    'generic-client-secret-value',
+    'generic-session-cookie-value',
     'Zm9vOmJhcg=='
   ]) assert.equal(masked.includes(secret), false, `secret remained visible: ${secret}`);
 
@@ -85,6 +91,33 @@ test('change governance accounts for changed bytes and per-file size, including 
   assert.equal(decision.reason, 'change_budget_exceeded');
 });
 
+
+
+test('streamed untracked text keeps full line accounting beyond the sensitivity sample', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-stream-lines-'));
+  const project = configFrom({
+    id: 'stream-lines',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '..',
+    commands: { test: 'node --version' },
+    changePolicy: { budgets: { maxChangedFiles: 5, maxDiffLines: 50_000, maxChangedBytes: 2 * 1024 * 1024, maxFileBytes: 2 * 1024 * 1024 } },
+    budgets: { commandTimeoutMs: 5_000 }
+  }, join(workspace, 'config'));
+
+  await runProcess('git', ['init'], { cwd: workspace, timeoutMs: 5_000 });
+  await runProcess('git', ['config', 'user.email', 'agent@example.invalid'], { cwd: workspace, timeoutMs: 5_000 });
+  await runProcess('git', ['config', 'user.name', 'Agent Test'], { cwd: workspace, timeoutMs: 5_000 });
+  await writeFile(join(workspace, 'README.md'), 'baseline\n');
+  await runProcess('git', ['add', 'README.md'], { cwd: workspace, timeoutMs: 5_000 });
+  await runProcess('git', ['commit', '--no-verify', '-m', 'baseline'], { cwd: workspace, timeoutMs: 5_000 });
+
+  const lines = Array.from({ length: 20_000 }, (_, index) => `line-${index}\n`).join('');
+  await writeFile(join(workspace, 'many-lines.txt'), lines);
+  const changeSet = await new LocalGitAdapter().inspectChangeSet(project);
+  assert.ok(changeSet.diffLines >= 20_000, `streamed line count was truncated: ${changeSet.diffLines}`);
+});
 test('JsonStore does not lose updates when two agent processes mutate shared state concurrently', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-store-race-'));
   const file = join(directory, 'state.json');
