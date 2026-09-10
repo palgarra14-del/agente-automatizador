@@ -8,10 +8,14 @@ Persistent CLI runs, policy/approvals, redaction, JSON state, safe configured co
 
 The first governed engineering vertical slice is implemented: a real Codex SDK worker, protected local Git workflow, authenticated GitHub reads and PR creation, CI polling, deterministic evaluation, bounded correction, and durable resume.
 
-## v0.3 — current
+## v0.3 — complete
 
 Registered repositories receive isolated managed workspaces, controlled bootstrap commands, generic acceptance criteria, cross-repository PR/CI flow, and Vercel preview observation through a read-only adapter. The agent remains a CLI: it is not a Vercel deployment target. No automatic merge or production deployment exists.
 
+## v0.4 — current
+
+Governed real engineering tasks add literal scope input, immutable forbidden-path enforcement, sensitivity classification with an approval gate before checks or publication, per-project diff budgets, and a read-only doctor/preflight command. LeadFinder uses the strict 3-file / 200-line policy. The orchestrator still never merges pull requests or deploys production.
+
 ## Deferred
 
-Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Do not start v0.4 from this branch.
+Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Do not start v0.5 from this branch.

@@ -16,7 +16,10 @@ import {
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
   configFrom,
+  doctor,
   evaluate,
+  evaluateChangePolicy,
+  formatDoctor,
   loadProjects,
   maskSecrets,
   policy,
@@ -160,6 +163,46 @@ test('configuration confines workspaces and policy blocks protected branch actio
 test('self project keeps a shell-free cross-platform typecheck command', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
   assert.equal(configured.get('self').commands.typecheck, 'node --check src/core.js');
+  assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500 });
+  assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200 });
+});
+
+test('v0.4 change policy rejects forbidden files, workspace escape, scope violations, and over-budget diffs', () => {
+  const governed = project({ changePolicy: { budgets: { maxChangedFiles: 10, maxDiffLines: 50 } } });
+  for (const path of ['.env', 'nested/.env.local', 'keys/service.pem', 'keys/service.key', 'secrets/value.txt', 'creds/value.txt', '.git/config']) {
+    const result = evaluateChangePolicy(governed, { paths: [path], changedFiles: 1, diffLines: 1 });
+    assert.equal(result.ok, false, path);
+    assert.match(result.reason, /^forbidden_path:/);
+  }
+  assert.equal(evaluateChangePolicy(governed, { paths: ['../outside.txt'] }).reason, 'forbidden_path:workspace_escape');
+  assert.equal(evaluateChangePolicy(governed, { paths: ['docs/blocked.md'], changedFiles: 1, diffLines: 1 }, { allowedPaths: ['src'], forbiddenPaths: ['docs'] }).reason, 'forbidden_scope_path:docs/blocked.md');
+  assert.equal(evaluateChangePolicy(governed, { paths: Array.from({ length: 11 }, (_, index) => `src/${index}.js`), changedFiles: 11, diffLines: 11 }).reason, 'change_budget_exceeded');
+  assert.equal(evaluateChangePolicy(governed, { paths: ['src/large.js'], changedFiles: 1, diffLines: 51 }).reason, 'change_budget_exceeded');
+});
+
+test('v0.4 change policy marks package, workflow, and security/auth changes as sensitive while a one-file source change continues', () => {
+  const governed = project();
+  for (const changeSet of [
+    { paths: ['package.json'], changedFiles: 1, diffLines: 1 },
+    { paths: ['.github/workflows/verify.yml'], changedFiles: 1, diffLines: 1 },
+    { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1, sensitiveContent: true }
+  ]) assert.equal(evaluateChangePolicy(governed, changeSet).classification, 'sensitive');
+  const normal = evaluateChangePolicy(governed, { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1 }, { allowedPaths: ['src'] });
+  assert.deepEqual({ ok: normal.ok, classification: normal.classification }, { ok: true, classification: 'normal' });
+});
+
+test('doctor reports governed project readiness without exposing configuration secrets', async () => {
+  const result = await doctor(leadfinderProject(), {
+    github: { inspect: async () => ({ defaultBranchProtected: false }) },
+    codexAvailable: () => true,
+    environment: {}
+  });
+  assert.equal(result.githubConnectivity, 'YES');
+  assert.equal(result.codexAvailable, 'YES');
+  assert.equal(result.vercelConfigured, 'YES');
+  assert.equal(result.vercelToken, 'NO');
+  assert.equal(result.branchProtection, 'NO');
+  assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
@@ -204,7 +247,7 @@ test('project subprocesses retain PATH but never inherit orchestrator credential
     OPENAI_API_KEY: 'sk-command_environment_test', CODEX_API_KEY: 'codex-command_environment_test'
   });
   try {
-    const result = await runCommand(project({ commands: { test: 'node test/fixtures/command-env.js' } }), 'test');
+    const result = await runCommand(project({ commands: { test: 'node fixtures/command-env.js' } }), 'test');
     const observed = JSON.parse(result.stdout);
     assert.equal(result.ok, true);
     assert.equal(observed.pathAvailable, true);
@@ -524,6 +567,31 @@ test('happy path persists branch, commit, push, PR, CI, evaluation, and report s
   assert.equal(run.results.ci.ok, true);
   assert.equal(run.evaluation.decision, 'PASS');
   assert.equal(worker.calls, 1);
+  assert.equal(github.pullRequests, 1);
+});
+
+test('a sensitive diff waits for approval before checks, commit, push, or pull-request creation', async () => {
+  class SensitiveGit extends FakeLocalGit {
+    async inspectChangeSet() { return { paths: ['package.json'], changedFiles: 1, additions: 1, deletions: 0, diffLines: 1, sensitiveContent: false }; }
+  }
+  const github = new FakeGitHub();
+  const localGit = new SensitiveGit();
+  let commandCalls = 0;
+  const orchestrator = new Orchestrator({
+    store: await temporaryStore(), github, localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => { commandCalls += 1; return { name, ok: true, stdout: '', stderr: '' }; }
+  });
+  const waiting = await orchestrator.run(project(), 'Change a sensitive package fixture');
+  assert.equal(waiting.status, RunStatus.WAITING_APPROVAL);
+  assert.equal(waiting.results.changePolicy.classification, 'sensitive');
+  assert.equal(commandCalls, 0);
+  assert.equal(localGit.commitCalls, 0);
+  assert.equal(localGit.pushCalls, 0);
+  assert.equal(github.pullRequests, 0);
+  await orchestrator.decideApproval(waiting.pendingAction.approvalId, true);
+  const completed = await orchestrator.resume(waiting.id, project());
+  assert.equal(completed.status, RunStatus.COMPLETED);
+  assert.ok(commandCalls > 0);
   assert.equal(github.pullRequests, 1);
 });
 

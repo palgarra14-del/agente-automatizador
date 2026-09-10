@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.3
+# Engineering Orchestrator — v0.4
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -18,14 +18,15 @@ Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TO
 ```bash
 npm ci
 node src/cli.js run --project self --goal "Update a controlled documentation fixture with one accurate sentence"
-node src/cli.js run --project leadfinder --goal "Create a docs-only smoke fixture" --dry-run
+node src/cli.js doctor --project leadfinder
+node src/cli.js run --project leadfinder --goal "Fix one small empty state" --allowed-path app --forbidden-path package.json --forbidden-path pnpm-lock.yaml --dry-run
 node src/cli.js report <runId>
 node src/cli.js resume <runId>
 ```
 
 Add `--dry-run` to persist the plan and a zero-write simulation. It does not create a workspace or clone, create or switch branches, invoke the worker or checks, commit, push, create a PR, query Vercel, or write to GitHub.
 
-The project commands, protected branches, branch pattern, approvals, and budgets live in `config/projects.json`. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
+The project commands, protected branches, branch pattern, approvals, change policy, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, and default-branch protection without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 
 ## Guarantees and boundaries
 
@@ -33,6 +34,8 @@ The project commands, protected branches, branch pattern, approvals, and budgets
 - `main` is protected in project configuration; a run works only on a new `agent/<runId>` branch created from the SHA shared by GitHub and `origin/main`.
 - The worker receives a redacted structured task, never GitHub/OpenAI credentials, and cannot choose commits, pushes, PRs, merge, deployment, or validation commands.
 - The orchestrator runs only configured commands without a shell. It refuses path traversal, protected files such as `.env`, working branches outside the allowlist, protected-branch pushes, and changes to Git history made by the worker.
+- Before checks, commit, push, or PR creation, v0.4 evaluates the actual diff. `.env` variants, PEM/key files, secret/credential paths, `.git`, and workspace escapes fail. Project budgets default to 8 files / 500 diff lines (LeadFinder: 3 / 200). Package manifests and lockfiles, workflows, scripts, deployment configuration, Dockerfiles, and security/auth-sensitive diffs require a recorded approval before those actions proceed.
+- Scope input is deliberately simple: repeat `--allowed-path <relative-root>` and `--forbidden-path <relative-root>` as needed. They are literal repository-relative roots, not a task DSL; the orchestrator independently verifies the resulting paths after the worker finishes.
 - `create_branch`, commit, and push are safe operations. A project can require approval for PR creation. Merge and production deploy are approval-required but deliberately have no execution handler. Force-push to `main` and protected-branch deletion are forbidden.
 - CI ends as `pending`, `success`, `failure`, or `timeout`; failed checks can cause at most `maxWorkerAttempts` worker attempts. A configured Vercel provider only observes preview deployments and treats `READY`, `ERROR`, `NOT_FOUND`, `TIMEOUT`, and `NOT_CONFIGURED` explicitly. There is no automatic merge.
 
