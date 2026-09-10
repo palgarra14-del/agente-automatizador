@@ -843,13 +843,17 @@ export class LocalGitAdapter {
       if (!info.isFile()) continue;
       changedBytes += info.size;
       let sample = '';
+      let newlineCount = 0;
+      let sawData = false;
       contentHash.update(path).update('\0');
       for await (const chunk of createReadStream(filePath)) {
         contentHash.update(chunk);
+        sawData ||= chunk.length > 0;
+        for (const byte of chunk) if (byte === 10) newlineCount += 1;
         if (sample.length < 100_000) sample += chunk.toString('utf8').slice(0, 100_000 - sample.length);
       }
       contentHash.update('\0');
-      additions += sample ? sample.split(/\r?\n/).length : 0;
+      additions += sawData ? newlineCount + 1 : 0;
       sensitiveContent ||= sensitiveContentPattern.test(sample);
     }
     const contentFingerprint = contentHash.digest('hex');
