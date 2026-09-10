@@ -8,17 +8,18 @@ The official SDK worker starts a thread with `workspace-write`, `networkAccessEn
 
 ## Git and paths
 
-- A project workspace must resolve inside its configured project root and be the local repository root.
-- The remote must match the configured GitHub owner/repository.
+- Only an ID in `config/projects.json` is eligible for a run; the LLM cannot supply the repository URL, owner, repo, workspace root, or branch pattern.
+- Managed workspaces must resolve below `.agent-workspaces/<project>/<runId>` and reject escaped paths and symlinked workspace roots. They are never reused across projects or runs.
+- The clone remote and the checked-out remote must both match the configured GitHub owner/repository.
 - A run requires a clean checkout and creates an allowlisted `agent/<runId>` branch from protected `main`; it does not write the caller's current branch.
 - Commit and push methods assert the working branch and never use force-push.
 - `.env`, key, PEM, and secret-named files are rejected before staging. A detected Git-history mutation by the worker fails the run.
 
 ## Commands, budgets, and logs
 
-Validation commands come only from `config/projects.json`, reject shell metacharacters, run with `shell: false`, time out, and have output capped. The worker cannot supply commands. Active budgets are `maxTasks`, `maxRuntimeMinutes`, `commandTimeoutMs`, `ciTimeoutMs`, `ciPollIntervalMs`, and `maxWorkerAttempts`.
+Install and validation commands come only from `config/projects.json`, reject shell metacharacters, run with `shell: false`, time out, and have output capped. The worker cannot supply commands. Active budgets include `maxTasks`, `maxRuntimeMinutes`, `commandTimeoutMs`, `ciTimeoutMs`, `ciPollIntervalMs`, `deploymentTimeoutMs`, `deploymentPollIntervalMs`, and `maxWorkerAttempts`.
 
-Known GitHub, OpenAI, Bearer, and key-like values are redacted before persistence or report output. No token belongs in project configuration, prompts, logs, source files, or commits.
+Known GitHub, OpenAI, Vercel, Bearer, and key-like values are redacted before persistence or report output. No token belongs in project configuration, prompts, logs, source files, or commits. `VERCEL_TOKEN` is read only by the deployment adapter and Vercel is queried only with GET requests; deployment, promotion, rollback, domains, and environment settings have no execution path.
 
 ## Approvals
 

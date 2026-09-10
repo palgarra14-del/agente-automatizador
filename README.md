@@ -1,36 +1,39 @@
-# Engineering Orchestrator — v0.2
+# Engineering Orchestrator — v0.3
 
-A CLI-first, policy-governed engineering loop for configured repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
+A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
 ## What is real
 
 - A deterministic planner creates a structured coding task.
 - The official Codex SDK runs a local coding worker in `workspace-write`, with network access disabled.
-- The orchestrator creates an allowlisted `agent/<runId>` branch, controls the configured checks, commits, pushes, opens a GitHub pull request, and polls CI.
-- Run state, audit events, CI observations, branch/commit/PR facts, and retry state are persisted in `.agent/state.json`.
+- Each run gets an isolated managed workspace under `.agent-workspaces/<project>/<runId>`; its controlled clone, remote, base SHA, branch, install, checks, and Git evidence are persisted.
+- The orchestrator creates an allowlisted `agent/<runId>` branch, controls the configured install/checks, commits, pushes, opens a GitHub pull request, polls CI, and can observe a matching Vercel preview through its read-only API.
+- Run state, audit events, CI/preview observations, branch/commit/PR facts, and retry state are persisted in `.agent/state.json`.
 - GitHub calls use `GITHUB_TOKEN`; local Git uses the checkout's configured credential mechanism.
 
 ## Quick start
 
-Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. This implementation deliberately does not inject `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub; the caller's current branch is never written directly.
+Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
 
 ```bash
 npm ci
 node src/cli.js run --project self --goal "Update a controlled documentation fixture with one accurate sentence"
+node src/cli.js run --project leadfinder --goal "Create a docs-only smoke fixture" --dry-run
 node src/cli.js report <runId>
 node src/cli.js resume <runId>
 ```
 
-Add `--dry-run` to persist the plan and a zero-write simulation. It does not create or switch branches, invoke the worker or checks, commit, push, create a PR, or write to GitHub.
+Add `--dry-run` to persist the plan and a zero-write simulation. It does not create a workspace or clone, create or switch branches, invoke the worker or checks, commit, push, create a PR, query Vercel, or write to GitHub.
 
 The project commands, protected branches, branch pattern, approvals, and budgets live in `config/projects.json`. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 
 ## Guarantees and boundaries
 
-- `main` is protected in project configuration; a run requires a clean checkout and works only on a new `agent/<runId>` branch created from `main`.
+- Only registered projects can run. A managed workspace validates its containment, rejects symlinked workspace paths, clones the configured origin only, and validates that origin again before work starts.
+- `main` is protected in project configuration; a run works only on a new `agent/<runId>` branch created from the SHA shared by GitHub and `origin/main`.
 - The worker receives a redacted structured task, never GitHub/OpenAI credentials, and cannot choose commits, pushes, PRs, merge, deployment, or validation commands.
 - The orchestrator runs only configured commands without a shell. It refuses path traversal, protected files such as `.env`, working branches outside the allowlist, protected-branch pushes, and changes to Git history made by the worker.
 - `create_branch`, commit, and push are safe operations. A project can require approval for PR creation. Merge and production deploy are approval-required but deliberately have no execution handler. Force-push to `main` and protected-branch deletion are forbidden.
-- CI ends as `pending`, `success`, `failure`, or `timeout`; failed checks can cause at most `maxWorkerAttempts` worker attempts. There is no automatic merge.
+- CI ends as `pending`, `success`, `failure`, or `timeout`; failed checks can cause at most `maxWorkerAttempts` worker attempts. A configured Vercel provider only observes preview deployments and treats `READY`, `ERROR`, `NOT_FOUND`, `TIMEOUT`, and `NOT_CONFIGURED` explicitly. There is no automatic merge.
 
-See [architecture](docs/ARCHITECTURE.md), [security](docs/SECURITY.md), [Codex integration](docs/CODEX_INTEGRATION.md), and the [real smoke-test record](docs/V0.2-SMOKE-TEST.md) for implementation detail.
+The agent itself is a CLI and is not hosted on Vercel. See [architecture](docs/ARCHITECTURE.md), [cross-repository workspaces](docs/CROSS_REPO.md), [Vercel observation](docs/VERCEL_INTEGRATION.md), [security](docs/SECURITY.md), and the smoke-test records for implementation detail.

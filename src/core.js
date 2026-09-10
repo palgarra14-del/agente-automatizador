@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve, sep } from 'node:path';
+import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
 
 export const RunStatus = Object.freeze({
@@ -44,6 +45,8 @@ const forbiddenActions = new Set([
 ]);
 const protectedFilePattern = /(^|\/)(?:\.env(?:\.|$)|.*\.(?:pem|key)$|secrets?(?:\.|$))/i;
 const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization)/i;
+const defaultAcceptance = ['test', 'typecheck', 'lint', 'build', 'ci'];
+const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
 
 function isWithin(parent, child) {
   const rel = relative(parent, child);
@@ -119,11 +122,25 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   const projectRoot = resolve(configDirectory, '..');
   const workspace = resolve(configDirectory, input.workspace ?? '..');
   if (!isWithin(projectRoot, workspace)) throw new Error('workspace must stay within the configured project root');
+  const workspaceStrategy = input.workspaceStrategy ?? 'host';
+  if (!['host', 'managed'].includes(workspaceStrategy)) throw new Error('workspaceStrategy must be host or managed');
+  const managedWorkspaceRoot = resolve(projectRoot, input.managedWorkspaceRoot ?? '.agent-workspaces');
+  if (!isWithin(projectRoot, managedWorkspaceRoot) || managedWorkspaceRoot === projectRoot) throw new Error('managedWorkspaceRoot must stay below the project root');
+  const acceptance = input.acceptance?.require ?? defaultAcceptance;
+  if (!Array.isArray(acceptance) || !acceptance.length || acceptance.some((name) => !allowedAcceptance.has(name))) throw new Error('Invalid acceptance requirements');
+  if (input.acceptance && acceptance.some((name) => !['ci', 'deployment'].includes(name) && !input.commands[name])) throw new Error('Acceptance command is not allowlisted');
+  const deployment = input.deployment ?? { provider: 'none' };
+  if (!['none', 'vercel'].includes(deployment.provider)) throw new Error('Unsupported deployment provider');
+  if (deployment.provider === 'vercel' && (!deployment.projectId || !deployment.teamId)) throw new Error('Vercel projectId and teamId are required');
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
     workspace,
     projectRoot,
+    workspaceStrategy,
+    managedWorkspaceRoot,
+    acceptance: { require: [...acceptance] },
+    deployment,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -133,7 +150,9 @@ export function configFrom(input, baseDirectory = process.cwd()) {
       maxWorkerAttempts: positiveInteger(budgets.maxWorkerAttempts, 2, 'maxWorkerAttempts'),
       commandTimeoutMs: positiveInteger(budgets.commandTimeoutMs, 30_000, 'commandTimeoutMs', 100),
       ciTimeoutMs: positiveInteger(budgets.ciTimeoutMs, 600_000, 'ciTimeoutMs', 1_000),
-      ciPollIntervalMs: positiveInteger(budgets.ciPollIntervalMs, 10_000, 'ciPollIntervalMs', 1_000)
+      ciPollIntervalMs: positiveInteger(budgets.ciPollIntervalMs, 10_000, 'ciPollIntervalMs', 1_000),
+      deploymentTimeoutMs: positiveInteger(budgets.deploymentTimeoutMs, 600_000, 'deploymentTimeoutMs', 1_000),
+      deploymentPollIntervalMs: positiveInteger(budgets.deploymentPollIntervalMs, 15_000, 'deploymentPollIntervalMs', 1_000)
     }
   };
   buildWorkingBranch(project, 'validation-run');
@@ -213,6 +232,57 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
   }
   const result = await processRunner(binary, args, { cwd: project.workspace, env: { CI: 'true' }, timeoutMs });
   return { name, command, ...result };
+}
+
+export function managedWorkspacePath(project, runId) {
+  if (!/^[A-Za-z0-9-]+$/.test(runId)) throw new Error('Invalid run id for managed workspace');
+  const root = resolve(project.managedWorkspaceRoot);
+  const projectDirectory = resolve(root, project.id);
+  const workspace = resolve(projectDirectory, runId);
+  if (!isWithin(root, projectDirectory) || !isWithin(projectDirectory, workspace)) throw new Error('Managed workspace escapes its root');
+  return { root, projectDirectory, workspace };
+}
+
+async function rejectSymlink(path) {
+  try {
+    if ((await lstat(path)).isSymbolicLink()) throw new Error(`Managed workspace path cannot be a symlink: ${path}`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+export function projectAtWorkspace(project, workspace) {
+  const resolvedWorkspace = resolve(workspace);
+  if (project.workspaceStrategy === 'managed' && !isWithin(resolve(project.managedWorkspaceRoot), resolvedWorkspace)) {
+    throw new Error('Workspace is outside the managed workspace root');
+  }
+  return { ...project, workspace: resolvedWorkspace };
+}
+
+export class WorkspaceManager {
+  constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
+
+  describe(project, runId) {
+    if (project.workspaceStrategy !== 'managed') return { workspace: project.workspace, managed: false, retained: false };
+    return { ...managedWorkspacePath(project, runId), managed: true, retained: true };
+  }
+
+  async prepare(project, runId) {
+    const details = this.describe(project, runId);
+    if (!details.managed) return details;
+    await mkdir(details.projectDirectory, { recursive: true });
+    await rejectSymlink(details.root);
+    await rejectSymlink(details.projectDirectory);
+    if (existsSync(details.workspace)) throw new Error(`Managed workspace already exists: ${details.workspace}`);
+    const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
+    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--no-checkout', remoteUrl, details.workspace], {
+      cwd: details.projectDirectory,
+      timeoutMs: project.budgets.commandTimeoutMs
+    });
+    if (!clone.ok || clone.timedOut) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+    await rejectSymlink(details.workspace);
+    return { ...details, remoteUrl, clone: { ok: true, durationMs: clone.durationMs, exitCode: clone.exitCode } };
+  }
 }
 
 export function sanitizeCodingTask(task) {
@@ -429,8 +499,48 @@ export class GitHubAdapter {
   }
 }
 
+function vercelState(state) {
+  if (state === 'READY') return 'READY';
+  if (['ERROR', 'CANCELED'].includes(state)) return 'ERROR';
+  return 'BUILDING';
+}
+
 export class VercelDeploymentProvider {
-  async latest() { return { provider: 'vercel', status: 'not_configured' }; }
+  constructor({ token = process.env.VERCEL_TOKEN, fetchImpl = fetch, sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)), now = () => Date.now() } = {}) {
+    Object.assign(this, { token, fetch: fetchImpl, sleep, now });
+  }
+
+  async latest(project, { commitSha, branch }) {
+    if (project.deployment?.provider !== 'vercel') return { provider: 'none', state: 'NOT_REQUIRED', ok: true };
+    if (!this.token) return { provider: 'vercel', state: 'NOT_CONFIGURED', ok: false, reason: 'VERCEL_TOKEN is required for read-only preview observation' };
+    const query = new URLSearchParams({ projectId: project.deployment.projectId, limit: '20', teamId: project.deployment.teamId });
+    const response = await this.fetch(`https://api.vercel.com/v13/deployments?${query}`, { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!response.ok) throw new Error(`Vercel API request failed: ${response.status}`);
+    const data = await response.json();
+    const deployment = (data.deployments ?? []).find((item) => {
+      const meta = item.meta ?? {};
+      return item.target !== 'production' && meta.githubCommitSha === commitSha && (!branch || meta.githubCommitRef === branch);
+    });
+    if (!deployment) return { provider: 'vercel', state: 'NOT_FOUND', ok: false, commitSha, branch };
+    return {
+      provider: 'vercel', ok: vercelState(deployment.state) === 'READY', deploymentId: deployment.uid ?? deployment.id,
+      environment: deployment.target === 'production' ? 'production' : 'preview', commitSha: deployment.meta?.githubCommitSha ?? commitSha,
+      branch: deployment.meta?.githubCommitRef ?? branch, state: vercelState(deployment.state),
+      url: deployment.url ? `https://${deployment.url.replace(/^https:\/\//, '')}` : undefined,
+      createdAt: deployment.createdAt ? new Date(deployment.createdAt).toISOString() : undefined
+    };
+  }
+
+  async waitForPreview(project, context, { timeoutMs, pollIntervalMs }) {
+    if (project.deployment?.provider !== 'vercel') return { provider: 'none', state: 'NOT_REQUIRED', ok: true, durationMs: 0 };
+    const startedAt = this.now();
+    for (;;) {
+      const latest = await this.latest(project, context);
+      if (['READY', 'ERROR', 'NOT_CONFIGURED'].includes(latest.state)) return { ...latest, durationMs: this.now() - startedAt };
+      if (this.now() - startedAt >= timeoutMs) return { ...latest, state: 'TIMEOUT', ok: false, durationMs: this.now() - startedAt };
+      await this.sleep(pollIntervalMs);
+    }
+  }
 }
 
 export class DeterministicPlanner {
@@ -449,25 +559,30 @@ export class DeterministicPlanner {
   }
 }
 
-export function evaluate(results, { retryable = false } = {}) {
+export function evaluate(results, { retryable = false, required = defaultAcceptance } = {}) {
   if (results.ci?.state === 'pending') return { decision: 'WAITING', reasons: ['CI is still pending'] };
-  const required = ['worker', 'diff', 'test', 'typecheck', 'lint', 'build', 'commit', 'push', 'pullRequest', 'ci'];
-  const missing = required.filter((name) => results[name]?.ok !== true);
+  const evidence = ['worker', 'diff', ...required, 'commit', 'push', 'pullRequest'];
+  const missing = evidence.filter((name) => results[name]?.ok !== true);
   return {
     decision: missing.length ? (retryable ? 'NEEDS_RETRY' : 'FAIL') : 'PASS',
     reasons: missing.length ? missing.map((name) => `${name} did not pass`) : ['All deterministic engineering criteria passed']
   };
 }
 
+export function configuredChecks(project) {
+  return project.acceptance.require.filter((name) => name !== 'install' && !['ci', 'deployment'].includes(name));
+}
+
 export function report(run) {
   const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.simulated ? 'SIMULATED' : result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
-  return `RUN\n${run.id}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nPROJECT\n${run.projectId}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const deployment = run.deployment ?? run.results?.deployment;
+  return `PROJECT\n${run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
 }
 
 export class Orchestrator {
-  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), worker = new CodexSdkWorker(), commandRunner = runCommand }) {
-    Object.assign(this, { store, planner, github, localGit, worker, commandRunner });
+  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), commandRunner = runCommand }) {
+    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, commandRunner });
   }
 
   async event(runId, component, event, details = {}) {
@@ -536,9 +651,29 @@ export class Orchestrator {
   async initializeWorkspace(run, project) {
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
-    const branch = await this.localGit.prepareWorkingBranch(project, run.id, repository.head);
-    const updated = await this.updateRun(run.id, (current) => { current.repository = repository; current.initialHead = branch.initialHead; current.workingBranch = branch.workingBranch; current.results.branch = { ok: true, ...branch }; });
-    await this.event(run.id, 'git', 'working_branch.created', { branch: branch.workingBranch, initialHead: branch.initialHead });
+    if (repository.repository?.toLowerCase() !== `${project.repository.owner}/${project.repository.name}`.toLowerCase()) throw new Error('Configured repository differs from GitHub');
+    const allocation = await this.workspaceManager.prepare(project, run.id);
+    const workspaceProject = projectAtWorkspace(project, allocation.workspace);
+    const branch = await this.localGit.prepareWorkingBranch(workspaceProject, run.id, repository.head);
+    const updated = await this.updateRun(run.id, (current) => {
+      current.repository = repository;
+      current.workspace = allocation.workspace;
+      current.workspaceEvidence = safeJson(allocation);
+      current.initialHead = branch.initialHead;
+      current.initialRemoteHead = branch.remoteBaseHead;
+      current.workingBranch = branch.workingBranch;
+      current.results.workspace = { ok: true, ...safeJson(allocation) };
+      current.results.branch = { ok: true, ...branch };
+    });
+    await this.event(run.id, 'git', 'working_branch.created', { branch: branch.workingBranch, initialHead: branch.initialHead, workspace: allocation.workspace });
+    return updated;
+  }
+
+  async bootstrap(run, project) {
+    const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
+    const updated = await this.updateRun(run.id, (saved) => { saved.results.install = safeJson(result); });
+    await this.event(run.id, 'workspace', 'install.completed', { ok: result.ok, durationMs: result.durationMs, exitCode: result.exitCode });
+    if (!result.ok) return this.fail(run.id, `install failed: ${result.stderr || result.stdout}`);
     return updated;
   }
 
@@ -554,30 +689,37 @@ export class Orchestrator {
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
     const workingBranch = buildWorkingBranch(project, run.id);
+    const workspace = this.workspaceManager.describe(project, run.id);
+    const simulatedChecks = Object.fromEntries(project.acceptance.require.filter((name) => !['ci', 'deployment'].includes(name)).map((name) => [name, { ok: true, simulated: true, command: project.commands[name] }]));
     const plannedActions = [
+      `create isolated workspace ${workspace.workspace}`,
       `fetch origin ${project.defaultBranch} and verify the GitHub base head`,
       `create ${workingBranch} at the verified remote base`,
+      'run the allowlisted install/bootstrap command',
       'invoke CodingWorker',
-      'run configured checks: test, typecheck, lint, build',
+      `run configured checks: ${configuredChecks(project).join(', ') || 'none'}`,
       'commit and push the working branch',
-      'create a pull request and poll CI'
+      'create a pull request and poll CI',
+      project.deployment?.provider === 'vercel' ? 'find and poll the Vercel preview for the pushed commit' : 'skip deployment observation (provider none)'
     ];
     const updated = await this.updateRun(run.id, (saved) => {
       saved.repository = safeJson(repository);
       saved.initialHead = repository.head;
+      saved.initialRemoteHead = repository.head;
+      saved.workspace = workspace.workspace;
       saved.workingBranch = workingBranch;
       saved.plannedActions = plannedActions;
       saved.results = {
-        repository: { ok: true, simulated: true, head: repository.head }, branch: { ok: true, simulated: true, workingBranch },
-        worker: { ok: true, simulated: true }, test: { ok: true, simulated: true }, typecheck: { ok: true, simulated: true },
-        lint: { ok: true, simulated: true }, build: { ok: true, simulated: true }, commit: { ok: true, simulated: true },
-        push: { ok: true, simulated: true }, pullRequest: { ok: true, simulated: true }, ci: { ok: true, simulated: true }
+        repository: { ok: true, simulated: true, head: repository.head }, workspace: { ok: true, simulated: true, ...safeJson(workspace) },
+        branch: { ok: true, simulated: true, workingBranch }, worker: { ok: true, simulated: true }, ...simulatedChecks,
+        commit: { ok: true, simulated: true }, push: { ok: true, simulated: true }, pullRequest: { ok: true, simulated: true },
+        ci: { ok: true, simulated: true }, deployment: { ok: true, simulated: true, provider: project.deployment?.provider ?? 'none' }
       };
       saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.'] };
       transition(saved, RunStatus.EVALUATING);
       transition(saved, RunStatus.COMPLETED);
     });
-    await this.event(run.id, 'orchestrator', 'dry_run.simulated', { workingBranch, baseHead: repository.head });
+    await this.event(run.id, 'orchestrator', 'dry_run.simulated', { workingBranch, baseHead: repository.head, workspace: workspace.workspace });
     return updated;
   }
 
@@ -603,7 +745,7 @@ export class Orchestrator {
     run = await this.updateRun(run.id, (saved) => { saved.results.diff = { ok: paths.length > 0, paths }; });
     if (!paths.length) return this.retryOrFail(run, 'worker produced no diff');
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.TESTING));
-    for (const name of ['test', 'typecheck', 'lint', 'build']) {
+    for (const name of configuredChecks(project)) {
       this.assertDeadline(await this.store.getRun(run.id));
       const result = await this.commandRunner(project, name, { dryRun: run.dryRun, timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
       run = await this.updateRun(run.id, (saved) => { saved.results[name] = safeJson(result); saved.checkHistory.push({ attempt: saved.workerAttempts, ...safeJson(result) }); });
@@ -625,7 +767,13 @@ export class Orchestrator {
   }
 
   async createPullRequest(run, project) {
-    const pullRequest = await this.github.createPullRequest(project, { branch: run.workingBranch, title: `Agent: ${clip(run.goal, 90)}`, body: `Automated engineering run ${run.id}.\n\nThe orchestrator ran configured checks before pushing. Review is required before merge.` });
+    const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
+    const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(run.goal, 90));
+    const pullRequest = await this.github.createPullRequest(project, {
+      branch: run.workingBranch,
+      title,
+      body: `Automated engineering run ${run.id}.\n\nScope: governed ${project.id} change. Configured local checks passed before push; CI and any configured preview observation are recorded by the orchestrator. Human review is required before merge.\n\nNo merge or production deployment was performed.`
+    });
     const updated = await this.updateRun(run.id, (saved) => { saved.pullRequestNumber = pullRequest.number; saved.pullRequestUrl = pullRequest.url; saved.results.pullRequest = { ok: true, ...pullRequest }; transition(saved, RunStatus.WAITING_CI); });
     await this.event(run.id, 'github', 'pull_request.created', pullRequest);
     return updated;
@@ -637,14 +785,28 @@ export class Orchestrator {
     const ci = await this.github.waitForCi(project, run.finalHead, { timeoutMs: project.budgets.ciTimeoutMs, pollIntervalMs: project.budgets.ciPollIntervalMs });
     run = await this.updateRun(run.id, (saved) => { saved.results.ci = { ok: ci.state === 'success', ...safeJson(ci) }; saved.ci = safeJson(ci); if (ci.state === 'success') transition(saved, RunStatus.EVALUATING); });
     await this.event(run.id, 'github', 'ci.observed', ci);
-    if (ci.state === 'success') return this.updateRun(run.id, (saved) => { saved.evaluation = evaluate(saved.results); transition(saved, saved.evaluation.decision === 'PASS' ? RunStatus.COMPLETED : RunStatus.FAILED); });
+    if (ci.state === 'success') return this.observeDeployment(run, project);
     if (ci.state === 'failure') return this.retryOrFail(run, 'CI failed');
     return this.fail(run.id, 'ci_timeout');
+  }
+
+  async observeDeployment(run, project) {
+    const deployment = await this.deploymentProvider.waitForPreview(project, { commitSha: run.finalHead, branch: run.workingBranch }, {
+      timeoutMs: project.budgets.deploymentTimeoutMs,
+      pollIntervalMs: project.budgets.deploymentPollIntervalMs
+    });
+    run = await this.updateRun(run.id, (saved) => { saved.results.deployment = safeJson(deployment); saved.deployment = safeJson(deployment); });
+    await this.event(run.id, 'vercel', 'preview.observed', deployment);
+    return this.updateRun(run.id, (saved) => {
+      saved.evaluation = evaluate(saved.results, { required: project.acceptance.require });
+      transition(saved, saved.evaluation.decision === 'PASS' ? RunStatus.COMPLETED : RunStatus.FAILED);
+    });
   }
 
   async continueRun(run, project) {
     try {
       this.assertDeadline(run);
+      if (run.workspace) project = projectAtWorkspace(project, run.workspace);
       if (run.status === RunStatus.WAITING_APPROVAL) {
         const approval = (await this.store.load()).approvals[run.pendingAction?.approvalId];
         if (!approval || approval.status !== 'approved') return run;
@@ -657,7 +819,14 @@ export class Orchestrator {
       }
       if (run.status === RunStatus.WAITING_CI) return this.pollCi(run, project);
       if (run.status === RunStatus.PLANNING || run.status === RunStatus.CREATED) run = await this.plan(run, project);
-      if (!run.workingBranch) run = await this.initializeWorkspace(run, project);
+      if (!run.workingBranch) {
+        run = await this.initializeWorkspace(run, project);
+        project = projectAtWorkspace(project, run.workspace);
+      }
+      if (project.acceptance.require.includes('install') && !run.results.install) {
+        run = await this.bootstrap(run, project);
+        if (run.status !== RunStatus.WORKING) return run;
+      }
       while (run.status === RunStatus.WORKING && run.workerAttempts < run.budgets.maxWorkerAttempts) {
         run = await this.executeAttempt(run, project);
         if (run.status === RunStatus.WAITING_CI) return run;
