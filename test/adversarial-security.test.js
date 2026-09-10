@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonStore, LocalGitAdapter, configFrom, evaluateChangePolicy, maskSecrets, runProcess } from '../src/core.js';
@@ -142,6 +142,17 @@ test('JsonStore does not lose updates when two agent processes mutate shared sta
   assert.ok(final.runs['run-b'], 'concurrent mutation lost run-b');
 });
 
+test('JsonStore recovers an expired lock before mutating state', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-store-stale-lock-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file, { lockStaleMs: 1 });
+  await writeFile(`${file}.lock`, 'stale');
+  const staleAt = new Date(Date.now() - 10_000);
+  await utimes(`${file}.lock`, staleAt, staleAt);
+  await store.mutate((data) => { data.runs.recovered = { id: 'recovered' }; });
+  assert.ok((await store.load()).runs.recovered);
+});
+
 test('runProcess bounds captured output while retaining full byte accounting', async () => {
   const result = await runProcess(process.execPath, ['-e', 'process.stdout.write("x".repeat(1024 * 1024))'], {
     timeoutMs: 5_000,
@@ -151,6 +162,7 @@ test('runProcess bounds captured output while retaining full byte accounting', a
   assert.equal(result.ok, true);
   assert.ok(result.stdout.length <= 1_024);
   assert.ok(result.stdoutBytes >= 1024 * 1024);
+  assert.equal(result.stdoutTruncated, true);
 });
 
 test('runProcess escalates a timed out child instead of waiting indefinitely', async () => {

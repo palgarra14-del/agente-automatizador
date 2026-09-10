@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
@@ -352,11 +352,12 @@ export async function loadProjects(file) {
 }
 
 export class JsonStore {
-  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10, lockStaleMs = 60_000 } = {}) {
     this.file = file;
     this.lockFile = `${file}.lock`;
     this.lockTimeoutMs = lockTimeoutMs;
     this.lockPollMs = lockPollMs;
+    this.lockStaleMs = lockStaleMs;
   }
 
   async load() {
@@ -383,6 +384,16 @@ export class JsonStore {
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
+        try {
+          const details = await stat(this.lockFile);
+          if (Date.now() - details.mtimeMs > this.lockStaleMs) {
+            await unlink(this.lockFile);
+            continue;
+          }
+        } catch (lockError) {
+          if (lockError.code !== 'ENOENT') throw lockError;
+          continue;
+        }
         if (Date.now() >= deadline) throw new Error('state_lock_timeout', { cause: error });
         await new Promise((resolveWait) => setTimeout(resolveWait, this.lockPollMs));
       }
@@ -417,40 +428,56 @@ export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_
     let stderr = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     const stdoutHash = captureOutputDigest ? createHash('sha256') : null;
     let timedOut = false;
     let settled = false;
     let killTimer = null;
     const startedAt = Date.now();
     const appendBounded = (current, data) => {
-      if (current.length >= outputLimit) return current;
-      return current + data.toString('utf8').slice(0, outputLimit - current.length);
+      const text = data.toString('utf8');
+      if (current.length >= outputLimit) return { text: current, truncated: text.length > 0 };
+      const visible = text.slice(0, outputLimit - current.length);
+      return { text: current + visible, truncated: visible.length < text.length };
     };
     const finish = (result) => {
       if (settled) return;
       settled = true;
       if (killTimer) clearTimeout(killTimer);
-      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), stdoutBytes, stderrBytes, ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
+      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated, ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
     };
     const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : restrictEnvironment ? { ...env } : { ...safeCommandEnvironment(), ...env };
-    const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
+    const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+    const terminate = (signal) => {
+      if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, signal); return; } catch { /* Child exited before group signalling. */ }
+      }
+      child.kill(signal);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      killTimer = setTimeout(() => { if (!settled) child.kill('SIGKILL'); }, killGraceMs);
+      terminate('SIGTERM');
+      killTimer = setTimeout(() => { if (!settled) terminate('SIGKILL'); }, killGraceMs);
     }, timeoutMs);
     child.stdout.on('data', (data) => {
       stdoutBytes += data.length;
-      stdout = appendBounded(stdout, data);
+      const appended = appendBounded(stdout, data);
+      stdout = appended.text;
+      stdoutTruncated ||= appended.truncated;
       stdoutHash?.update(data);
     });
     child.stderr.on('data', (data) => {
       stderrBytes += data.length;
-      stderr = appendBounded(stderr, data);
+      const appended = appendBounded(stderr, data);
+      stderr = appended.text;
+      stderrTruncated ||= appended.truncated;
     });
     child.on('error', (error) => {
       clearTimeout(timer);
-      stderr = appendBounded(stderr, Buffer.from(error.message));
+      const appended = appendBounded(stderr, Buffer.from(error.message));
+      stderr = appended.text;
+      stderrTruncated ||= appended.truncated;
       finish({ ok: false, exitCode: null });
     });
     child.on('close', (exitCode) => { clearTimeout(timer); finish({ ok: exitCode === 0 && !timedOut, exitCode }); });
@@ -1299,9 +1326,9 @@ export class Orchestrator {
       saved.results.diff = { ok: changeSet.paths.length > 0, ...safeJson(changeSet) };
       saved.results.changePolicy = { ok: decision.ok, phase, ...safeJson(decision) };
       saved.governanceHistory ??= [];
-      saved.governanceHistory.push({ phase, ok: decision.ok, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, timestamp: new Date().toISOString() });
+      saved.governanceHistory.push({ phase, ok: decision.ok, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, changedBytes: decision.changedBytes, maxFileBytes: decision.maxFileBytes, timestamp: new Date().toISOString() });
     });
-    await this.event(run.id, 'policy', 'change_set.evaluated', { phase, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines });
+    await this.event(run.id, 'policy', 'change_set.evaluated', { phase, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, changedBytes: decision.changedBytes, maxFileBytes: decision.maxFileBytes });
     if (!changeSet.paths.length) return phase === 'before_checks' ? this.retryOrFail(run, 'worker produced no diff') : this.fail(run.id, 'governed_change_set_empty');
     if (!decision.ok) return this.fail(run.id, decision.reason);
     if (approvedFingerprint && approvedFingerprint !== decision.changeSetFingerprint) {
