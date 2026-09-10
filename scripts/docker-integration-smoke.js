@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFrom, DockerContainerExecution } from '../src/core.js';
@@ -8,12 +8,15 @@ const image = process.argv[2] ?? 'agent-node22-pnpm11:local';
 const root = await mkdtemp(join(tmpdir(), 'agent-docker-smoke-'));
 const workspace = join(root, 'workspace');
 const homeSentinel = join(homedir(), `agent-host-home-${process.pid}`);
+const runtimeUser = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+  ? `${process.getuid()}:${process.getgid()}`
+  : '1000:1000';
 
 function smokeProject(commands, timeoutMs) {
   return configFrom({
     id: 'docker-smoke', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
     commands, commandEnvironment: { SMOKE_HOST_HOME_SENTINEL: homeSentinel },
-    execution: { provider: 'container-required', image, user: '1000:1000', resources: { memoryMb: 128, cpuCount: 1, pidsLimit: 64 } }, budgets: { commandTimeoutMs: timeoutMs }
+    execution: { provider: 'container-required', image, user: runtimeUser, resources: { memoryMb: 128, cpuCount: 1, pidsLimit: 64 } }, budgets: { commandTimeoutMs: timeoutMs }
   }, workspace);
 }
 
@@ -22,7 +25,6 @@ try {
   const available = await docker.availability(smokeProject({ test: 'node smoke.mjs' }, 10_000));
   if (!available.available) throw new Error(`BLOCKED_EXTERNAL_RUNTIME: ${available.reason}`);
   await mkdir(join(workspace, '.git'), { recursive: true });
-  await chmod(root, 0o777); await chmod(workspace, 0o777); await chmod(join(workspace, '.git'), 0o777);
   await writeFile(homeSentinel, 'host-only');
   await writeFile(join(workspace, 'smoke.mjs'), `
 import assert from 'node:assert/strict'; import { access, readdir, writeFile } from 'node:fs/promises'; import { execFile } from 'node:child_process'; import { promisify } from 'node:util';
@@ -50,5 +52,5 @@ assert.deepEqual((await readdir('/sys/class/net')).sort(), ['lo']); for (const n
   const timeoutProject = smokeProject({ test: 'node timeout.mjs' }, 1_500);
   const timeout = await docker.execute(timeoutProject, 'test', { stage: 'post-worker' });
   assert.equal(timeout.timedOut, true, timeout.stderr || timeout.stdout); assert.equal(timeout.cleanup?.attempted, true);
-  console.log('docker integration smoke PASS');
+  console.log(`docker integration smoke PASS (${runtimeUser})`);
 } finally { await rm(homeSentinel, { force: true }); await rm(root, { recursive: true, force: true }); }
