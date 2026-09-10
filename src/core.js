@@ -275,7 +275,7 @@ export class WorkspaceManager {
     await rejectSymlink(details.projectDirectory);
     if (existsSync(details.workspace)) throw new Error(`Managed workspace already exists: ${details.workspace}`);
     const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
-    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--no-checkout', remoteUrl, details.workspace], {
+    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
       timeoutMs: project.budgets.commandTimeoutMs
     });

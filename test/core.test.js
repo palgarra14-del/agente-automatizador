@@ -296,7 +296,7 @@ test('managed workspaces are isolated under the configured root and clone only t
   const manager = new WorkspaceManager({ processRunner: async (binary, args, options) => { calls.push({ binary, args, options }); return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' }; } });
   const allocation = await manager.prepare(configured, 'agent-20260910-abcdef12');
   assert.match(allocation.workspace, /leadfinder[\\/]agent-20260910-abcdef12$/);
-  assert.deepEqual(calls[0].args.slice(0, 5), ['clone', '--origin', 'origin', '--no-checkout', 'https://github.com/owner/leadfinder.git']);
+  assert.deepEqual(calls[0].args.slice(0, 4), ['clone', '--origin', 'origin', 'https://github.com/owner/leadfinder.git']);
   assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
   assert.throws(() => managedWorkspacePath(configured, '../other-project'));
 });
