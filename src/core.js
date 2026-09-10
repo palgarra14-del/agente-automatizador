@@ -44,10 +44,10 @@ const forbiddenActions = new Set([
   'approval_bypass', 'delete_protected_branch'
 ]);
 const protectedFilePattern = /(^|\/)(?:\.env(?:\.|$)|.*\.(?:pem|key)$|secrets?(?:\.|$))/i;
-const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization)/i;
+const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization|cookie|session)/i;
 const defaultAcceptance = ['test', 'typecheck', 'lint', 'build', 'ci'];
 const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
-const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth)/i;
+const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth|cookie|session)/i;
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
@@ -77,10 +77,18 @@ function positiveInteger(value, fallback, label, minimum = 1) {
   return result;
 }
 
+function hasControlCharacters(value) {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
 function normalizeRepositoryPath(path, label = 'path') {
   if (typeof path !== 'string' || !path.trim()) throw new Error(`${label} must be a non-empty repository-relative path`);
   const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
-  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.includes('*')) {
+  if (hasControlCharacters(normalized) || !normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.includes('*')) {
     throw new Error(`${label} must be a literal repository-relative path`);
   }
   return normalized;
@@ -362,7 +370,7 @@ export class JsonStore {
   async save(data) {
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(data, null, 2));
+    await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
     await rename(temporary, this.file);
   }
 
@@ -371,7 +379,7 @@ export class JsonStore {
     const deadline = Date.now() + this.lockTimeoutMs;
     while (true) {
       try {
-        await writeFile(this.lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), { flag: 'wx' });
+        await writeFile(this.lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;

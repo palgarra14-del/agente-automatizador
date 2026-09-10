@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -246,6 +246,21 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.branchProtection, 'NO');
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
   assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
+});
+
+test('security rejects control characters in governed paths and keeps state private', async () => {
+  const configured = project();
+  const decision = evaluateChangePolicy(configured, { paths: ['safe\n.env'], changedFiles: 1, diffLines: 1 });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.reason, 'forbidden_path:workspace_escape');
+
+  const directory = await mkdtemp(join(tmpdir(), 'agent-private-state-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file);
+  await store.mutate((data) => { data.runs.example = { id: 'example' }; });
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+  }
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
