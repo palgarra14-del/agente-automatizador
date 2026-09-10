@@ -15,6 +15,12 @@ A CLI-first, policy-governed engineering loop for registered repositories. It tu
 
 Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
 
+Prepare LeadFinder's declared local toolchain explicitly before any real run; the Agent itself does not build it:
+
+```bash
+docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
+```
+
 ```bash
 npm ci
 node src/cli.js run --project self --goal "Update a controlled documentation fixture with one accurate sentence"

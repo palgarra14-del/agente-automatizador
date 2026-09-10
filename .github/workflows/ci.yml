@@ -12,3 +12,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - name: Build prepared Node 22 / pnpm 11.19.0 image
+        run: docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
+      - name: Verify real Docker execution boundary
+        run: node scripts/docker-integration-smoke.js

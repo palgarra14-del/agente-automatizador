@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { configFrom, DockerContainerExecution } from '../src/core.js';
+
+const image = process.argv[2] ?? 'agent-node22-pnpm11:local';
+const root = await mkdtemp(join(tmpdir(), 'agent-docker-smoke-'));
+const workspace = join(root, 'workspace');
+const homeSentinel = join(homedir(), `agent-host-home-${process.pid}`);
+
+function smokeProject(command, timeoutMs) {
+  return configFrom({
+    id: 'docker-smoke', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    commands: { test: command }, commandEnvironment: { SMOKE_HOST_HOME_SENTINEL: homeSentinel },
+    execution: { provider: 'container-required', image, user: '1000:1000', resources: { memoryMb: 128, cpuCount: 1, pidsLimit: 64 } }, budgets: { commandTimeoutMs: timeoutMs }
+  }, workspace);
+}
+
+try {
+  const docker = new DockerContainerExecution();
+  const available = await docker.availability(smokeProject('node smoke.mjs', 10_000));
+  if (!available.available) throw new Error(`BLOCKED_EXTERNAL_RUNTIME: ${available.reason}`);
+  await mkdir(join(workspace, '.git'), { recursive: true });
+  await chmod(root, 0o777); await chmod(workspace, 0o777); await chmod(join(workspace, '.git'), 0o777);
+  await writeFile(homeSentinel, 'host-only');
+  await writeFile(join(workspace, 'smoke.mjs'), `
+import assert from 'node:assert/strict'; import { access, readdir, writeFile } from 'node:fs/promises'; import { execFile } from 'node:child_process'; import { promisify } from 'node:util';
+const execute = promisify(execFile); assert.match(process.version, /^v22\\./); const pnpm = await execute('pnpm', ['--version']); assert.equal(pnpm.stdout.trim(), '11.19.0');
+await writeFile('/workspace/agent-workspace-write-test', 'workspace is writable'); let gitWriteFailed = false; try { await writeFile('/workspace/.git/agent-write-test', 'must not exist'); } catch { gitWriteFailed = true; } assert.equal(gitWriteFailed, true);
+await assert.rejects(access(process.env.SMOKE_HOST_HOME_SENTINEL)); for (const path of ['/root/.ssh', '/home/node/.ssh', '/var/run/docker.sock']) await assert.rejects(access(path));
+assert.deepEqual((await readdir('/sys/class/net')).sort(), ['lo']); for (const name of ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY']) assert.equal(process.env[name], undefined);
+`);
+  await writeFile(join(workspace, 'timeout.mjs'), 'setTimeout(() => {}, 30_000);');
+  const smoke = await docker.execute(smokeProject('node smoke.mjs', 10_000), 'test', { stage: 'post-worker' });
+  assert.equal(smoke.ok, true, smoke.stderr || smoke.stdout);
+  const timeout = await docker.execute(smokeProject('node timeout.mjs', 1_500), 'test', { stage: 'post-worker' });
+  assert.equal(timeout.timedOut, true, timeout.stderr || timeout.stdout); assert.equal(timeout.cleanup?.attempted, true);
+  console.log('docker integration smoke PASS');
+} finally { await rm(homeSentinel, { force: true }); await rm(root, { recursive: true, force: true }); }

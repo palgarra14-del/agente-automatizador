@@ -733,6 +733,27 @@ test('install failure stops before worker, push and PR creation', async () => {
   assert.equal(github.pullRequests, 0);
 });
 
+test('bootstrap changes to governed files fail before the worker starts', async () => {
+  class BootstrapMutationGit extends FakeLocalGit {
+    constructor() { super(); this.inspections = 0; }
+    async inspectChangeSet() {
+      this.inspections += 1;
+      return this.inspections === 1 ? governedChangeSet([]) : governedChangeSet(['package.json'], { contentFingerprint: 'bootstrap-mutated' });
+    }
+  }
+  const worker = new FakeWorker();
+  const github = new FakeGitHub();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github, localGit: new BootstrapMutationGit(), worker,
+    commandRunner: async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })
+  }).run(leadfinderProject(), 'Reject bootstrap changes before the worker');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.match(run.failureReason, /bootstrap_modified_governed_files/);
+  assert.equal(run.results.bootstrapGovernance.ok, false);
+  assert.equal(worker.calls, 0);
+  assert.equal(github.pullRequests, 0);
+});
+
 test('push, PR, and Vercel failures leave coherent failed cross-repository runs', async () => {
   class FailingPushGit extends FakeLocalGit { async push() { throw new Error('push failed'); } }
   const pushRun = await new Orchestrator({ store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github: new FakeGitHub(), localGit: new FailingPushGit(), worker: new FakeWorker(), commandRunner: async (_p, name) => ({ name, ok: true }) }).run(leadfinderProject(), 'Exercise push failure');

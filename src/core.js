@@ -1099,10 +1099,17 @@ export class Orchestrator {
   }
 
   async bootstrap(run, project) {
+    const beforeBootstrap = await this.localGit.inspectChangeSet(project);
     const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())), stage: 'bootstrap' });
-    const updated = await this.updateRun(run.id, (saved) => { saved.results.install = safeJson(result); });
+    const afterBootstrap = result.ok ? await this.localGit.inspectChangeSet(project) : null;
+    const bootstrapClean = !afterBootstrap || beforeBootstrap.changeSetFingerprint === afterBootstrap.changeSetFingerprint;
+    const updated = await this.updateRun(run.id, (saved) => {
+      saved.results.install = safeJson(result);
+      saved.results.bootstrapGovernance = safeJson({ ok: bootstrapClean, beforeChangeSetFingerprint: beforeBootstrap.changeSetFingerprint, afterChangeSetFingerprint: afterBootstrap?.changeSetFingerprint ?? null });
+    });
     await this.event(run.id, 'workspace', 'install.completed', { ok: result.ok, durationMs: result.durationMs, exitCode: result.exitCode });
     if (!result.ok) return this.fail(run.id, `install failed: ${result.stderr || result.stdout}`);
+    if (!bootstrapClean) return this.fail(run.id, 'bootstrap_modified_governed_files');
     return updated;
   }
 
