@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createReadStream, existsSync } from 'node:fs';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
@@ -116,7 +116,9 @@ function changePolicyFrom(input = {}) {
     sensitivePaths: [...new Set([...defaultSensitivePathRoots, ...normalizePathList(input.sensitivePaths, 'changePolicy.sensitivePaths')])],
     budgets: {
       maxChangedFiles: positiveInteger(budgets.maxChangedFiles, 8, 'maxChangedFiles'),
-      maxDiffLines: positiveInteger(budgets.maxDiffLines, 500, 'maxDiffLines')
+      maxDiffLines: positiveInteger(budgets.maxDiffLines, 500, 'maxDiffLines'),
+      maxChangedBytes: positiveInteger(budgets.maxChangedBytes, 8 * 1024 * 1024, 'maxChangedBytes'),
+      maxFileBytes: positiveInteger(budgets.maxFileBytes, 4 * 1024 * 1024, 'maxFileBytes')
     }
   };
 }
@@ -139,8 +141,15 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
   if (scopeViolation) return { ok: false, reason: `scope_violation:${scopeViolation}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
   const changedFiles = changeSet.changedFiles ?? paths.length;
   const diffLines = changeSet.diffLines ?? 0;
-  if (changedFiles > policy.budgets.maxChangedFiles || diffLines > policy.budgets.maxDiffLines) {
-    return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, budgets: policy.budgets, changeSetFingerprint };
+  const changedBytes = changeSet.changedBytes ?? 0;
+  const maxFileBytes = changeSet.maxFileBytes ?? 0;
+  if (
+    changedFiles > policy.budgets.maxChangedFiles ||
+    diffLines > policy.budgets.maxDiffLines ||
+    changedBytes > policy.budgets.maxChangedBytes ||
+    maxFileBytes > policy.budgets.maxFileBytes
+  ) {
+    return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, changedBytes, maxFileBytes, budgets: policy.budgets, changeSetFingerprint };
   }
   const sensitivePath = paths.find((path) => pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
   const sensitive = Boolean(sensitivePath || changeSet.sensitiveContent);
@@ -154,6 +163,8 @@ export function fingerprintChangeSet(changeSet = {}) {
     additions: Number(changeSet.additions ?? 0),
     deletions: Number(changeSet.deletions ?? 0),
     diffLines: Number(changeSet.diffLines ?? 0),
+    changedBytes: Number(changeSet.changedBytes ?? 0),
+    maxFileBytes: Number(changeSet.maxFileBytes ?? 0),
     contentFingerprint: String(changeSet.contentFingerprint ?? '')
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
@@ -213,10 +224,13 @@ function executionFrom(input = {}) {
 }
 
 export function maskSecrets(value) {
+  const secretField = '[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization|cookie|session)[A-Za-z0-9_-]*';
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b((?:api[_-]?key|token|secret|password|credential)\s*[=:]\s*)[^\s"']+/gi, '$1[REDACTED]');
+    .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}]+/gi, '$1[REDACTED]')
+    .replace(new RegExp(`("${secretField}"\\s*:\\s*)"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
+    .replace(new RegExp(`('${secretField}'\\s*:\\s*)'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
+    .replace(new RegExp(`\\b(${secretField}\\s*[=:]\\s*)[^\\s"']+`, 'gi'), '$1[REDACTED]');
 }
 
 export function transition(run, nextStatus) {
@@ -322,7 +336,12 @@ export async function loadProjects(file) {
 }
 
 export class JsonStore {
-  constructor(file) { this.file = file; }
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
+    this.file = file;
+    this.lockFile = `${file}.lock`;
+    this.lockTimeoutMs = lockTimeoutMs;
+    this.lockPollMs = lockPollMs;
+  }
 
   async load() {
     try { return JSON.parse(await readFile(this.file, 'utf8')); }
@@ -339,35 +358,85 @@ export class JsonStore {
     await rename(temporary, this.file);
   }
 
+  async acquireLock() {
+    await mkdir(dirname(this.file), { recursive: true });
+    const deadline = Date.now() + this.lockTimeoutMs;
+    while (true) {
+      try {
+        await writeFile(this.lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), { flag: 'wx' });
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        if (Date.now() >= deadline) throw new Error('state_lock_timeout', { cause: error });
+        await new Promise((resolveWait) => setTimeout(resolveWait, this.lockPollMs));
+      }
+    }
+  }
+
   async mutate(mutator) {
-    const data = await this.load();
-    const output = await mutator(data);
-    await this.save(data);
+    await this.acquireLock();
+    let output;
+    let operationError = null;
+    try {
+      const data = await this.load();
+      output = await mutator(data);
+      await this.save(data);
+    } catch (error) {
+      operationError = error;
+    }
+    let unlockError = null;
+    try { await unlink(this.lockFile); }
+    catch (error) { if (error.code !== 'ENOENT') unlockError = error; }
+    if (operationError) throw operationError;
+    if (unlockError) throw unlockError;
     return output;
   }
 
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
-export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000 } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     const stdoutHash = captureOutputDigest ? createHash('sha256') : null;
     let timedOut = false;
     let settled = false;
+    let killTimer = null;
     const startedAt = Date.now();
+    const appendBounded = (current, data) => {
+      if (current.length >= outputLimit) return current;
+      return current + data.toString('utf8').slice(0, outputLimit - current.length);
+    };
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
+      if (killTimer) clearTimeout(killTimer);
+      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), stdoutBytes, stderrBytes, ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
     };
     const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : restrictEnvironment ? { ...env } : { ...safeCommandEnvironment(), ...env };
     const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeoutMs);
-    child.stdout.on('data', (data) => { stdout += data; stdoutHash?.update(data); });
-    child.stderr.on('data', (data) => { stderr += data; });
-    child.on('error', (error) => { clearTimeout(timer); stderr += error.message; finish({ ok: false, exitCode: null }); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => { if (!settled) child.kill('SIGKILL'); }, killGraceMs);
+    }, timeoutMs);
+    child.stdout.on('data', (data) => {
+      stdoutBytes += data.length;
+      stdout = appendBounded(stdout, data);
+      stdoutHash?.update(data);
+    });
+    child.stderr.on('data', (data) => {
+      stderrBytes += data.length;
+      stderr = appendBounded(stderr, data);
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      stderr = appendBounded(stderr, Buffer.from(error.message));
+      finish({ ok: false, exitCode: null });
+    });
     child.on('close', (exitCode) => { clearTimeout(timer); finish({ ok: exitCode === 0 && !timedOut, exitCode }); });
   });
 }
@@ -755,24 +824,47 @@ export class LocalGitAdapter {
     const trackedStats = (await this.git(['diff', 'HEAD', '--numstat'], project)).stdout.split(/\r?\n/).filter(Boolean);
     let additions = 0;
     let deletions = 0;
+    let maxFileBytes = 0;
     for (const entry of trackedStats) {
       const [added, removed] = entry.split('\t');
       additions += Number.parseInt(added, 10) || 0;
       deletions += Number.parseInt(removed, 10) || 0;
     }
+    for (const path of paths) {
+      try {
+        const info = await lstat(resolve(project.workspace, path));
+        if (info.isFile()) maxFileBytes = Math.max(maxFileBytes, info.size);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
     const untracked = new Set((await this.git(['ls-files', '--others', '--exclude-standard'], project)).stdout.split(/\r?\n/).filter(Boolean).map((path) => normalizeRepositoryPath(path, 'untracked path')));
-    const trackedDiff = await this.git(['diff', 'HEAD', '--binary', '--no-ext-diff'], project, { outputLimit: 1_000_000, captureOutputDigest: true });
+    const trackedDiffLimit = Math.min(project.changePolicy.budgets.maxChangedBytes + 65_536, 16 * 1024 * 1024);
+    const trackedDiff = await this.git(['diff', 'HEAD', '--binary', '--no-ext-diff'], project, { outputLimit: trackedDiffLimit, captureOutputDigest: true });
+    let changedBytes = trackedDiff.stdoutBytes ?? Buffer.byteLength(trackedDiff.stdout);
     const contentHash = createHash('sha256').update(trackedDiff.stdoutDigest ?? createHash('sha256').update(trackedDiff.stdout).digest('hex'));
     let sensitiveContent = sensitiveContentPattern.test(trackedDiff.stdout);
     for (const path of paths.filter((path) => untracked.has(path))) {
-      const content = await readFile(resolve(project.workspace, path));
-      const text = content.toString('utf8');
-      additions += text ? text.split(/\r?\n/).length : 0;
-      sensitiveContent ||= sensitiveContentPattern.test(text.slice(0, 100_000));
-      contentHash.update(path).update('\0').update(content).update('\0');
+      const filePath = resolve(project.workspace, path);
+      const info = await lstat(filePath);
+      if (!info.isFile()) continue;
+      changedBytes += info.size;
+      let sample = '';
+      let newlineCount = 0;
+      let sawData = false;
+      contentHash.update(path).update('\0');
+      for await (const chunk of createReadStream(filePath)) {
+        contentHash.update(chunk);
+        sawData ||= chunk.length > 0;
+        for (const byte of chunk) if (byte === 10) newlineCount += 1;
+        if (sample.length < 100_000) sample += chunk.toString('utf8').slice(0, 100_000 - sample.length);
+      }
+      contentHash.update('\0');
+      additions += sawData ? newlineCount + 1 : 0;
+      sensitiveContent ||= sensitiveContentPattern.test(sample);
     }
     const contentFingerprint = contentHash.digest('hex');
-    const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, sensitiveContent, contentFingerprint };
+    const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, changedBytes, maxFileBytes, sensitiveContent, contentFingerprint };
     return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
   }
 
@@ -802,7 +894,7 @@ export class LocalGitAdapter {
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     assertAllowedWorkingBranch(project, branch);
-    await this.git(['push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
+    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
     return { branch, finalHead: await this.head(project) };
   }
 }

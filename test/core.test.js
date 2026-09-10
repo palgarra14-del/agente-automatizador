@@ -195,8 +195,8 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.equal(configured.get('self').commands.typecheck, 'node --check src/core.js');
   assert.equal(configured.get('self').toolchain.command, 'npm');
   assert.deepEqual(configured.get('leadfinder').toolchain, { command: 'pnpm', version: '11.19.0' });
-  assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500 });
-  assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200 });
+  assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
+  assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
 });
 
 test('v0.5 treats only the self control-plane project configuration as sensitive', async () => {
