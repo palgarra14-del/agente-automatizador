@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { dirname, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
 
@@ -229,6 +229,10 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
   if (process.platform === 'win32' && binary === 'npm' && npmCli) {
     args = [npmCli, ...args];
     binary = process.execPath;
+  }
+  if (process.platform === 'win32' && ['pnpm', 'corepack'].includes(binary)) {
+    const executable = (process.env.PATH ?? '').split(delimiter).map((directory) => resolve(directory, `${binary}.cmd`)).find((candidate) => existsSync(candidate));
+    if (executable) binary = executable;
   }
   const result = await processRunner(binary, args, { cwd: project.workspace, env: { CI: 'true' }, timeoutMs });
   return { name, command, ...result };

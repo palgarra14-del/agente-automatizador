@@ -285,6 +285,15 @@ test('dry-run persists a complete simulation without invoking worker, git writes
   assert.equal(run.results.worker.simulated, true);
 });
 
+test('command runner resolves pnpm.cmd without a shell on Windows', async () => {
+  const calls = [];
+  const result = await runCommand(project({ commands: { test: 'pnpm test' } }), 'test', {
+    processRunner: async (binary, args) => { calls.push({ binary, args }); return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  assert.equal(result.ok, true);
+  if (process.platform === 'win32') assert.match(calls[0].binary, /pnpm\.cmd$/i);
+});
+
 test('managed workspaces are isolated under the configured root and clone only the configured repository', async () => {
   const root = await mkdtemp(join(tmpdir(), 'managed-workspace-root-'));
   const configured = configFrom({
