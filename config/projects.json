@@ -1,1 +1,32 @@
-{"projects":[{"id":"self","repository":{"owner":"palgarra14-del","name":"agente-automatizador"},"defaultBranch":"main","workingBranchPattern":"agent/{runId}","protectedBranches":["main"],"workspace":"..","commands":{"test":"npm test","lint":"npm run lint","build":"npm run build"},"policies":{"requireApprovalFor":["merge","production_deploy","destructive_data_change"]},"budgets":{"maxIterations":3,"maxTasks":10,"maxRuntimeMinutes":10,"maxModelCalls":2,"maxWorkerAttempts":2,"commandTimeoutMs":30000}}]}
+{
+  "projects": [
+    {
+      "id": "self",
+      "repository": { "owner": "palgarra14-del", "name": "agente-automatizador" },
+      "defaultBranch": "main",
+      "workingBranchPattern": "agent/{runId}",
+      "protectedBranches": ["main"],
+      "workspace": "..",
+      "commands": {
+        "test": "npm test",
+        "typecheck": "node --check src/core.js",
+        "lint": "npm run lint",
+        "build": "npm run build"
+      },
+      "policies": {
+        "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
+        "forbidden": ["force_push_main", "delete_protected_branch"]
+      },
+      "budgets": {
+        "maxIterations": 3,
+        "maxTasks": 10,
+        "maxRuntimeMinutes": 10,
+        "maxModelCalls": 0,
+        "maxWorkerAttempts": 2,
+        "commandTimeoutMs": 30000,
+        "ciTimeoutMs": 600000,
+        "ciPollIntervalMs": 10000
+      }
+    }
+  ]
+}
