@@ -92,18 +92,42 @@ test('JsonStore does not lose updates when two agent processes mutate shared sta
   const second = new JsonStore(file);
   await first.save({ runs: {}, approvals: {}, events: [] });
 
-  let arrived = 0;
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const concurrentMutation = (store, id) => store.mutate(async (data) => {
-    arrived += 1;
-    if (arrived === 2) release();
-    await gate;
-    data.runs[id] = { id, status: 'created' };
+  let firstEntered = false;
+  const slowMutation = first.mutate(async (data) => {
+    firstEntered = true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    data.runs['run-a'] = { id: 'run-a', status: 'created' };
+  });
+  while (!firstEntered) await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+  const competingMutation = second.mutate(async (data) => {
+    data.runs['run-b'] = { id: 'run-b', status: 'created' };
   });
 
-  await Promise.all([concurrentMutation(first, 'run-a'), concurrentMutation(second, 'run-b')]);
+  await Promise.all([slowMutation, competingMutation]);
   const final = await first.load();
   assert.ok(final.runs['run-a'], 'concurrent mutation lost run-a');
   assert.ok(final.runs['run-b'], 'concurrent mutation lost run-b');
+});
+
+test('runProcess bounds captured output while retaining full byte accounting', async () => {
+  const result = await runProcess(process.execPath, ['-e', 'process.stdout.write("x".repeat(1024 * 1024))'], {
+    timeoutMs: 5_000,
+    outputLimit: 1_024,
+    restrictEnvironment: true
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.stdout.length <= 1_024);
+  assert.ok(result.stdoutBytes >= 1024 * 1024);
+});
+
+test('runProcess escalates a timed out child instead of waiting indefinitely', async () => {
+  const result = await runProcess(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], {
+    timeoutMs: 50,
+    killGraceMs: 50,
+    outputLimit: 256,
+    restrictEnvironment: true
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.ok, false);
+  assert.ok(result.durationMs < 2_000, `timed out child survived too long: ${result.durationMs}ms`);
 });
