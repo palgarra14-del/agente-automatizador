@@ -14,7 +14,7 @@ Registered repositories receive isolated managed workspaces, controlled bootstra
 
 ## v0.4 — current
 
-Governed real engineering tasks add literal scope input, immutable forbidden-path enforcement, sensitivity classification with an approval gate before checks or publication, per-project diff budgets, and a read-only doctor/preflight command. LeadFinder uses the strict 3-file / 200-line policy. The orchestrator still never merges pull requests or deploys production.
+Governed real engineering tasks add literal scope input, immutable forbidden-path enforcement, continuous policy evaluation after the worker and every validation command, fingerprint-bound sensitive approvals with stale-approval detection, final commit matching, per-project diff budgets, and a read-only doctor/preflight command. LeadFinder uses the strict 3-file / 200-line policy. The orchestrator still never merges pull requests or deploys production.
 
 ## Deferred
 

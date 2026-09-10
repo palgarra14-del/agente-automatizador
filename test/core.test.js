@@ -19,6 +19,7 @@ import {
   doctor,
   evaluate,
   evaluateChangePolicy,
+  fingerprintChangeSet,
   formatDoctor,
   loadProjects,
   maskSecrets,
@@ -71,15 +72,38 @@ class FakeLocalGit {
   async assertWorkingBranch(_project, branch) { assert.equal(this.current, branch); }
   async head() { return this.currentHead; }
   async assertSafeChangedPaths() { return ['docs/worker-fixture.md']; }
+  async inspectChangeSet() {
+    const changeSet = { paths: await this.assertSafeChangedPaths(), changedFiles: 1, additions: 1, deletions: 0, diffLines: 1, sensitiveContent: false, contentFingerprint: 'fixture-content-a' };
+    return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
+  }
 
-  async commit(_project, branch) {
+  async commit(_project, branch, _message, { expectedChangeSetFingerprint } = {}) {
     assert.equal(branch, this.current);
+    const changeSet = await this.inspectChangeSet();
+    assert.equal(changeSet.changeSetFingerprint, expectedChangeSetFingerprint);
     this.commitCalls += 1;
+    this.committedPaths = changeSet.paths;
+    this.committedChangeSetFingerprint = changeSet.changeSetFingerprint;
     this.currentHead = `commit-${this.commitCalls}`;
-    return { message: 'agent: safe change', finalHead: this.currentHead };
+    return { message: 'agent: safe change', finalHead: this.currentHead, committedPaths: changeSet.paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
   async push(_project, branch) { this.pushCalls += 1; return { branch, finalHead: this.currentHead }; }
+}
+
+function governedChangeSet(paths = ['src/worker-fixture.js'], { additions = 1, deletions = 0, contentFingerprint = 'content-a', sensitiveContent = false } = {}) {
+  const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, contentFingerprint, sensitiveContent };
+  return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
+}
+
+class GovernedFakeGit extends FakeLocalGit {
+  constructor(changeSet = governedChangeSet()) {
+    super();
+    this.changeSet = changeSet;
+  }
+
+  async assertSafeChangedPaths() { return this.changeSet.paths; }
+  async inspectChangeSet() { return { ...this.changeSet, changeSetFingerprint: this.changeSet.changeSetFingerprint ?? fingerprintChangeSet(this.changeSet) }; }
 }
 
 class FakeGitHub {
@@ -572,7 +596,10 @@ test('happy path persists branch, commit, push, PR, CI, evaluation, and report s
 
 test('a sensitive diff waits for approval before checks, commit, push, or pull-request creation', async () => {
   class SensitiveGit extends FakeLocalGit {
-    async inspectChangeSet() { return { paths: ['package.json'], changedFiles: 1, additions: 1, deletions: 0, diffLines: 1, sensitiveContent: false }; }
+    async inspectChangeSet() {
+      const changeSet = { paths: ['package.json'], changedFiles: 1, additions: 1, deletions: 0, diffLines: 1, sensitiveContent: false, contentFingerprint: 'package-content-a' };
+      return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
+    }
   }
   const github = new FakeGitHub();
   const localGit = new SensitiveGit();
@@ -593,6 +620,133 @@ test('a sensitive diff waits for approval before checks, commit, push, or pull-r
   assert.equal(completed.status, RunStatus.COMPLETED);
   assert.ok(commandCalls > 0);
   assert.equal(github.pullRequests, 1);
+});
+
+test('v0.4 post-check governance blocks a generated .env before any further command or publication', async () => {
+  const localGit = new GovernedFakeGit();
+  const github = new FakeGitHub();
+  const commands = [];
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github, localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => {
+      commands.push(name);
+      if (name === 'test') localGit.changeSet = governedChangeSet(['.env'], { contentFingerprint: 'env-created' });
+      return { name, ok: true, stdout: '', stderr: '', durationMs: 1 };
+    }
+  }).run(project(), 'Do not permit generated environment files');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(run.failureReason, 'forbidden_path:.env');
+  assert.deepEqual(commands, ['test']);
+  assert.equal(localGit.commitCalls, 0);
+  assert.equal(localGit.pushCalls, 0);
+  assert.equal(github.pullRequests, 0);
+});
+
+test('v0.4 post-check governance pauses a generated sensitive package change before the next command', async () => {
+  const localGit = new GovernedFakeGit();
+  const commands = [];
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => {
+      commands.push(name);
+      if (name === 'test') localGit.changeSet = governedChangeSet(['package.json'], { contentFingerprint: 'package-created' });
+      return { name, ok: true, stdout: '', stderr: '', durationMs: 1 };
+    }
+  }).run(project(), 'Pause package changes');
+  assert.equal(run.status, RunStatus.WAITING_APPROVAL);
+  assert.equal(run.results.changePolicy.phase, 'after_test');
+  assert.equal(run.results.changePolicy.classification, 'sensitive');
+  assert.deepEqual(commands, ['test']);
+  assert.equal(localGit.commitCalls, 0);
+});
+
+test('v0.4 post-check governance blocks a command that exceeds the changed-file budget', async () => {
+  const localGit = new GovernedFakeGit();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => {
+      if (name === 'test') localGit.changeSet = governedChangeSet(Array.from({ length: 9 }, (_value, index) => `src/generated-${index}.js`), { additions: 9, contentFingerprint: 'too-many-files' });
+      return { name, ok: true, stdout: '', stderr: '', durationMs: 1 };
+    }
+  }).run(project(), 'Enforce changed-file budget');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(run.failureReason, 'change_budget_exceeded');
+  assert.equal(localGit.commitCalls, 0);
+});
+
+test('v0.4 post-check governance blocks a command that exceeds the diff-line budget', async () => {
+  const localGit = new GovernedFakeGit();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => {
+      if (name === 'test') localGit.changeSet = governedChangeSet(['src/generated.js'], { additions: 501, contentFingerprint: 'too-many-lines' });
+      return { name, ok: true, stdout: '', stderr: '', durationMs: 1 };
+    }
+  }).run(project(), 'Enforce diff-line budget');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(run.failureReason, 'change_budget_exceeded');
+  assert.equal(localGit.commitCalls, 0);
+});
+
+test('v0.4 never reuses an approval when the approved sensitive fingerprint becomes stale', async () => {
+  const store = await temporaryStore();
+  const localGit = new GovernedFakeGit(governedChangeSet(['package.json'], { contentFingerprint: 'sensitive-a' }));
+  let commandCalls = 0;
+  const orchestrator = new Orchestrator({
+    store, github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => { commandCalls += 1; return { name, ok: true, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  const waiting = await orchestrator.run(project(), 'Approve only the reviewed sensitive change');
+  const firstApprovalId = waiting.pendingAction.approvalId;
+  const firstFingerprint = waiting.pendingAction.changeSetFingerprint;
+  assert.equal((await store.load()).approvals[firstApprovalId].changeSetFingerprint, firstFingerprint);
+  await orchestrator.decideApproval(firstApprovalId, true);
+  localGit.changeSet = governedChangeSet(['package.json'], { contentFingerprint: 'sensitive-b' });
+  const stale = await orchestrator.resume(waiting.id, project());
+  const state = await store.load();
+  assert.equal(stale.status, RunStatus.WAITING_APPROVAL);
+  assert.notEqual(stale.pendingAction.approvalId, firstApprovalId);
+  assert.equal(state.approvals[firstApprovalId].status, 'stale');
+  assert.equal(state.approvals[firstApprovalId].execution, 'stale');
+  assert.equal(commandCalls, 0);
+});
+
+test('v0.4 resumes an approved unchanged sensitive fingerprint and completes publication', async () => {
+  const localGit = new GovernedFakeGit(governedChangeSet(['package.json'], { contentFingerprint: 'sensitive-a' }));
+  const github = new FakeGitHub();
+  let commandCalls = 0;
+  const orchestrator = new Orchestrator({
+    store: await temporaryStore(), github, localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => { commandCalls += 1; return { name, ok: true, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  const waiting = await orchestrator.run(project(), 'Approve an unchanged sensitive change');
+  await orchestrator.decideApproval(waiting.pendingAction.approvalId, true);
+  const completed = await orchestrator.resume(waiting.id, project());
+  assert.equal(completed.status, RunStatus.COMPLETED);
+  assert.equal(commandCalls, 4);
+  assert.equal(github.pullRequests, 1);
+});
+
+test('v0.4 evaluates an unchanged normal change after every check and before commit', async () => {
+  const localGit = new GovernedFakeGit();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => ({ name, ok: true, stdout: '', stderr: '', durationMs: 1 })
+  }).run(project(), 'Continuously govern an unchanged normal change');
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.deepEqual(run.governanceHistory.map((entry) => entry.phase), ['before_checks', 'after_test', 'after_typecheck', 'after_lint', 'after_build', 'before_commit']);
+  assert.equal(run.results.changePolicy.phase, 'before_commit');
+});
+
+test('v0.4 commits exactly the final governed change set', async () => {
+  const localGit = new GovernedFakeGit(governedChangeSet(['src/only-governed.js'], { contentFingerprint: 'exact-governed-change' }));
+  const run = await new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name) => ({ name, ok: true, stdout: '', stderr: '', durationMs: 1 })
+  }).run(project(), 'Commit only the final governed change');
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.deepEqual(run.results.commit.committedPaths, run.results.changePolicy.paths);
+  assert.equal(run.results.commit.committedChangeSetFingerprint, run.results.changePolicy.changeSetFingerprint);
 });
 
 test('failed checks retry once and eventually complete without an infinite loop', async () => {

@@ -68,7 +68,7 @@
         "teamId": "team_WDwd9ZZgxEdlv4AS0oIP1num",
         "requirePreviewReady": true
       },
-      "pullRequest": { "titleTemplate": "Agent smoke: cross-repository {project} validation" },
+      "pullRequest": { "titleTemplate": "Agent: {project} — {objective}" },
       "policies": {
         "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
         "forbidden": ["force_push_main", "delete_protected_branch"]
