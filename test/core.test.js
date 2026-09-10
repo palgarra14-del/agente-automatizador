@@ -430,7 +430,7 @@ test('v0.5 doctor distinguishes an unavailable container from an explicit local 
   const executionRunner = new ProjectCommandRunner({ localExecution: new LocalSanitizedExecution({ processRunner: async () => ({ ok: true }) }), containerExecution: unavailableContainer });
   const result = await doctor(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), { github: { inspect: async () => ({}) }, codexAvailable: () => true, environment: {}, executionRunner });
   assert.deepEqual(result.execution, {
-    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
+    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', runtimeUser: resolveExecutionUser('host'), gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
   });
   assert.match(formatDoctor(result), /DOCKER AVAILABLE\nNO/);
 });
