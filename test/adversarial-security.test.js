@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonStore, LocalGitAdapter, configFrom, evaluateChangePolicy, maskSecrets, runProcess } from '../src/core.js';
@@ -29,6 +29,20 @@ test('secret masking redacts quoted JSON-style secret fields and authorization h
   ]) assert.equal(masked.includes(secret), false, `secret remained visible: ${secret}`);
 
   assert.equal(maskSecrets('Authorization: Basic Zm9vOmJhcg==').includes('Zm9vOmJhcg=='), false);
+});
+
+test('secret masking consumes complete quoted shell and YAML values', () => {
+  const cases = [
+    ['TOKEN="abc123"', 'abc123'],
+    ["TOKEN='abc$123!@#'", 'abc$123!@#'],
+    ['PASSWORD="foo bar"', 'foo bar'],
+    ["API_KEY='secret:with=symbols'", 'secret:with=symbols'],
+    ['token: "yaml-secret"', 'yaml-secret'],
+    ["password: 'yaml secret'", 'yaml secret'],
+    ['authorization: Bearer bearer-value', 'bearer-value'],
+    ['authorization: Basic basic-value', 'basic-value']
+  ];
+  for (const [input, secret] of cases) assert.equal(maskSecrets(input).includes(secret), false, input);
 });
 
 test('controlled git push disables repository-provided pre-push hooks', async () => {
@@ -142,15 +156,36 @@ test('JsonStore does not lose updates when two agent processes mutate shared sta
   assert.ok(final.runs['run-b'], 'concurrent mutation lost run-b');
 });
 
-test('JsonStore recovers an expired lock before mutating state', async () => {
+test('JsonStore recovers a lock whose owner process is dead', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-store-stale-lock-'));
   const file = join(directory, 'state.json');
-  const store = new JsonStore(file, { lockStaleMs: 1 });
-  await writeFile(`${file}.lock`, 'stale');
-  const staleAt = new Date(Date.now() - 10_000);
-  await utimes(`${file}.lock`, staleAt, staleAt);
+  const store = new JsonStore(file);
+  await writeFile(`${file}.lock`, JSON.stringify({ pid: 2147483647, createdAt: '2000-01-01T00:00:00.000Z', ownerIdentity: 'dead-process' }));
   await store.mutate((data) => { data.runs.recovered = { id: 'recovered' }; });
   assert.ok((await store.load()).runs.recovered);
+});
+
+test('JsonStore conservatively retains an old lock owned by a live process', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-store-live-lock-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file, { lockTimeoutMs: 30, lockPollMs: 5 });
+  const original = JSON.stringify({ pid: process.pid, createdAt: '2000-01-01T00:00:00.000Z' });
+  await writeFile(`${file}.lock`, original);
+  await assert.rejects(store.mutate((data) => { data.runs.mustNotWrite = {}; }), /state_lock_timeout/);
+  assert.equal(await readFile(`${file}.lock`, 'utf8'), original);
+});
+
+test('JsonStore handles PID reuse without treating a live owner as stale', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-store-pid-reuse-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file, { lockTimeoutMs: 30, lockPollMs: 5 });
+  await writeFile(`${file}.lock`, JSON.stringify({ pid: process.pid, createdAt: '2000-01-01T00:00:00.000Z', ownerIdentity: 'different-process-start' }));
+  if (process.platform === 'linux') {
+    await store.mutate((data) => { data.runs.recovered = { id: 'recovered' }; });
+    assert.ok((await store.load()).runs.recovered);
+  } else {
+    await assert.rejects(store.mutate((data) => { data.runs.mustNotWrite = {}; }), /state_lock_timeout/);
+  }
 });
 
 test('runProcess bounds captured output while retaining full byte accounting', async () => {

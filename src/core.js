@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
@@ -241,12 +241,15 @@ export function resolveExecutionUser(user = 'host') {
 
 export function maskSecrets(value) {
   const secretField = '[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization|cookie|session)[A-Za-z0-9_-]*';
+  const assignment = `\\b(${secretField}\\s*[=:]\\s*)`;
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
     .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}]+/gi, '$1[REDACTED]')
     .replace(new RegExp(`("${secretField}"\\s*:\\s*)"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
     .replace(new RegExp(`('${secretField}'\\s*:\\s*)'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
-    .replace(new RegExp(`\\b(${secretField}\\s*[=:]\\s*)[^\\s"']+`, 'gi'), '$1[REDACTED]');
+    .replace(new RegExp(`${assignment}"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
+    .replace(new RegExp(`${assignment}'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
+    .replace(new RegExp(`${assignment}[^\\s"',;}]+`, 'gi'), '$1[REDACTED]');
 }
 
 export function transition(run, nextStatus) {
@@ -352,12 +355,12 @@ export async function loadProjects(file) {
 }
 
 export class JsonStore {
-  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10, lockStaleMs = 60_000 } = {}) {
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
     this.file = file;
     this.lockFile = `${file}.lock`;
+    this.recoveryLockFile = `${file}.lock.recovery`;
     this.lockTimeoutMs = lockTimeoutMs;
     this.lockPollMs = lockPollMs;
-    this.lockStaleMs = lockStaleMs;
   }
 
   async load() {
@@ -375,23 +378,80 @@ export class JsonStore {
     await rename(temporary, this.file);
   }
 
+  async ownerIdentity(pid) {
+    if (process.platform !== 'linux') return null;
+    try {
+      const contents = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = contents.slice(contents.lastIndexOf(')') + 1).trim().split(/\s+/);
+      return fields[19] ?? null;
+    } catch { return null; }
+  }
+
+  async readLock(file = this.lockFile) {
+    try {
+      const metadata = JSON.parse(await readFile(file, 'utf8'));
+      if (!Number.isInteger(metadata.pid) || metadata.pid <= 0 || typeof metadata.createdAt !== 'string') return null;
+      return metadata;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      return null;
+    }
+  }
+
+  async lockOwnerIsAbandoned(metadata) {
+    try { process.kill(metadata.pid, 0); }
+    catch (error) {
+      if (error.code === 'ESRCH') return true;
+      return false;
+    }
+    if (metadata.ownerIdentity && process.platform === 'linux') {
+      const currentIdentity = await this.ownerIdentity(metadata.pid);
+      return Boolean(currentIdentity && currentIdentity !== metadata.ownerIdentity);
+    }
+    return false;
+  }
+
+  sameLock(left, right) {
+    return left?.leaseId === right?.leaseId && left?.pid === right?.pid && left?.createdAt === right?.createdAt && left?.ownerIdentity === right?.ownerIdentity;
+  }
+
+  async writeLock(file) {
+    await writeFile(file, JSON.stringify({ leaseId: randomUUID(), pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: await this.ownerIdentity(process.pid) }), { flag: 'wx', mode: 0o600 });
+  }
+
+  async claimRecoveryLock() {
+    try {
+      await this.writeLock(this.recoveryLockFile);
+      return true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const owner = await this.readLock(this.recoveryLockFile);
+      if (owner && await this.lockOwnerIsAbandoned(owner)) {
+        try { await unlink(this.recoveryLockFile); } catch (unlockError) { if (unlockError.code !== 'ENOENT') throw unlockError; }
+      }
+      return false;
+    }
+  }
+
   async acquireLock() {
     await mkdir(dirname(this.file), { recursive: true });
     const deadline = Date.now() + this.lockTimeoutMs;
     while (true) {
       try {
-        await writeFile(this.lockFile, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+        await this.writeLock(this.lockFile);
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
-        try {
-          const details = await stat(this.lockFile);
-          if (Date.now() - details.mtimeMs > this.lockStaleMs) {
-            await unlink(this.lockFile);
-            continue;
+        const observed = await this.readLock();
+        if (observed && await this.lockOwnerIsAbandoned(observed) && await this.claimRecoveryLock()) {
+          let recoveryUnlockError = null;
+          try {
+            const current = await this.readLock();
+            if (this.sameLock(observed, current) && await this.lockOwnerIsAbandoned(current)) await unlink(this.lockFile);
+          } finally {
+            try { await unlink(this.recoveryLockFile); } catch (unlockError) { if (unlockError.code !== 'ENOENT') recoveryUnlockError = unlockError; }
           }
-        } catch (lockError) {
-          if (lockError.code !== 'ENOENT') throw lockError;
+          if (recoveryUnlockError) throw recoveryUnlockError;
           continue;
         }
         if (Date.now() >= deadline) throw new Error('state_lock_timeout', { cause: error });
