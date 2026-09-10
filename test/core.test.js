@@ -31,6 +31,7 @@ import {
   runCommand,
   report,
   remoteMatchesProject,
+  resolveExecutionUser,
   safeCommandEnvironment,
   transition,
   managedWorkspacePath
@@ -279,6 +280,22 @@ test('command runner finds npm through the current Node installation on Windows'
     assert.equal(calls[0].binary, process.execPath);
     assert.match(calls[0].args[0], /npm-cli\.js$/);
   }
+});
+
+test('v0.5 resolves container runtime user from the host without requiring root', () => {
+  const expected = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+    ? `${process.getuid()}:${process.getgid()}`
+    : '1000:1000';
+  assert.equal(resolveExecutionUser('host'), expected);
+  assert.equal(resolveExecutionUser('1234:5678'), '1234:5678');
+
+  const configured = project({
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim', user: 'host' }
+  });
+  assert.equal(configured.execution.user, 'host');
+  const execution = new DockerContainerExecution();
+  const { containerArgs } = execution.commandArguments(configured, 'test', { containerName: 'agent-test', gitMetadata: join(configured.workspace, '.git') });
+  assert.equal(containerArgs[containerArgs.indexOf('--user') + 1], expected);
 });
 
 test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
