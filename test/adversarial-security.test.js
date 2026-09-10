@@ -32,11 +32,11 @@ test('controlled git push disables repository-provided pre-push hooks', async ()
     repository: { owner: 'owner', name: 'repo' },
     defaultBranch: 'main',
     protectedBranches: ['main'],
-    workspace,
+    workspace: '..',
     workingBranchPattern: 'agent/{runId}',
     commands: { test: 'node --version' },
     budgets: { commandTimeoutMs: 1000 }
-  });
+  }, join(workspace, 'config'));
   const calls = [];
   const processRunner = async (_binary, args) => {
     calls.push(args);
