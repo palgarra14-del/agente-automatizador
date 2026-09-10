@@ -26,18 +26,18 @@ const transitions = Object.freeze({
   planning: ['working', 'waiting_approval', 'failed', 'cancelled'],
   working: ['testing', 'evaluating', 'worker_failed_retryable', 'waiting_approval', 'failed', 'cancelled'],
   worker_failed_retryable: ['working', 'failed', 'cancelled'],
-  testing: ['pushing', 'worker_failed_retryable', 'failed', 'cancelled'],
+  testing: ['pushing', 'worker_failed_retryable', 'waiting_approval', 'failed', 'cancelled'],
   pushing: ['waiting_ci', 'waiting_approval', 'failed', 'cancelled'],
   waiting_ci: ['evaluating', 'worker_failed_retryable', 'working', 'failed', 'cancelled'],
   evaluating: ['working', 'completed', 'failed', 'cancelled'],
-  waiting_approval: ['pushing', 'completed', 'cancelled', 'failed'],
+  waiting_approval: ['testing', 'pushing', 'completed', 'cancelled', 'failed'],
   completed: [],
   failed: [],
   cancelled: []
 });
 
 const dangerousActions = new Set([
-  'merge', 'production_deploy', 'destructive_data_change', 'modify_secrets', 'send_communication'
+  'merge', 'production_deploy', 'destructive_data_change', 'modify_secrets', 'send_communication', 'sensitive_change'
 ]);
 const forbiddenActions = new Set([
   'force_push_main', 'delete_repository', 'print_secret', 'disable_security', 'production_test',
@@ -49,6 +49,9 @@ const defaultAcceptance = ['test', 'typecheck', 'lint', 'build', 'ci'];
 const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
 const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth)/i;
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
+const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
+const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
+const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 
 function isWithin(parent, child) {
   const rel = relative(parent, child);
@@ -59,6 +62,88 @@ function positiveInteger(value, fallback, label, minimum = 1) {
   const result = value ?? fallback;
   if (!Number.isInteger(result) || result < minimum) throw new Error(`${label} must be an integer >= ${minimum}`);
   return result;
+}
+
+function normalizeRepositoryPath(path, label = 'path') {
+  if (typeof path !== 'string' || !path.trim()) throw new Error(`${label} must be a non-empty repository-relative path`);
+  const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.includes('*')) {
+    throw new Error(`${label} must be a literal repository-relative path`);
+  }
+  return normalized;
+}
+
+function normalizePathList(value, label) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return [...new Set(value.map((path) => normalizeRepositoryPath(path, label)))];
+}
+
+function pathIsWithinRoot(path, root) {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function pathMatchesAnyRoot(path, roots) {
+  return roots.some((root) => pathIsWithinRoot(path, root));
+}
+
+export function normalizeRunScope(scope = {}) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) throw new Error('scope must be an object');
+  return {
+    allowedPaths: normalizePathList(scope.allowedPaths, 'allowedPaths'),
+    forbiddenPaths: normalizePathList(scope.forbiddenPaths, 'forbiddenPaths')
+  };
+}
+
+function changePolicyFrom(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('changePolicy must be an object');
+  const budgets = input.budgets ?? {};
+  return {
+    forbiddenPaths: normalizePathList(input.forbiddenPaths, 'changePolicy.forbiddenPaths'),
+    sensitivePaths: [...new Set([...defaultSensitivePathRoots, ...normalizePathList(input.sensitivePaths, 'changePolicy.sensitivePaths')])],
+    budgets: {
+      maxChangedFiles: positiveInteger(budgets.maxChangedFiles, 8, 'maxChangedFiles'),
+      maxDiffLines: positiveInteger(budgets.maxDiffLines, 500, 'maxDiffLines')
+    }
+  };
+}
+
+export function evaluateChangePolicy(project, changeSet, scope = {}) {
+  const normalizedScope = normalizeRunScope(scope);
+  let paths;
+  try {
+    paths = (changeSet.paths ?? []).map((path) => normalizeRepositoryPath(path, 'changed path'));
+  } catch {
+    return { ok: false, reason: 'forbidden_path:workspace_escape', paths: [], changedFiles: 0, diffLines: 0 };
+  }
+  const policy = project.changePolicy;
+  const forbidden = paths.find((path) => immutableForbiddenPathPattern.test(path) || pathMatchesAnyRoot(path, policy.forbiddenPaths));
+  const changeSetFingerprint = changeSet.changeSetFingerprint ?? fingerprintChangeSet(changeSet);
+  if (forbidden) return { ok: false, reason: `forbidden_path:${forbidden}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
+  const scopeForbidden = paths.find((path) => pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths));
+  if (scopeForbidden) return { ok: false, reason: `forbidden_scope_path:${scopeForbidden}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
+  const scopeViolation = normalizedScope.allowedPaths.length && paths.find((path) => !pathMatchesAnyRoot(path, normalizedScope.allowedPaths));
+  if (scopeViolation) return { ok: false, reason: `scope_violation:${scopeViolation}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
+  const changedFiles = changeSet.changedFiles ?? paths.length;
+  const diffLines = changeSet.diffLines ?? 0;
+  if (changedFiles > policy.budgets.maxChangedFiles || diffLines > policy.budgets.maxDiffLines) {
+    return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, budgets: policy.budgets, changeSetFingerprint };
+  }
+  const sensitivePath = paths.find((path) => pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
+  const sensitive = Boolean(sensitivePath || changeSet.sensitiveContent);
+  return { ok: true, classification: sensitive ? 'sensitive' : 'normal', reason: sensitive ? `sensitive_change:${sensitivePath ?? 'security_or_auth_content'}` : 'normal_change', paths, changedFiles, diffLines, budgets: policy.budgets, scope: normalizedScope, changeSetFingerprint };
+}
+
+export function fingerprintChangeSet(changeSet = {}) {
+  const paths = [...new Set((changeSet.paths ?? []).map((path) => String(path).replaceAll('\\', '/')))].sort();
+  const canonical = {
+    paths,
+    additions: Number(changeSet.additions ?? 0),
+    deletions: Number(changeSet.deletions ?? 0),
+    diffLines: Number(changeSet.diffLines ?? 0),
+    contentFingerprint: String(changeSet.contentFingerprint ?? '')
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
 function clip(value, size = 8_000) {
@@ -147,6 +232,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   if (deployment.provider === 'vercel' && (!deployment.projectId || !deployment.teamId)) throw new Error('Vercel projectId and teamId are required');
   safeCommandEnvironment(input.commandEnvironment ?? {});
   const commandEnvironment = safeJson(input.commandEnvironment ?? {});
+  const changePolicy = changePolicyFrom(input.changePolicy);
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -157,6 +243,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     acceptance: { require: [...acceptance] },
     deployment,
     commandEnvironment,
+    changePolicy,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -211,22 +298,23 @@ export class JsonStore {
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
-export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, outputLimit = 8_000, captureOutputDigest = false } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
+    const stdoutHash = captureOutputDigest ? createHash('sha256') : null;
     let timedOut = false;
     let settled = false;
     const startedAt = Date.now();
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      resolveResult({ ...result, timedOut, stdout: clip(stdout), stderr: clip(stderr), durationMs: Date.now() - startedAt });
+      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
     };
     const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : { ...safeCommandEnvironment(), ...env };
     const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeoutMs);
-    child.stdout.on('data', (data) => { stdout += data; });
+    child.stdout.on('data', (data) => { stdout += data; stdoutHash?.update(data); });
     child.stderr.on('data', (data) => { stderr += data; });
     child.on('error', (error) => { clearTimeout(timer); stderr += error.message; finish({ ok: false, exitCode: null }); });
     child.on('close', (exitCode) => { clearTimeout(timer); finish({ ok: exitCode === 0 && !timedOut, exitCode }); });
@@ -401,8 +489,8 @@ export class CodexSdkWorker extends CodingWorker {
 export class LocalGitAdapter {
   constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
 
-  async git(args, project, { allowExitCodes = [0] } = {}) {
-    const result = await this.processRunner('git', args, { cwd: project.workspace, timeoutMs: project.budgets.commandTimeoutMs });
+  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false } = {}) {
+    const result = await this.processRunner('git', args, { cwd: project.workspace, timeoutMs: project.budgets.commandTimeoutMs, outputLimit, captureOutputDigest });
     if (!allowExitCodes.includes(result.exitCode) || result.timedOut) throw new Error(`Git ${args[0]} failed: ${clip(result.stderr || result.stdout)}`);
     return result;
   }
@@ -443,30 +531,67 @@ export class LocalGitAdapter {
   }
 
   async changedPaths(project) {
-    const tracked = (await this.git(['diff', '--name-only'], project)).stdout.split(/\r?\n/).filter(Boolean);
+    const tracked = (await this.git(['diff', 'HEAD', '--name-only'], project)).stdout.split(/\r?\n/).filter(Boolean);
     const untracked = (await this.git(['ls-files', '--others', '--exclude-standard'], project)).stdout.split(/\r?\n/).filter(Boolean);
     return [...new Set([...tracked, ...untracked])];
   }
 
   async assertSafeChangedPaths(project) {
     const paths = await this.changedPaths(project);
-    const unsafe = paths.find((path) => protectedFilePattern.test(path) || path.includes('..'));
-    if (unsafe) throw new Error(`Worker changed a protected path: ${unsafe}`);
-    return paths;
+    for (const path of paths) {
+      const normalized = normalizeRepositoryPath(path, 'changed path');
+      const target = resolve(project.workspace, normalized);
+      if (!isWithin(resolve(project.workspace), target)) throw new Error(`Worker changed a path outside the workspace: ${normalized}`);
+      await assertSafePathChain(target);
+    }
+    return paths.map((path) => normalizeRepositoryPath(path, 'changed path'));
+  }
+
+  async inspectChangeSet(project) {
+    const paths = await this.assertSafeChangedPaths(project);
+    const trackedStats = (await this.git(['diff', 'HEAD', '--numstat'], project)).stdout.split(/\r?\n/).filter(Boolean);
+    let additions = 0;
+    let deletions = 0;
+    for (const entry of trackedStats) {
+      const [added, removed] = entry.split('\t');
+      additions += Number.parseInt(added, 10) || 0;
+      deletions += Number.parseInt(removed, 10) || 0;
+    }
+    const untracked = new Set((await this.git(['ls-files', '--others', '--exclude-standard'], project)).stdout.split(/\r?\n/).filter(Boolean).map((path) => normalizeRepositoryPath(path, 'untracked path')));
+    const trackedDiff = await this.git(['diff', 'HEAD', '--binary', '--no-ext-diff'], project, { outputLimit: 1_000_000, captureOutputDigest: true });
+    const contentHash = createHash('sha256').update(trackedDiff.stdoutDigest ?? createHash('sha256').update(trackedDiff.stdout).digest('hex'));
+    let sensitiveContent = sensitiveContentPattern.test(trackedDiff.stdout);
+    for (const path of paths.filter((path) => untracked.has(path))) {
+      const content = await readFile(resolve(project.workspace, path));
+      const text = content.toString('utf8');
+      additions += text ? text.split(/\r?\n/).length : 0;
+      sensitiveContent ||= sensitiveContentPattern.test(text.slice(0, 100_000));
+      contentHash.update(path).update('\0').update(content).update('\0');
+    }
+    const contentFingerprint = contentHash.digest('hex');
+    const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, sensitiveContent, contentFingerprint };
+    return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
   }
 
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
-  async commit(project, branch, message) {
+  async commit(project, branch, message, { expectedChangeSetFingerprint } = {}) {
     await this.assertWorkingBranch(project, branch);
-    await this.assertSafeChangedPaths(project);
+    let changeSet = await this.inspectChangeSet(project);
+    let { paths } = changeSet;
+    if (expectedChangeSetFingerprint && changeSet.changeSetFingerprint !== expectedChangeSetFingerprint) throw new Error('changeset_changed_before_commit');
+    const unsafe = paths.find((path) => protectedFilePattern.test(path) || immutableForbiddenPathPattern.test(path));
+    if (unsafe) throw new Error(`Worker changed a protected path: ${unsafe}`);
     await this.git(['add', '--all'], project);
+    changeSet = await this.inspectChangeSet(project);
+    paths = changeSet.paths;
+    if (expectedChangeSetFingerprint && changeSet.changeSetFingerprint !== expectedChangeSetFingerprint) throw new Error('changeset_changed_while_staging');
     const staged = await this.git(['diff', '--cached', '--quiet'], project, { allowExitCodes: [0, 1] });
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
     await this.git(['commit', '--message', safeMessage], project);
-    return { message: safeMessage, finalHead: await this.head(project) };
+    return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
   async push(project, branch) {
@@ -587,11 +712,17 @@ export class VercelDeploymentProvider {
 }
 
 export class DeterministicPlanner {
-  async plan(goal, project) {
+  async plan(goal, project, scope = {}) {
+    const normalizedScope = normalizeRunScope(scope);
     const task = {
       objective: String(goal),
       repositoryContext: { repository: `${project.repository.owner}/${project.repository.name}`, defaultBranch: project.defaultBranch },
-      constraints: ['Modify only the authorized workspace.', 'Do not commit, push, merge, deploy, or modify secrets.', 'Keep the change small and safe.'],
+      constraints: [
+        'Modify only the authorized workspace.', 'Do not commit, push, merge, deploy, or modify secrets.', 'Keep the change small and safe.',
+        ...(normalizedScope.allowedPaths.length ? [`Modify only these repository path roots: ${normalizedScope.allowedPaths.join(', ')}.`] : []),
+        ...(normalizedScope.forbiddenPaths.length ? [`Do not modify these repository path roots: ${normalizedScope.forbiddenPaths.join(', ')}.`] : [])
+      ],
+      scope: normalizedScope,
       acceptanceCriteria: ['A focused code or documentation diff exists.', `Configured evidence passes: ${project.acceptance.require.join(', ')}.`, 'A pull request is created and CI succeeds.']
     };
     return {
@@ -620,8 +751,40 @@ export function report(run) {
   const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.simulated ? 'SIMULATED' : result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
   const deployment = run.deployment ?? run.results?.deployment;
+  const changePolicy = run.results?.changePolicy;
   const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
-  return reportText.replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`);
+  return reportText
+    .replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`)
+    .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
+}
+
+export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env } = {}) {
+  let repository;
+  let githubError;
+  try {
+    repository = await github.inspect(project);
+  } catch (error) {
+    githubError = clip(error.message, 300);
+  }
+  const vercelConfigured = project.deployment?.provider === 'vercel' && Boolean(project.deployment.projectId && project.deployment.teamId);
+  return {
+    project: project.displayName ?? project.id,
+    projectId: project.id,
+    repository: `${project.repository.owner}/${project.repository.name}`,
+    defaultBranch: project.defaultBranch,
+    githubConnectivity: repository ? 'YES' : 'NO',
+    githubError,
+    codexAvailable: codexAvailable() ? 'YES' : 'NO',
+    workspaceRoot: project.managedWorkspaceRoot,
+    commandsConfigured: Object.keys(project.commands),
+    vercelConfigured: vercelConfigured ? 'YES' : 'NO',
+    vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
+    branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN'
+  };
+}
+
+export function formatDoctor(result) {
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}`;
 }
 
 export class Orchestrator {
@@ -637,10 +800,10 @@ export class Orchestrator {
     return this.store.mutate((data) => { const run = data.runs[id]; if (!run) throw new Error('Run not found'); mutator(run, data); return run; });
   }
 
-  async create(project, goal, dryRun = false) {
+  async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -660,13 +823,21 @@ export class Orchestrator {
     if (verdict === 'SAFE') return null;
     const id = createHash('sha256').update(`${run.id}:${action}:${JSON.stringify(payload)}`).digest('hex').slice(0, 16);
     await this.store.mutate((data) => {
-      if (!data.approvals[id]) data.approvals[id] = { id, runId: run.id, action, reason: clip(reason), payload: safeJson(payload), createdAt: new Date().toISOString(), status: 'pending', execution: 'pending' };
+      if (!data.approvals[id]) data.approvals[id] = {
+        id, runId: run.id, action, reason: clip(reason), payload: safeJson(payload),
+        changeSetFingerprint: typeof payload?.changeSetFingerprint === 'string' ? payload.changeSetFingerprint : undefined,
+        createdAt: new Date().toISOString(), status: 'pending', execution: 'pending'
+      };
       const current = data.runs[run.id];
       if (!current.approvals.includes(id)) current.approvals.push(id);
-      current.pendingAction = { action, approvalId: id, execution: 'pending' };
+      current.pendingAction = {
+        action, approvalId: id, execution: 'pending',
+        ...(typeof payload?.changeSetFingerprint === 'string' ? { changeSetFingerprint: payload.changeSetFingerprint } : {}),
+        ...(typeof payload?.phase === 'string' ? { phase: payload.phase } : {})
+      };
       if (current.status !== RunStatus.WAITING_APPROVAL) transition(current, RunStatus.WAITING_APPROVAL);
     });
-    await this.event(run.id, 'policy', 'approval.requested', { action, reason });
+    await this.event(run.id, 'policy', 'approval.requested', { action, reason, changeSetFingerprint: payload?.changeSetFingerprint, phase: payload?.phase });
     return id;
   }
 
@@ -686,7 +857,7 @@ export class Orchestrator {
   }
 
   async plan(run, project) {
-    const plan = await this.planner.plan(run.goal, project);
+    const plan = await this.planner.plan(run.goal, project, run.scope);
     if (plan.tasks.length > project.budgets.maxTasks) return this.fail(run.id, 'maxTasks');
     const updated = await this.updateRun(run.id, (current) => { transition(current, RunStatus.PLANNING); current.plan = safeJson(plan); transition(current, RunStatus.WORKING); });
     await this.event(run.id, 'planner', 'plan.generated', { taskCount: plan.tasks.length });
@@ -769,8 +940,97 @@ export class Orchestrator {
     return updated;
   }
 
+  async inspectChangeSet(project) {
+    if (typeof this.localGit.inspectChangeSet === 'function') return this.localGit.inspectChangeSet(project);
+    const paths = await this.localGit.assertSafeChangedPaths(project);
+    const changeSet = { paths, changedFiles: paths.length, diffLines: paths.length, additions: paths.length, deletions: 0, sensitiveContent: false };
+    return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
+  }
+
+  async markApprovalStale(run, approval, decision) {
+    await this.store.mutate((data) => {
+      const stale = data.approvals[approval.id];
+      if (stale) {
+        stale.status = 'stale';
+        stale.execution = 'stale';
+        stale.staleAt = new Date().toISOString();
+        stale.staleFingerprint = decision.changeSetFingerprint;
+      }
+      const current = data.runs[run.id];
+      if (current.pendingAction?.approvalId === approval.id) current.pendingAction.execution = 'stale';
+    });
+    await this.event(run.id, 'policy', 'approval.stale', { approvalId: approval.id, approvedFingerprint: approval.changeSetFingerprint, observedFingerprint: decision.changeSetFingerprint });
+  }
+
+  async verifyChangePolicy(run, project, { phase = 'before_checks', approvedFingerprint, approval } = {}) {
+    const inspected = await this.inspectChangeSet(project);
+    const changeSet = { ...inspected, changeSetFingerprint: inspected.changeSetFingerprint ?? fingerprintChangeSet(inspected) };
+    const decision = evaluateChangePolicy(project, changeSet, run.scope);
+    run = await this.updateRun(run.id, (saved) => {
+      saved.results.diff = { ok: changeSet.paths.length > 0, ...safeJson(changeSet) };
+      saved.results.changePolicy = { ok: decision.ok, phase, ...safeJson(decision) };
+      saved.governanceHistory ??= [];
+      saved.governanceHistory.push({ phase, ok: decision.ok, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, timestamp: new Date().toISOString() });
+    });
+    await this.event(run.id, 'policy', 'change_set.evaluated', { phase, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines });
+    if (!changeSet.paths.length) return phase === 'before_checks' ? this.retryOrFail(run, 'worker produced no diff') : this.fail(run.id, 'governed_change_set_empty');
+    if (!decision.ok) return this.fail(run.id, decision.reason);
+    if (approvedFingerprint && approvedFingerprint !== decision.changeSetFingerprint) {
+      if (approval) await this.markApprovalStale(run, approval, decision);
+      await this.requireApproval(run, 'sensitive_change', 'The governed change set changed after approval; fresh approval is required before execution continues', { ...decision, phase, previousApprovalId: approval?.id }, project);
+      return this.store.getRun(run.id);
+    }
+    if (decision.classification === 'sensitive' && !approvedFingerprint) {
+      const approvalId = await this.requireApproval(run, 'sensitive_change', `Sensitive diff requires approval before ${phase === 'before_commit' ? 'commit and publication' : 'the next command'}`, { ...decision, phase }, project);
+      if (approvalId) return this.store.getRun(run.id);
+    }
+    return this.store.getRun(run.id);
+  }
+
+  async validateAndPublish(run, project, { approvedFingerprint } = {}) {
+    run = await this.updateRun(run.id, (saved) => {
+      if (saved.status !== RunStatus.TESTING) transition(saved, RunStatus.TESTING);
+    });
+    for (const name of configuredChecks(project)) {
+      run = await this.store.getRun(run.id);
+      if (run.results[name]?.ok) continue;
+      this.assertDeadline(run);
+      const result = await this.commandRunner(project, name, { dryRun: run.dryRun, timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
+      run = await this.updateRun(run.id, (saved) => { saved.results[name] = safeJson(result); saved.checkHistory.push({ attempt: saved.workerAttempts, ...safeJson(result) }); });
+      run = await this.verifyChangePolicy(run, project, { phase: `after_${name}`, approvedFingerprint });
+      if (run.status !== RunStatus.TESTING) return run;
+      if (!result.ok) return this.retryOrFail(run, `${name} failed: ${result.stderr || result.stdout}`);
+    }
+    run = await this.verifyChangePolicy(run, project, { phase: 'before_commit', approvedFingerprint });
+    if (run.status !== RunStatus.TESTING) return run;
+    const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
+    await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
+    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, { expectedChangeSetFingerprint });
+    const expectedPaths = [...run.results.changePolicy.paths].sort();
+    const committedPaths = [...(commit.committedPaths ?? [])].sort();
+    if (commit.committedChangeSetFingerprint !== expectedChangeSetFingerprint || JSON.stringify(committedPaths) !== JSON.stringify(expectedPaths)) {
+      return this.fail(run.id, 'committed_change_set_does_not_match_governed_change_set');
+    }
+    run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
+    const push = await this.localGit.push(project, run.workingBranch);
+    run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
+    if (!run.pullRequestNumber) {
+      const approvalId = await this.requireApproval(run, 'create_pull_request', 'Publish validated engineering work for review', { branch: run.workingBranch, finalHead: run.finalHead }, project);
+      if (approvalId) return this.store.getRun(run.id);
+      run = await this.createPullRequest(run, project);
+    } else {
+      run = await this.updateRun(run.id, (saved) => transition(saved, RunStatus.WAITING_CI));
+    }
+    return this.pollCi(run, project);
+  }
+
   async executeAttempt(run, project) {
     this.assertDeadline(run);
+    if (run.workerAttempts > 0) {
+      run = await this.updateRun(run.id, (saved) => {
+        for (const name of configuredChecks(project)) delete saved.results[name];
+      });
+    }
     await this.localGit.assertWorkingBranch(project, run.workingBranch);
     const beforeHead = await this.localGit.head(project);
     const task = {
@@ -787,29 +1047,9 @@ export class Orchestrator {
     if (afterWorker.remote !== run.results.branch.remote) return this.fail(run.id, 'worker_mutated_git_remote');
     await this.localGit.assertWorkingBranch(project, run.workingBranch);
     if (afterWorker.initialHead !== beforeHead) return this.fail(run.id, 'worker_mutated_git_history');
-    const paths = await this.localGit.assertSafeChangedPaths(project);
-    run = await this.updateRun(run.id, (saved) => { saved.results.diff = { ok: paths.length > 0, paths }; });
-    if (!paths.length) return this.retryOrFail(run, 'worker produced no diff');
-    await this.updateRun(run.id, (saved) => transition(saved, RunStatus.TESTING));
-    for (const name of configuredChecks(project)) {
-      this.assertDeadline(await this.store.getRun(run.id));
-      const result = await this.commandRunner(project, name, { dryRun: run.dryRun, timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
-      run = await this.updateRun(run.id, (saved) => { saved.results[name] = safeJson(result); saved.checkHistory.push({ attempt: saved.workerAttempts, ...safeJson(result) }); });
-      if (!result.ok) return this.retryOrFail(run, `${name} failed: ${result.stderr || result.stdout}`);
-    }
-    await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
-    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`);
-    run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
-    const push = await this.localGit.push(project, run.workingBranch);
-    run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
-    if (!run.pullRequestNumber) {
-      const approvalId = await this.requireApproval(run, 'create_pull_request', 'Publish validated engineering work for review', { branch: run.workingBranch, finalHead: run.finalHead }, project);
-      if (approvalId) return this.store.getRun(run.id);
-      run = await this.createPullRequest(run, project);
-    } else {
-      run = await this.updateRun(run.id, (saved) => transition(saved, RunStatus.WAITING_CI));
-    }
-    return this.pollCi(run, project);
+    run = await this.verifyChangePolicy(run, project, { phase: 'before_checks' });
+    if (run.status !== RunStatus.WORKING) return run;
+    return this.validateAndPublish(run, project);
   }
 
   async createPullRequest(run, project) {
@@ -862,6 +1102,19 @@ export class Orchestrator {
           run = await this.createPullRequest(run, project);
           return this.pollCi(run, project);
         }
+        if (approval.action === 'sensitive_change') {
+          const phase = run.pendingAction?.phase ?? approval.payload?.phase ?? 'before_checks';
+          run = await this.verifyChangePolicy(run, project, { phase, approvedFingerprint: approval.changeSetFingerprint, approval });
+          if (run.status !== RunStatus.WAITING_APPROVAL) return run;
+          const refreshedApproval = (await this.store.load()).approvals[run.pendingAction?.approvalId];
+          if (!refreshedApproval || refreshedApproval.id !== approval.id) return run;
+          run = await this.updateRun(run.id, (saved, data) => {
+            data.approvals[approval.id].execution = 'executing';
+            saved.pendingAction.execution = 'executing';
+            transition(saved, RunStatus.TESTING);
+          });
+          return this.validateAndPublish(run, project, { approvedFingerprint: approval.changeSetFingerprint });
+        }
         return this.updateRun(run.id, (saved) => { approval.execution = 'unsupported'; saved.pendingAction.execution = 'unsupported'; transition(saved, RunStatus.COMPLETED); });
       }
       if (run.status === RunStatus.WAITING_CI) return this.pollCi(run, project);
@@ -884,8 +1137,8 @@ export class Orchestrator {
     }
   }
 
-  async run(project, goal, { dryRun = false, requestAction } = {}) {
-    let run = await this.create(project, goal, dryRun);
+  async run(project, goal, { dryRun = false, requestAction, allowedPaths, forbiddenPaths } = {}) {
+    let run = await this.create(project, goal, dryRun, { allowedPaths, forbiddenPaths });
     run = await this.plan(run, project);
     if (requestAction) { await this.requireApproval(run, requestAction, 'Requested by run input', {}, project); return this.store.getRun(run.id); }
     if (dryRun) return this.simulateDryRun(run, project);
