@@ -23,11 +23,11 @@ export const RunStatus = Object.freeze({
 const transitions = Object.freeze({
   created: ['planning', 'cancelled'],
   planning: ['working', 'waiting_approval', 'failed', 'cancelled'],
-  working: ['testing', 'worker_failed_retryable', 'waiting_approval', 'failed', 'cancelled'],
+  working: ['testing', 'evaluating', 'worker_failed_retryable', 'waiting_approval', 'failed', 'cancelled'],
   worker_failed_retryable: ['working', 'failed', 'cancelled'],
   testing: ['pushing', 'worker_failed_retryable', 'failed', 'cancelled'],
   pushing: ['waiting_ci', 'waiting_approval', 'failed', 'cancelled'],
-  waiting_ci: ['evaluating', 'working', 'failed', 'cancelled'],
+  waiting_ci: ['evaluating', 'worker_failed_retryable', 'working', 'failed', 'cancelled'],
   evaluating: ['working', 'completed', 'failed', 'cancelled'],
   waiting_approval: ['pushing', 'completed', 'cancelled', 'failed'],
   completed: [],
@@ -309,7 +309,7 @@ export class LocalGitAdapter {
     return { repository, remote, currentBranch: await this.currentBranch(project), initialHead: await this.head(project), status: (await this.git(['status', '--porcelain'], project)).stdout };
   }
 
-  async prepareWorkingBranch(project, runId) {
+  async prepareWorkingBranch(project, runId, expectedBaseHead) {
     const inspection = await this.inspect(project);
     if (project.protectedBranches.includes(inspection.currentBranch) && inspection.currentBranch !== project.defaultBranch) {
       throw new Error(`Engineering runs cannot start from protected branch ${inspection.currentBranch}`);
@@ -317,10 +317,13 @@ export class LocalGitAdapter {
     if (inspection.status.trim()) throw new Error('Working tree must be clean before an engineering run');
     const workingBranch = buildWorkingBranch(project, runId);
     assertAllowedWorkingBranch(project, workingBranch);
+    await this.git(['fetch', 'origin', project.defaultBranch], project);
+    const remoteBaseHead = (await this.git(['rev-parse', `refs/remotes/origin/${project.defaultBranch}`], project)).stdout.trim();
+    if (remoteBaseHead !== expectedBaseHead) throw new Error('base_head_changed');
     const exists = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${workingBranch}`], project, { allowExitCodes: [0, 1] });
     if (exists.exitCode === 0) throw new Error(`Working branch already exists: ${workingBranch}`);
-    await this.git(['switch', '--create', workingBranch, project.defaultBranch], project);
-    return { ...inspection, workingBranch, initialHead: await this.head(project) };
+    await this.git(['switch', '--create', workingBranch, remoteBaseHead], project);
+    return { ...inspection, workingBranch, initialHead: await this.head(project), remoteBaseHead };
   }
 
   async assertWorkingBranch(project, branch) {
@@ -457,8 +460,9 @@ export function evaluate(results, { retryable = false } = {}) {
 }
 
 export function report(run) {
-  const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
-  return `RUN\n${run.id}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nSTATUS\n${run.status}\n\nPROJECT\n${run.projectId}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCHECKS\n${checks}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const checks = Object.entries(run.results ?? {}).filter(([, result]) => result && typeof result === 'object' && 'ok' in result).map(([name, result]) => `${name.toUpperCase()}: ${result.simulated ? 'SIMULATED' : result.ok ? 'PASS' : 'FAIL'}`).join('\n') || 'No checks executed';
+  const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
+  return `RUN\n${run.id}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nPROJECT\n${run.projectId}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
 }
 
 export class Orchestrator {
@@ -532,7 +536,7 @@ export class Orchestrator {
   async initializeWorkspace(run, project) {
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
-    const branch = await this.localGit.prepareWorkingBranch(project, run.id);
+    const branch = await this.localGit.prepareWorkingBranch(project, run.id, repository.head);
     const updated = await this.updateRun(run.id, (current) => { current.repository = repository; current.initialHead = branch.initialHead; current.workingBranch = branch.workingBranch; current.results.branch = { ok: true, ...branch }; });
     await this.event(run.id, 'git', 'working_branch.created', { branch: branch.workingBranch, initialHead: branch.initialHead });
     return updated;
@@ -544,6 +548,37 @@ export class Orchestrator {
     await this.updateRun(run.id, (saved) => { saved.lastWorkerFailure = clip(reason, 4_000); transition(saved, RunStatus.WORKER_FAILED_RETRYABLE); transition(saved, RunStatus.WORKING); });
     await this.event(run.id, 'orchestrator', 'worker.retry_scheduled', { reason });
     return this.store.getRun(run.id);
+  }
+
+  async simulateDryRun(run, project) {
+    const repository = await this.github.inspect(project);
+    if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
+    const workingBranch = buildWorkingBranch(project, run.id);
+    const plannedActions = [
+      `fetch origin ${project.defaultBranch} and verify the GitHub base head`,
+      `create ${workingBranch} at the verified remote base`,
+      'invoke CodingWorker',
+      'run configured checks: test, typecheck, lint, build',
+      'commit and push the working branch',
+      'create a pull request and poll CI'
+    ];
+    const updated = await this.updateRun(run.id, (saved) => {
+      saved.repository = safeJson(repository);
+      saved.initialHead = repository.head;
+      saved.workingBranch = workingBranch;
+      saved.plannedActions = plannedActions;
+      saved.results = {
+        repository: { ok: true, simulated: true, head: repository.head }, branch: { ok: true, simulated: true, workingBranch },
+        worker: { ok: true, simulated: true }, test: { ok: true, simulated: true }, typecheck: { ok: true, simulated: true },
+        lint: { ok: true, simulated: true }, build: { ok: true, simulated: true }, commit: { ok: true, simulated: true },
+        push: { ok: true, simulated: true }, pullRequest: { ok: true, simulated: true }, ci: { ok: true, simulated: true }
+      };
+      saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.'] };
+      transition(saved, RunStatus.EVALUATING);
+      transition(saved, RunStatus.COMPLETED);
+    });
+    await this.event(run.id, 'orchestrator', 'dry_run.simulated', { workingBranch, baseHead: repository.head });
+    return updated;
   }
 
   async executeAttempt(run, project) {
@@ -583,6 +618,8 @@ export class Orchestrator {
       const approvalId = await this.requireApproval(run, 'create_pull_request', 'Publish validated engineering work for review', { branch: run.workingBranch, finalHead: run.finalHead }, project);
       if (approvalId) return this.store.getRun(run.id);
       run = await this.createPullRequest(run, project);
+    } else {
+      run = await this.updateRun(run.id, (saved) => transition(saved, RunStatus.WAITING_CI));
     }
     return this.pollCi(run, project);
   }
@@ -635,6 +672,7 @@ export class Orchestrator {
     let run = await this.create(project, goal, dryRun);
     run = await this.plan(run, project);
     if (requestAction) { await this.requireApproval(run, requestAction, 'Requested by run input', {}, project); return this.store.getRun(run.id); }
+    if (dryRun) return this.simulateDryRun(run, project);
     return this.continueRun(run, project);
   }
 

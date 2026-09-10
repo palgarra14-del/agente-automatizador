@@ -7,6 +7,7 @@ import {
   CodexSdkWorker,
   GitHubAdapter,
   JsonStore,
+  LocalGitAdapter,
   Orchestrator,
   RunStatus,
   assertAllowedWorkingBranch,
@@ -43,9 +44,13 @@ class FakeLocalGit {
     this.current = 'main';
     this.currentHead = 'initial-head';
     this.commitCalls = 0;
+    this.prepareCalls = 0;
+    this.pushCalls = 0;
   }
 
-  async prepareWorkingBranch(_project, runId) {
+  async prepareWorkingBranch(_project, runId, expectedBaseHead) {
+    this.prepareCalls += 1;
+    if (expectedBaseHead !== 'initial-head') throw new Error('base_head_changed');
     this.current = `agent/${runId}`;
     return { initialHead: this.currentHead, workingBranch: this.current, repository: 'fake', remote: 'https://github.com/owner/repo.git', status: '' };
   }
@@ -65,7 +70,7 @@ class FakeLocalGit {
     return { message: 'agent: safe change', finalHead: this.currentHead };
   }
 
-  async push(_project, branch) { return { branch, finalHead: this.currentHead }; }
+  async push(_project, branch) { this.pushCalls += 1; return { branch, finalHead: this.currentHead }; }
 }
 
 class FakeGitHub {
@@ -199,6 +204,53 @@ test('GitHub adapter maps check runs to pending, success, and failure without ex
   assert.equal(maskSecrets('ghp_adapterToken').includes('ghp_adapterToken'), false);
 });
 
+test('LocalGitAdapter creates the working branch at the fetched remote base and rejects a changed base', async () => {
+  const calls = [];
+  let currentBranch = 'main';
+  let currentHead = 'stale-local-main';
+  const configured = project();
+  const runner = async (_binary, args) => {
+    calls.push(args);
+    const command = args.join(' ');
+    if (command === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: configured.workspace, stderr: '' };
+    if (command === 'remote get-url origin') return { exitCode: 0, stdout: 'https://github.com/owner/repo.git', stderr: '' };
+    if (command === 'branch --show-current') return { exitCode: 0, stdout: currentBranch, stderr: '' };
+    if (command === 'rev-parse HEAD') return { exitCode: 0, stdout: currentHead, stderr: '' };
+    if (command === 'status --porcelain') return { exitCode: 0, stdout: '', stderr: '' };
+    if (command === 'fetch origin main') return { exitCode: 0, stdout: '', stderr: '' };
+    if (command === 'rev-parse refs/remotes/origin/main') return { exitCode: 0, stdout: 'new-remote-main', stderr: '' };
+    if (command.startsWith('show-ref --verify --quiet')) return { exitCode: 1, stdout: '', stderr: '' };
+    if (args[0] === 'switch') { currentBranch = args[2]; currentHead = args[3]; return { exitCode: 0, stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected git command: ${command}`);
+  };
+  const adapter = new LocalGitAdapter({ processRunner: runner });
+  const prepared = await adapter.prepareWorkingBranch(configured, 'run-id', 'new-remote-main');
+  assert.equal(prepared.initialHead, 'new-remote-main');
+  assert.deepEqual(calls.at(-2), ['switch', '--create', 'agent/run-id', 'new-remote-main']);
+  const mismatch = new LocalGitAdapter({ processRunner: runner });
+  await assert.rejects(() => mismatch.prepareWorkingBranch(configured, 'second-run', 'github-other-head'), /base_head_changed/);
+  assert.equal(calls.some((args) => args[0] === 'switch' && args[2] === 'agent/second-run'), false);
+});
+
+test('dry-run persists a complete simulation without invoking worker, git writes, commands, or PR writes', async () => {
+  const store = await temporaryStore();
+  const localGit = new FakeLocalGit();
+  const github = new FakeGitHub();
+  const worker = new FakeWorker();
+  let commandCalls = 0;
+  const run = await new Orchestrator({ store, localGit, github, worker, commandRunner: async () => { commandCalls += 1; return { ok: true }; } })
+    .run(project(), 'Simulate exactly one safe fixture change', { dryRun: true });
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.equal(run.evaluation.decision, 'DRY_RUN');
+  assert.equal(localGit.prepareCalls, 0);
+  assert.equal(localGit.commitCalls, 0);
+  assert.equal(localGit.pushCalls, 0);
+  assert.equal(worker.calls, 0);
+  assert.equal(commandCalls, 0);
+  assert.equal(github.pullRequests, 0);
+  assert.equal(run.results.worker.simulated, true);
+});
+
 test('happy path persists branch, commit, push, PR, CI, evaluation, and report state', async () => {
   const store = await temporaryStore();
   const github = new FakeGitHub();
@@ -241,6 +293,37 @@ test('failed checks retry once and eventually complete without an infinite loop'
   assert.equal(run.status, RunStatus.COMPLETED);
   assert.equal(worker.calls, 2);
   assert.equal(run.workerAttempts, 2);
+});
+
+test('a failed CI retries the worker, pushes the same PR branch, then completes on the next CI success', async () => {
+  const github = new FakeGitHub();
+  github.waitForCi = async () => {
+    github.ciCalls += 1;
+    return { state: github.ciCalls === 1 ? 'failure' : 'success', checks: [{ name: 'verify', status: 'completed', conclusion: github.ciCalls === 1 ? 'failure' : 'success' }] };
+  };
+  const localGit = new FakeLocalGit();
+  const worker = new FakeWorker();
+  const run = await new Orchestrator({ store: await temporaryStore(), github, localGit, worker, commandRunner: async (_project, name) => ({ name, ok: true }) })
+    .run(project(), 'Fix the CI fixture');
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.equal(worker.calls, 2);
+  assert.equal(localGit.commitCalls, 2);
+  assert.equal(localGit.pushCalls, 2);
+  assert.equal(github.pullRequests, 1);
+  assert.equal(github.ciCalls, 2);
+});
+
+test('repeated CI failures stop at maxWorkerAttempts without creating another PR', async () => {
+  const github = new FakeGitHub();
+  github.waitForCi = async () => ({ state: 'failure', checks: [{ name: 'verify', status: 'completed', conclusion: 'failure' }] });
+  const localGit = new FakeLocalGit();
+  const worker = new FakeWorker();
+  const run = await new Orchestrator({ store: await temporaryStore(), github, localGit, worker, commandRunner: async (_project, name) => ({ name, ok: true }) })
+    .run(project(), 'Bound the failing CI retry');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(run.failureReason, 'worker_attempts_exhausted');
+  assert.equal(worker.calls, 2);
+  assert.equal(github.pullRequests, 1);
 });
 
 test('approval is distinct from execution and resume creates the approved pull request', async () => {

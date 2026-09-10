@@ -12,7 +12,7 @@ A CLI-first, policy-governed engineering loop for configured repositories. It tu
 
 ## Quick start
 
-Requires Node 22+, an authenticated Codex installation (or `CODEX_API_KEY` for the SDK), `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. The generated branch is always created from configured `main`; the caller's current branch is never written directly.
+Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. This implementation deliberately does not inject `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub; the caller's current branch is never written directly.
 
 ```bash
 npm ci
@@ -20,6 +20,8 @@ node src/cli.js run --project self --goal "Update a controlled documentation fix
 node src/cli.js report <runId>
 node src/cli.js resume <runId>
 ```
+
+Add `--dry-run` to persist the plan and a zero-write simulation. It does not create or switch branches, invoke the worker or checks, commit, push, create a PR, or write to GitHub.
 
 The project commands, protected branches, branch pattern, approvals, and budgets live in `config/projects.json`. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 

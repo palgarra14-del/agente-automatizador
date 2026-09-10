@@ -19,7 +19,7 @@ The worker receives a redacted `CodingTask`. It returns a final response, usage 
 
 ## Authentication
 
-The SDK can use saved local Codex authentication. For controlled API-key automation it can receive `CODEX_API_KEY` only in the SDK process; the worker task never contains it. `GITHUB_TOKEN` is used separately by `GitHubAdapter` and is deliberately removed from the worker environment. For CI, use separate jobs/credentials for untrusted checkout code and privileged GitHub writes.
+This implementation uses the saved authentication of the local Codex installation. It deliberately does not inject or propagate `CODEX_API_KEY` to the worker process. `GITHUB_TOKEN` is used separately by `GitHubAdapter` and is deliberately removed from the worker environment. For CI, use separate jobs/credentials for untrusted checkout code and privileged GitHub writes.
 
 ## Limits
 
