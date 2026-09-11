@@ -195,6 +195,82 @@ function safeJson(value) {
   return JSON.parse(maskSecrets(JSON.stringify(value)));
 }
 
+function createModelUsageState(maxCalls) {
+  return { maxCalls, calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, unknownUsageCalls: 0, entries: [] };
+}
+
+function normalizeReportedModelUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return { reported: false, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const input = usage.input_tokens ?? usage.inputTokens;
+  const output = usage.output_tokens ?? usage.outputTokens;
+  const valid = (value) => value === undefined || (Number.isInteger(value) && value >= 0);
+  if (!valid(input) || !valid(output) || (input === undefined && output === undefined)) return { reported: false, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const inputTokens = input ?? 0;
+  const outputTokens = output ?? 0;
+  return { reported: true, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
+function validateModelUsageState(state, expectedMaxCalls, label = 'modelUsage') {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error(`${label} is missing`);
+  if (!Number.isInteger(state.maxCalls) || state.maxCalls < 1 || state.maxCalls !== expectedMaxCalls) throw new Error(`${label}.maxCalls does not match the active project budget`);
+  for (const key of ['calls', 'inputTokens', 'outputTokens', 'totalTokens', 'unknownUsageCalls']) if (!Number.isInteger(state[key]) || state[key] < 0) throw new Error(`${label}.${key} must be a non-negative integer`);
+  if (state.calls > state.maxCalls) throw new Error(`${label}.calls exceeds maxCalls`);
+  if (state.totalTokens !== state.inputTokens + state.outputTokens) throw new Error(`${label}.totalTokens is inconsistent`);
+  if (state.unknownUsageCalls > state.calls) throw new Error(`${label}.unknownUsageCalls exceeds calls`);
+  if (!Array.isArray(state.entries) || state.entries.length !== state.calls) throw new Error(`${label}.entries must match reserved calls`);
+  const ids = new Set();
+  for (const [index, entry] of state.entries.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${label}.entries[${index}] is invalid`);
+    if (entry.id !== `model-call-${index + 1}` || ids.has(entry.id)) throw new Error(`${label}.entries contain invalid ids`);
+    ids.add(entry.id);
+    if (!['started', 'completed', 'failed'].includes(entry.status)) throw new Error(`${label}.entries[${index}].status is invalid`);
+    if (typeof entry.surface !== 'string' || !entry.surface) throw new Error(`${label}.entries[${index}].surface is invalid`);
+    if (typeof entry.skill !== 'string' || !entry.skill) throw new Error(`${label}.entries[${index}].skill is invalid`);
+    if (!Number.isFinite(Date.parse(entry.startedAt ?? ''))) throw new Error(`${label}.entries[${index}].startedAt is invalid`);
+    if (entry.completedAt !== null && entry.completedAt !== undefined && !Number.isFinite(Date.parse(entry.completedAt))) throw new Error(`${label}.entries[${index}].completedAt is invalid`);
+    if (entry.usage !== null && entry.usage !== undefined) {
+      const normalized = normalizeReportedModelUsage(entry.usage);
+      if (!normalized.reported || normalized.inputTokens !== entry.usage.inputTokens || normalized.outputTokens !== entry.usage.outputTokens || normalized.totalTokens !== entry.usage.totalTokens) throw new Error(`${label}.entries[${index}].usage is invalid`);
+    }
+  }
+  return true;
+}
+
+function reserveModelCall(state, context, startedAt = new Date().toISOString()) {
+  if (state.calls >= state.maxCalls) return null;
+  const id = `model-call-${state.calls + 1}`;
+  state.calls += 1;
+  state.entries.push({
+    id,
+    status: 'started',
+    surface: String(context.surface),
+    skill: String(context.skill),
+    stepId: context.stepId ? String(context.stepId) : null,
+    specialist: context.specialist ? String(context.specialist) : null,
+    attempt: Number.isInteger(context.attempt) ? context.attempt : null,
+    startedAt,
+    completedAt: null,
+    usage: null
+  });
+  return id;
+}
+
+function completeModelCall(state, callId, usage, status = 'completed', completedAt = new Date().toISOString()) {
+  const entry = state.entries.find((candidate) => candidate.id === callId);
+  if (!entry || entry.status !== 'started') throw new Error('model_call_reservation_invalid');
+  const normalized = normalizeReportedModelUsage(usage);
+  entry.status = status === 'completed' ? 'completed' : 'failed';
+  entry.completedAt = completedAt;
+  if (normalized.reported) {
+    entry.usage = { inputTokens: normalized.inputTokens, outputTokens: normalized.outputTokens, totalTokens: normalized.totalTokens };
+    state.inputTokens += normalized.inputTokens;
+    state.outputTokens += normalized.outputTokens;
+    state.totalTokens += normalized.totalTokens;
+  } else {
+    state.unknownUsageCalls += 1;
+  }
+}
+
 export function safeCommandEnvironment(commandEnvironment = {}) {
   if (!commandEnvironment || typeof commandEnvironment !== 'object' || Array.isArray(commandEnvironment)) throw new Error('commandEnvironment must be an object');
   const environment = Object.fromEntries(systemEnvironmentNames.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
@@ -344,7 +420,7 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
       maxTasks: positiveInteger(budgets.maxTasks, 10, 'maxTasks'),
       maxRuntimeMinutes: positiveInteger(budgets.maxRuntimeMinutes, 10, 'maxRuntimeMinutes'),
-      maxModelCalls: positiveInteger(budgets.maxModelCalls, 0, 'maxModelCalls', 0),
+      maxModelCalls: positiveInteger(budgets.maxModelCalls, 6, 'maxModelCalls'),
       maxWorkerAttempts: positiveInteger(budgets.maxWorkerAttempts, 2, 'maxWorkerAttempts'),
       commandTimeoutMs: positiveInteger(budgets.commandTimeoutMs, 30_000, 'commandTimeoutMs', 100),
       ciTimeoutMs: positiveInteger(budgets.ciTimeoutMs, 600_000, 'ciTimeoutMs', 1_000),
