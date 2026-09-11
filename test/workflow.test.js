@@ -56,8 +56,10 @@ function completeStep(plan, id) {
   const completedAt = '2026-09-11T00:00:00.000Z';
   const capability = {
     skill: step.skill,
+    specialist: step.specialist,
     registryFingerprint: plan.registryFingerprint,
-    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint
   };
   if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint, repositoryControlFingerprint: emptyRepositoryControlState().fingerprint };
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
