@@ -62,6 +62,24 @@ function completeStep(plan, id) {
     specialistRegistryFingerprint: plan.specialistRegistryFingerprint
   };
   if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSet: emptyChangeSet(), changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint, repositoryControlFingerprint: emptyRepositoryControlState().fingerprint };
+  else if (step.type === 'placeholder' && step.skill === 'project.dependencies.refresh') {
+    const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+    const dependencyPaths = [...(implementation?.evidence?.changeSet?.paths ?? [])].filter((path) => ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json'].includes(path)).sort();
+    step.evidence = {
+      ...capability,
+      type: 'executor',
+      ok: true,
+      completedAt,
+      required: dependencyPaths.length > 0,
+      dependencyPaths,
+      changeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null,
+      ...(dependencyPaths.length ? {
+        command: { name: 'dependencyRefresh', ok: true, exitCode: 0, stdout: '', stderr: '' },
+        executionProvider: 'container-required',
+        lifecycleScripts: 'disabled'
+      } : {})
+    };
+  }
   else if (step.type === 'placeholder' && step.skill === 'code.review') {
     const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
     step.evidence = { ...capability, type: 'executor', ok: true, completedAt, result: { reviewEvidence: { verdict: 'PASS', summary: 'fixture review passed', findings: [] } }, reviewedChangeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null };
@@ -333,7 +351,7 @@ test('app-improvement dry-run discloses future reviewed publication without exec
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Show full reviewed workflow' });
   const dryRun = await instance.run(created.id, { dryRun: true });
   assert.equal(dryRun.dryRun, true);
-  assert.equal(dryRun.plannedSteps.length, 9);
+  assert.equal(dryRun.plannedSteps.length, 10);
   const publication = dryRun.plannedSteps.find((step) => step.id === 'publication');
   assert.equal(publication.skill, 'release.publish-reviewed-workflow');
   assert.equal(publication.specialist, 'release-manager');
@@ -375,7 +393,8 @@ test('release-readiness approval is bound to the exact reviewed implementation f
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSet = changedChangeSet(['src/feature.js']);
     implementation.evidence.changeSetFingerprint = implementation.evidence.changeSet.changeSetFingerprint;
-    const review = completeStep(plan, 'review');
+    completeStep(plan, 'dependency-refresh');
+  const review = completeStep(plan, 'review');
     review.evidence.reviewedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
     completeStep(plan, 'tests');
     completeStep(plan, 'verification');
@@ -410,7 +429,8 @@ test('interrupted reviewed publication is non-approvable because external-write 
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSet = changedChangeSet(['src/feature.js']);
     implementation.evidence.changeSetFingerprint = implementation.evidence.changeSet.changeSetFingerprint;
-    const review = completeStep(plan, 'review');
+    completeStep(plan, 'dependency-refresh');
+  const review = completeStep(plan, 'review');
     review.evidence.reviewedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
     completeStep(plan, 'tests');
     completeStep(plan, 'verification');
@@ -1177,7 +1197,8 @@ async function prepareReviewedPublication(instance, workflowId, changeSet) {
     implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
     implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
 
-    const review = completeStep(plan, 'review');
+    completeStep(plan, 'dependency-refresh');
+  const review = completeStep(plan, 'review');
     review.evidence.reviewedChangeSetFingerprint = changeSet.changeSetFingerprint;
     review.evidence.result = { reviewEvidence: { verdict: 'PASS', summary: 'fixture critic pass', findings: [] } };
 
@@ -1849,6 +1870,7 @@ test('persisted critic PASS must retain structurally valid review evidence', () 
   completeStep(plan, 'diagnose');
   completeStep(plan, 'plan-change');
   completeStep(plan, 'implementation');
+  completeStep(plan, 'dependency-refresh');
   const review = completeStep(plan, 'review');
   review.evidence.result.reviewEvidence = { verdict: 'PASS', summary: '', findings: [] };
   assert.throws(
@@ -1864,6 +1886,7 @@ test('completed critic PASS cannot be replayed against a different implementatio
   completeStep(plan, 'diagnose');
   completeStep(plan, 'plan-change');
   const implementation = completeStep(plan, 'implementation');
+  completeStep(plan, 'dependency-refresh');
   completeStep(plan, 'review');
   implementation.evidence.changeSetFingerprint = 'f'.repeat(64);
   assert.throws(
@@ -2200,7 +2223,8 @@ test('verification command that mutates governed implementation diff fails close
     implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
     implementation.evidence.changeSet = governed;
     implementation.evidence.workspacePath = workspaceProject.workspace;
-    completeStep(plan, 'review');
+    completeStep(plan, 'dependency-refresh');
+  completeStep(plan, 'review');
   });
   const failed = await instance.run(created.id);
   const testsStep = failed.steps.find((step) => step.id === 'tests');
@@ -2249,7 +2273,8 @@ test('verification command that changes repository state fails closed even when 
     implementation.evidence.changeSet = governed;
     implementation.evidence.workspacePath = workspaceProject.workspace;
     implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
-    completeStep(plan, 'review');
+    completeStep(plan, 'dependency-refresh');
+  completeStep(plan, 'review');
   });
   const failed = await instance.run(created.id);
   const testsStep = failed.steps.find((step) => step.id === 'tests');
