@@ -949,6 +949,11 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
     }
+    if (step.skill === 'website.plan') {
+      const websitePlan = normalizeWebsitePlan(step.evidence.result?.websitePlan);
+      if (!plan.input?.businessBrief || step.evidence.businessBriefFingerprint !== plan.inputFingerprint) throw new Error('Completed website plan is not bound to the persisted business brief');
+      if (step.evidence.websitePlanFingerprint !== evidenceFingerprint(websitePlan)) throw new Error('Completed website plan fingerprint is invalid');
+    }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const persistedReview = validateReviewEvidence(step.evidence.result?.reviewEvidence);
@@ -1241,11 +1246,19 @@ export class WorkflowEngine {
     const reviewedChangeSetFingerprint = reviewedImplementation?.evidence?.changeSetFingerprint ?? null;
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
+    const skillContext = {
+      projectId: project.id,
+      priorEvidence,
+      ...(runningStep.skill === 'website.plan' ? {
+        businessBrief: safeJson(runningPlan.input.businessBrief),
+        businessBriefFingerprint: runningPlan.inputFingerprint
+      } : {})
+    };
     const execution = await this.skillExecutor.execute({
       skill: runningStep.skill,
       goal: runningPlan.goal,
       contract: skillResolution.contract,
-      context: { projectId: project.id, priorEvidence }
+      context: skillContext
     }, {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
@@ -1273,6 +1286,8 @@ export class WorkflowEngine {
         repositoryControlBeforeFingerprint: before.repositoryControl.fingerprint,
         repositoryControlAfterFingerprint: after?.repositoryControl?.fingerprint ?? null,
         reviewedChangeSetFingerprint,
+        websitePlanFingerprint: execution.ok && !integrityChanged && step.skill === 'website.plan' ? evidenceFingerprint(execution.result.websitePlan) : null,
+        businessBriefFingerprint: step.skill === 'website.plan' ? saved.inputFingerprint : null,
         error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
