@@ -135,3 +135,16 @@ test('dry run reports unavailable lifecycle capabilities without invoking the wo
   assert.equal(implementation.reason, 'skill_not_allowed');
   assert.ok(run.evaluation.reasons.some((reason) => reason.includes('code.implement:skill_not_allowed')));
 });
+
+
+test('pre-v0.7 runs without capability fingerprints fail closed instead of inheriting permissions', async () => {
+  const configured = project({
+    allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval', 'repository.observe', 'repository.publish', 'code.implement', 'release.observe-ci', 'release.publish-pr'],
+    deny: []
+  });
+  const orchestrator = new Orchestrator({ store: await store() });
+  const run = await orchestrator.create(configured, 'Legacy state');
+  delete run.registryFingerprint;
+  delete run.projectSkillPolicyFingerprint;
+  assert.throws(() => orchestrator.assertRunCapabilityContext(run, configured), /run_capability_context_missing/);
+});
