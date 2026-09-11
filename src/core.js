@@ -889,7 +889,7 @@ export class WorkflowEngine {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'read_only_workspace_integrity_failed';
-        step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -900,9 +900,7 @@ export class WorkflowEngine {
       step.attempts += 1;
       step.evidence = {
         type: 'executor-start',
-        skill: step.skill,
-        registryFingerprint: saved.registryFingerprint,
-        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        ...workflowEvidenceContext(saved, step),
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
@@ -940,9 +938,7 @@ export class WorkflowEngine {
         type: 'executor',
         ok: execution.ok === true && !integrityChanged,
         completedAt: execution.ok && !integrityChanged ? new Date().toISOString() : null,
-        skill: step.skill,
-        registryFingerprint: saved.registryFingerprint,
-        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        ...workflowEvidenceContext(saved, step),
         result: execution.ok && !integrityChanged ? execution.result : null,
         codexThreadId: execution.codexThreadId ?? null,
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
@@ -993,7 +989,7 @@ export class WorkflowEngine {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_implementation_workspace_integrity_failed';
-        step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -1003,7 +999,7 @@ export class WorkflowEngine {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.BLOCKED;
         step.error = 'workflow_workspace_not_clean_before_implementation';
-        step.evidence = { type: 'governance', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, changeSet: safeJson(before.changeSet) };
+        step.evidence = { type: 'governance', ok: false, ...workflowEvidenceContext(saved, step), changeSet: safeJson(before.changeSet) };
         saved.status = WorkflowStepStatus.BLOCKED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -1014,9 +1010,7 @@ export class WorkflowEngine {
       step.attempts += 1;
       step.evidence = {
         type: 'executor-start',
-        skill: step.skill,
-        registryFingerprint: saved.registryFingerprint,
-        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        ...workflowEvidenceContext(saved, step),
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
@@ -1065,9 +1059,7 @@ export class WorkflowEngine {
         type: 'executor',
         ok: false,
         completedAt: null,
-        skill: step.skill,
-        registryFingerprint: saved.registryFingerprint,
-        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        ...workflowEvidenceContext(saved, step),
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
@@ -1181,9 +1173,7 @@ export class WorkflowEngine {
       step.error = error;
       step.evidence = {
         type: 'verification-governance',
-        skill: step.skill,
-        registryFingerprint: saved.registryFingerprint,
-        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        ...workflowEvidenceContext(saved, step),
         phase,
         commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })),
         expectedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
@@ -1220,7 +1210,7 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      step.evidence = { skill: step.skill, registryFingerprint: plan.registryFingerprint, projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint, approvedAt: new Date(approvedAt).toISOString() };
+      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString() };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -1502,7 +1492,7 @@ export class WorkflowEngine {
       }
       plan = await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
-        step.evidence = { ...result.evidence, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint };
+        step.evidence = { ...result.evidence, ...workflowEvidenceContext(saved, step) };
         saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
         if (result.deadlineExceeded) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_budget_deadline_exceeded'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
         else if (result.outputBudgetExceeded || saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
