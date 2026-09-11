@@ -482,6 +482,171 @@ export class JsonStore {
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
+export const WorkflowStepStatus = Object.freeze({
+  PENDING: 'pending', READY: 'ready', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', BLOCKED: 'blocked', SKIPPED: 'skipped', AWAITING_APPROVAL: 'awaiting_approval'
+});
+
+const workflowStepTypes = new Set(['placeholder', 'command', 'verification', 'checkpoint']);
+const workflowProfiles = Object.freeze({
+  'website-build': {
+    definitionOfDone: [{ id: 'implementationCompleted', steps: ['implementation'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
+    steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
+  },
+  'app-improvement': {
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
+  },
+  'data-analysis': {
+    definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
+    steps: [['inspect-data', 'placeholder'], ['validate-data', 'verification'], ['analysis', 'placeholder'], ['findings', 'placeholder'], ['output', 'placeholder'], ['validation', 'verification']]
+  }
+});
+
+function workflowBudget(input = {}) {
+  return {
+    maxSteps: positiveInteger(input.maxSteps, 20, 'workflow.maxSteps'),
+    maxAttempts: positiveInteger(input.maxAttempts, 2, 'workflow.maxAttempts'),
+    timeoutMs: positiveInteger(input.timeoutMs, 300_000, 'workflow.timeoutMs', 1_000),
+    maxOutputBytes: positiveInteger(input.maxOutputBytes, 64_000, 'workflow.maxOutputBytes', 1_024)
+  };
+}
+
+function workflowCommands(project, type) {
+  const available = Object.keys(project.commands ?? {});
+  if (type === 'verification') return available.filter((name) => ['test', 'typecheck', 'lint', 'build'].includes(name));
+  return [];
+}
+
+export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), budgets } = {}) {
+  const template = workflowProfiles[profile];
+  if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
+  if (!project?.id) throw new Error('Workflow project is required');
+  if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
+  const budget = workflowBudget(budgets);
+  const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, type), evidence: null, error: null }));
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: Date.now() + budget.timeoutMs, result: null, validation: null, dryRun: false };
+  validateWorkflowPlan(plan, new Set([project.id]));
+  return plan;
+}
+
+export function validateWorkflowPlan(plan, knownProjects) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps) || !plan.steps.length) throw new Error('Workflow plan must contain steps');
+  if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
+  const budget = workflowBudget(plan.budgets);
+  if (plan.steps.length > budget.maxSteps) throw new Error('Workflow exceeds maxSteps budget');
+  const ids = new Set();
+  for (const step of plan.steps) {
+    if (!/^[a-z][a-z0-9-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('Workflow step ids must be unique');
+    if (!workflowStepTypes.has(step.type)) throw new Error(`Unknown workflow step type: ${step.type}`);
+    if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
+    ids.add(step.id);
+  }
+  for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
+  const visiting = new Set();
+  const visited = new Set();
+  const byId = new Map(plan.steps.map((step) => [step.id, step]));
+  const visit = (id) => {
+    if (visiting.has(id)) throw new Error('Workflow dependencies contain a cycle');
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of byId.get(id).dependsOn) visit(dependency);
+    visiting.delete(id); visited.add(id);
+  };
+  for (const id of ids) visit(id);
+  return { ok: true, stepCount: plan.steps.length, budgets: budget };
+}
+
+export function evaluateDefinitionOfDone(plan) {
+  const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED || step.status === WorkflowStepStatus.SKIPPED).map((step) => step.id));
+  const requirements = plan.definitionOfDone.map((requirement) => ({ id: requirement.id, ok: requirement.steps.every((step) => completed.has(step)) }));
+  return { ok: requirements.every((requirement) => requirement.ok), requirements };
+}
+
+export class WorkflowEngine {
+  constructor({ store, projects, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+    if (!store || !projects) throw new Error('WorkflowEngine requires store and projects');
+    Object.assign(this, { store, projects, commandRunner, now });
+  }
+
+  async create(input) {
+    const project = this.projects.get(input.projectId ?? input.project);
+    const plan = createWorkflowPlan({ ...input, project });
+    await this.store.mutate((data) => { data.workflows ??= {}; data.workflows[plan.id] = plan; });
+    return plan;
+  }
+
+  async get(id) { return (await this.store.load()).workflows?.[id]; }
+  async list() { return Object.values((await this.store.load()).workflows ?? {}); }
+
+  async update(id, mutator) {
+    return this.store.mutate((data) => {
+      const plan = data.workflows?.[id];
+      if (!plan) throw new Error('Workflow not found');
+      mutator(plan); plan.updatedAt = new Date().toISOString(); return plan;
+    });
+  }
+
+  readySteps(plan) {
+    const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED || step.status === WorkflowStepStatus.SKIPPED).map((step) => step.id));
+    return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
+  }
+
+  async approve(id, stepId) {
+    return this.update(id, (plan) => {
+      const step = plan.steps.find((candidate) => candidate.id === stepId);
+      if (!step || ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(step.status)) throw new Error('Workflow step is not awaiting approval');
+      step.status = step.type === 'checkpoint' ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
+      step.evidence = { approvedAt: new Date().toISOString() };
+      plan.status = WorkflowStepStatus.PENDING;
+    });
+  }
+
+  async resume(id, options = {}) {
+    await this.update(id, (plan) => {
+      for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'interrupted_step_requires_human_approval';
+      }
+      if (plan.status === WorkflowStepStatus.RUNNING) plan.status = WorkflowStepStatus.BLOCKED;
+    });
+    return this.run(id, options);
+  }
+
+  async run(id, { dryRun = false } = {}) {
+    let plan = await this.get(id);
+    if (!plan) throw new Error('Workflow not found');
+    const project = this.projects.get(plan.projectId);
+    validateWorkflowPlan(plan, new Set(this.projects.keys()));
+    if (dryRun) return { ...plan, dryRun: true, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
+    if (this.now() > plan.deadlineAt) return this.update(id, (saved) => { saved.status = WorkflowStepStatus.FAILED; saved.result = { error: 'workflow_budget_deadline_exceeded' }; });
+    while (true) {
+      plan = await this.get(id);
+      const next = this.readySteps(plan)[0];
+      if (!next) break;
+      if (next.type === 'checkpoint') return this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.AWAITING_APPROVAL; saved.status = WorkflowStepStatus.AWAITING_APPROVAL; });
+      await this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.RUNNING; step.attempts += 1; saved.status = WorkflowStepStatus.RUNNING; });
+      let result = { ok: true, evidence: { type: next.type, completedAt: new Date().toISOString() } };
+      if (next.type === 'command' || next.type === 'verification') {
+        const commands = next.commands.length ? next.commands : workflowCommands(project, next.type);
+        const outcomes = [];
+        for (const name of commands) outcomes.push(await this.commandRunner(project, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, plan.budgets.timeoutMs), stage: 'post-worker' }));
+        result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: outcomes.reduce((total, outcome) => total + Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? ''))), 0), evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(outcome.stdout, 1_000), stderr: clip(outcome.stderr, 1_000) })) } };
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = result.evidence;
+        saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
+        if (saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else if (result.ok) { step.status = WorkflowStepStatus.COMPLETED; step.error = null; saved.status = WorkflowStepStatus.PENDING; }
+        else if (step.attempts >= saved.budgets.maxAttempts) { step.status = WorkflowStepStatus.FAILED; step.error = 'step_attempt_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else { step.status = WorkflowStepStatus.READY; step.error = 'step_failed_retry_available'; saved.status = WorkflowStepStatus.PENDING; }
+      });
+      if (plan.status === WorkflowStepStatus.FAILED) return plan;
+    }
+    return this.update(id, (saved) => { saved.validation = evaluateDefinitionOfDone(saved); saved.status = saved.validation.ok ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.BLOCKED; saved.result = { definitionOfDone: saved.validation }; });
+  }
+}
+
 export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000 } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
