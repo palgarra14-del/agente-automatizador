@@ -56,6 +56,7 @@ const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|cr
 const packageManagerControlPathPattern = /(^|\/)(?:\.npmrc|\.pnpmfile\.cjs|pnpm-workspace\.yaml|\.yarnrc(?:\.yml)?)(?:$|\/)/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
 const dependencyControlPaths = Object.freeze(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json']);
+const dependencyControlPathPattern = /(^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|npm-shrinkwrap\.json)$/i;
 const defaultSensitivePathRoots = [...dependencyControlPaths, '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 const protectedIgnoredPathspecs = Object.freeze([
   '.env', '.env.*', '*.pem', '*.key', '.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', '.yarnrc', '.yarnrc.yml',
@@ -129,7 +130,7 @@ export function normalizeRunScope(scope = {}) {
 }
 
 function dependencyChangedPaths(changeSet = {}) {
-  return [...new Set((changeSet.paths ?? []).map((path) => String(path).replaceAll('\\', '/')).filter((path) => dependencyControlPaths.includes(path)))].sort();
+  return [...new Set((changeSet.paths ?? []).map((path) => String(path).replaceAll('\\', '/')).filter((path) => dependencyControlPathPattern.test(path)))].sort();
 }
 
 function expectedDependencyRefreshCommand(toolchain) {
@@ -181,7 +182,7 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
   ) {
     return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, changedBytes, maxFileBytes, budgets: policy.budgets, changeSetFingerprint };
   }
-  const sensitivePath = paths.find((path) => pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
+  const sensitivePath = paths.find((path) => dependencyControlPathPattern.test(path) || pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
   const sensitive = Boolean(sensitivePath || changeSet.sensitiveContent);
   return { ok: true, classification: sensitive ? 'sensitive' : 'normal', reason: sensitive ? `sensitive_change:${sensitivePath ?? 'security_or_auth_content'}` : 'normal_change', paths, changedFiles, diffLines, budgets: policy.budgets, scope: normalizedScope, changeSetFingerprint };
 }
