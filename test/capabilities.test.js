@@ -68,8 +68,8 @@ test('capability resolution distinguishes policy, binding, and execution surface
 
   const inspectWorkflow = defaultToolSkillRegistry.resolve(project, 'code.inspect', { surface: 'workflow' });
   assert.equal(inspectWorkflow.allowed, true);
-  assert.equal(inspectWorkflow.available, false);
-  assert.equal(inspectWorkflow.reason, 'skill_not_bound_to_surface');
+  assert.equal(inspectWorkflow.available, true);
+  assert.equal(inspectWorkflow.reason, null);
 
   const inspectOrchestrator = defaultToolSkillRegistry.resolve(project, 'code.inspect', { surface: 'orchestrator' });
   assert.equal(inspectOrchestrator.available, false);
@@ -221,7 +221,7 @@ test('custom registry can validate project configuration and workflow execution 
 });
 
 
-test('default project policy does not pre-authorize future capabilities', () => {
+test('default project policy does not pre-authorize optional or future capabilities', () => {
   const configured = configFrom({
     id: 'least-privilege-default',
     repository: { owner: 'owner', name: 'repo' },
@@ -231,7 +231,7 @@ test('default project policy does not pre-authorize future capabilities', () => 
     commands: { test: 'node --version' },
     execution: { provider: 'local-sanitized' }
   });
-  for (const skillId of ['research.web', 'visual.review', 'code.inspect', 'requirements.define', 'data.inspect', 'data.analyze', 'data.summarize']) {
+  for (const skillId of ['research.web', 'visual.review', 'code.inspect', 'code.diagnose', 'requirements.define', 'data.inspect', 'data.analyze', 'data.summarize']) {
     const resolution = defaultToolSkillRegistry.resolve(configured, skillId, { surface: 'orchestrator' });
     assert.equal(resolution.allowed, false, skillId);
     assert.equal(resolution.available, false, skillId);
