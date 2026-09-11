@@ -215,24 +215,40 @@ function validateModelUsageState(state, expectedMaxCalls, label = 'modelUsage') 
   if (!Number.isInteger(state.maxCalls) || state.maxCalls < 1 || state.maxCalls !== expectedMaxCalls) throw new Error(`${label}.maxCalls does not match the active project budget`);
   for (const key of ['calls', 'inputTokens', 'outputTokens', 'totalTokens', 'unknownUsageCalls']) if (!Number.isInteger(state[key]) || state[key] < 0) throw new Error(`${label}.${key} must be a non-negative integer`);
   if (state.calls > state.maxCalls) throw new Error(`${label}.calls exceeds maxCalls`);
-  if (state.totalTokens !== state.inputTokens + state.outputTokens) throw new Error(`${label}.totalTokens is inconsistent`);
-  if (state.unknownUsageCalls > state.calls) throw new Error(`${label}.unknownUsageCalls exceeds calls`);
   if (!Array.isArray(state.entries) || state.entries.length !== state.calls) throw new Error(`${label}.entries must match reserved calls`);
   const ids = new Set();
+  let expectedInputTokens = 0;
+  let expectedOutputTokens = 0;
+  let expectedUnknownUsageCalls = 0;
   for (const [index, entry] of state.entries.entries()) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${label}.entries[${index}] is invalid`);
     if (entry.id !== `model-call-${index + 1}` || ids.has(entry.id)) throw new Error(`${label}.entries contain invalid ids`);
     ids.add(entry.id);
     if (!['started', 'completed', 'failed'].includes(entry.status)) throw new Error(`${label}.entries[${index}].status is invalid`);
-    if (typeof entry.surface !== 'string' || !entry.surface) throw new Error(`${label}.entries[${index}].surface is invalid`);
+    if (!['workflow', 'orchestrator'].includes(entry.surface)) throw new Error(`${label}.entries[${index}].surface is invalid`);
     if (typeof entry.skill !== 'string' || !entry.skill) throw new Error(`${label}.entries[${index}].skill is invalid`);
+    if (entry.stepId !== null && entry.stepId !== undefined && (typeof entry.stepId !== 'string' || !entry.stepId)) throw new Error(`${label}.entries[${index}].stepId is invalid`);
+    if (entry.specialist !== null && entry.specialist !== undefined && (typeof entry.specialist !== 'string' || !entry.specialist)) throw new Error(`${label}.entries[${index}].specialist is invalid`);
+    if (entry.attempt !== null && entry.attempt !== undefined && (!Number.isInteger(entry.attempt) || entry.attempt < 1)) throw new Error(`${label}.entries[${index}].attempt is invalid`);
     if (!Number.isFinite(Date.parse(entry.startedAt ?? ''))) throw new Error(`${label}.entries[${index}].startedAt is invalid`);
-    if (entry.completedAt !== null && entry.completedAt !== undefined && !Number.isFinite(Date.parse(entry.completedAt))) throw new Error(`${label}.entries[${index}].completedAt is invalid`);
-    if (entry.usage !== null && entry.usage !== undefined) {
-      const normalized = normalizeReportedModelUsage(entry.usage);
-      if (!normalized.reported || normalized.inputTokens !== entry.usage.inputTokens || normalized.outputTokens !== entry.usage.outputTokens || normalized.totalTokens !== entry.usage.totalTokens) throw new Error(`${label}.entries[${index}].usage is invalid`);
+    if (entry.status === 'started') {
+      if (entry.completedAt !== null || entry.usage !== null) throw new Error(`${label}.entries[${index}] started state is inconsistent`);
+      continue;
     }
+    if (!Number.isFinite(Date.parse(entry.completedAt ?? ''))) throw new Error(`${label}.entries[${index}].completedAt is invalid`);
+    if (Date.parse(entry.completedAt) < Date.parse(entry.startedAt)) throw new Error(`${label}.entries[${index}] completion precedes start`);
+    if (entry.usage === null || entry.usage === undefined) {
+      expectedUnknownUsageCalls += 1;
+      continue;
+    }
+    const normalized = normalizeReportedModelUsage(entry.usage);
+    if (!normalized.reported || normalized.inputTokens !== entry.usage.inputTokens || normalized.outputTokens !== entry.usage.outputTokens || normalized.totalTokens !== entry.usage.totalTokens) throw new Error(`${label}.entries[${index}].usage is invalid`);
+    expectedInputTokens += normalized.inputTokens;
+    expectedOutputTokens += normalized.outputTokens;
   }
+  if (state.inputTokens !== expectedInputTokens || state.outputTokens !== expectedOutputTokens) throw new Error(`${label} token totals do not match entries`);
+  if (state.totalTokens !== expectedInputTokens + expectedOutputTokens) throw new Error(`${label}.totalTokens does not match entries`);
+  if (state.unknownUsageCalls !== expectedUnknownUsageCalls) throw new Error(`${label}.unknownUsageCalls does not match entries`);
   return true;
 }
 
