@@ -1709,8 +1709,19 @@ export function formatDoctor(result) {
 }
 
 export class Orchestrator {
-  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
-    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
+  constructor({ store, registry = defaultToolSkillRegistry, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
+    Object.assign(this, { store, registry, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
+  }
+
+  requireSkill(project, skillId) {
+    const resolution = this.registry.resolve(project, skillId, { surface: 'orchestrator' });
+    if (!resolution.available) throw new Error(`capability_unavailable:${skillId}:${resolution.reason}`);
+    return resolution;
+  }
+
+  assertRunCapabilityContext(run, project) {
+    if (run.registryFingerprint !== this.registry.fingerprint) throw new Error('run_capability_registry_changed');
+    if (run.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {})) throw new Error('run_project_skill_policy_changed');
   }
 
   async event(runId, component, event, details = {}) {
@@ -1724,7 +1735,7 @@ export class Orchestrator {
   async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -1740,6 +1751,7 @@ export class Orchestrator {
 
   async requireApproval(run, action, reason, payload, project) {
     const verdict = policy(action, project);
+    if (verdict === 'APPROVAL_REQUIRED') this.requireSkill(project, 'human.approval');
     if (verdict === 'FORBIDDEN') throw new Error(`Forbidden action: ${action}`);
     if (verdict === 'SAFE') return null;
     const id = createHash('sha256').update(`${run.id}:${action}:${JSON.stringify(payload)}`).digest('hex').slice(0, 16);
@@ -1786,6 +1798,7 @@ export class Orchestrator {
   }
 
   async initializeWorkspace(run, project) {
+    this.requireSkill(project, 'repository.observe');
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
     if (repository.repository?.toLowerCase() !== `${project.repository.owner}/${project.repository.name}`.toLowerCase()) throw new Error('Configured repository differs from GitHub');
@@ -1807,6 +1820,7 @@ export class Orchestrator {
   }
 
   async bootstrap(run, project) {
+    this.requireSkill(project, 'project.bootstrap');
     const beforeBootstrap = await this.localGit.inspectChangeSet(project);
     const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())), stage: 'bootstrap' });
     const afterBootstrap = result.ok ? await this.localGit.inspectChangeSet(project) : null;
@@ -1916,6 +1930,7 @@ export class Orchestrator {
   }
 
   async validateAndPublish(run, project, { approvedFingerprint } = {}) {
+    this.requireSkill(project, 'project.verify');
     run = await this.updateRun(run.id, (saved) => {
       if (saved.status !== RunStatus.TESTING) transition(saved, RunStatus.TESTING);
     });
@@ -1944,6 +1959,7 @@ export class Orchestrator {
       return this.fail(run.id, 'committed_change_set_does_not_match_governed_change_set');
     }
     run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
+    this.requireSkill(project, 'repository.publish');
     const push = await this.localGit.push(project, run.workingBranch, { expectedHead: run.finalHead, expectedRemote: run.results.branch.remote });
     run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
     if (!run.pullRequestNumber) {
@@ -1958,6 +1974,7 @@ export class Orchestrator {
 
   async executeAttempt(run, project) {
     this.assertDeadline(run);
+    this.requireSkill(project, 'code.implement');
     if (run.workerAttempts > 0) {
       run = await this.updateRun(run.id, (saved) => {
         for (const name of configuredChecks(project)) delete saved.results[name];
@@ -1985,6 +2002,7 @@ export class Orchestrator {
   }
 
   async createPullRequest(run, project) {
+    this.requireSkill(project, 'release.publish-pr');
     const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
     const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(run.goal, 90));
     const pullRequest = await this.github.createPullRequest(project, {
@@ -1998,6 +2016,7 @@ export class Orchestrator {
   }
 
   async pollCi(run, project) {
+    this.requireSkill(project, 'release.observe-ci');
     run = await this.store.getRun(run.id);
     if (run.status !== RunStatus.WAITING_CI) return run;
     const ci = await this.github.waitForCi(project, run.finalHead, { timeoutMs: project.budgets.ciTimeoutMs, pollIntervalMs: project.budgets.ciPollIntervalMs });
@@ -2009,6 +2028,7 @@ export class Orchestrator {
   }
 
   async observeDeployment(run, project) {
+    if (project.deployment.provider === 'vercel') this.requireSkill(project, 'release.observe-preview');
     const deployment = await this.deploymentProvider.waitForPreview(project, { commitSha: run.finalHead, branch: run.workingBranch }, {
       timeoutMs: project.budgets.deploymentTimeoutMs,
       pollIntervalMs: project.budgets.deploymentPollIntervalMs
@@ -2024,6 +2044,7 @@ export class Orchestrator {
 
   async continueRun(run, project) {
     try {
+      this.assertRunCapabilityContext(run, project);
       this.assertDeadline(run);
       if (run.workspace) project = projectAtWorkspace(project, run.workspace);
       if (run.status === RunStatus.WAITING_APPROVAL) {
