@@ -1450,7 +1450,7 @@ export class WorkflowEngine {
           patch: { expectedBaseHead: plan.workspace.baseHead, observedBase: safeJson(base) }
         });
       }
-      plan = await this.update(id, (saved) => {
+      await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.RUNNING;
         step.attempts += 1;
@@ -1755,7 +1755,7 @@ export class WorkflowEngine {
         ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout', 'workflow_publication_preview_not_configured'].includes(step.error)
       );
       if (resumablePublication) {
-        plan = await this.update(id, (saved) => {
+        await this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === resumablePublication.id);
           if (Number.isFinite(saved.pausedAt)) saved.deadlineAt += Math.max(0, this.now() - saved.pausedAt);
           saved.pausedAt = null;
