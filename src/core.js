@@ -986,7 +986,16 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
   }
   if (step.type === 'checkpoint') {
     if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
-    if (plan.profile === 'app-improvement' && step.id === 'release-readiness') {
+    if (plan.profile === 'website-build' && step.id === 'design') {
+      const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+      if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint || step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('Completed website design approval is not bound to the website plan');
+    }
+    if (plan.profile === 'website-build' && step.id === 'visual-verification') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed visual verification is not bound to the reviewed implementation');
+    }
+    if (step.id === 'release-readiness' && plan.steps.some((candidate) => candidate.id === 'publication')) {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const review = plan.steps.find((candidate) => candidate.id === 'review');
       if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
@@ -1860,15 +1869,29 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      const releaseBinding = checkpointApproval && plan.profile === 'app-improvement' && step.id === 'release-readiness'
+      const checkpointBinding = checkpointApproval
         ? (() => {
-            const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
-            const review = plan.steps.find((candidate) => candidate.id === 'review');
-            if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
-            return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
+            if (plan.profile === 'website-build' && step.id === 'design') {
+              const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+              if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint) throw new Error('Website design cannot approve an unbound website plan');
+              return { approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint };
+            }
+            if (plan.profile === 'website-build' && step.id === 'visual-verification') {
+              const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+              const review = plan.steps.find((candidate) => candidate.id === 'review');
+              if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Visual verification cannot approve an unbound implementation');
+              return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint };
+            }
+            if (step.id === 'release-readiness' && plan.steps.some((candidate) => candidate.id === 'publication')) {
+              const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+              const review = plan.steps.find((candidate) => candidate.id === 'review');
+              if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
+              return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
+            }
+            return {};
           })()
         : {};
-      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString(), ...releaseBinding };
+      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString(), ...checkpointBinding };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
