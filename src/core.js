@@ -1083,23 +1083,73 @@ export class WorkflowEngine {
   async resume(id, options = {}) {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
       const pausedAt = this.now();
-      await this.update(id, (plan) => {
-      validateWorkflowPlan(plan, this.projects, this.registry);
-      let interrupted = false;
-      for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
-        step.status = WorkflowStepStatus.BLOCKED;
-        step.error = 'interrupted_step_requires_human_approval';
-        interrupted = true;
-      }
-      if (plan.bootstrap?.status === 'running') {
-        plan.bootstrap.status = 'pending';
-        plan.bootstrap.error = 'interrupted_bootstrap_requires_retry';
-      }
-      if (interrupted || plan.status === WorkflowStepStatus.RUNNING) {
-        plan.status = WorkflowStepStatus.BLOCKED;
-        plan.pausedAt ??= pausedAt;
-      }
+      let plan = await this.update(id, (saved) => {
+        validateWorkflowPlan(saved, this.projects, this.registry);
+        let interrupted = false;
+        for (const step of saved.steps) if (step.status === WorkflowStepStatus.RUNNING) {
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'interrupted_step_requires_human_approval';
+          interrupted = true;
+        }
+        if (saved.bootstrap?.status === 'running') {
+          saved.bootstrap.status = 'pending';
+          saved.bootstrap.error = 'interrupted_bootstrap_requires_retry';
+        }
+        if (interrupted || saved.status === WorkflowStepStatus.RUNNING) {
+          saved.status = WorkflowStepStatus.BLOCKED;
+          saved.pausedAt ??= pausedAt;
+        }
       });
+      const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.implement'].includes(interruptedStep.skill)) {
+        const project = this.projects.get(plan.projectId);
+        const expected = interruptedStep.evidence?.repositoryState;
+        if (!plan.workspace || !expected) {
+          plan = await this.update(id, (saved) => {
+            const step = saved.steps.find((item) => item.id === interruptedStep.id);
+            step.error = 'interrupted_execution_workspace_state_missing';
+            step.evidence = { ...step.evidence, type: 'interrupted-execution', ok: false };
+            saved.pausedAt = null;
+            saved.result = { error: step.error, stepId: step.id };
+          });
+          return plan;
+        }
+        const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
+        let current = null;
+        let changeSet = null;
+        let integrityError = null;
+        try {
+          current = await this.localGit.inspect(workspaceProject);
+          changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+        } catch (error) {
+          integrityError = error;
+        }
+        const repositoryChanged = integrityError ||
+          !current ||
+          current.currentBranch !== expected.branch ||
+          current.initialHead !== expected.head ||
+          current.remote !== expected.remote;
+        const filesChanged = Boolean(changeSet?.paths?.length);
+        if (repositoryChanged || filesChanged) {
+          plan = await this.update(id, (saved) => {
+            const step = saved.steps.find((item) => item.id === interruptedStep.id);
+            const readOnly = step.skill === 'code.inspect' || step.skill === 'code.diagnose';
+            step.error = readOnly ? 'interrupted_read_only_changes_detected' : 'interrupted_implementation_changes_detected';
+            step.evidence = {
+              ...step.evidence,
+              type: 'interrupted-execution',
+              ok: false,
+              observedRepositoryState: current ? { branch: current.currentBranch, head: current.initialHead, remote: current.remote } : null,
+              changeSet: changeSet ? safeJson(changeSet) : null,
+              changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
+              error: integrityError ? clip(integrityError.message, 1_000) : null
+            };
+            saved.pausedAt = null;
+            saved.status = WorkflowStepStatus.BLOCKED;
+            saved.result = { error: step.error, stepId: step.id };
+          });
+        }
+      }
       return this.runUnlocked(id, options);
     });
   }
