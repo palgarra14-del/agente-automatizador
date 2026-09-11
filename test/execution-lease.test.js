@@ -189,3 +189,34 @@ test('lost execution lease is reported instead of silently succeeding', async ()
     /run_execution_lease_lost/
   );
 });
+
+
+test('lease loss outranks an operation error because exclusivity can no longer be proven', async () => {
+  const store = await temporaryStore();
+  await store.mutate((data) => { data.runs.one = { id: 'one', executionLease: null }; });
+  await assert.rejects(
+    store.withExecutionLease('runs', 'one', 'run', async () => {
+      await store.mutate((data) => {
+        data.runs.one.executionLease = { leaseId: 'replacement', kind: 'run', pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: null };
+      });
+      throw new Error('inner_operation_failed');
+    }),
+    (error) => {
+      assert.equal(error.message, 'run_execution_lease_lost');
+      assert.equal(error.cause?.message, 'inner_operation_failed');
+      return true;
+    }
+  );
+});
+
+test('execution lease validation rejects malformed metadata even when pid and kind look plausible', async () => {
+  const store = await temporaryStore();
+  for (const executionLease of [
+    { leaseId: '', kind: 'run', pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: null },
+    { leaseId: 'fixture', kind: 'run', pid: process.pid, createdAt: 'not-a-date', ownerIdentity: null },
+    { leaseId: 'fixture', kind: 'run', pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: '' }
+  ]) {
+    await store.mutate((data) => { data.runs.one = { id: 'one', executionLease }; });
+    await assert.rejects(store.claimExecutionLease('runs', 'one', 'run'), /run_execution_lease_invalid/);
+  }
+});
