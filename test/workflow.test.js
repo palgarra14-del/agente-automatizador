@@ -1049,8 +1049,7 @@ test('verification command that mutates governed implementation diff fails close
   const localGit = stableLocalGit({
     async inspectChangeSet() {
       changeCalls += 1;
-      if (changeCalls <= 2) return governed;
-      return mutated;
+      return changeCalls === 1 ? governed : mutated;
     }
   });
   let commandCalls = 0;
