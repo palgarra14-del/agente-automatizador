@@ -110,7 +110,7 @@ export const defaultSpecialists = Object.freeze([
   { id: 'human-supervisor', mode: 'human', skills: ['human.approval'], authority: 'human-approval', executor: 'WorkflowApproval', description: 'Provides explicit human checkpoints.' },
   { id: 'researcher', mode: 'reserved', skills: ['research.web'], authority: 'unavailable', executor: null, description: 'Reserved for future reviewed web research.' },
   { id: 'business-analyst', mode: 'reserved', skills: ['business.analyze'], authority: 'unavailable', executor: null, description: 'Reserved for future business analysis.' },
-  { id: 'requirements-engineer', mode: 'reserved', skills: ['requirements.define'], authority: 'unavailable', executor: null, description: 'Reserved for future requirements definition.' },
+  { id: 'requirements-engineer', mode: 'read-only', skills: ['website.plan'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor', description: 'Produces a structured website plan from a validated business brief and read-only project context.' },
   { id: 'data-inspector', mode: 'reserved', skills: ['data.inspect'], authority: 'unavailable', executor: null, description: 'Reserved for future data inspection.' },
   { id: 'data-analyst', mode: 'reserved', skills: ['data.analyze'], authority: 'unavailable', executor: null, description: 'Reserved for future data analysis.' },
   { id: 'data-reporter', mode: 'reserved', skills: ['data.summarize'], authority: 'unavailable', executor: null, description: 'Reserved for future data reporting.' }
