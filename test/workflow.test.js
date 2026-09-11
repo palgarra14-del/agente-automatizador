@@ -42,10 +42,10 @@ function stableLocalGit(overrides = {}) {
   };
 }
 
-async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, now } = {}) {
+async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function completeStep(plan, id) {
@@ -72,10 +72,10 @@ function completeStep(plan, id) {
   return step;
 }
 
-function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills } = {}) {
+function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills, acceptance = { require: ['test'] }, deployment = { provider: 'none' }, pullRequest } = {}) {
   return configFrom({
     id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
-    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets, skills
+    commands, acceptance, deployment, pullRequest, execution: { provider: 'local-sanitized' }, budgets, skills
   }, join(root, id, 'config'));
 }
 
@@ -91,6 +91,44 @@ class FakeWorkflowWorkspaceManager {
     return { ...allocation, remoteUrl: `https://github.com/${project.repository.owner}/${project.repository.name}.git` };
   }
 }
+
+class FakeWorkflowPublicationBridge {
+  constructor({ baseHead = 'a'.repeat(40), commitHead = 'b'.repeat(40), changeSet, ci = { state: 'success', checks: [], durationMs: 1 }, preview = { provider: 'none', state: 'NOT_REQUIRED', ok: true, durationMs: 0 }, failAt = null, onCommit = null } = {}) {
+    Object.assign(this, { baseHead, commitHead, changeSet, ci, preview, failAt, onCommit, calls: [] });
+  }
+  fail(name) { if (this.failAt === name) throw new Error(`fixture_${name}_failure`); }
+  async inspectBase(project) {
+    this.calls.push('inspectBase'); this.fail('inspectBase');
+    return { provider: 'github', status: 'ok', repository: `${project.repository.owner}/${project.repository.name}`, defaultBranch: project.defaultBranch, head: this.baseHead };
+  }
+  async commit(_project, context) {
+    this.calls.push('commit'); this.fail('commit');
+    this.onCommit?.(this.commitHead);
+    return { message: 'agent: fixture', finalHead: this.commitHead, committedPaths: [...this.changeSet.paths], committedChangeSetFingerprint: context.changeSetFingerprint };
+  }
+  async push(_project, context) {
+    this.calls.push('push'); this.fail('push');
+    return { branch: context.branch, finalHead: context.commitHead };
+  }
+  async verifyRemoteBranch(_project, branch, expectedHead) {
+    this.calls.push('verifyRemoteBranch'); this.fail('verifyRemoteBranch');
+    return { branch, head: expectedHead, ok: true };
+  }
+  async createPullRequest(_project, context) {
+    this.calls.push('createPullRequest'); this.fail('createPullRequest');
+    return { number: 42, url: 'https://github.com/owner/repo/pull/42', state: 'open', branch: context.branch };
+  }
+  async verifyPullRequest(project, number, context) {
+    this.calls.push('verifyPullRequest'); this.fail('verifyPullRequest');
+    return { number, url: 'https://github.com/owner/repo/pull/42', state: 'open', headSha: context.commitHead, headRef: context.branch, baseRef: project.defaultBranch, ok: true };
+  }
+  async waitForCi() { this.calls.push('waitForCi'); this.fail('waitForCi'); return this.ci; }
+  async waitForPreview(_project, context) {
+    this.calls.push('waitForPreview'); this.fail('waitForPreview');
+    return this.preview.provider === 'none' ? this.preview : { ...this.preview, commitSha: context.commitSha, branch: context.branch };
+  }
+}
+
 
 test('workflow profiles create validated deterministic plans', () => {
   for (const profile of ['website-build', 'app-improvement', 'data-analysis']) {
