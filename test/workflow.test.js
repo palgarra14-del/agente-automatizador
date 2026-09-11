@@ -21,9 +21,14 @@ function completeStep(plan, id) {
   step.status = WorkflowStepStatus.COMPLETED;
   step.error = null;
   const completedAt = '2026-09-11T00:00:00.000Z';
-  if (step.type === 'placeholder') step.evidence = { type: 'executor', ok: true, completedAt };
-  else if (step.type === 'checkpoint') step.evidence = { approvedAt: completedAt };
-  else step.evidence = { commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
+  const capability = {
+    skill: step.skill,
+    registryFingerprint: plan.registryFingerprint,
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
+  };
+  if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
+  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
+  else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
 }
 
@@ -598,4 +603,17 @@ test('managed workflow denies bootstrap before clone when install capability is 
   assert.equal(blocked.result.error, 'skill_not_allowed');
   assert.equal(blocked.result.skill, 'project.bootstrap');
   assert.equal(manager.prepared.length, 0);
+});
+
+
+test('completed workflow evidence cannot be replayed under a different skill or capability fingerprint', () => {
+  const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Bind evidence context' });
+  const step = completeStep(plan, 'inspect-data');
+  step.evidence.skill = 'project.verify';
+  assert.throws(() => validateWorkflowPlan(plan, new Map([['workflow-project', project()]])), /capability context/);
+
+  const fingerprintPlan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Bind evidence fingerprint' });
+  const fingerprintStep = completeStep(fingerprintPlan, 'inspect-data');
+  fingerprintStep.evidence.registryFingerprint = '0'.repeat(64);
+  assert.throws(() => validateWorkflowPlan(fingerprintPlan, new Map([['workflow-project', project()]])), /capability context/);
 });
