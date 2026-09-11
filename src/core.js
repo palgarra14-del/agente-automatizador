@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
+import { defaultSpecialistRegistry } from './specialists.js';
 
 export const RunStatus = Object.freeze({
   CREATED: 'created',
@@ -621,10 +622,57 @@ const workflowStepSkills = Object.freeze({
   })
 });
 
+const workflowStepSpecialists = Object.freeze({
+  'website-build': Object.freeze({
+    research: 'researcher',
+    'business-analysis': 'business-analyst',
+    requirements: 'requirements-engineer',
+    design: 'human-supervisor',
+    implementation: 'implementer',
+    quality: 'verifier',
+    'visual-verification': 'human-supervisor',
+    'release-readiness': 'verifier'
+  }),
+  'app-improvement': Object.freeze({
+    'inspect-project': 'code-inspector',
+    diagnose: 'diagnostician',
+    'plan-change': 'human-supervisor',
+    implementation: 'implementer',
+    tests: 'verifier',
+    verification: 'verifier',
+    'release-readiness': 'human-supervisor'
+  }),
+  'data-analysis': Object.freeze({
+    'inspect-data': 'data-inspector',
+    'validate-data': 'verifier',
+    analysis: 'data-analyst',
+    findings: 'data-analyst',
+    output: 'data-reporter',
+    validation: 'verifier'
+  })
+});
+
 function workflowSkill(profile, stepId) {
   const skill = workflowStepSkills[profile]?.[stepId];
   if (!skill) throw new Error(`Workflow step has no registered skill: ${profile}/${stepId}`);
   return skill;
+}
+
+function workflowSpecialist(profile, stepId, specialistRegistry = defaultSpecialistRegistry) {
+  const specialistId = workflowStepSpecialists[profile]?.[stepId];
+  if (!specialistId) throw new Error(`Workflow step has no registered specialist: ${profile}/${stepId}`);
+  specialistRegistry.validateAssignment(specialistId, workflowSkill(profile, stepId));
+  return specialistId;
+}
+
+function workflowEvidenceContext(plan, step) {
+  return {
+    skill: step.skill,
+    specialist: step.specialist,
+    registryFingerprint: plan.registryFingerprint,
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint
+  };
 }
 
 function workflowBootstrap(project) {
@@ -632,23 +680,23 @@ function workflowBootstrap(project) {
   return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
 }
 
-export function createWorkflowPlan({ profile, project, goal, scope = {}, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry } = {}) {
+export function createWorkflowPlan({ profile, project, goal, scope = {}, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry } = {}) {
   const template = workflowProfiles[profile];
   if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
   if (!project?.id) throw new Error('Workflow project is required');
   if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
   const budget = workflowBudget(budgets);
-  const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
+  const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), specialist: workflowSpecialist(profile, id, specialistRegistry), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
-  validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  validateWorkflowPlan(plan, new Map([[project.id, project]]), registry, specialistRegistry);
   return plan;
 }
 
 function validateCompletedWorkflowEvidence(plan, step) {
   if (step.status !== WorkflowStepStatus.COMPLETED) return;
   if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
-  if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint) {
+  if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.specialist !== step.specialist || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint || step.evidence.specialistRegistryFingerprint !== plan.specialistRegistryFingerprint) {
     throw new Error(`Completed workflow step evidence does not match its capability context: ${step.id}`);
   }
   if (step.type === 'placeholder') {
@@ -673,10 +721,11 @@ function validateCompletedWorkflowEvidence(plan, step) {
   }
 }
 
-export function validateWorkflowPlan(plan, knownProjects, registry = defaultToolSkillRegistry) {
+export function validateWorkflowPlan(plan, knownProjects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps) || !plan.steps.length) throw new Error('Workflow plan must contain steps');
   if (!workflowProfiles[plan.profile]) throw new Error('Workflow references an unknown profile');
   if (plan.registryFingerprint !== registry.fingerprint) throw new Error('Workflow capability registry fingerprint does not match the active registry');
+  if (plan.specialistRegistryFingerprint !== specialistRegistry.fingerprint) throw new Error('Workflow specialist registry fingerprint does not match the active registry');
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
@@ -695,6 +744,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
     if (!/^[a-z][a-z0-9-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('Workflow step ids must be unique');
     if (!workflowStepTypes.has(step.type)) throw new Error(`Unknown workflow step type: ${step.type}`);
     if (step.skill !== workflowSkill(plan.profile, step.id) || !registry.getSkill(step.skill)) throw new Error(`Workflow step skill does not match the active registry: ${step.id}`);
+    if (step.specialist !== workflowSpecialist(plan.profile, step.id, specialistRegistry)) throw new Error(`Workflow step specialist does not match the active registry: ${step.id}`);
     if (!Object.values(WorkflowStepStatus).includes(step.status)) throw new Error(`Workflow step has an invalid status: ${step.id}`);
     if (!Number.isInteger(step.attempts) || step.attempts < 0 || step.attempts > budget.maxAttempts) throw new Error(`Workflow step attempts exceed the configured budget: ${step.id}`);
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
@@ -749,14 +799,14 @@ export function evaluateDefinitionOfDone(plan) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
-    if (!store || !projects || !registry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, localGit, skillExecutor, and codingWorker');
-    Object.assign(this, { store, projects, registry, workspaceManager, localGit, skillExecutor, codingWorker, commandRunner, now });
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+    if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
+    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, commandRunner, now });
   }
 
   async create(input) {
     const project = this.projects.get(input.projectId ?? input.project);
-    const plan = createWorkflowPlan({ ...input, project, registry: this.registry, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
+    const plan = createWorkflowPlan({ ...input, project, registry: this.registry, specialistRegistry: this.specialistRegistry, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
     await this.store.mutate((data) => { data.workflows ??= {}; data.workflows[plan.id] = plan; });
     return plan;
   }
@@ -1158,7 +1208,7 @@ export class WorkflowEngine {
   async approveUnlocked(id, stepId) {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
-      validateWorkflowPlan(plan, this.projects, this.registry);
+      validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
       const project = this.projects.get(plan.projectId);
       const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
       if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
@@ -1179,7 +1229,7 @@ export class WorkflowEngine {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
-        validateWorkflowPlan(saved, this.projects, this.registry);
+        validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
         let interrupted = false;
         for (const step of saved.steps) if (step.status === WorkflowStepStatus.RUNNING) {
           step.status = WorkflowStepStatus.BLOCKED;
@@ -1362,13 +1412,13 @@ export class WorkflowEngine {
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
-    validateWorkflowPlan(plan, this.projects, this.registry);
+    validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
     if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, skill: step.skill, capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }), commands: step.commands })) };
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
       plan = await this.get(id);
-      validateWorkflowPlan(plan, this.projects, this.registry);
+      validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
