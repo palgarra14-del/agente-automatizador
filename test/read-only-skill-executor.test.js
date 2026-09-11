@@ -100,6 +100,46 @@ test('read-only skill executor fails closed on malformed or contract-mismatched 
   assert.ok(malformed.outputBytes > 0);
 });
 
+test('change critic output is structurally validated and prompt defines PASS/FAIL semantics', async () => {
+  let response = JSON.stringify({ reviewEvidence: { verdict: 'PASS', summary: 'No material issue found.', findings: [] } });
+  let capturedPrompt = '';
+  class FakeCodex {
+    startThread() {
+      return {
+        id: 'critic-thread',
+        run: async (prompt) => {
+          capturedPrompt = prompt;
+          return { finalResponse: response, usage: {} };
+        }
+      };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const contract = defaultToolSkillRegistry.getSkill('code.review').contract;
+  const passed = await executor.execute({
+    skill: 'code.review',
+    goal: 'Review governed change',
+    contract,
+    context: { priorEvidence: { implementation: { changeSetFingerprint: 'a'.repeat(64) } } }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+
+  assert.equal(passed.ok, true);
+  assert.equal(passed.result.reviewEvidence.verdict, 'PASS');
+  assert.match(capturedPrompt, /PASS/);
+  assert.match(capturedPrompt, /FAIL/);
+  assert.match(capturedPrompt, /material correctness, security, scope, integrity, or regression concern/);
+
+  response = JSON.stringify({ reviewEvidence: { verdict: 'APPROVE', summary: 'invalid verdict', findings: [] } });
+  const invalidVerdict = await executor.execute({ skill: 'code.review', goal: 'review', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(invalidVerdict.ok, false);
+  assert.match(invalidVerdict.error, /review_evidence_verdict_invalid/);
+
+  response = JSON.stringify({ reviewEvidence: { verdict: 'PASS', summary: 'contradictory pass', findings: [{ severity: 'high', message: 'blocking regression', path: 'src/core.js' }] } });
+  const contradictoryPass = await executor.execute({ skill: 'code.review', goal: 'review', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(contradictoryPass.ok, false);
+  assert.match(contradictoryPass.error, /review_evidence_pass_contains_blocking_finding/);
+});
+
 test('read-only skill executor rejects unsupported skills before starting Codex', async () => {
   let started = 0;
   class FakeCodex {
