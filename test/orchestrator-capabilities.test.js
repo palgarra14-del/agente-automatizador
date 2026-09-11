@@ -51,6 +51,56 @@ test('orchestrator rejects a saved run after project capability policy changes',
   assert.throws(() => orchestrator.assertRunCapabilityContext(run, changed), /project_skill_policy_changed/);
 });
 
+test('orchestrator model usage state fails closed when missing or tampered', async () => {
+  const configured = project({
+    allow: ['project.bootstrap', 'project.verify', 'human.approval', 'repository.observe', 'repository.publish', 'code.implement', 'release.observe-ci', 'release.publish-pr'],
+    deny: []
+  });
+  const orchestrator = new Orchestrator({ store: await store() });
+  const missing = await orchestrator.create(configured, 'Missing model state');
+  delete missing.modelUsage;
+  assert.throws(() => orchestrator.assertRunCapabilityContext(missing, configured), /run\.modelUsage is missing/);
+
+  const tampered = await orchestrator.create(configured, 'Tampered model state');
+  tampered.modelUsage.calls = tampered.modelUsage.maxCalls + 1;
+  tampered.modelUsage.entries = Array.from({ length: tampered.modelUsage.calls }, (_, index) => ({
+    id: `model-call-${index + 1}`, status: 'started', surface: 'orchestrator', skill: 'code.implement', stepId: null, specialist: null, attempt: 1,
+    startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
+  }));
+  assert.throws(() => orchestrator.assertRunCapabilityContext(tampered, configured), /calls exceeds maxCalls/);
+
+  const inconsistent = await orchestrator.create(configured, 'Inconsistent model state');
+  inconsistent.modelUsage.calls = 1;
+  inconsistent.modelUsage.entries = [{
+    id: 'model-call-1', status: 'completed', surface: 'orchestrator', skill: 'code.implement', stepId: null, specialist: null, attempt: 1,
+    startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
+  }];
+  assert.throws(() => orchestrator.assertRunCapabilityContext(inconsistent, configured), /completedAt is invalid/);
+});
+
+test('orchestrator resume fails closed when the configured model-call budget changes', async () => {
+  const original = project({
+    allow: ['project.bootstrap', 'project.verify', 'human.approval', 'repository.observe', 'repository.publish', 'code.implement', 'release.observe-ci', 'release.publish-pr'],
+    deny: []
+  });
+  const orchestrator = new Orchestrator({ store: await store() });
+  const run = await orchestrator.create(original, 'Freeze model budget');
+  const changed = configFrom({
+    id: original.id,
+    repository: original.repository,
+    defaultBranch: original.defaultBranch,
+    protectedBranches: original.protectedBranches,
+    workspace: '.',
+    commands: { install: 'node --version', test: 'node --version' },
+    acceptance: { require: ['install', 'test', 'ci'] },
+    deployment: { provider: 'none' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: original.budgets.maxModelCalls + 1 },
+    skills: original.skills
+  });
+  assert.throws(() => orchestrator.assertRunCapabilityContext(run, changed), /run_model_budget_changed/);
+});
+
 test('repository observation gate fails before GitHub inspection', async () => {
   const configured = project({
     allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval', 'code.implement', 'release.observe-ci', 'release.publish-pr'],

@@ -20,6 +20,12 @@ Workflow read-only analysis and workspace-write implementation are separate auth
 
 WorkflowEngine has no commit, push, PR, merge, domain, environment-variable, deployment, or production action. Those repository publication authorities remain in Orchestrator. Persisted execution leases prevent concurrent run/resume/approval from duplicating the same worker/command sequence. Interrupted worker state records its starting repository identity; if recovery observes changes or repository-state mutation, retry is blocked.
 
+## Specialist and model-use integrity
+
+Specialist identity is evidence, not a permission source. Project skill policy remains authoritative, specialist mode must match the assigned skill risk, and specialist-registry fingerprints bind saved workflows to the reviewed specialist contract. Change Critic PASS evidence is structurally validated, tied to the exact implementation change-set fingerprint, and cannot authorize repository writes.
+
+Model-use accounting is also fail-closed. Saved runs/workflows must contain a model ledger whose maximum matches the active project configuration. Calls are reserved before execution; retries consume additional reservations; exceeding the cap stops before another model-backed executor runs. Reported token counts are evidence only and are never trusted to reduce the call count.
+
 ## Git and paths
 
 - Only an ID in `config/projects.json` is eligible for a run; the LLM cannot supply the repository URL, owner, repo, workspace root, or branch pattern.
@@ -33,7 +39,7 @@ WorkflowEngine has no commit, push, PR, merge, domain, environment-variable, dep
 
 ## Commands, budgets, and logs
 
-Install and validation commands come only from `config/projects.json`, reject shell metacharacters, run with `shell: false`, time out, and have output capped. They start from a system-only environment allowlist and may add only literal project variables whose names do not contain `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `CREDENTIAL`, or `AUTH`; they never inherit orchestration credentials. The worker cannot supply commands or change the execution provider. Active budgets include `maxTasks`, `maxRuntimeMinutes`, `commandTimeoutMs`, `ciTimeoutMs`, `ciPollIntervalMs`, `deploymentTimeoutMs`, `deploymentPollIntervalMs`, and `maxWorkerAttempts`.
+Install and validation commands come only from `config/projects.json`, reject shell metacharacters, run with `shell: false`, time out, and have output capped. They start from a system-only environment allowlist and may add only literal project variables whose names do not contain `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `CREDENTIAL`, or `AUTH`; they never inherit orchestration credentials. The worker cannot supply commands or change the execution provider. Active budgets include `maxTasks`, `maxRuntimeMinutes`, `maxModelCalls`, `commandTimeoutMs`, `ciTimeoutMs`, `ciPollIntervalMs`, `deploymentTimeoutMs`, `deploymentPollIntervalMs`, and `maxWorkerAttempts`. `maxModelCalls` is enforced before model invocation on both Orchestrator and WorkflowEngine paths. Each reserved call is persisted with attribution and remains consumed after interruption; missing SDK token usage is recorded as unknown rather than treated as zero-cost evidence.
 
 For a `container-required` project, post-worker checks run only through Docker with a single workspace bind mount, no network, no HOME/SSH/Git/Codex credentials, no Docker socket, a read-only container root, temporary writable `/tmp`, no added capabilities, `no-new-privileges`, a numeric non-root user, and memory/CPU/PID limits. Docker image inspection is local only and execution passes `--pull never`; the implementation cannot implicitly download an image. A missing daemon or image fails the command rather than executing it on the host. `local-sanitized` is explicitly documented and reported as non-container-isolated; it must never be described as equivalent isolation.
 

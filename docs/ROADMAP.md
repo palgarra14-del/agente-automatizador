@@ -30,11 +30,21 @@ The Tool/Skill Registry makes capability availability explicit and fail-closed. 
 
 The v0.7 scope deliberately does not add browser automation, web research, a new LLM, autonomous specialist agents, or automatic merge/production actions.
 
-## v0.8 — current
+## v0.8 — complete
 
-Execution Integration adds persistent execution leases and begins connecting reviewed workflow skills to real executors without bypassing the v0.7 registry. App-improvement now supports read-only `code.inspect` / `code.diagnose`, human plan approval, governed workspace-write `code.implement`, and configured verification. Read-only execution is independently checked for workspace mutations; implementation reuses the existing worker and v0.4/v0.5 change governance. Sensitive/forbidden/over-budget/partial/interrupted changes fail or block closed. WorkflowEngine still cannot commit, push, open PRs, merge, browse the web, or deploy.
+Execution Integration adds persistent execution leases and connects reviewed workflow skills to real executors without bypassing the v0.7 registry. App-improvement supports read-only `code.inspect` / `code.diagnose`, human plan approval, governed workspace-write `code.implement`, and configured verification. Read-only execution is independently checked for workspace mutations; implementation reuses the existing worker and v0.4/v0.5 change governance. Sensitive/forbidden/over-budget/partial/interrupted changes fail or block closed.
 
-The remaining v0.8 work is hardening/review of this vertical slice; browser/research/data-analysis/specialist-agent capabilities remain deferred.
+## v0.9 — complete
+
+Specialist Agents adds an immutable Specialist Registry, explicit specialist ownership for workflow steps, specialist-registry fingerprinting, authority/risk compatibility checks, persisted specialist evidence, and fail-closed resume on specialist-contract drift. App-improvement now includes an independent read-only Change Critic bound to the exact governed implementation fingerprint. Verification may proceed only after a structurally valid critic `PASS`; critic failure, malformed output, workspace mutation, or stale/replayed review evidence fails closed. Specialist ownership is visible in dry-runs and through `agent specialists`.
+
+## v0.10 — current
+
+Model Budget Enforcement turns `maxModelCalls` into an actual persisted execution limit across Orchestrator and WorkflowEngine. A model call is reserved before invocation and remains consumed across interruption/crash, preventing retries from silently exceeding the cap. Usage reported by the Codex SDK is normalized into input/output token evidence and attributed by execution surface, skill, workflow step, specialist, and attempt. Registered projects currently cap each run/workflow at six model calls.
+
+v0.10 deliberately does not claim exact monetary spend enforcement: SDK usage may be absent for a call, in which case the call is still counted and marked as missing usage evidence. Token ceilings and price-based budgets remain future hardening work.
+
+WorkflowEngine still cannot commit, push, open PRs, merge, browse the web, or deploy. Browser/research/data-analysis executors remain deferred.
 
 ## Deferred
 

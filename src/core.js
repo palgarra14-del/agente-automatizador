@@ -195,6 +195,98 @@ function safeJson(value) {
   return JSON.parse(maskSecrets(JSON.stringify(value)));
 }
 
+function createModelUsageState(maxCalls) {
+  return { maxCalls, calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, unknownUsageCalls: 0, entries: [] };
+}
+
+function normalizeReportedModelUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return { reported: false, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const input = usage.input_tokens ?? usage.inputTokens;
+  const output = usage.output_tokens ?? usage.outputTokens;
+  const valid = (value) => value === undefined || (Number.isInteger(value) && value >= 0);
+  if (!valid(input) || !valid(output) || (input === undefined && output === undefined)) return { reported: false, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const inputTokens = input ?? 0;
+  const outputTokens = output ?? 0;
+  return { reported: true, inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
+function validateModelUsageState(state, expectedMaxCalls, label = 'modelUsage') {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error(`${label} is missing`);
+  if (!Number.isInteger(state.maxCalls) || state.maxCalls < 1 || state.maxCalls !== expectedMaxCalls) throw new Error(`${label}.maxCalls does not match the active project budget`);
+  for (const key of ['calls', 'inputTokens', 'outputTokens', 'totalTokens', 'unknownUsageCalls']) if (!Number.isInteger(state[key]) || state[key] < 0) throw new Error(`${label}.${key} must be a non-negative integer`);
+  if (state.calls > state.maxCalls) throw new Error(`${label}.calls exceeds maxCalls`);
+  if (!Array.isArray(state.entries) || state.entries.length !== state.calls) throw new Error(`${label}.entries must match reserved calls`);
+  const ids = new Set();
+  let expectedInputTokens = 0;
+  let expectedOutputTokens = 0;
+  let expectedUnknownUsageCalls = 0;
+  for (const [index, entry] of state.entries.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${label}.entries[${index}] is invalid`);
+    if (entry.id !== `model-call-${index + 1}` || ids.has(entry.id)) throw new Error(`${label}.entries contain invalid ids`);
+    ids.add(entry.id);
+    if (!['started', 'completed', 'failed'].includes(entry.status)) throw new Error(`${label}.entries[${index}].status is invalid`);
+    if (!['workflow', 'orchestrator'].includes(entry.surface)) throw new Error(`${label}.entries[${index}].surface is invalid`);
+    if (typeof entry.skill !== 'string' || !entry.skill) throw new Error(`${label}.entries[${index}].skill is invalid`);
+    if (entry.stepId !== null && entry.stepId !== undefined && (typeof entry.stepId !== 'string' || !entry.stepId)) throw new Error(`${label}.entries[${index}].stepId is invalid`);
+    if (entry.specialist !== null && entry.specialist !== undefined && (typeof entry.specialist !== 'string' || !entry.specialist)) throw new Error(`${label}.entries[${index}].specialist is invalid`);
+    if (entry.attempt !== null && entry.attempt !== undefined && (!Number.isInteger(entry.attempt) || entry.attempt < 1)) throw new Error(`${label}.entries[${index}].attempt is invalid`);
+    if (!Number.isFinite(Date.parse(entry.startedAt ?? ''))) throw new Error(`${label}.entries[${index}].startedAt is invalid`);
+    if (entry.status === 'started') {
+      if (entry.completedAt !== null || entry.usage !== null) throw new Error(`${label}.entries[${index}] started state is inconsistent`);
+      continue;
+    }
+    if (!Number.isFinite(Date.parse(entry.completedAt ?? ''))) throw new Error(`${label}.entries[${index}].completedAt is invalid`);
+    if (Date.parse(entry.completedAt) < Date.parse(entry.startedAt)) throw new Error(`${label}.entries[${index}] completion precedes start`);
+    if (entry.usage === null || entry.usage === undefined) {
+      expectedUnknownUsageCalls += 1;
+      continue;
+    }
+    const normalized = normalizeReportedModelUsage(entry.usage);
+    if (!normalized.reported || normalized.inputTokens !== entry.usage.inputTokens || normalized.outputTokens !== entry.usage.outputTokens || normalized.totalTokens !== entry.usage.totalTokens) throw new Error(`${label}.entries[${index}].usage is invalid`);
+    expectedInputTokens += normalized.inputTokens;
+    expectedOutputTokens += normalized.outputTokens;
+  }
+  if (state.inputTokens !== expectedInputTokens || state.outputTokens !== expectedOutputTokens) throw new Error(`${label} token totals do not match entries`);
+  if (state.totalTokens !== expectedInputTokens + expectedOutputTokens) throw new Error(`${label}.totalTokens does not match entries`);
+  if (state.unknownUsageCalls !== expectedUnknownUsageCalls) throw new Error(`${label}.unknownUsageCalls does not match entries`);
+  return true;
+}
+
+function reserveModelCall(state, context, startedAt = new Date().toISOString()) {
+  if (state.calls >= state.maxCalls) return null;
+  const id = `model-call-${state.calls + 1}`;
+  state.calls += 1;
+  state.entries.push({
+    id,
+    status: 'started',
+    surface: String(context.surface),
+    skill: String(context.skill),
+    stepId: context.stepId ? String(context.stepId) : null,
+    specialist: context.specialist ? String(context.specialist) : null,
+    attempt: Number.isInteger(context.attempt) ? context.attempt : null,
+    startedAt,
+    completedAt: null,
+    usage: null
+  });
+  return id;
+}
+
+function completeModelCall(state, callId, usage, status = 'completed', completedAt = new Date().toISOString()) {
+  const entry = state.entries.find((candidate) => candidate.id === callId);
+  if (!entry || entry.status !== 'started') throw new Error('model_call_reservation_invalid');
+  const normalized = normalizeReportedModelUsage(usage);
+  entry.status = status === 'completed' ? 'completed' : 'failed';
+  entry.completedAt = completedAt;
+  if (normalized.reported) {
+    entry.usage = { inputTokens: normalized.inputTokens, outputTokens: normalized.outputTokens, totalTokens: normalized.totalTokens };
+    state.inputTokens += normalized.inputTokens;
+    state.outputTokens += normalized.outputTokens;
+    state.totalTokens += normalized.totalTokens;
+  } else {
+    state.unknownUsageCalls += 1;
+  }
+}
+
 export function safeCommandEnvironment(commandEnvironment = {}) {
   if (!commandEnvironment || typeof commandEnvironment !== 'object' || Array.isArray(commandEnvironment)) throw new Error('commandEnvironment must be an object');
   const environment = Object.fromEntries(systemEnvironmentNames.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
@@ -344,7 +436,7 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
       maxTasks: positiveInteger(budgets.maxTasks, 10, 'maxTasks'),
       maxRuntimeMinutes: positiveInteger(budgets.maxRuntimeMinutes, 10, 'maxRuntimeMinutes'),
-      maxModelCalls: positiveInteger(budgets.maxModelCalls, 0, 'maxModelCalls', 0),
+      maxModelCalls: positiveInteger(budgets.maxModelCalls, 6, 'maxModelCalls'),
       maxWorkerAttempts: positiveInteger(budgets.maxWorkerAttempts, 2, 'maxWorkerAttempts'),
       commandTimeoutMs: positiveInteger(budgets.commandTimeoutMs, 30_000, 'commandTimeoutMs', 100),
       ciTimeoutMs: positiveInteger(budgets.ciTimeoutMs, 600_000, 'ciTimeoutMs', 1_000),
@@ -709,7 +801,7 @@ export function createWorkflowPlan({ profile, project, goal, scope = {}, now = (
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), specialist: workflowSpecialist(profile, id, specialistRegistry), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry, specialistRegistry);
   return plan;
 }
@@ -756,6 +848,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
+  if (project) validateModelUsageState(plan.modelUsage, project.budgets.maxModelCalls, 'workflow.modelUsage');
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
@@ -865,6 +958,34 @@ export class WorkflowEngine {
     });
   }
 
+  async reserveWorkflowModelCall(id, stepId) {
+    let callId = null;
+    const plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      if (saved.modelUsage.calls >= saved.modelUsage.maxCalls) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_model_call_budget_exhausted';
+        step.evidence = { type: 'model-budget', ...workflowEvidenceContext(saved, step), calls: saved.modelUsage.calls, maxCalls: saved.modelUsage.maxCalls };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+        return;
+      }
+      callId = reserveModelCall(saved.modelUsage, {
+        surface: 'workflow',
+        skill: step.skill,
+        stepId: step.id,
+        specialist: step.specialist,
+        attempt: step.attempts + 1
+      });
+    });
+    return { plan, callId };
+  }
+
+  async completeWorkflowModelCall(id, callId, usage, status) {
+    if (!callId) return this.get(id);
+    return this.update(id, (saved) => { completeModelCall(saved.modelUsage, callId, usage, status); });
+  }
+
   async workspaceSnapshot(project) {
     const repositoryControl = await this.localGit.inspectRepositoryControlState(project);
     const repository = await this.localGit.inspect(project);
@@ -921,6 +1042,9 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    const reservation = await this.reserveWorkflowModelCall(id, next.id);
+    if (!reservation.callId) return reservation.plan;
+    const modelCallId = reservation.callId;
     await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
@@ -957,6 +1081,7 @@ export class WorkflowEngine {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
+    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, execution.ok ? 'completed' : 'failed');
     let after;
     let integrityError = null;
     try { after = await this.workspaceSnapshot(workspaceProject); }
@@ -1041,6 +1166,9 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    const reservation = await this.reserveWorkflowModelCall(id, next.id);
+    if (!reservation.callId) return reservation.plan;
+    const modelCallId = reservation.callId;
     await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
@@ -1071,6 +1199,7 @@ export class WorkflowEngine {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
+    await this.completeWorkflowModelCall(id, modelCallId, worker.usage, worker.status === 'completed' ? 'completed' : 'failed');
     const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
     let repositoryIntegrityError = null;
     let changeSet = null;
@@ -2608,7 +2737,7 @@ export function report(run) {
   const deployment = run.deployment ?? run.results?.deployment;
   const changePolicy = run.results?.changePolicy;
   const capabilityPreflight = run.results?.capabilities;
-  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nCAPABILITY REGISTRY\n${run.registryFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nPROJECT SKILL POLICY\n${run.projectSkillPolicyFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nCAPABILITY PREFLIGHT\n${capabilityPreflight ? (capabilityPreflight.ok ? 'PASS' : 'FAIL') : 'not recorded'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nCAPABILITY REGISTRY\n${run.registryFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nPROJECT SKILL POLICY\n${run.projectSkillPolicyFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nCAPABILITY PREFLIGHT\n${capabilityPreflight ? (capabilityPreflight.ok ? 'PASS' : 'FAIL') : 'not recorded'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nMODEL CALLS\n${run.modelUsage?.calls ?? 0}/${run.modelUsage?.maxCalls ?? run.budgets.maxModelCalls ?? 'unknown'}\n\nREPORTED TOKENS\n${run.modelUsage ? `${run.modelUsage.totalTokens} total (${run.modelUsage.inputTokens} input / ${run.modelUsage.outputTokens} output), ${run.modelUsage.unknownUsageCalls} call(s) without usage evidence` : 'not recorded'}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
   return reportText
     .replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`)
     .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
@@ -2644,6 +2773,7 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
     branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
+    modelCallBudget: project.budgets.maxModelCalls,
     capabilities: {
       registryFingerprint: registry.fingerprint,
       projectPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}),
@@ -2658,7 +2788,7 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
 export function formatDoctor(result) {
   const execution = result.execution ?? {};
   const capabilities = result.capabilities ?? {};
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nMODEL CALL BUDGET\n${result.modelCallBudget ?? 'UNKNOWN'}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
@@ -2676,6 +2806,8 @@ export class Orchestrator {
     if (!run.registryFingerprint || !run.projectSkillPolicyFingerprint) throw new Error('run_capability_context_missing');
     if (run.registryFingerprint !== this.registry.fingerprint) throw new Error('run_capability_registry_changed');
     if (run.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {})) throw new Error('run_project_skill_policy_changed');
+    if (run.budgets?.maxModelCalls !== project.budgets.maxModelCalls) throw new Error('run_model_budget_changed');
+    validateModelUsageState(run.modelUsage, project.budgets.maxModelCalls, 'run.modelUsage');
   }
 
   requiredSkills(project) {
@@ -2700,7 +2832,7 @@ export class Orchestrator {
   async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), executionLease: null, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), executionLease: null, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -2947,6 +3079,23 @@ export class Orchestrator {
     return this.pollCi(run, project);
   }
 
+  async reserveRunModelCall(run, context) {
+    let callId = null;
+    const updated = await this.updateRun(run.id, (saved) => {
+      if (saved.modelUsage.calls >= saved.modelUsage.maxCalls) {
+        saved.budgetExhausted = 'maxModelCalls';
+        return;
+      }
+      callId = reserveModelCall(saved.modelUsage, { surface: 'orchestrator', ...context });
+    });
+    return { run: updated, callId };
+  }
+
+  async completeRunModelCall(runId, callId, usage, status) {
+    if (!callId) return this.store.getRun(runId);
+    return this.updateRun(runId, (saved) => { completeModelCall(saved.modelUsage, callId, usage, status); });
+  }
+
   async executeAttempt(run, project) {
     this.assertDeadline(run);
     this.requireSkill(project, 'code.implement');
@@ -2963,7 +3112,11 @@ export class Orchestrator {
       branch: run.workingBranch,
       previousFailure: run.lastWorkerFailure
     };
+    const reservation = await this.reserveRunModelCall(run, { skill: 'code.implement', attempt: run.workerAttempts + 1 });
+    if (!reservation.callId) return this.fail(run.id, 'model_call_budget_exhausted');
+    run = reservation.run;
     const workerResult = await this.worker.execute(task, { workspace: project.workspace, timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, Math.max(1_000, run.deadlineAt - Date.now())) });
+    await this.completeRunModelCall(run.id, reservation.callId, workerResult.usage, workerResult.status === 'completed' ? 'completed' : 'failed');
     run = await this.updateRun(run.id, (saved) => { saved.workerAttempts += 1; saved.results.worker = { ok: workerResult.status === 'completed', ...safeJson(workerResult) }; });
     await this.event(run.id, 'worker', 'coding_task.completed', { status: workerResult.status, attempt: run.workerAttempts });
     if (workerResult.status !== 'completed') return this.retryOrFail(run, workerResult.output || 'worker failed');

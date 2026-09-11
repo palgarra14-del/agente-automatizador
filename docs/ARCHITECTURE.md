@@ -2,7 +2,7 @@
 
 ## Engineering loop
 
-`agent run` persists a run before acting. The deterministic planner emits a `CodingTask` containing an objective, repository context, constraints, and acceptance criteria. No second planner model is used, so `maxModelCalls` remains zero.
+`agent run` persists a run before acting. The deterministic planner emits a `CodingTask` containing an objective, repository context, constraints, and acceptance criteria. No second planner model is used. Model-backed worker/analysis calls are governed separately by the persisted per-project `maxModelCalls` budget.
 
 The orchestrator creates a dedicated managed workspace for registered projects, clones only their configured origin with a controlled Git invocation, verifies GitHub metadata and the cloned checkout, fetches `origin/main`, compares that remote SHA with GitHub's inspected default-branch SHA, and creates `agent/<runId>` at that exact object. A mismatch fails as `base_head_changed`; it never uses `pull` or resets a caller branch. It runs the configured install command before Codex, then lets the worker edit only that workspace. The orchestrator verifies that the worker did not alter Git history, validates changed paths, executes the project-configured checks, commits with a controlled message, pushes the working branch, creates a PR, polls CI, observes an optional read-only preview, evaluates deterministic evidence, and reports the result.
 
@@ -25,6 +25,18 @@ The first WorkflowEngine skill executors are deliberately split by authority. `C
 `code.implement` reuses `CodexSdkWorker` rather than adding a second writer. The WorkflowEngine captures the clean starting repository state, runs the worker with only sanitized goal/evidence/scope, then reuses `LocalGitAdapter.inspectChangeSet` and `evaluateChangePolicy`. Forbidden paths, scope violations, and change-budget violations fail; sensitive changes block; a failed worker that left changes blocks rather than retrying. Only a completed worker plus a normal policy decision and bound change-set fingerprint can satisfy implementation evidence. Tests/typecheck/lint/build remain configured verification commands. WorkflowEngine never commits, pushes, creates PRs, merges, or deploys.
 
 Crash recovery records the pre-execution branch, HEAD, remote, workspace, change-set fingerprint, protected ignored-file fingerprint, and Git-control fingerprint. An interrupted worker may be retried only when all governed state is still clean; observed changes or repository/control-state mutation become a non-approvable block so work is never silently applied twice.
+
+## v0.9 specialist and review boundary
+
+`SpecialistRegistry` assigns an explicit logical owner to every deterministic workflow step. The registry contract fingerprints specialist id, mode, skills, authority, and executor. Non-reserved specialists must have a workflow-bound skill whose risk matches their declared authority class; a read-only specialist therefore cannot be configured to own `code.implement`. Reserved specialists may own only skills whose execution surface is still unavailable.
+
+The app-improvement flow is `inspect → diagnose → human plan checkpoint → implement → change critic → tests → verification → human release-readiness checkpoint`. The Change Critic uses a fresh read-only execution thread, receives governed implementation evidence, inspects the real current repository diff and surrounding code, and returns a strict `PASS` or `FAIL` review contract. Its evidence is bound to the implementation change-set fingerprint. Tests cannot start without a valid PASS, and the existing repository/diff integrity checks still run after review and during verification.
+
+## v0.10 model budget and usage accounting
+
+Each run/workflow persists a `modelUsage` ledger with a fixed `maxCalls` copied from the active project budget. Before a model-backed operation starts, the orchestrator reserves an entry containing surface, skill, workflow step, specialist, and attempt. Reservation happens before invocation, so a crash cannot make an uncertain call disappear from accounting. Exhaustion fails before another model call is invoked.
+
+When the SDK returns usage evidence, input/output token counts are normalized and accumulated; missing or malformed usage does not erase the call and increments `unknownUsageCalls`. Resume validates the persisted ledger against the current project budget and fails closed on missing, inconsistent, over-budget, or tampered state. This is a real call-count governor and an auditable usage ledger, not yet an exact monetary spend cap.
 
 ## Adapters
 
