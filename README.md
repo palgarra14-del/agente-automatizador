@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.5
+# Engineering Orchestrator — v0.6
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -31,6 +31,22 @@ node src/cli.js resume <runId>
 ```
 
 Add `--dry-run` to persist the plan and a zero-write simulation. It does not create a workspace or clone, create or switch branches, invoke the worker or checks, commit, push, create a PR, query Vercel, or write to GitHub.
+
+## Workflows and plans
+
+v0.6 adds deterministic, persisted workflow plans. A workflow associates a registered project and goal with a profile, ordered dependency steps, bounded retries/budget, evidence, human checkpoints, and a Definition of Done. It does not yet use an LLM, browser, web research, or external executor.
+
+```bash
+node src/cli.js workflow create website-build --project self --goal "Create a professional company website"
+node src/cli.js workflow run <workflowId> --dry-run
+node src/cli.js workflow status <workflowId>
+node src/cli.js workflow run <workflowId>
+node src/cli.js workflow approve <workflowId> design
+node src/cli.js workflow resume <workflowId>
+node src/cli.js workflow list
+```
+
+The available profiles are `website-build`, `app-improvement`, and `data-analysis`. Command and verification steps use the existing governed command runner; placeholders and checkpoints are structural until a future version supplies a reviewed implementation. An interrupted running step becomes blocked on resume and requires explicit human approval before it can run again.
 
 The project commands, protected branches, branch pattern, approvals, change policy, execution provider, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, branch protection, and execution isolation availability without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 
