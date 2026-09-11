@@ -2,23 +2,41 @@
   "projects": [
     {
       "id": "self",
-      "repository": { "owner": "palgarra14-del", "name": "agente-automatizador" },
+      "repository": {
+        "owner": "palgarra14-del",
+        "name": "agente-automatizador"
+      },
       "defaultBranch": "main",
       "workingBranchPattern": "agent/{runId}",
-      "protectedBranches": ["main"],
+      "protectedBranches": [
+        "main"
+      ],
       "workspace": "..",
       "workspaceStrategy": "managed",
-      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
+      "commandEnvironment": {
+        "NEXT_TELEMETRY_DISABLED": "1"
+      },
       "execution": {
         "provider": "container-required",
         "image": "node:22-bookworm-slim",
-        "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
+        "resources": {
+          "memoryMb": 1024,
+          "cpuCount": 1,
+          "pidsLimit": 128
+        }
       },
-      "toolchain": { "command": "npm" },
+      "toolchain": {
+        "command": "npm"
+      },
       "changePolicy": {
         "forbiddenPaths": [],
-        "sensitivePaths": ["config/projects.json"],
-        "budgets": { "maxChangedFiles": 8, "maxDiffLines": 500 }
+        "sensitivePaths": [
+          "config/projects.json"
+        ],
+        "budgets": {
+          "maxChangedFiles": 8,
+          "maxDiffLines": 500
+        }
       },
       "commands": {
         "install": "npm ci",
@@ -28,11 +46,29 @@
         "build": "npm run build"
       },
       "policies": {
-        "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
-        "forbidden": ["force_push_main", "delete_protected_branch"]
+        "requireApprovalFor": [
+          "merge",
+          "production_deploy",
+          "destructive_data_change"
+        ],
+        "forbidden": [
+          "force_push_main",
+          "delete_protected_branch"
+        ]
       },
-      "acceptance": { "require": ["install", "test", "typecheck", "lint", "build", "ci"] },
-      "deployment": { "provider": "none" },
+      "acceptance": {
+        "require": [
+          "install",
+          "test",
+          "typecheck",
+          "lint",
+          "build",
+          "ci"
+        ]
+      },
+      "deployment": {
+        "provider": "none"
+      },
       "budgets": {
         "maxIterations": 3,
         "maxTasks": 10,
@@ -44,28 +80,59 @@
         "ciPollIntervalMs": 10000,
         "deploymentTimeoutMs": 600000,
         "deploymentPollIntervalMs": 15000
+      },
+      "skills": {
+        "allow": [
+          "workspace.prepare",
+          "project.bootstrap",
+          "project.verify",
+          "human.approval",
+          "repository.observe",
+          "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr"
+        ],
+        "deny": []
       }
     },
     {
       "id": "leadfinder",
       "displayName": "LeadFinder",
-      "repository": { "owner": "palgarra14-del", "name": "Lead-finder" },
+      "repository": {
+        "owner": "palgarra14-del",
+        "name": "Lead-finder"
+      },
       "defaultBranch": "main",
       "workingBranchPattern": "agent/{runId}",
-      "protectedBranches": ["main"],
+      "protectedBranches": [
+        "main"
+      ],
       "workspace": "..",
       "workspaceStrategy": "managed",
-      "commandEnvironment": { "NEXT_TELEMETRY_DISABLED": "1" },
+      "commandEnvironment": {
+        "NEXT_TELEMETRY_DISABLED": "1"
+      },
       "execution": {
         "provider": "container-required",
         "image": "agent-node22-pnpm11:local",
-        "resources": { "memoryMb": 1024, "cpuCount": 1, "pidsLimit": 128 }
+        "resources": {
+          "memoryMb": 1024,
+          "cpuCount": 1,
+          "pidsLimit": 128
+        }
       },
-      "toolchain": { "command": "pnpm", "version": "11.19.0" },
+      "toolchain": {
+        "command": "pnpm",
+        "version": "11.19.0"
+      },
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [],
-        "budgets": { "maxChangedFiles": 3, "maxDiffLines": 200 }
+        "budgets": {
+          "maxChangedFiles": 3,
+          "maxDiffLines": 200
+        }
       },
       "commands": {
         "install": "pnpm install --frozen-lockfile",
@@ -73,17 +140,35 @@
         "lint": "pnpm lint",
         "build": "pnpm build"
       },
-      "acceptance": { "require": ["install", "test", "lint", "build", "ci", "deployment"] },
+      "acceptance": {
+        "require": [
+          "install",
+          "test",
+          "lint",
+          "build",
+          "ci",
+          "deployment"
+        ]
+      },
       "deployment": {
         "provider": "vercel",
         "projectId": "prj_ITEH4iBkj6DOmNukkKP2LilTbyrn",
         "teamId": "team_WDwd9ZZgxEdlv4AS0oIP1num",
         "requirePreviewReady": true
       },
-      "pullRequest": { "titleTemplate": "Agent: {project} — {objective}" },
+      "pullRequest": {
+        "titleTemplate": "Agent: {project} — {objective}"
+      },
       "policies": {
-        "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change"],
-        "forbidden": ["force_push_main", "delete_protected_branch"]
+        "requireApprovalFor": [
+          "merge",
+          "production_deploy",
+          "destructive_data_change"
+        ],
+        "forbidden": [
+          "force_push_main",
+          "delete_protected_branch"
+        ]
       },
       "budgets": {
         "maxIterations": 3,
@@ -96,43 +181,96 @@
         "ciPollIntervalMs": 10000,
         "deploymentTimeoutMs": 600000,
         "deploymentPollIntervalMs": 15000
+      },
+      "skills": {
+        "allow": [
+          "workspace.prepare",
+          "project.bootstrap",
+          "project.verify",
+          "human.approval",
+          "repository.observe",
+          "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview"
+        ],
+        "deny": []
       }
     },
     {
       "id": "callflow",
       "displayName": "Callflow CRM",
-      "repository": { "owner": "palgarra14-del", "name": "App-llamadas" },
+      "repository": {
+        "owner": "palgarra14-del",
+        "name": "App-llamadas"
+      },
       "defaultBranch": "main",
       "workingBranchPattern": "agent/{runId}",
-      "protectedBranches": ["main"],
+      "protectedBranches": [
+        "main"
+      ],
       "workspace": "..",
       "workspaceStrategy": "managed",
       "commandEnvironment": {},
       "execution": {
         "provider": "container-required",
         "image": "node:22-bookworm-slim",
-        "resources": { "memoryMb": 512, "cpuCount": 1, "pidsLimit": 96 }
+        "resources": {
+          "memoryMb": 512,
+          "cpuCount": 1,
+          "pidsLimit": 96
+        }
       },
-      "toolchain": { "command": "npm" },
+      "toolchain": {
+        "command": "npm"
+      },
       "changePolicy": {
-        "forbiddenPaths": ["google-apps-script", ".clasp.json"],
-        "sensitivePaths": ["api", "config.js", ".claspignore"],
-        "budgets": { "maxChangedFiles": 5, "maxDiffLines": 400 }
+        "forbiddenPaths": [
+          "google-apps-script",
+          ".clasp.json"
+        ],
+        "sensitivePaths": [
+          "api",
+          "config.js",
+          ".claspignore"
+        ],
+        "budgets": {
+          "maxChangedFiles": 5,
+          "maxDiffLines": 400
+        }
       },
       "commands": {
         "test": "npm test"
       },
-      "acceptance": { "require": ["test", "ci", "deployment"] },
+      "acceptance": {
+        "require": [
+          "test",
+          "ci",
+          "deployment"
+        ]
+      },
       "deployment": {
         "provider": "vercel",
         "projectId": "prj_s1DkgFQpYlhslwwAsvGiiLol6D7Y",
         "teamId": "team_WDwd9ZZgxEdlv4AS0oIP1num",
         "requirePreviewReady": true
       },
-      "pullRequest": { "titleTemplate": "Agent: {project} — {objective}" },
+      "pullRequest": {
+        "titleTemplate": "Agent: {project} — {objective}"
+      },
       "policies": {
-        "requireApprovalFor": ["merge", "production_deploy", "destructive_data_change", "modify_secrets", "send_communication"],
-        "forbidden": ["force_push_main", "delete_protected_branch"]
+        "requireApprovalFor": [
+          "merge",
+          "production_deploy",
+          "destructive_data_change",
+          "modify_secrets",
+          "send_communication"
+        ],
+        "forbidden": [
+          "force_push_main",
+          "delete_protected_branch"
+        ]
       },
       "budgets": {
         "maxIterations": 3,
@@ -145,6 +283,20 @@
         "ciPollIntervalMs": 10000,
         "deploymentTimeoutMs": 600000,
         "deploymentPollIntervalMs": 15000
+      },
+      "skills": {
+        "allow": [
+          "workspace.prepare",
+          "project.verify",
+          "human.approval",
+          "repository.observe",
+          "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview"
+        ],
+        "deny": []
       }
     }
   ]

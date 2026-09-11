@@ -8,11 +8,20 @@ The orchestrator creates a dedicated managed workspace for registered projects, 
 
 The evaluation requires successful worker completion, a governed diff, configured acceptance checks, commit, push, PR, and CI. A project can additionally require install and a Vercel deployment. v0.4 calculates file and line budgets, validates literal requested scope roots, rejects immutable forbidden paths, and classifies package/workflow/script/deployment/Dockerfile/security/auth changes as sensitive after the worker, after every configured check, and immediately before commit. The decision carries a SHA-256 fingerprint over paths, line counts, and hashed tracked/untracked content; raw diffs are never persisted. A sensitive approval binds to that fingerprint. Resume recalculates it before any command and marks the old approval stale if it differs; the final local commit also refuses any change set other than the final governed fingerprint. A failed worker/check/CI can return to `working` only until `maxWorkerAttempts` is exhausted. A CI retry reuses the same branch and PR, pushes a new commit, and waits for CI again.
 
+## v0.7 capability boundary
+
+`ToolSkillRegistry` is the capability contract between planning and execution. Atomic tools declare a stable binding name, supported surfaces, and risk. Skills declare required tools plus a versioned input/output contract. The registry fingerprint covers executable contract fields rather than descriptive prose, and the registry internals are not externally mutable.
+
+Each configured project receives a normalized skill allow/deny policy. Deny wins over allow. A project-policy fingerprint and registry fingerprint are persisted on both Orchestrator runs and workflow plans; resume fails closed if either changes. The Orchestrator performs a lifecycle preflight before real work and also enforces individual skill gates immediately before workspace preparation, bootstrap/check execution, coding, push/PR publication, CI observation, preview observation, and human approval. Workflow execution resolves the visible step skill plus infrastructure skills such as `workspace.prepare` and `project.bootstrap` before clone/install.
+
+The registry distinguishes `workflow` and `orchestrator` surfaces. Future capabilities can be declared without becoming executable: research, visual review, requirements, data analysis, and inspection currently have no reviewed execution surface and therefore resolve unavailable.
+
 ## Adapters
 
 - `CodexSdkWorker`: real coding implementation through the official `@openai/codex-sdk`.
 - `LocalGitAdapter`: explicit local Git operations only; no LLM-generated Git command strings.
 - `GitHubAdapter`: authenticated repository/branch reads, PR creation, and check-run polling.
+- `ToolSkillRegistry`: immutable deterministic registry of tool bindings, skill contracts, project policy, surface availability, and fingerprints.
 - `WorkspaceManager`: isolated clone lifecycle beneath the managed root; fresh clones explicitly checkout the configured base branch, valid interrupted clones are reused only when clean and repository-matched, and partial/mismatched clones are retained under a `.failed-*` sibling before recovery.
 - `VercelDeploymentProvider`: read-only Vercel deployment lookup and bounded polling by configured project/team, branch, and commit SHA.
 - `ProjectCommandRunner`: selects only the project-configured execution provider; a worker cannot choose it.
@@ -30,13 +39,13 @@ Post-worker container commands run shell-free with an explicit `/workspace` bind
 
 ## State and resume
 
-`JsonStore` atomically replaces `.agent/state.json` and protects mutations with a filesystem lock. Concurrent writers serialize through that lock, and stale locks whose owning process is demonstrably dead can be recovered conservatively. A resumed run reconstructs its project configuration and continues an approved PR creation, CI wait, or preview observation. Workflow plans separately persist their managed workspace, bootstrap evidence, active-execution deadline, checkpoint pause timestamp, step evidence, and Definition of Done state. The Codex SDK thread id is persisted with the worker result for future worker-level continuation.
+`JsonStore` atomically replaces `.agent/state.json` and protects mutations with a filesystem lock. Concurrent writers serialize through that lock, and stale locks whose owning process is demonstrably dead can be recovered conservatively. A resumed run reconstructs its project configuration and continues an approved PR creation, CI wait, or preview observation. Workflow plans separately persist capability-registry/policy fingerprints, exact step skills, their managed workspace, bootstrap evidence, active-execution deadline, checkpoint pause timestamp, step evidence, and Definition of Done state. The Codex SDK thread id is persisted with the worker result for future worker-level continuation.
 
 Supported meaningful states are `working`, `testing`, `pushing`, `waiting_ci`, `evaluating`, `waiting_approval`, and `worker_failed_retryable`, plus terminal states. There is no in-memory-only continuation requirement.
 
 ## Dry run
 
-`--dry-run` persists the run, plan, repository read, deterministic workspace and branch names, policy outcome, simulated install/worker/check/commit/push/PR/CI/preview actions, and report. It performs no repository or GitHub write: no workspace creation, clone, fetch, branch creation or switch, worker invocation, configured command, commit, push, PR creation, Vercel query, or deployment.
+`--dry-run` persists the run, plan, repository read, deterministic workspace and branch names, policy outcome, required capability resolutions, simulated install/worker/check/commit/push/PR/CI/preview actions, and report. It performs no repository or GitHub write: no workspace creation, clone, fetch, branch creation or switch, worker invocation, configured command, commit, push, PR creation, Vercel query, or deployment.
 
 ## Doctor and scope
 

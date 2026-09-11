@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
+import { defaultToolSkillRegistry } from './capabilities.js';
 
 export const RunStatus = Object.freeze({
   CREATED: 'created',
@@ -287,7 +288,7 @@ export function assertAllowedWorkingBranch(project, branch) {
   }
 }
 
-export function configFrom(input, baseDirectory = process.cwd()) {
+export function configFrom(input, baseDirectory = process.cwd(), registry = defaultToolSkillRegistry) {
   if (!input?.id || !/^[a-z0-9-]+$/.test(input.id)) throw new Error('Invalid project id');
   if (!input.repository?.owner || !input.repository?.name) throw new Error('repository owner/name required');
   if (!input.defaultBranch || !Array.isArray(input.protectedBranches) || !input.protectedBranches.includes(input.defaultBranch)) {
@@ -315,6 +316,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   const changePolicy = changePolicyFrom(input.changePolicy);
   const execution = executionFrom(input.execution);
   const toolchain = toolchainFrom(input.toolchain);
+  const skills = registry.validateProjectPolicy(input.skills ?? {});
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -328,6 +330,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     changePolicy,
     execution,
     toolchain,
+    skills,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -346,10 +349,10 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   return project;
 }
 
-export async function loadProjects(file) {
+export async function loadProjects(file, registry = defaultToolSkillRegistry) {
   const data = JSON.parse(await readFile(file, 'utf8'));
   return new Map(data.projects.map((project) => {
-    const configured = configFrom(project, dirname(file));
+    const configured = configFrom(project, dirname(file), registry);
     return [configured.id, configured];
   }));
 }
@@ -528,46 +531,87 @@ function workflowCommands(project, profile, stepId, type) {
   return requested.filter((name) => Object.hasOwn(project.commands ?? {}, name));
 }
 
+const workflowStepSkills = Object.freeze({
+  'website-build': Object.freeze({
+    research: 'research.web',
+    'business-analysis': 'business.analyze',
+    requirements: 'requirements.define',
+    design: 'human.approval',
+    implementation: 'code.implement',
+    quality: 'project.verify',
+    'visual-verification': 'human.approval',
+    'release-readiness': 'project.verify'
+  }),
+  'app-improvement': Object.freeze({
+    'inspect-project': 'code.inspect',
+    diagnose: 'code.inspect',
+    'plan-change': 'human.approval',
+    implementation: 'code.implement',
+    tests: 'project.verify',
+    verification: 'project.verify',
+    'release-readiness': 'human.approval'
+  }),
+  'data-analysis': Object.freeze({
+    'inspect-data': 'data.inspect',
+    'validate-data': 'project.verify',
+    analysis: 'data.analyze',
+    findings: 'data.analyze',
+    output: 'data.summarize',
+    validation: 'project.verify'
+  })
+});
+
+function workflowSkill(profile, stepId) {
+  const skill = workflowStepSkills[profile]?.[stepId];
+  if (!skill) throw new Error(`Workflow step has no registered skill: ${profile}/${stepId}`);
+  return skill;
+}
+
 function workflowBootstrap(project) {
   const required = project.workspaceStrategy === 'managed' && Object.hasOwn(project.commands ?? {}, 'install');
   return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
 }
 
-export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), nowMs = Date.now(), budgets } = {}) {
+export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry } = {}) {
   const template = workflowProfiles[profile];
   if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
   if (!project?.id) throw new Error('Workflow project is required');
   if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
   const budget = workflowBudget(budgets);
-  const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
+  const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
-  validateWorkflowPlan(plan, new Map([[project.id, project]]));
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
+  validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
   return plan;
 }
 
-function validateCompletedWorkflowEvidence(step) {
+function validateCompletedWorkflowEvidence(plan, step) {
   if (step.status !== WorkflowStepStatus.COMPLETED) return;
   if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
+  if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint) {
+    throw new Error(`Completed workflow step evidence does not match its capability context: ${step.id}`);
+  }
   if (step.type === 'placeholder') {
-    if (!step.evidence || step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
+    if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
     return;
   }
   if (step.type === 'checkpoint') {
-    if (!step.evidence || !Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
     return;
   }
   if (step.type === 'command' || step.type === 'verification') {
-    const commands = step.evidence?.commands;
+    const commands = step.evidence.commands;
     if (!Array.isArray(commands) || commands.length !== step.commands.length || commands.some((outcome, index) => outcome?.name !== step.commands[index] || outcome.ok !== true)) throw new Error(`Completed executable step requires successful command evidence: ${step.id}`);
   }
 }
 
-export function validateWorkflowPlan(plan, knownProjects) {
+export function validateWorkflowPlan(plan, knownProjects, registry = defaultToolSkillRegistry) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps) || !plan.steps.length) throw new Error('Workflow plan must contain steps');
   if (!workflowProfiles[plan.profile]) throw new Error('Workflow references an unknown profile');
+  if (plan.registryFingerprint !== registry.fingerprint) throw new Error('Workflow capability registry fingerprint does not match the active registry');
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
+  if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
@@ -579,12 +623,13 @@ export function validateWorkflowPlan(plan, knownProjects) {
   for (const step of plan.steps) {
     if (!/^[a-z][a-z0-9-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('Workflow step ids must be unique');
     if (!workflowStepTypes.has(step.type)) throw new Error(`Unknown workflow step type: ${step.type}`);
+    if (step.skill !== workflowSkill(plan.profile, step.id) || !registry.getSkill(step.skill)) throw new Error(`Workflow step skill does not match the active registry: ${step.id}`);
     if (!Object.values(WorkflowStepStatus).includes(step.status)) throw new Error(`Workflow step has an invalid status: ${step.id}`);
     if (!Number.isInteger(step.attempts) || step.attempts < 0 || step.attempts > budget.maxAttempts) throw new Error(`Workflow step attempts exceed the configured budget: ${step.id}`);
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
-    validateCompletedWorkflowEvidence(step);
+    validateCompletedWorkflowEvidence(plan, step);
     ids.add(step.id);
   }
   for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
@@ -633,14 +678,14 @@ export function evaluateDefinitionOfDone(plan) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, workspaceManager = new WorkspaceManager(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
-    if (!store || !projects) throw new Error('WorkflowEngine requires store and projects');
-    Object.assign(this, { store, projects, workspaceManager, commandRunner, now });
+  constructor({ store, projects, registry = defaultToolSkillRegistry, workspaceManager = new WorkspaceManager(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+    if (!store || !projects || !registry) throw new Error('WorkflowEngine requires store, projects, and registry');
+    Object.assign(this, { store, projects, registry, workspaceManager, commandRunner, now });
   }
 
   async create(input) {
     const project = this.projects.get(input.projectId ?? input.project);
-    const plan = createWorkflowPlan({ ...input, project, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
+    const plan = createWorkflowPlan({ ...input, project, registry: this.registry, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
     await this.store.mutate((data) => { data.workflows ??= {}; data.workflows[plan.id] = plan; });
     return plan;
   }
@@ -661,9 +706,24 @@ export class WorkflowEngine {
     return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
   }
 
+  async blockForCapability(id, stepId, resolution) {
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      step.status = WorkflowStepStatus.BLOCKED;
+      step.error = resolution.reason;
+      step.evidence = { type: 'skill-resolution', skill: resolution.id, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, resolution };
+      saved.status = WorkflowStepStatus.BLOCKED;
+      saved.result = { error: step.error, stepId: step.id, skill: resolution.id };
+    });
+  }
+
   async approve(id, stepId) {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
+      validateWorkflowPlan(plan, this.projects, this.registry);
+      const project = this.projects.get(plan.projectId);
+      const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
+      if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
       const step = plan.steps.find((candidate) => candidate.id === stepId);
       const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
       const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
@@ -672,7 +732,7 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      step.evidence = { approvedAt: new Date(approvedAt).toISOString() };
+      step.evidence = { skill: step.skill, registryFingerprint: plan.registryFingerprint, projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint, approvedAt: new Date(approvedAt).toISOString() };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -680,6 +740,7 @@ export class WorkflowEngine {
   async resume(id, options = {}) {
     const pausedAt = this.now();
     await this.update(id, (plan) => {
+      validateWorkflowPlan(plan, this.projects, this.registry);
       let interrupted = false;
       for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
         step.status = WorkflowStepStatus.BLOCKED;
@@ -796,21 +857,23 @@ export class WorkflowEngine {
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
-    validateWorkflowPlan(plan, this.projects);
-    if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
+    validateWorkflowPlan(plan, this.projects, this.registry);
+    if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, skill: step.skill, capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }), commands: step.commands })) };
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
       plan = await this.get(id);
-      validateWorkflowPlan(plan, this.projects);
+      validateWorkflowPlan(plan, this.projects, this.registry);
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
+      const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
+      if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder') return this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.BLOCKED;
-        step.error = 'capability_not_implemented';
-        step.evidence = { type: 'placeholder', executable: false };
+        step.error = 'skill_executor_not_implemented';
+        step.evidence = { type: 'skill-resolution', resolution: skillResolution, executable: false };
         saved.status = WorkflowStepStatus.BLOCKED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -830,6 +893,14 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
       if (next.type === 'command' || next.type === 'verification') {
+        if (project.workspaceStrategy === 'managed') {
+          const workspaceResolution = this.registry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
+          if (!workspaceResolution.available) return this.blockForCapability(id, next.id, workspaceResolution);
+        }
+        if (plan.bootstrap.required) {
+          const bootstrapResolution = this.registry.resolve(project, 'project.bootstrap', { surface: 'workflow' });
+          if (!bootstrapResolution.available) return this.blockForCapability(id, next.id, bootstrapResolution);
+        }
         const workspaceProject = await this.workspaceProject(id, project);
         const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
         if (!bootstrap.ok) return bootstrap.plan;
@@ -858,7 +929,7 @@ export class WorkflowEngine {
       }
       plan = await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
-        step.evidence = result.evidence;
+        step.evidence = { ...result.evidence, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint };
         saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
         if (result.deadlineExceeded) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_budget_deadline_exceeded'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
         else if (result.outputBudgetExceeded || saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
@@ -1614,13 +1685,14 @@ export function report(run) {
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
   const deployment = run.deployment ?? run.results?.deployment;
   const changePolicy = run.results?.changePolicy;
-  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const capabilityPreflight = run.results?.capabilities;
+  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nCAPABILITY REGISTRY\n${run.registryFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nPROJECT SKILL POLICY\n${run.projectSkillPolicyFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nCAPABILITY PREFLIGHT\n${capabilityPreflight ? (capabilityPreflight.ok ? 'PASS' : 'FAIL') : 'not recorded'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
   return reportText
     .replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`)
     .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
 }
 
-export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner() } = {}) {
+export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner(), registry = defaultToolSkillRegistry } = {}) {
   let repository;
   let githubError;
   try {
@@ -1635,6 +1707,8 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
   } catch (error) {
     execution = { configuredProvider: project.execution.provider, selectedProvider: 'unavailable', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'NOT_AVAILABLE', hostFallback: 'NONE (FAIL-SAFE)', reason: clip(error.message, 300) };
   }
+  const orchestratorCapabilities = registry.report(project, { surface: 'orchestrator' });
+  const workflowCapabilities = registry.report(project, { surface: 'workflow' });
   return {
     project: project.displayName ?? project.id,
     projectId: project.id,
@@ -1648,18 +1722,49 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
     branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
+    capabilities: {
+      registryFingerprint: registry.fingerprint,
+      projectPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}),
+      orchestratorAvailable: orchestratorCapabilities.skills.filter((skill) => skill.available).map((skill) => skill.id),
+      orchestratorUnavailable: orchestratorCapabilities.skills.filter((skill) => !skill.available).map((skill) => `${skill.id}:${skill.reason}`),
+      workflowAvailable: workflowCapabilities.skills.filter((skill) => skill.available).map((skill) => skill.id)
+    },
     execution
   };
 }
 
 export function formatDoctor(result) {
   const execution = result.execution ?? {};
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
+  const capabilities = result.capabilities ?? {};
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
-  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
-    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
+  constructor({ store, registry = defaultToolSkillRegistry, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
+    Object.assign(this, { store, registry, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
+  }
+
+  requireSkill(project, skillId) {
+    const resolution = this.registry.resolve(project, skillId, { surface: 'orchestrator' });
+    if (!resolution.available) throw new Error(`capability_unavailable:${skillId}:${resolution.reason}`);
+    return resolution;
+  }
+
+  assertRunCapabilityContext(run, project) {
+    if (!run.registryFingerprint || !run.projectSkillPolicyFingerprint) throw new Error('run_capability_context_missing');
+    if (run.registryFingerprint !== this.registry.fingerprint) throw new Error('run_capability_registry_changed');
+    if (run.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {})) throw new Error('run_project_skill_policy_changed');
+  }
+
+  requiredSkills(project) {
+    const skills = new Set(['workspace.prepare', 'repository.observe', 'code.implement', 'project.verify', 'repository.publish', 'release.publish-pr', 'release.observe-ci', 'human.approval']);
+    if (project.acceptance.require.includes('install')) skills.add('project.bootstrap');
+    if (project.deployment.provider === 'vercel') skills.add('release.observe-preview');
+    return [...skills].sort();
+  }
+
+  assertOrchestratorCapabilities(project) {
+    return this.requiredSkills(project).map((skillId) => this.requireSkill(project, skillId));
   }
 
   async event(runId, component, event, details = {}) {
@@ -1673,7 +1778,7 @@ export class Orchestrator {
   async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -1689,6 +1794,7 @@ export class Orchestrator {
 
   async requireApproval(run, action, reason, payload, project) {
     const verdict = policy(action, project);
+    if (verdict === 'APPROVAL_REQUIRED') this.requireSkill(project, 'human.approval');
     if (verdict === 'FORBIDDEN') throw new Error(`Forbidden action: ${action}`);
     if (verdict === 'SAFE') return null;
     const id = createHash('sha256').update(`${run.id}:${action}:${JSON.stringify(payload)}`).digest('hex').slice(0, 16);
@@ -1735,6 +1841,8 @@ export class Orchestrator {
   }
 
   async initializeWorkspace(run, project) {
+    this.requireSkill(project, 'workspace.prepare');
+    this.requireSkill(project, 'repository.observe');
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
     if (repository.repository?.toLowerCase() !== `${project.repository.owner}/${project.repository.name}`.toLowerCase()) throw new Error('Configured repository differs from GitHub');
@@ -1756,6 +1864,7 @@ export class Orchestrator {
   }
 
   async bootstrap(run, project) {
+    this.requireSkill(project, 'project.bootstrap');
     const beforeBootstrap = await this.localGit.inspectChangeSet(project);
     const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())), stage: 'bootstrap' });
     const afterBootstrap = result.ok ? await this.localGit.inspectChangeSet(project) : null;
@@ -1779,6 +1888,9 @@ export class Orchestrator {
   }
 
   async simulateDryRun(run, project) {
+    this.assertRunCapabilityContext(run, project);
+    this.requireSkill(project, 'repository.observe');
+    const capabilityPlan = this.requiredSkills(project).map((skillId) => this.registry.resolve(project, skillId, { surface: 'orchestrator' }));
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
     const workingBranch = buildWorkingBranch(project, run.id);
@@ -1788,7 +1900,7 @@ export class Orchestrator {
       `create isolated workspace ${workspace.workspace}`,
       `fetch origin ${project.defaultBranch} and verify the GitHub base head`,
       `create ${workingBranch} at the verified remote base`,
-      'run the allowlisted install/bootstrap command',
+      ...(project.acceptance.require.includes('install') ? ['run the allowlisted install/bootstrap command'] : []),
       'invoke CodingWorker',
       `run configured checks: ${configuredChecks(project).join(', ') || 'none'}`,
       'commit and push the working branch',
@@ -1803,12 +1915,14 @@ export class Orchestrator {
       saved.workingBranch = workingBranch;
       saved.plannedActions = plannedActions;
       saved.results = {
+        capabilities: { ok: capabilityPlan.every((capability) => capability.available), simulated: true, required: safeJson(capabilityPlan) },
         repository: { ok: true, simulated: true, head: repository.head }, workspace: { ok: true, simulated: true, ...safeJson(workspace) },
         branch: { ok: true, simulated: true, workingBranch }, worker: { ok: true, simulated: true }, ...simulatedChecks,
         commit: { ok: true, simulated: true }, push: { ok: true, simulated: true }, pullRequest: { ok: true, simulated: true },
         ci: { ok: true, simulated: true }, deployment: { ok: true, simulated: true, provider: project.deployment?.provider ?? 'none' }
       };
-      saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.'] };
+      const unavailable = capabilityPlan.filter((capability) => !capability.available).map((capability) => `${capability.id}:${capability.reason}`);
+      saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.', ...(unavailable.length ? [`Unavailable capabilities: ${unavailable.join(', ')}`] : [])] };
       transition(saved, RunStatus.EVALUATING);
       transition(saved, RunStatus.COMPLETED);
       saved.durationMs = Date.now() - new Date(saved.createdAt).getTime();
@@ -1865,6 +1979,7 @@ export class Orchestrator {
   }
 
   async validateAndPublish(run, project, { approvedFingerprint } = {}) {
+    this.requireSkill(project, 'project.verify');
     run = await this.updateRun(run.id, (saved) => {
       if (saved.status !== RunStatus.TESTING) transition(saved, RunStatus.TESTING);
     });
@@ -1880,6 +1995,8 @@ export class Orchestrator {
     }
     run = await this.verifyChangePolicy(run, project, { phase: 'before_commit', approvedFingerprint });
     if (run.status !== RunStatus.TESTING) return run;
+    this.requireSkill(project, 'repository.publish');
+    if (!run.pullRequestNumber) this.requireSkill(project, 'release.publish-pr');
     const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
     const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, {
@@ -1907,6 +2024,7 @@ export class Orchestrator {
 
   async executeAttempt(run, project) {
     this.assertDeadline(run);
+    this.requireSkill(project, 'code.implement');
     if (run.workerAttempts > 0) {
       run = await this.updateRun(run.id, (saved) => {
         for (const name of configuredChecks(project)) delete saved.results[name];
@@ -1934,6 +2052,7 @@ export class Orchestrator {
   }
 
   async createPullRequest(run, project) {
+    this.requireSkill(project, 'release.publish-pr');
     const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
     const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(run.goal, 90));
     const pullRequest = await this.github.createPullRequest(project, {
@@ -1947,6 +2066,7 @@ export class Orchestrator {
   }
 
   async pollCi(run, project) {
+    this.requireSkill(project, 'release.observe-ci');
     run = await this.store.getRun(run.id);
     if (run.status !== RunStatus.WAITING_CI) return run;
     const ci = await this.github.waitForCi(project, run.finalHead, { timeoutMs: project.budgets.ciTimeoutMs, pollIntervalMs: project.budgets.ciPollIntervalMs });
@@ -1958,6 +2078,7 @@ export class Orchestrator {
   }
 
   async observeDeployment(run, project) {
+    if (project.deployment.provider === 'vercel') this.requireSkill(project, 'release.observe-preview');
     const deployment = await this.deploymentProvider.waitForPreview(project, { commitSha: run.finalHead, branch: run.workingBranch }, {
       timeoutMs: project.budgets.deploymentTimeoutMs,
       pollIntervalMs: project.budgets.deploymentPollIntervalMs
@@ -1973,6 +2094,8 @@ export class Orchestrator {
 
   async continueRun(run, project) {
     try {
+      this.assertRunCapabilityContext(run, project);
+      this.assertOrchestratorCapabilities(project);
       this.assertDeadline(run);
       if (run.workspace) project = projectAtWorkspace(project, run.workspace);
       if (run.status === RunStatus.WAITING_APPROVAL) {

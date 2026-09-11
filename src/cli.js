@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
 import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, report } from './core.js';
+import { defaultToolSkillRegistry } from './capabilities.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -25,6 +26,11 @@ try {
       allowedPaths: takeAll('--allowed-path'),
       forbiddenPaths: takeAll('--forbidden-path')
     })));
+  } else if (command === 'capabilities') {
+    const project = projects.get(take('--project'));
+    if (!project) throw new Error('Unknown --project');
+    const surface = take('--surface') ?? 'workflow';
+    console.log(JSON.stringify(defaultToolSkillRegistry.report(project, { surface }), null, 2));
   } else if (command === 'doctor') {
     const project = projects.get(take('--project'));
     if (!project) throw new Error('Unknown --project');
@@ -64,7 +70,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create <website-build|app-improvement|data-analysis> --project <id> --goal "..." | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
-    console.log('Usage: agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));

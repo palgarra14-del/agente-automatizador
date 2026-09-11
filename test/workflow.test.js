@@ -21,16 +21,21 @@ function completeStep(plan, id) {
   step.status = WorkflowStepStatus.COMPLETED;
   step.error = null;
   const completedAt = '2026-09-11T00:00:00.000Z';
-  if (step.type === 'placeholder') step.evidence = { type: 'executor', ok: true, completedAt };
-  else if (step.type === 'checkpoint') step.evidence = { approvedAt: completedAt };
-  else step.evidence = { commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
+  const capability = {
+    skill: step.skill,
+    registryFingerprint: plan.registryFingerprint,
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
+  };
+  if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
+  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
+  else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
 }
 
-function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets } = {}) {
+function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills } = {}) {
   return configFrom({
     id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
-    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets
+    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets, skills
   }, join(root, id, 'config'));
 }
 
@@ -75,9 +80,9 @@ test('workflow placeholders block honestly instead of claiming unimplemented wor
   const current = await instance.run(created.id);
   const inspect = current.steps.find((step) => step.id === 'inspect-project');
   assert.equal(current.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(current.result.error, 'capability_not_implemented');
+  assert.equal(current.result.error, 'skill_not_allowed');
   assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(inspect.error, 'capability_not_implemented');
+  assert.equal(inspect.error, 'skill_not_allowed');
   assert.equal(evaluateDefinitionOfDone(current).ok, false);
   await assert.rejects(instance.approve(created.id, 'inspect-project'), /not awaiting human approval/);
 });
@@ -127,7 +132,7 @@ test('workflow resume blocks an interrupted executable step until a human approv
   const resumed = await instance.run(created.id);
   assert.equal(resumed.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.COMPLETED);
   assert.equal(resumed.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(resumed.result.error, 'capability_not_implemented');
+  assert.equal(resumed.result.error, 'skill_not_allowed');
 });
 
 test('Definition of Done and malformed persisted workflow state are enforced', async () => {
@@ -557,5 +562,103 @@ test('persisted completed steps require type-appropriate evidence', async () => 
     }
     plan.status = WorkflowStepStatus.PENDING;
   });
-  await assert.rejects(instance.run(created.id), /requires .* evidence/);
+  await assert.rejects(instance.run(created.id), /evidence/);
+});
+
+
+test('managed workflow denies workspace preparation before clone when capability is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-workspace-capability-'));
+  const limited = managedProject('limited-workspace', root, {
+    skills: {
+      allow: ['project.verify', 'human.approval'],
+      deny: []
+    }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({ projects: new Map([[limited.id, limited]]), workspaceManager: manager });
+  const created = await instance.create({ profile: 'data-analysis', projectId: limited.id, goal: 'Do not clone' });
+  await instance.update(created.id, (plan) => { completeStep(plan, 'inspect-data'); });
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.result.error, 'skill_not_allowed');
+  assert.equal(blocked.result.skill, 'workspace.prepare');
+  assert.equal(manager.prepared.length, 0);
+});
+
+test('managed workflow denies bootstrap before clone when install capability is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-capability-'));
+  const limited = managedProject('limited-bootstrap', root, {
+    commands: { install: 'node --version', test: 'node --version' },
+    skills: {
+      allow: ['workspace.prepare', 'project.verify', 'human.approval'],
+      deny: []
+    }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({ projects: new Map([[limited.id, limited]]), workspaceManager: manager });
+  const created = await instance.create({ profile: 'data-analysis', projectId: limited.id, goal: 'Do not install' });
+  await instance.update(created.id, (plan) => { completeStep(plan, 'inspect-data'); });
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.result.error, 'skill_not_allowed');
+  assert.equal(blocked.result.skill, 'project.bootstrap');
+  assert.equal(manager.prepared.length, 0);
+});
+
+
+test('completed workflow evidence cannot be replayed under a different skill or capability fingerprint', () => {
+  const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Bind evidence context' });
+  const step = completeStep(plan, 'inspect-data');
+  step.evidence.skill = 'project.verify';
+  assert.throws(() => validateWorkflowPlan(plan, new Map([['workflow-project', project()]])), /capability context/);
+
+  const fingerprintPlan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Bind evidence fingerprint' });
+  const fingerprintStep = completeStep(fingerprintPlan, 'inspect-data');
+  fingerprintStep.evidence.registryFingerprint = '0'.repeat(64);
+  assert.throws(() => validateWorkflowPlan(fingerprintPlan, new Map([['workflow-project', project()]])), /capability context/);
+});
+
+
+test('stale capability context blocks workflow approval and resume before mutation', async () => {
+  const instance = await engine();
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Freeze capability context' });
+  await instance.update(created.id, (plan) => {
+    for (const id of ['inspect-project', 'diagnose']) completeStep(plan, id);
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.pausedAt = plan.deadlineAt - plan.budgets.timeoutMs + 1;
+  });
+  const beforeApproval = await instance.get(created.id);
+  const originalRegistryFingerprint = beforeApproval.registryFingerprint;
+  const originalPausedAt = beforeApproval.pausedAt;
+  await instance.update(created.id, (plan) => { plan.registryFingerprint = '0'.repeat(64); });
+  await assert.rejects(instance.approve(created.id, 'plan-change'), /registry fingerprint/);
+  const afterApproval = await instance.get(created.id);
+  assert.equal(afterApproval.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(afterApproval.pausedAt, originalPausedAt);
+
+  await instance.update(created.id, (plan) => {
+    plan.registryFingerprint = originalRegistryFingerprint;
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.COMPLETED;
+    checkpoint.evidence = {
+      skill: checkpoint.skill,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      approvedAt: '2026-09-11T00:00:00.000Z'
+    };
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    implementation.status = WorkflowStepStatus.RUNNING;
+    plan.status = WorkflowStepStatus.RUNNING;
+    plan.pausedAt = null;
+  });
+  const beforeResume = await instance.get(created.id);
+  const originalPolicyFingerprint = beforeResume.projectSkillPolicyFingerprint;
+  await instance.update(created.id, (plan) => { plan.projectSkillPolicyFingerprint = 'f'.repeat(64); });
+  await assert.rejects(instance.resume(created.id), /project skill policy fingerprint/);
+  const afterResume = await instance.get(created.id);
+  assert.equal(afterResume.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.RUNNING);
+  assert.equal(afterResume.status, WorkflowStepStatus.RUNNING);
+  assert.notEqual(afterResume.projectSkillPolicyFingerprint, originalPolicyFingerprint);
 });

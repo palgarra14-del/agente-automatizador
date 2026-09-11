@@ -20,10 +20,16 @@ Governed real engineering tasks add literal scope input, immutable forbidden-pat
 
 Safe project-command execution adds the provider boundary, a real Docker implementation with no automatic pull, strict `container-required` fail-safe behavior, explicit local fallback only, command-resource limits, a no-network post-worker policy, and doctor evidence for the active isolation contract. It does not create product changes, merge pull requests, or deploy production.
 
-## v0.6 — current
+## v0.6 — complete
 
 Deterministic persisted workflow plans add profile-based dependencies, Definition of Done, bounded retries/output/time, managed-workspace reuse, one-time bootstrap, crash-safe resume, and human checkpoints. Active execution budgets pause while waiting for checkpoint approval, workspace preparation is capped by the remaining budget, bootstrap attempts are bounded, and structural placeholders fail closed instead of claiming unimplemented work as complete. The workflow engine still does not execute research, design, implementation, or analysis placeholders; connecting those steps to reviewed executors is deferred to later versions.
 
+## v0.7 — current
+
+The Tool/Skill Registry makes capability availability explicit and fail-closed. Atomic tools expose reviewed bindings and execution surfaces; skills declare tool dependencies, risk, and versioned input/output contracts. Projects define explicit skill allow/deny policy, with deny taking precedence. Registry and project-policy fingerprints are persisted on runs/workflows so resume cannot silently gain capabilities after configuration changes. Existing Orchestrator actions are gated through the registry, while future research/browser/analysis/inspection capabilities remain registered but unavailable until reviewed executors are added.
+
+The v0.7 scope deliberately does not add browser automation, web research, a new LLM, autonomous specialist agents, or automatic merge/production actions.
+
 ## Deferred
 
-Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Do not start v0.7 capabilities from the v0.6 hardening branch.
+Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Later work should connect reviewed placeholder executors through these capability contracts rather than bypassing the registry.
