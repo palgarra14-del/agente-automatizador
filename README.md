@@ -46,7 +46,9 @@ node src/cli.js workflow resume <workflowId>
 node src/cli.js workflow list
 ```
 
-The available profiles are `website-build`, `app-improvement`, and `data-analysis`. Command and verification steps use the existing governed command runner; placeholders and checkpoints are structural until a future version supplies a reviewed implementation. An interrupted running step becomes blocked on resume and requires explicit human approval before it can run again.
+The available profiles are `website-build`, `app-improvement`, and `data-analysis`. Command and verification steps use the existing governed command runner; for a managed project, the workflow prepares one project-and-workflow-specific managed workspace and persists its repository/workspace evidence for safe reuse on resume. Persisted workflow state is fail-closed: profile shape, command names, workspace allocation, budgets, dependencies, and Definition of Done must still match the registered project before a command can run. Placeholders and checkpoints are structural until a future version supplies a reviewed implementation. An interrupted running step becomes blocked on resume and requires explicit human approval before it can run again.
+
+The workflow timeout is a global deadline, not a per-command allowance: it is checked before each step, retry, and command, and the command timeout is capped to the time remaining. Definition of Done is strict: only a `completed` required step satisfies it; `skipped` never does. A workflow dry run remains non-mutating for the project: it does not prepare/clone a workspace or execute a command.
 
 The project commands, protected branches, branch pattern, approvals, change policy, execution provider, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, branch protection, and execution isolation availability without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 

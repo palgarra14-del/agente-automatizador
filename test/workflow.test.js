@@ -1,18 +1,38 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
 
-async function engine({ runner } = {}) {
+async function engine({ runner, projects, workspaceManager, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
-  const projects = new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+}
+
+function managedProject(id, root) {
+  return configFrom({
+    id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }
+  }, join(root, id, 'config'));
+}
+
+class FakeWorkflowWorkspaceManager {
+  constructor() { this.prepared = []; }
+  describe(project, runId) {
+    if (project.workspaceStrategy !== 'managed') return { workspace: project.workspace, managed: false, retained: false };
+    return { workspace: resolve(project.managedWorkspaceRoot, project.id, runId), managed: true, retained: true };
+  }
+  async prepare(project, runId) {
+    const allocation = this.describe(project, runId);
+    this.prepared.push({ projectId: project.id, ...allocation });
+    return { ...allocation, remoteUrl: `https://github.com/${project.repository.owner}/${project.repository.name}.git` };
+  }
 }
 
 test('workflow profiles create validated deterministic plans', () => {
@@ -96,4 +116,129 @@ test('Definition of Done and malformed persisted workflow state are enforced', a
   assert.equal(evaluateDefinitionOfDone(created).ok, false);
   await instance.store.mutate((data) => { data.workflows.bad = { id: 'bad', projectId: 'workflow-project', profile: 'data-analysis', budgets: {}, steps: [] }; });
   await assert.rejects(instance.run('bad'), /must contain steps/);
+});
+
+test('Definition of Done requires completed steps and never accepts skipped mandatory work', () => {
+  const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Strict DoD' });
+  for (const step of plan.steps) step.status = WorkflowStepStatus.COMPLETED;
+  const required = plan.steps.find((step) => step.id === 'validate-data');
+  required.status = WorkflowStepStatus.SKIPPED;
+  assert.equal(evaluateDefinitionOfDone(plan).ok, false);
+  required.status = WorkflowStepStatus.COMPLETED;
+  assert.equal(evaluateDefinitionOfDone(plan).ok, true);
+});
+
+test('Callflow and LeadFinder workflows bind every command to their selected managed workspaces', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-projects-'));
+  const callflow = managedProject('callflow', root);
+  const leadfinder = managedProject('leadfinder', root);
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const instance = await engine({ projects: new Map([[callflow.id, callflow], [leadfinder.id, leadfinder]]), workspaceManager: manager, runner: async (boundProject, name) => {
+    calls.push({ id: boundProject.id, workspace: boundProject.workspace, name });
+    return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+  } });
+  const callflowWorkflow = await instance.create({ profile: 'data-analysis', projectId: 'callflow', goal: 'Isolate Callflow' });
+  const leadfinderWorkflow = await instance.create({ profile: 'data-analysis', projectId: 'leadfinder', goal: 'Isolate LeadFinder' });
+  const callflowCompleted = await instance.run(callflowWorkflow.id);
+  const leadfinderCompleted = await instance.run(leadfinderWorkflow.id);
+  const expectedCallflow = manager.describe(callflow, callflowWorkflow.id).workspace;
+  const expectedLeadfinder = manager.describe(leadfinder, leadfinderWorkflow.id).workspace;
+  assert.equal(callflowCompleted.workspace.path, expectedCallflow);
+  assert.deepEqual(callflowCompleted.workspace.repository, callflow.repository);
+  assert.equal(leadfinderCompleted.workspace.path, expectedLeadfinder);
+  assert.equal(leadfinderCompleted.workspace.managed, true);
+  assert.deepEqual(leadfinderCompleted.workspace.repository, leadfinder.repository);
+  assert.ok(calls.length > 0);
+  assert.ok(calls.filter((call) => call.id === 'callflow').every((call) => call.workspace === expectedCallflow));
+  assert.ok(calls.filter((call) => call.id === 'leadfinder').every((call) => call.workspace === expectedLeadfinder));
+  assert.notEqual(expectedCallflow, expectedLeadfinder);
+  assert.equal(manager.prepared.length, 2);
+});
+
+test('workflow rejects persisted workspace escape, cross-project substitution, and managed symlink before commands', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-escape-'));
+  const callflow = managedProject('callflow', root);
+  const leadfinder = managedProject('leadfinder', root);
+  const projects = new Map([[callflow.id, callflow], [leadfinder.id, leadfinder]]);
+  const manager = new FakeWorkflowWorkspaceManager();
+  let calls = 0;
+  const instance = await engine({ projects, workspaceManager: manager, runner: async () => { calls += 1; return { ok: true }; } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: 'leadfinder', goal: 'Reject workspace tampering' });
+  await instance.update(created.id, (plan) => {
+    plan.workspace = { path: manager.describe(callflow, created.id).workspace, managed: true, projectId: leadfinder.id, repository: leadfinder.repository, initializedAt: new Date().toISOString() };
+  });
+  await assert.rejects(instance.run(created.id), /outside the managed workspace root/);
+  await instance.update(created.id, (plan) => { plan.workspace.path = resolve(leadfinder.managedWorkspaceRoot, '..', 'outside'); });
+  await assert.rejects(instance.run(created.id), /outside the managed workspace root/);
+  await instance.update(created.id, (plan) => { plan.workspace = null; });
+  await mkdir(leadfinder.managedWorkspaceRoot, { recursive: true });
+  const external = await mkdtemp(join(tmpdir(), 'agent-workflow-external-'));
+  await symlink(external, join(leadfinder.managedWorkspaceRoot, leadfinder.id), 'junction');
+  await assert.rejects(instance.run(created.id), /cannot contain a symlink/);
+  assert.equal(calls, 0);
+});
+
+test('workflow fails closed when persisted state introduces arbitrary commands or invalid fields', async () => {
+  let calls = 0;
+  const instance = await engine({ runner: async () => { calls += 1; return { ok: true }; } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Reject corruption' });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'validate-data').commands = ['curl']; });
+  await assert.rejects(instance.run(created.id), /not allowlisted/);
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'validate-data').commands = ['test', 'typecheck', 'lint', 'build']; plan.outputBytes = -1; });
+  await assert.rejects(instance.run(created.id), /outputBytes/);
+  assert.equal(calls, 0);
+});
+
+test('workflow global deadline is enforced before start, between steps, between commands, and retries', async () => {
+  let clock = 0;
+  let calls = 0;
+  const expired = await engine({ now: () => clock, runner: async () => { calls += 1; return { ok: true }; } });
+  const expiredPlan = await expired.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Expired', budgets: { timeoutMs: 1_000 } });
+  clock = 1_000;
+  assert.equal((await expired.run(expiredPlan.id)).result.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(calls, 0);
+
+  clock = 0;
+  const betweenSteps = await engine({ now: () => clock, runner: async (_project, name) => { calls += 1; clock = 1_000; return { name, ok: true, stdout: '', stderr: '' }; } });
+  const stepPlan = await betweenSteps.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Between steps', budgets: { timeoutMs: 1_000 } });
+  assert.equal((await betweenSteps.run(stepPlan.id)).result.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(calls, 1);
+
+  clock = 0;
+  const commandTimeouts = [];
+  const betweenCommands = await engine({ now: () => clock, runner: async (_project, name, options) => { calls += 1; commandTimeouts.push(options.timeoutMs); clock = 1_000; return { name, ok: false, stdout: '', stderr: '' }; } });
+  const commandPlan = await betweenCommands.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
+  const deadlineFailed = await betweenCommands.run(commandPlan.id);
+  assert.equal(deadlineFailed.result.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(commandTimeouts.at(-1), 1_000);
+  assert.equal(calls, 2);
+  assert.equal(deadlineFailed.steps.find((step) => step.id === 'validate-data').attempts, 1);
+});
+
+test('crash and resume preserve a managed workspace and never repeat completed steps before approval', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-resume-'));
+  const leadfinder = managedProject('leadfinder', root);
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, runner: async (boundProject, name) => {
+    calls.push({ workspace: boundProject.workspace, name });
+    return { name, ok: true, stdout: '', stderr: '' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Resume safely' });
+  const expectedWorkspace = (await instance.workspaceProject(created.id, leadfinder)).workspace;
+  await instance.update(created.id, (plan) => {
+    plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED;
+    plan.steps.find((step) => step.id === 'validate-data').status = WorkflowStepStatus.RUNNING;
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+  const blocked = await instance.resume(created.id);
+  assert.equal(blocked.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.BLOCKED);
+  assert.equal(calls.length, 0);
+  await instance.approve(created.id, 'validate-data');
+  const resumed = await instance.run(created.id);
+  assert.equal(resumed.steps.find((step) => step.id === 'inspect-data').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(resumed.workspace.path, expectedWorkspace);
+  assert.equal(manager.prepared.length, 1);
+  assert.ok(calls.length > 0 && calls.every((call) => call.workspace === expectedWorkspace));
 });
