@@ -623,7 +623,7 @@ function workflowBootstrap(project) {
   return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
 }
 
-export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry } = {}) {
+export function createWorkflowPlan({ profile, project, goal, scope = {}, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry } = {}) {
   const template = workflowProfiles[profile];
   if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
   if (!project?.id) throw new Error('Workflow project is required');
@@ -631,7 +631,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(input.scope ?? {}), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
   return plan;
 }
