@@ -31,6 +31,7 @@ function stableLocalGit(overrides = {}) {
     async inspectChangeSet() { return emptyChangeSet(); },
     async inspectProtectedIgnoredState() { return emptyProtectedIgnoredState(); },
     async inspectRepositoryControlState() { return emptyRepositoryControlState(); },
+    async inspectWorkerSensitivePaths() { return []; },
     async assertRepositoryState(project, expected = {}) {
       const current = await this.inspect(project);
       if (expected.branch && current.currentBranch !== expected.branch) throw new Error('Unexpected current branch');
@@ -1272,4 +1273,55 @@ test('implementation fails if git control state changes even when normal diff is
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
   assert.match(implementation.evidence.error, /repository_control_state_changed/);
+});
+
+
+test('read-only worker refuses to start when sensitive workspace files are present', async () => {
+  const configured = configFrom({
+    id: 'readonly-sensitive-files',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let executorCalls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      executorCalls += 1;
+      return { ok: true, status: 'completed', outputBytes: 0, result: { inspectionEvidence: { summary: 'should not run' } } };
+    }
+  };
+  const localGit = stableLocalGit({ async inspectWorkerSensitivePaths() { return ['.env']; } });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not expose secrets' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'worker_sensitive_files_present');
+  assert.deepEqual(step.evidence.paths, ['.env']);
+  assert.equal(executorCalls, 0);
+});
+
+test('implementation worker refuses to start when sensitive workspace files are present', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return { status: 'completed', summary: 'should not run', output: '', outputBytes: 0 };
+    }
+  };
+  const localGit = stableLocalGit({ async inspectWorkerSensitivePaths() { return ['secrets/client.key']; } });
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Protect secrets' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'worker_sensitive_files_present');
+  assert.deepEqual(step.evidence.paths, ['secrets/client.key']);
+  assert.equal(workerCalls, 0);
 });
