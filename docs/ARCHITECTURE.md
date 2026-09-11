@@ -22,7 +22,7 @@ Execution leases are persisted on runs and workflows. A live owner rejects a sec
 
 The first WorkflowEngine skill executors are deliberately split by authority. `CodexReadOnlySkillExecutor` handles `code.inspect` and `code.diagnose` with a fail-closed read-only Codex permission profile, isolated HOME, no network/browser/plugins/project instructions, strict JSON contracts, and independent before/after integrity checks. Those checks bind repository identity, branch/HEAD/remote, working-tree fingerprint, protected ignored files, and Git control metadata (including refs/reflogs/hooks/info).
 
-`code.implement` reuses `CodexSdkWorker` rather than adding a second writer. The WorkflowEngine captures the clean starting repository state, runs the worker with only sanitized goal/evidence/scope, then reuses `LocalGitAdapter.inspectChangeSet` and `evaluateChangePolicy`. Forbidden paths, scope violations, and change-budget violations fail; sensitive changes block; a failed worker that left changes blocks rather than retrying. Only a completed worker plus a normal policy decision and bound change-set fingerprint can satisfy implementation evidence. Tests/typecheck/lint/build remain configured verification commands. WorkflowEngine never commits, pushes, creates PRs, merges, or deploys.
+`code.implement` reuses `CodexSdkWorker` rather than adding a second writer. The WorkflowEngine captures the clean starting repository state, runs the worker with only sanitized goal/evidence/scope, then reuses `LocalGitAdapter.inspectChangeSet` and `evaluateChangePolicy`. Forbidden paths, scope violations, and change-budget violations fail; sensitive changes block; a failed worker that left changes blocks rather than retrying. Only a completed worker plus a normal policy decision and bound change-set fingerprint can satisfy implementation evidence. Tests/typecheck/lint/build remain configured verification commands. In v0.8 this flow stopped before publication; v0.11 adds a separate reviewed-publication boundary described below. Merge and production deployment remain unavailable.
 
 Crash recovery records the pre-execution branch, HEAD, remote, workspace, change-set fingerprint, protected ignored-file fingerprint, and Git-control fingerprint. An interrupted worker may be retried only when all governed state is still clean; observed changes or repository/control-state mutation become a non-approvable block so work is never silently applied twice.
 
@@ -38,6 +38,18 @@ Each run/workflow persists a `modelUsage` ledger with a fixed `maxCalls` copied 
 
 When the SDK returns usage evidence, input/output token counts are normalized and accumulated; missing or malformed usage does not erase the call and increments `unknownUsageCalls`. Resume validates the persisted ledger against the current project budget and fails closed on missing, inconsistent, over-budget, or tampered state. This is a real call-count governor and an auditable usage ledger, not yet an exact monetary spend cap.
 
+## v0.11 reviewed workflow publication
+
+The app-improvement flow now ends with `release-readiness → publication`. Publication is not a general Git/GitHub capability grant. `release.publish-reviewed-workflow` depends on one workflow-only tool, `workflow-publication`, owned by the `release-manager` specialist with `external-write` authority. Low-level `git-publish`, `github-publish`, `github-observe`, and `vercel-observe` remain Orchestrator-only.
+
+A publication-capable workflow must use a managed workspace. During workspace initialization, controlled Git fetches the configured default branch and creates `agent/<workflowId>` at the exact persisted base SHA before any model-backed step runs. The workflow persists branch/base/remote evidence and revalidates it whenever the workspace is reused.
+
+Publication prerequisites are exact: implementation, critic PASS, configured verification, and human release-readiness approval must all point to the same change-set fingerprint. Immediately before publication the change set and repository-control evidence are recalculated. The GitHub default-branch head must still equal the persisted base before commit, again after push before PR creation, and again after CI/preview. Base drift invalidates publication rather than silently rebasing reviewed code.
+
+External writes are a persisted state machine: preflight → commit-started/committed → push-started/pushed → pr-started/pr-created → CI observation → optional preview observation → final revalidation. Commit must contain exactly the governed paths/fingerprint; push and remote branch must point to the commit SHA; the PR must be open with the exact head SHA/ref and configured base. CI must succeed. Projects whose acceptance requires deployment must also expose a READY non-production preview for the same commit and branch.
+
+A crash during commit, push, or PR creation becomes an uncertain external-write block and is never replayed automatically. Only read-only CI/preview timeout states are resumable, and resume first revalidates base, remote branch, and PR identity. No WorkflowPublicationBridge method exists for merge, promotion, production deploy, domain changes, environment changes, or secret writes.
+
 ## Adapters
 
 - `CodexSdkWorker`: real workspace-write coding implementation through the official `@openai/codex-sdk`.
@@ -46,6 +58,7 @@ When the SDK returns usage evidence, input/output token counts are normalized an
 - `GitHubAdapter`: authenticated repository/branch reads, PR creation, and check-run polling.
 - `ToolSkillRegistry`: immutable deterministic registry of tool bindings, skill contracts, project policy, surface availability, and fingerprints.
 - `WorkspaceManager`: isolated clone lifecycle beneath the managed root; fresh clones explicitly checkout the configured base branch, valid interrupted clones are reused only when clean and repository-matched, and partial/mismatched clones are retained under a `.failed-*` sibling before recovery.
+- `WorkflowPublicationBridge`: workflow-only façade over controlled commit/push/PR/CI/preview operations; deliberately exposes no merge or production action.
 - `VercelDeploymentProvider`: read-only Vercel deployment lookup and bounded polling by configured project/team, branch, and commit SHA.
 - `ProjectCommandRunner`: selects only the project-configured execution provider; a worker cannot choose it.
 - `DockerContainerExecution`: real Docker boundary for `container` and `container-required`, with only an explicit workspace bind mount and no automatic image pull.
