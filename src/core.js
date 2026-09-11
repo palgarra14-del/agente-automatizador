@@ -553,7 +553,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
-  if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < 0)) throw new Error('Workflow pausedAt must be null or a finite timestamp');
+  if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
   if (!Number.isInteger(plan.outputBytes) || plan.outputBytes < 0) throw new Error('Workflow outputBytes must be an integer >= 0');
   if (!plan.budgets || typeof plan.budgets !== 'object' || ['maxSteps', 'maxAttempts', 'timeoutMs', 'maxOutputBytes'].some((key) => !Object.hasOwn(plan.budgets, key))) throw new Error('Workflow budgets are incomplete');
   const budget = workflowBudget(plan.budgets);
@@ -596,9 +596,10 @@ export function validateWorkflowPlan(plan, knownProjects) {
   const awaitingApproval = plan.steps.filter((step) => step.status === WorkflowStepStatus.AWAITING_APPROVAL);
   if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
   if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
-  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
+  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
   if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
   if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
+  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt) && plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval').length !== 1) throw new Error('Paused blocked workflow must represent one interrupted step');
   if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
   if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
@@ -1179,7 +1180,8 @@ export class WorkspaceManager {
       await assertSafePathChain(details.workspace);
       const root = await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--show-toplevel'], { cwd: details.projectDirectory, timeoutMs });
       const remote = root.ok ? await this.processRunner('git', ['-C', details.workspace, 'remote', 'get-url', 'origin'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
-      if (root.ok && remote.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project)) {
+      const head = root.ok && remote.ok ? await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--verify', 'HEAD^{commit}'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      if (root.ok && remote.ok && head.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project)) {
         return { ...details, remoteUrl, clone: { ok: true, reused: true, durationMs: 0, exitCode: 0 } };
       }
       const failedWorkspace = `${details.workspace}.failed-${randomUUID().slice(0, 8)}`;
