@@ -288,7 +288,7 @@ export function assertAllowedWorkingBranch(project, branch) {
   }
 }
 
-export function configFrom(input, baseDirectory = process.cwd()) {
+export function configFrom(input, baseDirectory = process.cwd(), registry = defaultToolSkillRegistry) {
   if (!input?.id || !/^[a-z0-9-]+$/.test(input.id)) throw new Error('Invalid project id');
   if (!input.repository?.owner || !input.repository?.name) throw new Error('repository owner/name required');
   if (!input.defaultBranch || !Array.isArray(input.protectedBranches) || !input.protectedBranches.includes(input.defaultBranch)) {
@@ -316,7 +316,7 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   const changePolicy = changePolicyFrom(input.changePolicy);
   const execution = executionFrom(input.execution);
   const toolchain = toolchainFrom(input.toolchain);
-  const skills = defaultToolSkillRegistry.validateProjectPolicy(input.skills ?? {});
+  const skills = registry.validateProjectPolicy(input.skills ?? {});
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -349,10 +349,10 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   return project;
 }
 
-export async function loadProjects(file) {
+export async function loadProjects(file, registry = defaultToolSkillRegistry) {
   const data = JSON.parse(await readFile(file, 'utf8'));
   return new Map(data.projects.map((project) => {
-    const configured = configFrom(project, dirname(file));
+    const configured = configFrom(project, dirname(file), registry);
     return [configured.id, configured];
   }));
 }
