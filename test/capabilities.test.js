@@ -200,3 +200,22 @@ test('pre-v0.7 workflow plans without registry fingerprints fail closed', () => 
   delete plan.projectSkillPolicyFingerprint;
   assert.throws(() => validateWorkflowPlan(plan, new Map([[project.id, project]])), /registry fingerprint/);
 });
+
+
+test('custom registry can validate project configuration and workflow execution consistently', () => {
+  const customTools = [...defaultTools, { id: 'custom-tool', kind: 'executor', binding: 'CustomBinding', surfaces: ['workflow'], risk: 'workspace-read', description: 'test tool' }];
+  const customSkills = [...defaultSkills, { id: 'custom.skill', requiresTools: ['custom-tool'], surfaces: ['workflow'], contract: { version: 1, inputs: ['project'], outputs: ['customEvidence'] }, risk: 'workspace-read', description: 'test skill' }];
+  const registry = new ToolSkillRegistry({ tools: customTools, skills: customSkills });
+  const configured = configFrom({
+    id: 'custom-registry-project',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['custom.skill', 'project.verify', 'human.approval'], deny: [] }
+  }, process.cwd(), registry);
+  assert.deepEqual(configured.skills.allow, ['custom.skill', 'human.approval', 'project.verify']);
+  assert.equal(registry.resolve(configured, 'custom.skill', { surface: 'workflow' }).available, true);
+});
