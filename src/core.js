@@ -3001,10 +3001,13 @@ export class LocalGitAdapter {
   }
 }
 
-function ciState(checkRuns) {
-  if (!checkRuns.length || checkRuns.some((check) => check.status !== 'completed')) return 'pending';
-  const failures = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
-  return checkRuns.some((check) => failures.has(check.conclusion)) ? 'failure' : 'success';
+function ciState(checkRuns, statuses = []) {
+  const checkFailures = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
+  const statusFailures = new Set(['failure', 'error']);
+  if (checkRuns.some((check) => checkFailures.has(check.conclusion)) || statuses.some((status) => statusFailures.has(status.state))) return 'failure';
+  if (checkRuns.some((check) => check.status !== 'completed') || statuses.some((status) => status.state === 'pending')) return 'pending';
+  if (!checkRuns.length && !statuses.length) return 'pending';
+  return 'success';
 }
 
 export class GitHubAdapter {
@@ -3060,8 +3063,11 @@ export class GitHubAdapter {
   }
 
   async checks(project, sha) {
-    const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`));
-    const checks = (data.check_runs ?? []).map((check) => ({
+    const [checkData, statusData] = await Promise.all([
+      this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`)),
+      this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/status`))
+    ]);
+    const checks = (checkData.check_runs ?? []).map((check) => ({
       name: check.name,
       status: check.status,
       conclusion: check.conclusion,
@@ -3069,7 +3075,15 @@ export class GitHubAdapter {
       completedAt: check.completed_at,
       detailsUrl: check.details_url
     }));
-    return { state: ciState(checks), checks };
+    const statuses = (statusData.statuses ?? []).map((status) => ({
+      context: status.context,
+      state: status.state,
+      description: status.description ?? null,
+      targetUrl: status.target_url ?? null,
+      createdAt: status.created_at ?? null,
+      updatedAt: status.updated_at ?? null
+    }));
+    return { state: ciState(checks, statuses), checks, statuses };
   }
 
   async waitForCi(project, sha, { timeoutMs, pollIntervalMs }) {
