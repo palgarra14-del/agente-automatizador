@@ -231,6 +231,8 @@ test('v0.4 change policy marks package, workflow, and security/auth changes as s
   const governed = project();
   for (const changeSet of [
     { paths: ['package.json'], changedFiles: 1, diffLines: 1 },
+    { paths: ['apps/web/package.json'], changedFiles: 1, diffLines: 1 },
+    { paths: ['packages/ui/pnpm-lock.yaml'], changedFiles: 1, diffLines: 1 },
     { paths: ['.github/workflows/verify.yml'], changedFiles: 1, diffLines: 1 },
     { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1, sensitiveContent: true }
   ]) assert.equal(evaluateChangePolicy(governed, changeSet).classification, 'sensitive');
