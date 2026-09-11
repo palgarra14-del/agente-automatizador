@@ -1869,6 +1869,8 @@ export class Orchestrator {
   }
 
   async simulateDryRun(run, project) {
+    this.requireSkill(project, 'repository.observe');
+    const capabilityPlan = this.requiredSkills(project).map((skillId) => this.registry.resolve(project, skillId, { surface: 'orchestrator' }));
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
     const workingBranch = buildWorkingBranch(project, run.id);
@@ -1878,7 +1880,7 @@ export class Orchestrator {
       `create isolated workspace ${workspace.workspace}`,
       `fetch origin ${project.defaultBranch} and verify the GitHub base head`,
       `create ${workingBranch} at the verified remote base`,
-      'run the allowlisted install/bootstrap command',
+      ...(project.acceptance.require.includes('install') ? ['run the allowlisted install/bootstrap command'] : []),
       'invoke CodingWorker',
       `run configured checks: ${configuredChecks(project).join(', ') || 'none'}`,
       'commit and push the working branch',
@@ -1893,12 +1895,14 @@ export class Orchestrator {
       saved.workingBranch = workingBranch;
       saved.plannedActions = plannedActions;
       saved.results = {
+        capabilities: { ok: capabilityPlan.every((capability) => capability.available), simulated: true, required: safeJson(capabilityPlan) },
         repository: { ok: true, simulated: true, head: repository.head }, workspace: { ok: true, simulated: true, ...safeJson(workspace) },
         branch: { ok: true, simulated: true, workingBranch }, worker: { ok: true, simulated: true }, ...simulatedChecks,
         commit: { ok: true, simulated: true }, push: { ok: true, simulated: true }, pullRequest: { ok: true, simulated: true },
         ci: { ok: true, simulated: true }, deployment: { ok: true, simulated: true, provider: project.deployment?.provider ?? 'none' }
       };
-      saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.'] };
+      const unavailable = capabilityPlan.filter((capability) => !capability.available).map((capability) => `${capability.id}:${capability.reason}`);
+      saved.evaluation = { decision: 'DRY_RUN', reasons: ['Zero-write simulation: no branch, worker, command, commit, push, pull request, or CI write was executed.', ...(unavailable.length ? [`Unavailable capabilities: ${unavailable.join(', ')}`] : [])] };
       transition(saved, RunStatus.EVALUATING);
       transition(saved, RunStatus.COMPLETED);
       saved.durationMs = Date.now() - new Date(saved.createdAt).getTime();
