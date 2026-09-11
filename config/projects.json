@@ -43,7 +43,8 @@
         "test": "npm test",
         "typecheck": "node --check src/core.js",
         "lint": "npm run lint",
-        "build": "npm run build"
+        "build": "npm run build",
+        "dependencyRefresh": "npm ci --ignore-scripts"
       },
       "policies": {
         "requireApprovalFor": [
@@ -86,6 +87,7 @@
           "workspace.prepare",
           "project.bootstrap",
           "project.verify",
+          "project.dependencies.refresh",
           "human.approval",
           "repository.observe",
           "repository.publish",
@@ -142,7 +144,8 @@
         "install": "pnpm install --frozen-lockfile",
         "test": "pnpm test",
         "lint": "pnpm lint",
-        "build": "pnpm build"
+        "build": "pnpm build",
+        "dependencyRefresh": "pnpm install --frozen-lockfile --ignore-scripts"
       },
       "acceptance": {
         "require": [
@@ -191,6 +194,7 @@
           "workspace.prepare",
           "project.bootstrap",
           "project.verify",
+          "project.dependencies.refresh",
           "human.approval",
           "repository.observe",
           "repository.publish",
@@ -296,6 +300,7 @@
         "allow": [
           "workspace.prepare",
           "project.verify",
+          "project.dependencies.refresh",
           "human.approval",
           "repository.observe",
           "repository.publish",
