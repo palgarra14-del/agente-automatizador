@@ -4,7 +4,7 @@
 
 The CodingWorker edits code only. The Orchestrator owns repository identity, workspace, branch policy, budgets, configured checks, commits, pushes, GitHub writes, CI polling, and state persistence. The worker prompt expressly prohibits Git history/remote operations, deployment, secret handling, and policy changes.
 
-The official SDK worker starts a thread with `workspace-write`, `networkAccessEnabled: false`, and `webSearchMode: disabled`. Its explicit environment allowlist omits `GITHUB_TOKEN`, `CODEX_API_KEY`, and other inherited secrets. Codex authentication is recovered only from the local Codex runtime configuration or injected by the SDK, never included in the worker task.
+The official SDK workers use an explicit fail-closed Codex permission profile rather than trusting the prompt alone. The profile denies root reads, grants only the requested workspace authority (read-only analysis or workspace-write implementation), keeps `.git` read-only, disables network, login shells, browser/computer use, plugins/connectors/hooks, memories, collaboration/multi-agent features, and project instruction loading. Each invocation receives a private temporary HOME/CODEX_HOME containing only the minimum Codex authentication material with restrictive permissions; GitHub, Vercel and other orchestration credentials are not inherited or included in the task. Unsupported native platforms fail before constructing the Codex client.
 
 ## Capability policy
 
@@ -14,7 +14,7 @@ The registry fingerprint covers executable bindings, surfaces, risks, dependenci
 
 ## v0.8 workflow execution
 
-Workflow read-only analysis and workspace-write implementation are separate authority levels. `code.inspect` and `code.diagnose` run with Codex `read-only`, approvals disabled, network disabled, and web search disabled. The engine independently snapshots repository identity, branch, HEAD, remote, and working-tree fingerprint before/after execution; a persistent mutation fails closed even if the model reports success.
+Workflow read-only analysis and workspace-write implementation are separate authority levels. `code.inspect` and `code.diagnose` run with the read-only Codex permission profile. The engine independently snapshots repository identity, branch, HEAD, remote, working-tree content, protected ignored-file metadata, and Git control state before/after execution; any mutation fails closed even if the model reports success.
 
 `code.implement` reuses the existing `CodexSdkWorker` in workspace-write mode. It receives sanitized workflow evidence and optional literal path scope, but no GitHub/Vercel/OpenAI token values. After execution, controlled Git code reasserts branch/HEAD/remote and evaluates actual changed paths/content with the existing immutable-path, scope, sensitive-change, and size budgets. A normal governed change can advance to verification; a sensitive change blocks, a forbidden/over-budget change fails, and a failed/timed-out worker that left files changed cannot be retried automatically.
 
@@ -27,7 +27,9 @@ WorkflowEngine has no commit, push, PR, merge, domain, environment-variable, dep
 - The clone remote and the checked-out remote must both match the configured GitHub owner/repository.
 - A run requires a clean checkout and creates an allowlisted `agent/<runId>` branch from protected `main`; it does not write the caller's current branch.
 - Commit and push methods assert the working branch and never use force-push.
-- `.env`, key, PEM, and secret-named files are rejected before staging. A detected Git-history mutation by the worker fails the run.
+- `.env`, key, PEM, credentials/secrets paths and similar protected ignored files are fingerprinted without persisting their contents, so changes invisible to normal `git diff` still fail closed.
+- Git control state is fingerprinted independently: configuration, HEAD/control files, refs, reflogs, hooks and `.git/info` are covered while mutable cache/index/object data that can legitimately change during reads is excluded. Temporary ref manipulation that restores the final HEAD is still detectable through reflogs.
+- Protected/sensitive changed files are rejected by change policy before any publication path.
 
 ## Commands, budgets, and logs
 
