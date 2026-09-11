@@ -14,15 +14,17 @@ function fingerprint(value) {
 
 function normalizeTool(tool) {
   if (!tool || !idPattern.test(tool.id ?? '')) throw new Error('Tool id is invalid');
-  if (typeof tool.kind !== 'string' || !tool.kind) throw new Error(`Tool kind is required: ${tool.id}`);
+  if (typeof tool.kind !== 'string' || !tool.kind.trim()) throw new Error(`Tool kind is required: ${tool.id}`);
+  if (tool.binding !== null && tool.binding !== undefined && (typeof tool.binding !== 'string' || !tool.binding.trim())) throw new Error(`Tool binding is invalid: ${tool.id}`);
+  if (typeof (tool.risk ?? 'unknown') !== 'string' || !(tool.risk ?? 'unknown').trim()) throw new Error(`Tool risk is invalid: ${tool.id}`);
   if (!Array.isArray(tool.surfaces) || tool.surfaces.some((surface) => !['workflow', 'orchestrator'].includes(surface))) throw new Error(`Tool surfaces are invalid: ${tool.id}`);
   return Object.freeze({
     id: tool.id,
-    kind: tool.kind,
-    binding: tool.binding ?? null,
+    kind: tool.kind.trim(),
+    binding: tool.binding?.trim() ?? null,
     bound: Boolean(tool.binding),
     surfaces: Object.freeze([...new Set(tool.surfaces)].sort()),
-    risk: tool.risk ?? 'unknown',
+    risk: (tool.risk ?? 'unknown').trim(),
     description: tool.description ?? ''
   });
 }
@@ -47,12 +49,13 @@ function normalizeSkill(skill, tools) {
   const requiresTools = [...new Set(skill.requiresTools)].sort();
   for (const toolId of requiresTools) if (!tools.has(toolId)) throw new Error(`Skill references unknown tool: ${skill.id} -> ${toolId}`);
   if (!Array.isArray(skill.surfaces) || skill.surfaces.some((surface) => !['workflow', 'orchestrator'].includes(surface))) throw new Error(`Skill surfaces are invalid: ${skill.id}`);
+  if (typeof (skill.risk ?? 'unknown') !== 'string' || !(skill.risk ?? 'unknown').trim()) throw new Error(`Skill risk is invalid: ${skill.id}`);
   return Object.freeze({
     id: skill.id,
     requiresTools: Object.freeze(requiresTools),
     surfaces: Object.freeze([...new Set(skill.surfaces)].sort()),
     contract: normalizeContract(skill.contract, skill.id),
-    risk: skill.risk ?? 'unknown',
+    risk: (skill.risk ?? 'unknown').trim(),
     description: skill.description ?? ''
   });
 }
@@ -113,7 +116,7 @@ export class ToolSkillRegistry {
     if (!['workflow', 'orchestrator'].includes(surface)) throw new Error('Unknown capability surface');
     const skill = this.#skills.get(skillId);
     if (!skill) return { id: skillId, exists: false, allowed: false, available: false, surface, reason: 'unknown_skill', tools: [] };
-    const policy = project?.skills ?? this.validateProjectPolicy();
+    const policy = this.validateProjectPolicy(project?.skills ?? {});
     const allowed = policy.allow.includes(skillId) && !policy.deny.includes(skillId);
     const tools = skill.requiresTools.map((toolId) => {
       const tool = this.#tools.get(toolId);
