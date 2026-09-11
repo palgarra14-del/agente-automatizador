@@ -68,6 +68,14 @@ test('orchestrator model usage state fails closed when missing or tampered', asy
     startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
   }));
   assert.throws(() => orchestrator.assertRunCapabilityContext(tampered, configured), /calls exceeds maxCalls/);
+
+  const inconsistent = await orchestrator.create(configured, 'Inconsistent model state');
+  inconsistent.modelUsage.calls = 1;
+  inconsistent.modelUsage.entries = [{
+    id: 'model-call-1', status: 'completed', surface: 'orchestrator', skill: 'code.implement', stepId: null, specialist: null, attempt: 1,
+    startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
+  }];
+  assert.throws(() => orchestrator.assertRunCapabilityContext(inconsistent, configured), /completedAt is invalid/);
 });
 
 test('orchestrator resume fails closed when the configured model-call budget changes', async () => {
