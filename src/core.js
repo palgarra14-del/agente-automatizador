@@ -732,7 +732,8 @@ function validateCompletedWorkflowEvidence(plan, step) {
     }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
-      if (reviewEvidenceVerdict(step.evidence.result) !== 'PASS') throw new Error(`Completed change review requires PASS evidence: ${step.id}`);
+      const persistedReview = validateReviewEvidence(step.evidence.result?.reviewEvidence);
+      if (persistedReview.verdict !== 'PASS') throw new Error(`Completed change review requires PASS evidence: ${step.id}`);
       if (!implementation?.evidence?.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error(`Completed change review is not bound to the governed implementation: ${step.id}`);
     }
     return;
@@ -2119,7 +2120,7 @@ const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review'
 export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }) {
   const clean = sanitizeCodingTask({ skill, goal, context });
   const reviewInstruction = skill === 'code.review'
-    ? 'For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
+    ? 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   return [
     'You are a read-only analysis worker in a controlled engineering workflow.',
