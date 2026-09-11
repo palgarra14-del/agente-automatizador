@@ -961,7 +961,7 @@ export class WorkflowEngine {
           workspace: workspaceProject.workspace,
           timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
         });
-        return this.update(id, (saved) => {
+        plan = await this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === next.id);
           saved.outputBytes += Number(execution.outputBytes ?? 0);
           step.evidence = {
@@ -995,6 +995,8 @@ export class WorkflowEngine {
             saved.status = WorkflowStepStatus.PENDING;
           }
         });
+        if (plan.status === WorkflowStepStatus.FAILED) return plan;
+        continue;
       }
       if (next.type === 'placeholder') return this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
@@ -1550,6 +1552,7 @@ export class CodexReadOnlySkillExecutor {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
     const controller = new AbortController();
     let timedOut = false;
+    let outputBytes = 0;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
       const client = new this.CodexClient({ env: this.environment() });
@@ -1562,14 +1565,14 @@ export class CodexReadOnlySkillExecutor {
       });
       const turn = await thread.run(buildReadOnlySkillPrompt(request), { signal: controller.signal });
       const raw = String(turn.finalResponse ?? '').trim();
-      const outputBytes = Buffer.byteLength(raw);
+      outputBytes = Buffer.byteLength(raw);
       if (outputBytes > this.maxOutputBytes) throw new Error('skill_output_too_large');
       const parsed = validateSkillOutput(request.contract, JSON.parse(raw));
       return {
         status: 'completed',
         ok: true,
         codexThreadId: thread.id,
-        usage: safeJson(turn.usage),
+        usage: turn.usage === undefined ? null : safeJson(turn.usage),
         outputBytes,
         result: parsed
       };
@@ -1578,7 +1581,7 @@ export class CodexReadOnlySkillExecutor {
         status: 'failed',
         ok: false,
         timedOut,
-        outputBytes: 0,
+        outputBytes,
         error: clip(error.message, 1_000)
       };
     } finally {
