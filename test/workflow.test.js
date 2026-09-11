@@ -216,6 +216,36 @@ test('malformed SDK usage evidence never reduces a consumed workflow model call'
   assert.equal(failed.modelUsage.entries[0].status, 'failed');
 });
 
+test('workflow state cannot advance a step before every dependency is completed', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Reject skipped prerequisites' });
+  const release = plan.steps.find((step) => step.id === 'release-readiness');
+  release.status = WorkflowStepStatus.COMPLETED;
+  release.evidence = {
+    type: 'checkpoint',
+    skill: release.skill,
+    specialist: release.specialist,
+    registryFingerprint: plan.registryFingerprint,
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+    approvedAt: '2026-09-11T10:00:00.000Z',
+    approvedChangeSetFingerprint: 'a'.repeat(64),
+    reviewedChangeSetFingerprint: 'a'.repeat(64)
+  };
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
+    /advanced before dependency completed: release-readiness -> verification/
+  );
+
+  const running = createWorkflowPlan({ profile: 'data-analysis', project: configured, goal: 'Reject running skip' });
+  running.steps.find((step) => step.id === 'analysis').status = WorkflowStepStatus.RUNNING;
+  running.status = WorkflowStepStatus.RUNNING;
+  assert.throws(
+    () => validateWorkflowPlan(running, new Map([[configured.id, configured]])),
+    /advanced before dependency completed: analysis -> validate-data/
+  );
+});
+
 test('workflow validation rejects duplicate ids, missing dependencies, cycles, and budgets', () => {
   const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Validate' });
   plan.steps[1].id = plan.steps[0].id;
