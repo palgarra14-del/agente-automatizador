@@ -152,6 +152,61 @@ class FakeWorkflowPublicationBridge {
 }
 
 
+test('business brief normalization is bounded, deterministic, and safe for website workflows', () => {
+  const normalized = normalizeBusinessBrief({
+    businessName: '  Fontanería Ejemplo  ',
+    category: 'Fontanería',
+    locations: [' Madrid '],
+    services: ['Fugas'],
+    contact: {},
+    brand: {},
+    website: {},
+    facts: ['Authorization: Bearer top-secret-token-value'],
+    assets: { logoPath: 'public/logo.png' }
+  });
+  assert.equal(normalized.businessName, 'Fontanería Ejemplo');
+  assert.deepEqual(normalized.services, [{ name: 'Fugas', description: null }]);
+  assert.equal(normalized.website.language, 'es');
+  assert.equal(normalized.website.primaryGoal, 'contact');
+  assert.deepEqual(normalized.website.requiredPages, ['home', 'services', 'contact']);
+  assert.equal(normalized.facts[0].includes('top-secret-token-value'), false);
+  assert.equal(normalized.assets.logoPath, 'public/logo.png');
+
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], unknown: true }), /unknown fields/);
+  assert.throws(() => normalizeBusinessBrief({ category: 'Y', locations: ['Z'], services: ['S'] }), /businessName is required/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: [], services: ['S'] }), /locations must contain between 1 and 12 items/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: [] }), /services must contain between 1 and 20 items/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], brand: { primaryColor: '#123' } }), /six-digit hex color/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], assets: { logoPath: '../secret.txt' } }), /escape|relative|path/i);
+});
+
+test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({
+    profile: 'website-build',
+    project: configured,
+    goal: 'Build business website',
+    input: { businessBrief: businessBrief() }
+  });
+  assert.equal(plan.input.businessBrief.businessName, 'Fontanería Ejemplo');
+  assert.match(plan.inputFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
+
+  const tampered = JSON.parse(JSON.stringify(plan));
+  tampered.input.businessBrief.businessName = 'Otro negocio';
+  assert.throws(
+    () => validateWorkflowPlan(tampered, new Map([[configured.id, configured]])),
+    /input fingerprint does not match/
+  );
+
+  const missing = JSON.parse(JSON.stringify(plan));
+  delete missing.input;
+  assert.throws(
+    () => validateWorkflowPlan(missing, new Map([[configured.id, configured]])),
+    /website-build requires input.businessBrief/
+  );
+});
+
 test('workflow profiles create validated deterministic plans', () => {
   for (const profile of ['website-build', 'app-improvement', 'data-analysis']) {
     const plan = createWorkflowPlan({
