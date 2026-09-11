@@ -1054,14 +1054,17 @@ test('verification command that mutates governed implementation diff fails close
     }
   });
   let commandCalls = 0;
+  const configured = project();
   const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
     localGit,
     runner: async (_project, name) => {
       commandCalls += 1;
       return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
     }
   });
-  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Guard verification diff' });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Guard verification diff' });
+  const workspaceProject = await instance.workspaceProject(created.id, configured);
   await instance.update(created.id, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
     inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
@@ -1071,6 +1074,7 @@ test('verification command that mutates governed implementation diff fails close
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
     implementation.evidence.changeSet = governed;
+    implementation.evidence.workspacePath = workspaceProject.workspace;
   });
   const failed = await instance.run(created.id);
   const testsStep = failed.steps.find((step) => step.id === 'tests');
