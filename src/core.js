@@ -855,7 +855,15 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       const expectedDependencyPaths = dependencyChangedPaths(implementation?.evidence?.changeSet ?? {});
       if (!expectedFingerprint || step.evidence.changeSetFingerprint !== expectedFingerprint || JSON.stringify(step.evidence.dependencyPaths ?? []) !== JSON.stringify(expectedDependencyPaths)) throw new Error('Completed dependency refresh is not bound to the governed implementation');
       if (expectedDependencyPaths.length) {
-        if (step.evidence.required !== true || step.evidence.command?.name !== 'dependencyRefresh' || step.evidence.command?.ok !== true || step.evidence.executionProvider !== 'container-required' || step.evidence.lifecycleScripts !== 'disabled') throw new Error('Completed dependency refresh requires successful frozen container evidence');
+        if (
+          step.evidence.required !== true ||
+          step.evidence.command?.name !== 'dependencyRefresh' ||
+          step.evidence.command?.ok !== true ||
+          step.evidence.execution?.provider !== 'container' ||
+          step.evidence.execution?.stage !== 'dependency-refresh' ||
+          step.evidence.execution?.postWorkerNetwork !== 'dependency-refresh-network-enabled' ||
+          step.evidence.lifecycleScripts !== 'disabled'
+        ) throw new Error('Completed dependency refresh requires successful frozen container evidence');
       } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
     }
     if (step.skill === 'code.review') {
@@ -971,8 +979,16 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
       waiting.type === 'placeholder' &&
       waiting.skill === 'code.implement' &&
       waiting.error === 'workflow_sensitive_change_requires_approval' &&
+      waiting.evidence?.type === 'executor' &&
+      waiting.evidence?.workerEvidence?.status === 'completed' &&
+      waiting.evidence?.changePolicy?.ok === true &&
       waiting.evidence?.changePolicy?.classification === 'sensitive' &&
-      waiting.evidence?.changeSetFingerprint;
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.changeSetFingerprint ?? '') &&
+      typeof waiting.evidence?.repositoryState?.branch === 'string' &&
+      typeof waiting.evidence?.repositoryState?.head === 'string' &&
+      typeof waiting.evidence?.repositoryState?.remote === 'string' &&
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.protectedIgnoredFingerprint ?? '') &&
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.repositoryControlFingerprint ?? '');
     const checkpoint = awaitingApproval.length === 1 && waiting?.type === 'checkpoint';
     if ((!checkpoint && !sensitiveImplementation) || !Number.isFinite(plan.pausedAt)) throw new Error('Awaiting approval workflow must have one paused checkpoint or fingerprint-bound sensitive implementation');
   }
@@ -1507,7 +1523,7 @@ export class WorkflowEngine {
         required: true,
         dependencyPaths,
         changeSetFingerprint: implementation.evidence.changeSetFingerprint,
-        executionProvider: project.execution.provider,
+        execution: outcome.execution ? safeJson(outcome.execution) : null,
         lifecycleScripts: 'disabled',
         command: {
           name: 'dependencyRefresh',
@@ -1524,6 +1540,13 @@ export class WorkflowEngine {
       } else if (integrityError) {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_dependency_refresh_modified_governed_state';
+      } else if (outcome.ok && (
+        outcome.execution?.provider !== 'container' ||
+        outcome.execution?.stage !== 'dependency-refresh' ||
+        outcome.execution?.postWorkerNetwork !== 'dependency-refresh-network-enabled'
+      )) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_execution_boundary_invalid';
       } else if (outcome.ok) {
         step.status = WorkflowStepStatus.COMPLETED;
         step.error = null;
