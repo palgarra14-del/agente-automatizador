@@ -4,11 +4,33 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, fingerprintChangeSet, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
+
+function businessBrief(overrides = {}) {
+  return {
+    version: 1,
+    businessName: 'Fontanería Ejemplo',
+    category: 'Fontanería',
+    summary: 'Servicio profesional de fontanería para hogares y negocios.',
+    locations: ['Madrid'],
+    services: [
+      { name: 'Reparación de fugas', description: 'Diagnóstico y reparación de fugas.' },
+      { name: 'Desatascos', description: 'Desatascos domésticos y comerciales.' }
+    ],
+    contact: { phone: '600 000 000', whatsapp: '34600000000', email: 'hola@example.test', address: 'Calle Ejemplo 1' },
+    brand: { tone: 'profesional y cercano', primaryColor: '#123456', secondaryColor: '#abcdef' },
+    website: { language: 'es', primaryGoal: 'contacto por WhatsApp', requiredPages: ['home', 'servicios', 'contacto'], requiredFeatures: ['CTA WhatsApp'] },
+    facts: ['Atención con cita previa.'],
+    contentRestrictions: ['No inventar reseñas ni años de experiencia.'],
+    assets: { logoPath: 'public/logo.png', photoPaths: ['public/equipo.jpg'] },
+    ...overrides
+  };
+}
+
 
 function emptyChangeSet() {
   const base = { paths: [], changedFiles: 0, additions: 0, deletions: 0, diffLines: 0, changedBytes: 0, maxFileBytes: 0, sensitiveContent: false, contentFingerprint: '0'.repeat(64) };
@@ -132,8 +154,13 @@ class FakeWorkflowPublicationBridge {
 
 test('workflow profiles create validated deterministic plans', () => {
   for (const profile of ['website-build', 'app-improvement', 'data-analysis']) {
-    const plan = createWorkflowPlan({ profile, project: project(), goal: `Exercise ${profile}` });
-    assert.equal(validateWorkflowPlan(plan, new Set(['workflow-project'])).ok, true);
+    const plan = createWorkflowPlan({
+      profile,
+      project: project(),
+      goal: `Exercise ${profile}`,
+      ...(profile === 'website-build' ? { input: { businessBrief: businessBrief() } } : {})
+    });
+    assert.equal(validateWorkflowPlan(plan, new Map([['workflow-project', project()]])).ok, true);
     assert.ok(plan.steps.length > 3);
     assert.ok(plan.definitionOfDone.length > 0);
   }
@@ -830,9 +857,9 @@ test('verification steps use profile-specific command sets instead of repeating 
   const app = createWorkflowPlan({ profile: 'app-improvement', project: project(), goal: 'Map checks' });
   assert.deepEqual(app.steps.find((step) => step.id === 'tests').commands, ['test']);
   assert.deepEqual(app.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
-  const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks' });
-  assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint']);
-  assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, ['build']);
+  const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks', input: { businessBrief: businessBrief() } });
+  assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint', 'build']);
+  assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, []);
 });
 
 test('terminal workflows do not execute again', async () => {
