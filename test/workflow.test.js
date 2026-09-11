@@ -1179,6 +1179,34 @@ async function prepareImplementation(instance, workflowId) {
   });
 }
 
+async function prepareApprovedDependencyChange(instance, workflowId, changeSet, { branch = 'main', head = 'deadbeef', remote = 'https://github.com/owner/repo.git' } = {}) {
+  await instance.update(workflowId, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture inspection', relevantPaths: changeSet.paths } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture diagnosis', cause: 'fixture dependency change' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = plan.workspace?.path ?? null;
+    implementation.evidence.repositoryState = { branch, head, remote };
+    implementation.evidence.changeSet = changeSet;
+    implementation.evidence.changeSetFingerprint = changeSet.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'sensitive', reason: 'sensitive_change:package.json' };
+    implementation.evidence.workerEvidence = { status: 'completed', summary: 'fixture dependency implementation' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+    implementation.evidence.sensitiveApproval = { approvedAt: '2026-09-11T00:00:00.000Z', changeSetFingerprint: changeSet.changeSetFingerprint };
+    const dependencyRefresh = plan.steps.find((step) => step.id === 'dependency-refresh');
+    dependencyRefresh.status = WorkflowStepStatus.PENDING;
+    dependencyRefresh.error = null;
+    dependencyRefresh.evidence = null;
+    plan.status = WorkflowStepStatus.PENDING;
+    plan.pausedAt = null;
+    plan.result = null;
+  });
+}
+
+
 async function prepareReviewedPublication(instance, workflowId, changeSet) {
   await instance.update(workflowId, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
@@ -2017,6 +2045,191 @@ test('package-manager control files are immutable even for an otherwise approvab
     assert.equal(decision.ok, false);
     assert.match(decision.reason, /forbidden_path/);
   }
+});
+
+test('normal implementation dependency stage is a no-op and requests no network capability', async () => {
+  const configured = configFrom({
+    id: 'dependency-noop',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'human.approval'], deny: [] }
+  });
+  let runnerCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    runner: async () => { runnerCalls += 1; throw new Error('normal dependency no-op must not execute a command'); }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'No dependency refresh' });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    const changeSet = changedChangeSet(['src/feature.js']);
+    implementation.evidence.changeSet = changeSet;
+    implementation.evidence.changeSetFingerprint = changeSet.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+  });
+  const blockedAtReview = await instance.run(created.id);
+  const dependencyRefresh = blockedAtReview.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(dependencyRefresh.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(dependencyRefresh.evidence.required, false);
+  assert.deepEqual(dependencyRefresh.evidence.dependencyPaths, []);
+  assert.equal(runnerCalls, 0);
+  assert.equal(blockedAtReview.steps.find((step) => step.id === 'review').error, 'skill_not_allowed');
+});
+
+test('approved dependency change runs exactly one frozen refresh and preserves the reviewed diff', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-dependency-refresh-happy-'));
+  const configured = managedProject('dependency-refresh-happy', root, {
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'project.dependencies.refresh', 'code.implement', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['package.json', 'package-lock.json']);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const calls = [];
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    runner: async (_project, name, options) => {
+      calls.push({ name, options });
+      return { name, ok: true, exitCode: 0, stdout: 'dependencies ready', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Refresh approved dependencies' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareApprovedDependencyChange(instance, created.id, changeSet, { remote });
+  const blockedAtReview = await instance.run(created.id);
+  const dependencyRefresh = blockedAtReview.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(dependencyRefresh.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(dependencyRefresh.evidence.required, true);
+  assert.equal(dependencyRefresh.evidence.command.name, 'dependencyRefresh');
+  assert.equal(dependencyRefresh.evidence.command.ok, true);
+  assert.equal(dependencyRefresh.evidence.executionProvider, 'container-required');
+  assert.equal(dependencyRefresh.evidence.lifecycleScripts, 'disabled');
+  assert.deepEqual(dependencyRefresh.evidence.dependencyPaths, ['package-lock.json', 'package.json']);
+  assert.equal(dependencyRefresh.evidence.changeSetFingerprint, changeSet.changeSetFingerprint);
+  assert.deepEqual(calls.map((call) => call.name), ['dependencyRefresh']);
+  assert.equal(calls[0].options.stage, 'dependency-refresh');
+  assert.equal(blockedAtReview.steps.find((step) => step.id === 'review').error, 'skill_not_allowed');
+});
+
+test('approved dependency change blocks safely when no frozen refresh command is configured', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-dependency-refresh-missing-'));
+  const configured = managedProject('dependency-refresh-missing', root, {
+    commands: { test: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'project.dependencies.refresh', 'code.implement', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['package.json']);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  let runnerCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    runner: async () => { runnerCalls += 1; throw new Error('missing refresh command must block before execution'); }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Block unsupported dependency refresh' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareApprovedDependencyChange(instance, created.id, changeSet, { remote });
+  const blocked = await instance.run(created.id);
+  const dependencyRefresh = blocked.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(dependencyRefresh.error, 'workflow_dependency_refresh_not_configured');
+  assert.equal(runnerCalls, 0);
+});
+
+test('dependency refresh fails closed if the networked package-manager command changes governed state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-dependency-refresh-mutates-'));
+  const configured = managedProject('dependency-refresh-mutates', root, {
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'project.dependencies.refresh', 'code.implement', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const approved = changedChangeSet(['package.json', 'package-lock.json']);
+  const mutated = changedChangeSet(['package.json', 'package-lock.json', 'src/install-side-effect.js'], { contentFingerprint: '3'.repeat(64) });
+  let current = approved;
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return current; }
+  });
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    runner: async (_project, name) => {
+      assert.equal(name, 'dependencyRefresh');
+      current = mutated;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Detect install mutation' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareApprovedDependencyChange(instance, created.id, approved, { remote });
+  const failed = await instance.run(created.id);
+  const dependencyRefresh = failed.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(dependencyRefresh.error, 'workflow_dependency_refresh_modified_governed_state');
+  assert.match(dependencyRefresh.evidence.error, /dependency_refresh_modified_governed_state/);
+});
+
+test('failed dependency refresh retries only within the workflow attempt budget and never calls a model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-dependency-refresh-retry-'));
+  const configured = managedProject('dependency-refresh-retry', root, {
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'project.dependencies.refresh', 'code.implement', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['package.json', 'package-lock.json']);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  let calls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    runner: async (_project, name) => {
+      calls += 1;
+      return { name, ok: false, exitCode: 1, stdout: '', stderr: 'registry unavailable' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Bound dependency retries', budgets: { maxAttempts: 2 } });
+  await instance.workspaceProject(created.id, configured);
+  await prepareApprovedDependencyChange(instance, created.id, changeSet, { remote });
+  const failed = await instance.run(created.id);
+  const dependencyRefresh = failed.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(dependencyRefresh.attempts, 2);
+  assert.equal(dependencyRefresh.error, 'workflow_dependency_refresh_attempt_budget_exhausted');
+  assert.equal(calls, 2);
+  assert.equal(failed.modelUsage.calls, 0);
 });
 
 test('implementation forbidden path and budget excess fail closed before verification', async () => {
