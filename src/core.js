@@ -1742,11 +1742,75 @@ export class WorkflowEngine {
 
   async approveUnlocked(id, stepId) {
     const approvedAt = this.now();
+    const current = await this.get(id);
+    validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
+    const project = this.projects.get(current.projectId);
+    const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
+    if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
+    const currentStep = current.steps.find((candidate) => candidate.id === stepId);
+    const sensitiveImplementationApproval = current.profile === 'app-improvement' &&
+      currentStep?.id === 'implementation' &&
+      currentStep.status === WorkflowStepStatus.AWAITING_APPROVAL &&
+      currentStep.skill === 'code.implement' &&
+      currentStep.error === 'workflow_sensitive_change_requires_approval';
+
+    if (sensitiveImplementationApproval) {
+      const workspaceProject = await this.workspaceProject(id, project);
+      let snapshot = null;
+      let decision = null;
+      let integrityError = null;
+      try {
+        snapshot = await this.workspaceSnapshot(workspaceProject);
+        const expected = currentStep.evidence?.repositoryState;
+        if (!expected || snapshot.branch !== expected.branch || snapshot.head !== expected.head || snapshot.remote !== expected.remote) throw new Error('repository_state_changed');
+        if (snapshot.repositoryControl.fingerprint !== currentStep.evidence?.repositoryControlFingerprint) throw new Error('repository_control_state_changed');
+        if (snapshot.protectedIgnored.fingerprint !== currentStep.evidence?.protectedIgnoredFingerprint) throw new Error('protected_ignored_state_changed');
+        decision = evaluateChangePolicy(project, snapshot.changeSet, current.scope);
+        if (!decision.ok || decision.classification !== 'sensitive' || snapshot.changeSet.changeSetFingerprint !== currentStep.evidence?.changeSetFingerprint) throw new Error('approved_change_set_changed');
+      } catch (error) {
+        integrityError = error;
+      }
+      if (integrityError) {
+        return this.update(id, (plan) => {
+          const step = plan.steps.find((candidate) => candidate.id === stepId);
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'workflow_sensitive_approval_stale';
+          step.evidence = {
+            ...step.evidence,
+            approvalCheck: {
+              ok: false,
+              observedChangeSetFingerprint: snapshot?.changeSet?.changeSetFingerprint ?? null,
+              observedPolicy: decision ? safeJson(decision) : null,
+              error: clip(integrityError.message, 1_000)
+            }
+          };
+          plan.status = WorkflowStepStatus.BLOCKED;
+          plan.pausedAt = null;
+          plan.result = { error: step.error, stepId: step.id };
+        });
+      }
+      return this.update(id, (plan) => {
+        const step = plan.steps.find((candidate) => candidate.id === stepId);
+        if (Number.isFinite(plan.pausedAt)) plan.deadlineAt += Math.max(0, approvedAt - plan.pausedAt);
+        plan.pausedAt = null;
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.evidence = {
+          ...step.evidence,
+          ok: true,
+          completedAt: new Date(approvedAt).toISOString(),
+          sensitiveApproval: {
+            approvedAt: new Date(approvedAt).toISOString(),
+            changeSetFingerprint: step.evidence.changeSetFingerprint
+          }
+        };
+        plan.status = WorkflowStepStatus.PENDING;
+        plan.result = null;
+      });
+    }
+
     return this.update(id, (plan) => {
       validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
-      const project = this.projects.get(plan.projectId);
-      const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
-      if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
       const step = plan.steps.find((candidate) => candidate.id === stepId);
       const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
       const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
