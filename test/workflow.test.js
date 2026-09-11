@@ -1284,7 +1284,8 @@ for (const fixture of [
 ]) {
   test(`reviewed publication blocks uncertain external write at ${fixture.failAt} without replaying later stages`, async () => {
     const root = await mkdtemp(join(tmpdir(), `agent-workflow-publication-${fixture.failAt}-`));
-    const configured = managedProject(`publication-${fixture.failAt}`, root, {
+    const fixtureId = `publication-${fixture.failAt.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+    const configured = managedProject(fixtureId, root, {
       skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
     });
     const manager = new FakeWorkflowWorkspaceManager();
