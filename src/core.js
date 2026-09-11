@@ -695,7 +695,7 @@ export class WorkflowEngine {
     } catch (error) {
       if (error.message === 'workspace_clone_timeout' || this.remainingMs(await this.get(id)) <= 0) {
         await this.failDeadline(id);
-        throw new Error('workflow_budget_deadline_exceeded');
+        throw new Error('workflow_budget_deadline_exceeded', { cause: error });
       }
       throw error;
     }
