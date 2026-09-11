@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -664,6 +664,42 @@ test('managed workspaces are isolated under the configured root and clone only t
   assert.deepEqual(calls[0].args.slice(0, 4), ['clone', '--origin', 'origin', 'https://github.com/owner/leadfinder.git']);
   assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
   assert.throws(() => managedWorkspacePath(configured, '../other-project'));
+});
+
+test('managed workspace prepare reuses a valid interrupted clone and quarantines a partial clone', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-workspace-recovery-'));
+  const configured = configFrom({
+    id: 'leadfinder', repository: { owner: 'owner', name: 'leadfinder' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { test: 'node --version' }, acceptance: { require: ['test'] }
+  }, join(root, 'host', 'config'));
+  const runId = 'agent-20260911-recovery1';
+  const details = managedWorkspacePath(configured, runId);
+  await mkdir(details.workspace, { recursive: true });
+  let cloneCalls = 0;
+  const valid = new WorkspaceManager({ processRunner: async (_binary, args) => {
+    if (args[0] === '-C' && args[2] === 'rev-parse' && args[3] === '--show-toplevel') return { ok: true, exitCode: 0, stdout: details.workspace, stderr: '' };
+    if (args[0] === '-C' && args[2] === 'remote') return { ok: true, exitCode: 0, stdout: 'https://github.com/owner/leadfinder.git', stderr: '' };
+    if (args[0] === '-C' && args[2] === 'rev-parse' && args[3] === '--verify') return { ok: true, exitCode: 0, stdout: 'deadbeef', stderr: '' };
+    if (args[0] === 'clone') { cloneCalls += 1; return { ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected git command: ${args.join(' ')}`);
+  } });
+  const reused = await valid.prepare(configured, runId);
+  assert.equal(reused.clone.reused, true);
+  assert.equal(cloneCalls, 0);
+
+  const partialRunId = 'agent-20260911-recovery2';
+  const partialDetails = managedWorkspacePath(configured, partialRunId);
+  await mkdir(partialDetails.workspace, { recursive: true });
+  const partial = new WorkspaceManager({ processRunner: async (_binary, args) => {
+    if (args[0] === '-C') return { ok: false, exitCode: 128, stdout: '', stderr: 'not a complete repository' };
+    if (args[0] === 'clone') { cloneCalls += 1; return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected git command: ${args.join(' ')}`);
+  } });
+  const recovered = await partial.prepare(configured, partialRunId);
+  assert.equal(recovered.clone.reused, false);
+  assert.equal(cloneCalls, 1);
+  const entries = await readdir(partialDetails.projectDirectory);
+  assert.ok(entries.some((name) => name.startsWith(`${partialRunId}.failed-`)));
 });
 
 test('a managed-root symlink fails before clone or any workspace write', async (t) => {
