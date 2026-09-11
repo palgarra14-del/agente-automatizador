@@ -1367,6 +1367,8 @@ export class WorkflowEngine {
         const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
         if (!bootstrap.ok) return bootstrap.plan;
         if (this.remainingMs(bootstrap.plan) <= 0) return this.failDeadline(id);
+        const governed = await this.guardImplementationChangeSet(id, project, next.id, 'before-verification');
+        if (!governed.ok) return governed.plan;
       }
       await this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.RUNNING; step.attempts += 1; saved.status = WorkflowStepStatus.RUNNING; });
       let result = { ok: true, evidence: { type: next.type, completedAt: new Date().toISOString() } };
@@ -1385,6 +1387,8 @@ export class WorkflowEngine {
             result = { ok: false, outputBudgetExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } };
             break;
           }
+          const governed = await this.guardImplementationChangeSet(id, project, next.id, `after-${name}`, { outcomes, outputBytes: stepOutputBytes });
+          if (!governed.ok) return governed.plan;
         }
         if (!result.deadlineExceeded && !result.outputBudgetExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: stepOutputBytes, evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) } };
         else result.evidence = { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) };
