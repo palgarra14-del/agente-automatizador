@@ -1720,8 +1720,20 @@ export class Orchestrator {
   }
 
   assertRunCapabilityContext(run, project) {
+    if (!run.registryFingerprint || !run.projectSkillPolicyFingerprint) throw new Error('run_capability_context_missing');
     if (run.registryFingerprint !== this.registry.fingerprint) throw new Error('run_capability_registry_changed');
     if (run.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {})) throw new Error('run_project_skill_policy_changed');
+  }
+
+  requiredSkills(project) {
+    const skills = new Set(['repository.observe', 'code.implement', 'project.verify', 'repository.publish', 'release.publish-pr', 'release.observe-ci', 'human.approval']);
+    if (project.acceptance.require.includes('install')) skills.add('project.bootstrap');
+    if (project.deployment.provider === 'vercel') skills.add('release.observe-preview');
+    return [...skills].sort();
+  }
+
+  assertOrchestratorCapabilities(project) {
+    return this.requiredSkills(project).map((skillId) => this.requireSkill(project, skillId));
   }
 
   async event(runId, component, event, details = {}) {
@@ -1946,6 +1958,8 @@ export class Orchestrator {
     }
     run = await this.verifyChangePolicy(run, project, { phase: 'before_commit', approvedFingerprint });
     if (run.status !== RunStatus.TESTING) return run;
+    this.requireSkill(project, 'repository.publish');
+    if (!run.pullRequestNumber) this.requireSkill(project, 'release.publish-pr');
     const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
     const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, {
@@ -1959,7 +1973,6 @@ export class Orchestrator {
       return this.fail(run.id, 'committed_change_set_does_not_match_governed_change_set');
     }
     run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
-    this.requireSkill(project, 'repository.publish');
     const push = await this.localGit.push(project, run.workingBranch, { expectedHead: run.finalHead, expectedRemote: run.results.branch.remote });
     run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
     if (!run.pullRequestNumber) {
@@ -2045,6 +2058,7 @@ export class Orchestrator {
   async continueRun(run, project) {
     try {
       this.assertRunCapabilityContext(run, project);
+      this.assertOrchestratorCapabilities(project);
       this.assertDeadline(run);
       if (run.workspace) project = projectAtWorkspace(project, run.workspace);
       if (run.status === RunStatus.WAITING_APPROVAL) {
