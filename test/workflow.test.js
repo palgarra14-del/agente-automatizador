@@ -28,9 +28,9 @@ class FakeWorkflowWorkspaceManager {
     if (project.workspaceStrategy !== 'managed') return { workspace: project.workspace, managed: false, retained: false };
     return { workspace: resolve(project.managedWorkspaceRoot, project.id, runId), managed: true, retained: true };
   }
-  async prepare(project, runId) {
+  async prepare(project, runId, options = {}) {
     const allocation = this.describe(project, runId);
-    this.prepared.push({ projectId: project.id, ...allocation });
+    this.prepared.push({ projectId: project.id, ...allocation, options });
     return { ...allocation, remoteUrl: `https://github.com/${project.repository.owner}/${project.repository.name}.git` };
   }
 }
@@ -57,19 +57,17 @@ test('workflow validation rejects duplicate ids, missing dependencies, cycles, a
   assert.throws(() => createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Validate', budgets: { maxSteps: 1 } }), /maxSteps/);
 });
 
-test('workflow runs dependencies sequentially, honors checkpoints, and satisfies Definition of Done', async () => {
+test('workflow placeholders block honestly instead of claiming unimplemented work completed', async () => {
   const instance = await engine();
   const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Improve safely' });
-  let current = await instance.run(created.id);
-  assert.equal(current.status, WorkflowStepStatus.AWAITING_APPROVAL);
-  assert.equal(current.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.PENDING);
-  await instance.approve(created.id, 'plan-change');
-  current = await instance.run(created.id);
-  assert.equal(current.status, WorkflowStepStatus.AWAITING_APPROVAL);
-  await instance.approve(created.id, 'release-readiness');
-  current = await instance.run(created.id);
-  assert.equal(current.status, WorkflowStepStatus.COMPLETED);
-  assert.equal(current.validation.ok, true);
+  const current = await instance.run(created.id);
+  const inspect = current.steps.find((step) => step.id === 'inspect-project');
+  assert.equal(current.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(current.result.error, 'capability_not_implemented');
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.error, 'capability_not_implemented');
+  assert.equal(evaluateDefinitionOfDone(current).ok, false);
+  await assert.rejects(instance.approve(created.id, 'inspect-project'), /requires an executor/);
 });
 
 test('workflow dry-run reports executable steps without invoking the command executor', async () => {
@@ -85,29 +83,39 @@ test('workflow dry-run reports executable steps without invoking the command exe
 test('workflow limits retries and persists failure evidence', async () => {
   const instance = await engine({ runner: async (project, name) => ({ name, ok: false, exitCode: 1, stdout: '', stderr: `${project.id}:${name}` }) });
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Fail safely', budgets: { maxAttempts: 2 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   await instance.run(created.id);
   const failed = await instance.get(created.id);
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(failed.steps.find((step) => step.id === 'validate-data').attempts, 2);
 });
 
-test('workflow fails when accumulated command output exceeds its budget', async () => {
-  const instance = await engine({ runner: async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'x'.repeat(2_000), stderr: '' }) });
+test('workflow stops command execution as soon as accumulated output exceeds its budget', async () => {
+  const calls = [];
+  const instance = await engine({ runner: async (_project, name) => { calls.push(name); return { name, ok: true, exitCode: 0, stdout: 'x'.repeat(2_000), stderr: '' }; } });
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Bound output', budgets: { maxOutputBytes: 1_024 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const failed = await instance.run(created.id);
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(failed.result.error, 'workflow_output_budget_exhausted');
+  assert.deepEqual(calls, ['test']);
 });
 
-test('workflow resume blocks an interrupted running step until a human approves it', async () => {
+test('workflow resume blocks an interrupted executable step until a human approves it', async () => {
   const instance = await engine();
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Recover safely' });
-  await instance.update(created.id, (plan) => { plan.steps[0].status = WorkflowStepStatus.RUNNING; plan.status = WorkflowStepStatus.RUNNING; });
+  await instance.update(created.id, (plan) => {
+    plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED;
+    plan.steps.find((step) => step.id === 'validate-data').status = WorkflowStepStatus.RUNNING;
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
   const blocked = await instance.resume(created.id);
-  assert.equal(blocked.steps[0].status, WorkflowStepStatus.BLOCKED);
-  await instance.approve(created.id, blocked.steps[0].id);
+  assert.equal(blocked.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.BLOCKED);
+  await instance.approve(created.id, 'validate-data');
   const resumed = await instance.run(created.id);
-  assert.equal(resumed.steps[0].status, WorkflowStepStatus.COMPLETED);
+  assert.equal(resumed.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(resumed.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(resumed.result.error, 'capability_not_implemented');
 });
 
 test('Definition of Done and malformed persisted workflow state are enforced', async () => {
@@ -140,6 +148,8 @@ test('Callflow and LeadFinder workflows bind every command to their selected man
   } });
   const callflowWorkflow = await instance.create({ profile: 'data-analysis', projectId: 'callflow', goal: 'Isolate Callflow' });
   const leadfinderWorkflow = await instance.create({ profile: 'data-analysis', projectId: 'leadfinder', goal: 'Isolate LeadFinder' });
+  await instance.update(callflowWorkflow.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
+  await instance.update(leadfinderWorkflow.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const callflowCompleted = await instance.run(callflowWorkflow.id);
   const leadfinderCompleted = await instance.run(leadfinderWorkflow.id);
   const expectedCallflow = manager.describe(callflow, callflowWorkflow.id).workspace;
@@ -172,7 +182,10 @@ test('workflow rejects persisted workspace escape, cross-project substitution, a
   await assert.rejects(instance.run(created.id), /outside the managed workspace root/);
   await instance.update(created.id, (plan) => { plan.workspace.path = resolve(leadfinder.managedWorkspaceRoot, '..', 'outside'); });
   await assert.rejects(instance.run(created.id), /outside the managed workspace root/);
-  await instance.update(created.id, (plan) => { plan.workspace = null; });
+  await instance.update(created.id, (plan) => {
+    plan.workspace = null;
+    plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED;
+  });
   await mkdir(leadfinder.managedWorkspaceRoot, { recursive: true });
   const external = await mkdtemp(join(tmpdir(), 'agent-workflow-external-'));
   await symlink(external, join(leadfinder.managedWorkspaceRoot, leadfinder.id), 'junction');
@@ -203,6 +216,7 @@ test('workflow global deadline is enforced before start, between steps, between 
   clock = 0;
   const betweenSteps = await engine({ now: () => clock, runner: async (_project, name) => { calls += 1; clock = 1_000; return { name, ok: true, stdout: '', stderr: '' }; } });
   const stepPlan = await betweenSteps.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Between steps', budgets: { timeoutMs: 1_000 } });
+  await betweenSteps.update(stepPlan.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   assert.equal((await betweenSteps.run(stepPlan.id)).result.error, 'workflow_budget_deadline_exceeded');
   assert.equal(calls, 1);
 
@@ -210,6 +224,7 @@ test('workflow global deadline is enforced before start, between steps, between 
   const commandTimeouts = [];
   const betweenCommands = await engine({ now: () => clock, runner: async (_project, name, options) => { calls += 1; commandTimeouts.push(options.timeoutMs); clock = 1_000; return { name, ok: false, stdout: '', stderr: '' }; } });
   const commandPlan = await betweenCommands.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
+  await betweenCommands.update(commandPlan.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const deadlineFailed = await betweenCommands.run(commandPlan.id);
   assert.equal(deadlineFailed.result.error, 'workflow_budget_deadline_exceeded');
   assert.equal(commandTimeouts.at(-1), 1_000);
@@ -258,6 +273,7 @@ test('a new LeadFinder-like workspace bootstraps once before its verification co
   assert.equal(dryRun.plannedBootstrap, 'install');
   assert.equal(manager.prepared.length, 0);
   assert.deepEqual(order, []);
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const completed = await instance.run(created.id);
   assert.deepEqual(order.slice(0, 4), ['bootstrap:install', 'post-worker:test', 'post-worker:lint', 'post-worker:build']);
   assert.equal(order.filter((entry) => entry === 'bootstrap:install').length, 1);
@@ -277,12 +293,14 @@ test('bootstrap failure or output exhaustion stops managed workflow verification
     return { name, ok: name !== 'install', exitCode: name === 'install' ? 1 : 0, stdout: '', stderr: 'install failed' };
   } });
   const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Stop on install failure' });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const failed = await instance.run(created.id);
   assert.equal(failed.result.error, 'workflow_bootstrap_failed');
   assert.deepEqual(attempts, ['install']);
 
   const exhausted = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager(), runner: async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'x'.repeat(2_000), stderr: '' }) });
   const outputPlan = await exhausted.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound install output', budgets: { maxOutputBytes: 1_024 } });
+  await exhausted.update(outputPlan.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   assert.equal((await exhausted.run(outputPlan.id)).result.error, 'workflow_output_budget_exhausted');
 });
 
@@ -297,6 +315,7 @@ test('bootstrap respects the global deadline and uses only remaining command tim
     return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
   } });
   const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound install time', budgets: { timeoutMs: 1_000 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   clock = 300;
   const failed = await instance.run(created.id);
   assert.equal(failed.result.error, 'workflow_budget_deadline_exceeded');
@@ -355,6 +374,7 @@ test('an interrupted bootstrap is never treated as completed and is retried only
     return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
   } });
   const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Recover interrupted install' });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const workspaceProject = await instance.workspaceProject(created.id, leadfinder);
   await instance.update(created.id, (plan) => {
     plan.bootstrap.status = 'running';
@@ -380,6 +400,7 @@ test('workflow persists only bounded masked bootstrap and verification output wh
     stderr: name === 'test' ? `Authorization: Bearer ${verificationSecret}` : ''
   }) });
   const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Mask workflow output', budgets: { maxOutputBytes: 8_000 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const completed = await instance.run(created.id);
   const persisted = JSON.stringify(await instance.get(created.id));
   const bootstrapEvidence = completed.bootstrap.evidence;
@@ -390,4 +411,57 @@ test('workflow persists only bounded masked bootstrap and verification output wh
   assert.match(verificationEvidence.stderr, /\[REDACTED\]/);
   assert.ok(bootstrapEvidence.stdout.length <= 1_000);
   assert.ok(completed.outputBytes >= Buffer.byteLength(largeBootstrapOutput));
+});
+
+
+test('human checkpoint wait time pauses the workflow execution deadline', async () => {
+  let clock = 0;
+  const instance = await engine({ now: () => clock });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Pause while waiting', budgets: { timeoutMs: 1_000 } });
+  await instance.update(created.id, (plan) => {
+    plan.steps.find((step) => step.id === 'inspect-project').status = WorkflowStepStatus.COMPLETED;
+    plan.steps.find((step) => step.id === 'diagnose').status = WorkflowStepStatus.COMPLETED;
+  });
+  clock = 200;
+  const waiting = await instance.run(created.id);
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.pausedAt, 200);
+  const originalDeadline = waiting.deadlineAt;
+  clock = 10_200;
+  const stillWaiting = await instance.run(created.id);
+  assert.equal(stillWaiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  await instance.approve(created.id, 'plan-change');
+  const approved = await instance.get(created.id);
+  assert.equal(approved.pausedAt, null);
+  assert.equal(approved.deadlineAt, originalDeadline + 10_000);
+  assert.ok(approved.deadlineAt > clock);
+});
+
+test('managed workspace clone receives only the workflow remaining time', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-clone-deadline-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { test: 'pnpm test' }, budgets: { commandTimeoutMs: 120_000 } });
+  let clock = 0;
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, now: () => clock });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound clone time', budgets: { timeoutMs: 1_000 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
+  clock = 300;
+  await instance.run(created.id);
+  assert.equal(manager.prepared.length, 1);
+  assert.equal(manager.prepared[0].options.timeoutMs, 700);
+});
+
+test('bootstrap attempt budget prevents unlimited retry after repeated interrupted installs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-attempts-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test' } });
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager() });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound bootstrap attempts', budgets: { maxAttempts: 2 } });
+  await instance.update(created.id, (plan) => {
+    plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED;
+    plan.bootstrap.status = 'pending';
+    plan.bootstrap.attempts = 2;
+  });
+  const failed = await instance.run(created.id);
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'workflow_bootstrap_attempt_budget_exhausted');
 });
