@@ -2121,7 +2121,9 @@ test('approved dependency change runs exactly one frozen refresh and preserves t
   assert.equal(dependencyRefresh.evidence.required, true);
   assert.equal(dependencyRefresh.evidence.command.name, 'dependencyRefresh');
   assert.equal(dependencyRefresh.evidence.command.ok, true);
-  assert.equal(dependencyRefresh.evidence.executionProvider, 'container-required');
+  assert.equal(dependencyRefresh.evidence.execution.provider, 'container');
+  assert.equal(dependencyRefresh.evidence.execution.stage, 'dependency-refresh');
+  assert.equal(dependencyRefresh.evidence.execution.postWorkerNetwork, 'dependency-refresh-network-enabled');
   assert.equal(dependencyRefresh.evidence.lifecycleScripts, 'disabled');
   assert.deepEqual(dependencyRefresh.evidence.dependencyPaths, ['package-lock.json', 'package.json']);
   assert.equal(dependencyRefresh.evidence.changeSetFingerprint, changeSet.changeSetFingerprint);
