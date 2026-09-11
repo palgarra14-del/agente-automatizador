@@ -516,10 +516,16 @@ function workflowBudget(input = {}) {
   };
 }
 
-function workflowCommands(project, type) {
-  const available = Object.keys(project.commands ?? {});
-  if (type === 'verification') return available.filter((name) => ['test', 'typecheck', 'lint', 'build'].includes(name));
-  return [];
+const workflowVerificationCommands = Object.freeze({
+  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint'], 'release-readiness': ['build'] }),
+  'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
+  'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
+});
+
+function workflowCommands(project, profile, stepId, type) {
+  if (type !== 'verification') return [];
+  const requested = workflowVerificationCommands[profile]?.[stepId] ?? [];
+  return requested.filter((name) => Object.hasOwn(project.commands ?? {}, name));
 }
 
 function workflowBootstrap(project) {
@@ -533,7 +539,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   if (!project?.id) throw new Error('Workflow project is required');
   if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
   const budget = workflowBudget(budgets);
-  const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, type), evidence: null, error: null }));
+  const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
   const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]));
@@ -584,11 +590,17 @@ export function validateWorkflowPlan(plan, knownProjects) {
   }
   const template = workflowProfiles[plan.profile];
   if (plan.steps.length !== template.steps.length || plan.steps.some((step, index) => step.id !== template.steps[index][0] || step.type !== template.steps[index][1] || step.dependsOn.length !== (index ? 1 : 0) || (index && step.dependsOn[0] !== template.steps[index - 1][0]))) throw new Error('Workflow steps do not match the deterministic profile');
-  if (project && plan.steps.some((step) => JSON.stringify(step.commands) !== JSON.stringify(workflowCommands(project, step.type)))) throw new Error('Workflow commands do not match the project allowlist');
+  if (project && plan.steps.some((step) => JSON.stringify(step.commands) !== JSON.stringify(workflowCommands(project, plan.profile, step.id, step.type)))) throw new Error('Workflow commands do not match the project allowlist');
   if (JSON.stringify(plan.definitionOfDone) !== JSON.stringify(template.definitionOfDone)) throw new Error('Workflow definitionOfDone does not match the deterministic profile');
   const running = plan.steps.filter((step) => step.status === WorkflowStepStatus.RUNNING);
+  const awaitingApproval = plan.steps.filter((step) => step.status === WorkflowStepStatus.AWAITING_APPROVAL);
   if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
   if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
+  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
+  if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
+  if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
+  if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
+  if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
   validateWorkflowBootstrap(plan.bootstrap, plan.workspace, project);
   return { ok: true, stepCount: plan.steps.length, budgets: budget };
@@ -693,9 +705,17 @@ export class WorkflowEngine {
     try {
       allocation = await this.workspaceManager.prepare(project, plan.id, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs) });
     } catch (error) {
-      if (error.message === 'workspace_clone_timeout' || this.remainingMs(await this.get(id)) <= 0) {
+      if (this.remainingMs(await this.get(id)) <= 0) {
         await this.failDeadline(id);
         throw new Error('workflow_budget_deadline_exceeded', { cause: error });
+      }
+      if (error.code === 'WORKSPACE_CLONE_TIMEOUT') {
+        await this.update(id, (saved) => { saved.status = WorkflowStepStatus.FAILED; saved.result = { error: 'workspace_clone_timeout' }; });
+        throw error;
+      }
+      if (error.code === 'WORKSPACE_CLONE_FAILED') {
+        await this.update(id, (saved) => { saved.status = WorkflowStepStatus.FAILED; saved.result = { error: 'workspace_clone_failed' }; });
+        throw error;
       }
       throw error;
     }
@@ -779,6 +799,14 @@ export class WorkflowEngine {
         step.error = null;
         saved.status = WorkflowStepStatus.AWAITING_APPROVAL;
         saved.pausedAt ??= this.now();
+      });
+      if ((next.type === 'command' || next.type === 'verification') && next.commands.length === 0) return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'verification_command_not_configured';
+        step.evidence = { type: next.type, executable: false };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
       });
       if (next.type === 'command' || next.type === 'verification') {
         const workspaceProject = await this.workspaceProject(id, project);
@@ -1145,18 +1173,35 @@ export class WorkspaceManager {
     const details = this.describe(project, runId);
     if (!details.managed) return details;
     await assertSafePathChain(details.workspace);
-    if (existsSync(details.workspace)) throw new Error(`Managed workspace already exists: ${details.workspace}`);
     await mkdir(details.projectDirectory, { recursive: true });
-    await assertSafePathChain(details.workspace);
     const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
+    if (existsSync(details.workspace)) {
+      await assertSafePathChain(details.workspace);
+      const root = await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--show-toplevel'], { cwd: details.projectDirectory, timeoutMs });
+      const remote = root.ok ? await this.processRunner('git', ['-C', details.workspace, 'remote', 'get-url', 'origin'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      if (root.ok && remote.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project)) {
+        return { ...details, remoteUrl, clone: { ok: true, reused: true, durationMs: 0, exitCode: 0 } };
+      }
+      const failedWorkspace = `${details.workspace}.failed-${randomUUID().slice(0, 8)}`;
+      await rename(details.workspace, failedWorkspace);
+    }
+    await assertSafePathChain(details.workspace);
     const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
       timeoutMs
     });
-    if (clone.timedOut) throw new Error('workspace_clone_timeout');
-    if (!clone.ok) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+    if (clone.timedOut) {
+      const error = new Error('workspace_clone_timeout');
+      error.code = 'WORKSPACE_CLONE_TIMEOUT';
+      throw error;
+    }
+    if (!clone.ok) {
+      const error = new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+      error.code = 'WORKSPACE_CLONE_FAILED';
+      throw error;
+    }
     await assertSafePathChain(details.workspace);
-    return { ...details, remoteUrl, clone: { ok: true, durationMs: clone.durationMs, exitCode: clone.exitCode } };
+    return { ...details, remoteUrl, clone: { ok: true, reused: false, durationMs: clone.durationMs, exitCode: clone.exitCode } };
   }
 }
 
