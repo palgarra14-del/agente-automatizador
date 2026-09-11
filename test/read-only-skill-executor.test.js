@@ -140,6 +140,69 @@ test('change critic output is structurally validated and prompt defines PASS/FAI
   assert.match(contradictoryPass.error, /review_evidence_pass_contains_blocking_finding/);
 });
 
+test('website planner is offline, anti-fabrication, and validates a strict structured plan', async () => {
+  let response = JSON.stringify({
+    websitePlan: {
+      summary: 'Professional local-service website focused on qualified contact.',
+      pages: [
+        { slug: '/', title: 'Inicio', purpose: 'Present the business and primary conversion path.', sections: ['Hero', 'Servicios', 'Contacto'] },
+        { slug: '/servicios', title: 'Servicios', purpose: 'Explain supplied services.', sections: ['Listado de servicios', 'CTA'] }
+      ],
+      design: { direction: 'Clean local-service layout.', tone: 'Profesional y cercano', colors: ['#123456', '#abcdef'], typography: 'Readable sans-serif pairing.' },
+      conversion: { primaryCta: 'Contactar por WhatsApp', secondaryCta: 'Llamar' },
+      seo: { primaryLocation: 'Madrid', keywords: ['fontanería Madrid'] },
+      implementation: { priorities: ['Mobile-first contact path', 'Accessible navigation'], constraints: ['Use only supplied business facts'] },
+      missingInputs: ['Horario comercial no facilitado']
+    }
+  });
+  let prompt = '';
+  class FakeCodex {
+    startThread(options) {
+      assert.equal(options.webSearchMode, 'disabled');
+      return { id: 'website-plan-thread', run: async (value) => { prompt = value; return { finalResponse: response, usage: { input_tokens: 12, output_tokens: 30 } }; } };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const result = await executor.execute({
+    skill: 'website.plan',
+    goal: 'Plan a professional website',
+    contract,
+    context: {
+      businessBrief: { businessName: 'Fontanería Ejemplo', category: 'Fontanería', locations: ['Madrid'], services: [{ name: 'Fugas' }] }
+    }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.websitePlan.pages[0].slug, '/');
+  assert.match(prompt, /Do not use web research/);
+  assert.match(prompt, /do not invent testimonials/i);
+  assert.match(prompt, /missingInputs/);
+
+  response = JSON.stringify({
+    websitePlan: {
+      summary: 'Invalid duplicate routes',
+      pages: [
+        { slug: '/servicios', title: 'A', purpose: 'A', sections: ['A'] },
+        { slug: '/servicios', title: 'B', purpose: 'B', sections: ['B'] }
+      ],
+      design: { direction: 'x', tone: 'x', colors: [], typography: 'x' },
+      conversion: { primaryCta: 'x', secondaryCta: null },
+      seo: { primaryLocation: null, keywords: [] },
+      implementation: { priorities: ['x'], constraints: [] },
+      missingInputs: []
+    }
+  });
+  const duplicate = await executor.execute({ skill: 'website.plan', goal: 'plan', contract, context: {} }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(duplicate.ok, false);
+  assert.match(duplicate.error, /duplicate slugs/);
+
+  response = JSON.stringify({ websitePlan: { summary: 'x', pages: [], design: {}, conversion: {}, seo: {}, implementation: {}, missingInputs: [], inventedField: true } });
+  const unknown = await executor.execute({ skill: 'website.plan', goal: 'plan', contract, context: {} }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /unknown fields/);
+});
+
 test('read-only skill executor rejects unsupported skills before starting Codex', async () => {
   let started = 0;
   class FakeCodex {
