@@ -1056,6 +1056,58 @@ export class WorkflowEngine {
     });
   }
 
+  async guardImplementationChangeSet(id, project, stepId, phase, { outcomes = [], outputBytes = 0 } = {}) {
+    const plan = await this.get(id);
+    if (plan.profile !== 'app-improvement') return { ok: true, plan };
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    if (implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) return { ok: true, plan };
+    const workspaceProject = await this.workspaceProject(id, project);
+    let changeSet = null;
+    let decision = null;
+    let integrityError = null;
+    try {
+      changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+      decision = evaluateChangePolicy(project, changeSet, plan.scope);
+    } catch (error) {
+      integrityError = error;
+    }
+    let error = null;
+    let blocked = false;
+    if (integrityError) error = 'workflow_change_set_integrity_failed_during_verification';
+    else if (changeSet.changeSetFingerprint !== implementation.evidence.changeSetFingerprint) error = 'workflow_change_set_changed_during_verification';
+    else if (!decision?.ok) error = 'workflow_change_policy_rejected_during_verification';
+    else if (decision.classification === 'sensitive') {
+      error = 'workflow_sensitive_change_during_verification';
+      blocked = true;
+    }
+    if (!error) return { ok: true, plan, changeSet, decision };
+    const failed = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      saved.outputBytes += Number(outputBytes ?? 0);
+      step.status = blocked ? WorkflowStepStatus.BLOCKED : WorkflowStepStatus.FAILED;
+      step.error = error;
+      step.evidence = {
+        type: 'verification-governance',
+        skill: step.skill,
+        registryFingerprint: saved.registryFingerprint,
+        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        phase,
+        commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })),
+        expectedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        observedChangeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
+        changePolicy: decision ? safeJson(decision) : null,
+        error: integrityError ? clip(integrityError.message, 1_000) : null
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+      }
+      saved.status = step.status === WorkflowStepStatus.BLOCKED ? WorkflowStepStatus.BLOCKED : WorkflowStepStatus.FAILED;
+      saved.result = { error: step.error, stepId: step.id, phase };
+    });
+    return { ok: false, plan: failed };
+  }
+
   async approve(id, stepId) {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId));
   }
