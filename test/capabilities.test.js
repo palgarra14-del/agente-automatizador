@@ -49,10 +49,14 @@ test('project capability policy is explicit and rejects unknown or contradictory
     execution: { provider: 'local-sanitized' },
     skills: { allow: ['does.not-exist'], deny: [] }
   }), /unknown skill/);
-  assert.throws(() => defaultToolSkillRegistry.validateProjectPolicy({
+  const deniedPolicy = defaultToolSkillRegistry.validateProjectPolicy({
     allow: ['project.verify'],
     deny: ['project.verify']
-  }), /both allowed and denied/);
+  });
+  const deniedProject = configuredProject({ skills: deniedPolicy });
+  const denied = defaultToolSkillRegistry.resolve(deniedProject, 'project.verify', { surface: 'workflow' });
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.reason, 'skill_not_allowed');
 });
 
 test('capability resolution distinguishes policy, binding, and execution surface', () => {
@@ -148,4 +152,42 @@ test('registry internals cannot be mutated through public properties', () => {
   const original = registry.fingerprint;
   assert.throws(() => { registry.fingerprint = 'tampered'; }, TypeError);
   assert.equal(registry.fingerprint, original);
+});
+
+
+test('skill contracts are versioned, normalized, and security-relevant', () => {
+  const verify = defaultToolSkillRegistry.getSkill('project.verify');
+  assert.equal(verify.contract.version, 1);
+  assert.deepEqual(verify.contract.inputs, ['checks', 'project', 'workspace']);
+  assert.deepEqual(verify.contract.outputs, ['commandEvidence']);
+
+  const changedContractSkills = defaultSkills.map((skill) => skill.id === 'project.verify'
+    ? { ...skill, contract: { version: 2, inputs: skill.contract.inputs, outputs: skill.contract.outputs } }
+    : skill);
+  const changed = new ToolSkillRegistry({ tools: defaultTools, skills: changedContractSkills });
+  assert.notEqual(changed.fingerprint, defaultToolSkillRegistry.fingerprint);
+});
+
+test('workspace preparation is an explicit workflow capability', () => {
+  const project = configuredProject({
+    workspaceStrategy: 'managed',
+    skills: {
+      allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval'],
+      deny: []
+    }
+  });
+  const allowed = defaultToolSkillRegistry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
+  assert.equal(allowed.available, true);
+  assert.equal(allowed.contract.outputs[0], 'workspaceEvidence');
+
+  const deniedProject = configuredProject({
+    workspaceStrategy: 'managed',
+    skills: {
+      allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval'],
+      deny: ['workspace.prepare']
+    }
+  });
+  const denied = defaultToolSkillRegistry.resolve(deniedProject, 'workspace.prepare', { surface: 'workflow' });
+  assert.equal(denied.available, false);
+  assert.equal(denied.reason, 'skill_not_allowed');
 });
