@@ -1205,3 +1205,71 @@ test('implementation fails if an ignored protected file changes even when normal
   assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
   assert.match(implementation.evidence.error, /protected_ignored_state_changed/);
 });
+
+
+test('read-only workflow detects git control-state mutation even when worktree diff is unchanged', async () => {
+  const configured = configFrom({
+    id: 'readonly-git-control',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let controlCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectRepositoryControlState() {
+      controlCalls += 1;
+      return controlCalls === 1
+        ? { paths: ['config', 'info/exclude'], fingerprint: '5'.repeat(64) }
+        : { paths: ['config', 'info/exclude'], fingerprint: '6'.repeat(64) };
+    }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 8, result: { inspectionEvidence: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not alter git controls' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'read_only_skill_modified_workspace');
+  assert.equal(step.evidence.repositoryControlBeforeFingerprint, '5'.repeat(64));
+  assert.equal(step.evidence.repositoryControlAfterFingerprint, '6'.repeat(64));
+});
+
+test('implementation fails if git control state changes even when normal diff is acceptable', async () => {
+  let changeCalls = 0;
+  let controlCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js']);
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    },
+    async inspectRepositoryControlState() {
+      controlCalls += 1;
+      return controlCalls === 1
+        ? { paths: ['config'], fingerprint: '7'.repeat(64) }
+        : { paths: ['config'], fingerprint: '8'.repeat(64) };
+    }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'changed git controls', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Protect git controls' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
+  assert.match(implementation.evidence.error, /repository_control_state_changed/);
+});
