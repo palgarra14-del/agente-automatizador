@@ -67,7 +67,7 @@ test('workflow placeholders block honestly instead of claiming unimplemented wor
   assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
   assert.equal(inspect.error, 'capability_not_implemented');
   assert.equal(evaluateDefinitionOfDone(current).ok, false);
-  await assert.rejects(instance.approve(created.id, 'inspect-project'), /requires an executor/);
+  await assert.rejects(instance.approve(created.id, 'inspect-project'), /not awaiting human approval/);
 });
 
 test('workflow dry-run reports executable steps without invoking the command executor', async () => {
@@ -519,4 +519,16 @@ test('workspace clone timeout is distinct from exhausting the global workflow de
   const failed = await instance.get(created.id);
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(failed.result.error, 'workspace_clone_timeout');
+});
+
+
+test('workflow approval cannot bypass non-human capability blocks', async () => {
+  const limited = configFrom({ id: 'limited', repository: { owner: 'owner', name: 'limited' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { lint: 'node --version' }, execution: { provider: 'local-sanitized' } });
+  const instance = await engine({ projects: new Map([[limited.id, limited]]) });
+  const created = await instance.create({ profile: 'data-analysis', projectId: limited.id, goal: 'Require a configured validator' });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.result.error, 'verification_command_not_configured');
+  assert.equal(blocked.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.BLOCKED);
+  await assert.rejects(instance.approve(created.id, 'validate-data'), /not awaiting human approval/);
 });
