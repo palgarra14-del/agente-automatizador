@@ -29,7 +29,13 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
     }
   }
   const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
-  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({ PATH: '/safe/bin' }) });
+  let cleaned = false;
+  const executor = new CodexReadOnlySkillExecutor({
+    CodexClient: FakeCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_HOME: '/real/codex-home' }),
+    codexHomeFactory: async () => ({ path: '/isolated/codex-home', cleanup: async () => { cleaned = true; } }),
+    platform: 'linux'
+  });
   const result = await executor.execute({
     skill: 'code.inspect',
     goal: 'Inspect workflow execution',
@@ -42,12 +48,20 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.equal(result.codexThreadId, 'readonly-thread-1');
   assert.deepEqual(invocation.threadOptions, {
     workingDirectory: '/safe/workspace',
-    sandboxMode: 'read-only',
     approvalPolicy: 'never',
-    networkAccessEnabled: false,
     webSearchMode: 'disabled'
   });
   assert.equal(invocation.clientOptions.env.PATH, '/safe/bin');
+  assert.equal(invocation.clientOptions.env.CODEX_HOME, '/isolated/codex-home');
+  assert.equal(invocation.clientOptions.env.HOME, '/isolated/codex-home');
+  assert.equal(cleaned, true);
+  const overrides = invocation.clientOptions.configOverrides;
+  assert.ok(overrides.includes('default_permissions="agent-workflow"'));
+  assert.ok(overrides.includes('permissions.agent-workflow.network.enabled=false'));
+  assert.ok(overrides.includes('project_doc_max_bytes=0'));
+  assert.ok(overrides.includes('features.plugins=false'));
+  assert.ok(overrides.some((entry) => entry.includes('":root"="deny"') && entry.includes('"."="read"') && entry.includes('".git"="read"')));
+  assert.equal(Object.hasOwn(invocation.threadOptions, 'sandboxMode'), false);
   assert.deepEqual(Object.keys(result.result), ['inspectionEvidence']);
   assert.match(invocation.prompt, /untrusted data/);
   assert.match(invocation.prompt, /exactly one JSON object/);
@@ -97,4 +111,16 @@ test('read-only skill executor rejects unsupported skills before starting Codex'
     /skill_executor_unsupported/
   );
   assert.equal(started, 0);
+});
+
+
+test('read-only skill executor fails closed on native Windows before constructing Codex', async () => {
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
+  const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const result = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_win32');
+  assert.equal(constructed, 0);
 });
