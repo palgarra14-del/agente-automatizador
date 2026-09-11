@@ -489,7 +489,9 @@ export class JsonStore {
       if (!entity) throw new Error(`${kind}_not_found`);
       const existing = entity.executionLease;
       if (existing !== null && existing !== undefined) {
-        if (!existing || typeof existing !== 'object' || typeof existing.leaseId !== 'string' || !Number.isInteger(existing.pid) || existing.pid <= 0 || typeof existing.createdAt !== 'string' || existing.kind !== kind) {
+        const createdAt = typeof existing?.createdAt === 'string' ? Date.parse(existing.createdAt) : NaN;
+        const ownerIdentityValid = existing?.ownerIdentity === null || existing?.ownerIdentity === undefined || (typeof existing.ownerIdentity === 'string' && existing.ownerIdentity.length > 0);
+        if (!existing || typeof existing !== 'object' || typeof existing.leaseId !== 'string' || !existing.leaseId.trim() || !Number.isInteger(existing.pid) || existing.pid <= 0 || !Number.isFinite(createdAt) || existing.kind !== kind || !ownerIdentityValid) {
           throw new Error(`${kind}_execution_lease_invalid`);
         }
         if (!(await this.lockOwnerIsAbandoned(existing))) throw new Error(`${kind}_execution_in_progress`);
@@ -527,9 +529,9 @@ export class JsonStore {
     let releaseError = null;
     try { released = await this.releaseExecutionLease(collection, id, lease.leaseId); }
     catch (error) { releaseError = error; }
+    if (releaseError) throw new Error(`${kind}_execution_lease_release_failed`, { cause: releaseError });
+    if (!released) throw new Error(`${kind}_execution_lease_lost`, { cause: operationError ?? undefined });
     if (operationError) throw operationError;
-    if (releaseError) throw releaseError;
-    if (!released) throw new Error(`${kind}_execution_lease_lost`);
     return output;
   }
 
