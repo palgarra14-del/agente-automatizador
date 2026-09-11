@@ -6,6 +6,12 @@ The CodingWorker edits code only. The Orchestrator owns repository identity, wor
 
 The official SDK worker starts a thread with `workspace-write`, `networkAccessEnabled: false`, and `webSearchMode: disabled`. Its explicit environment allowlist omits `GITHUB_TOKEN`, `CODEX_API_KEY`, and other inherited secrets. Codex authentication is recovered only from the local Codex runtime configuration or injected by the SDK, never included in the worker task.
 
+## Capability policy
+
+v0.7 adds an immutable Tool/Skill Registry as an additional authority boundary. Project configuration contains explicit skill allow/deny policy; deny takes precedence. A skill is executable only when policy allows it, its declared surface matches the caller, and every required tool has a reviewed binding on that surface. Reserved future capabilities are represented but remain unavailable.
+
+The registry fingerprint covers executable bindings, surfaces, risks, dependencies, and versioned input/output contracts. The normalized project-policy fingerprint is persisted with each run/workflow. Resume fails closed if either fingerprint changes, preventing a saved task from silently gaining permissions after a registry or project-policy update. Real Orchestrator actions still re-check the specific skill immediately before the operation; the preflight is defense in depth, not the sole gate.
+
 ## Git and paths
 
 - Only an ID in `config/projects.json` is eligible for a run; the LLM cannot supply the repository URL, owner, repo, workspace root, or branch pattern.
