@@ -13,7 +13,7 @@ The evaluation requires successful worker completion, a governed diff, configure
 - `CodexSdkWorker`: real coding implementation through the official `@openai/codex-sdk`.
 - `LocalGitAdapter`: explicit local Git operations only; no LLM-generated Git command strings.
 - `GitHubAdapter`: authenticated repository/branch reads, PR creation, and check-run polling.
-- `WorkspaceManager`: isolated clone lifecycle beneath the managed root; successful and failed workspaces are retained for diagnosis.
+- `WorkspaceManager`: isolated clone lifecycle beneath the managed root; fresh clones explicitly checkout the configured base branch, valid interrupted clones are reused only when clean and repository-matched, and partial/mismatched clones are retained under a `.failed-*` sibling before recovery.
 - `VercelDeploymentProvider`: read-only Vercel deployment lookup and bounded polling by configured project/team, branch, and commit SHA.
 - `ProjectCommandRunner`: selects only the project-configured execution provider; a worker cannot choose it.
 - `DockerContainerExecution`: real Docker boundary for `container` and `container-required`, with only an explicit workspace bind mount and no automatic image pull.
