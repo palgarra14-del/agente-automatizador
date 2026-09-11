@@ -75,7 +75,7 @@ function completeStep(plan, id) {
       changeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null,
       ...(dependencyPaths.length ? {
         command: { name: 'dependencyRefresh', ok: true, exitCode: 0, stdout: '', stderr: '' },
-        executionProvider: 'container-required',
+        execution: { provider: 'container', stage: 'dependency-refresh', postWorkerNetwork: 'dependency-refresh-network-enabled' },
         lifecycleScripts: 'disabled'
       } : {})
     };
@@ -2106,7 +2106,10 @@ test('approved dependency change runs exactly one frozen refresh and preserves t
     localGit,
     runner: async (_project, name, options) => {
       calls.push({ name, options });
-      return { name, ok: true, exitCode: 0, stdout: 'dependencies ready', stderr: '' };
+      return {
+        name, ok: true, exitCode: 0, stdout: 'dependencies ready', stderr: '',
+        execution: { provider: 'container', stage: 'dependency-refresh', postWorkerNetwork: 'dependency-refresh-network-enabled' }
+      };
     }
   });
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Refresh approved dependencies' });
@@ -2149,7 +2152,10 @@ test('nested workspace manifests and lockfiles still require governed dependency
     localGit,
     runner: async (_project, name, options) => {
       calls.push({ name, options });
-      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+      return {
+        name, ok: true, exitCode: 0, stdout: '', stderr: '',
+        execution: { provider: 'container', stage: 'dependency-refresh', postWorkerNetwork: 'dependency-refresh-network-enabled' }
+      };
     }
   });
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Refresh nested workspace dependencies' });
