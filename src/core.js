@@ -703,6 +703,17 @@ export class WorkflowEngine {
     return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
   }
 
+  async blockForCapability(id, stepId, resolution) {
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      step.status = WorkflowStepStatus.BLOCKED;
+      step.error = resolution.reason;
+      step.evidence = { type: 'skill-resolution', resolution };
+      saved.status = WorkflowStepStatus.BLOCKED;
+      saved.result = { error: step.error, stepId: step.id, skill: resolution.id };
+    });
+  }
+
   async approve(id, stepId) {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
@@ -849,14 +860,7 @@ export class WorkflowEngine {
       const next = this.readySteps(plan)[0];
       if (!next) break;
       const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
-      if (!skillResolution.available) return this.update(id, (saved) => {
-        const step = saved.steps.find((item) => item.id === next.id);
-        step.status = WorkflowStepStatus.BLOCKED;
-        step.error = skillResolution.reason;
-        step.evidence = { type: 'skill-resolution', resolution: skillResolution };
-        saved.status = WorkflowStepStatus.BLOCKED;
-        saved.result = { error: step.error, stepId: step.id, skill: step.skill };
-      });
+      if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder') return this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.BLOCKED;
@@ -881,6 +885,14 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
       if (next.type === 'command' || next.type === 'verification') {
+        if (project.workspaceStrategy === 'managed') {
+          const workspaceResolution = this.registry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
+          if (!workspaceResolution.available) return this.blockForCapability(id, next.id, workspaceResolution);
+        }
+        if (plan.bootstrap.required) {
+          const bootstrapResolution = this.registry.resolve(project, 'project.bootstrap', { surface: 'workflow' });
+          if (!bootstrapResolution.available) return this.blockForCapability(id, next.id, bootstrapResolution);
+        }
         const workspaceProject = await this.workspaceProject(id, project);
         const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
         if (!bootstrap.ok) return bootstrap.plan;
@@ -1726,7 +1738,7 @@ export class Orchestrator {
   }
 
   requiredSkills(project) {
-    const skills = new Set(['repository.observe', 'code.implement', 'project.verify', 'repository.publish', 'release.publish-pr', 'release.observe-ci', 'human.approval']);
+    const skills = new Set(['workspace.prepare', 'repository.observe', 'code.implement', 'project.verify', 'repository.publish', 'release.publish-pr', 'release.observe-ci', 'human.approval']);
     if (project.acceptance.require.includes('install')) skills.add('project.bootstrap');
     if (project.deployment.provider === 'vercel') skills.add('release.observe-preview');
     return [...skills].sort();
@@ -1810,6 +1822,7 @@ export class Orchestrator {
   }
 
   async initializeWorkspace(run, project) {
+    this.requireSkill(project, 'workspace.prepare');
     this.requireSkill(project, 'repository.observe');
     const repository = await this.github.inspect(project);
     if (repository.defaultBranch !== project.defaultBranch) throw new Error('Configured default branch differs from GitHub');
