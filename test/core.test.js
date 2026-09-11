@@ -1187,3 +1187,25 @@ test('LocalGitAdapter fingerprints ignored protected files without reading their
   assert.deepEqual(after.paths, before.paths);
   assert.equal(JSON.stringify(after).includes('second-secret-value'), false);
 });
+
+
+test('LocalGitAdapter fingerprints git control files without exposing their contents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-git-control-'));
+  const initialized = await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(initialized.ok, true);
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+
+  const before = await adapter.inspectRepositoryControlState(configured);
+  assert.match(before.fingerprint, /^[a-f0-9]{64}$/);
+  assert.ok(before.paths.includes('config'));
+  assert.ok(before.paths.includes('info/exclude'));
+
+  const excludePath = join(root, '.git', 'info', 'exclude');
+  await writeFile(excludePath, '# changed by fixture\nprivate-cache/\n');
+  const after = await adapter.inspectRepositoryControlState(configured);
+
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.equal(JSON.stringify(after).includes('private-cache'), false);
+  assert.equal(JSON.stringify(after).includes('changed by fixture'), false);
+});
