@@ -482,6 +482,57 @@ export class JsonStore {
     return output;
   }
 
+  async claimExecutionLease(collection, id, kind) {
+    if (!['runs', 'workflows'].includes(collection) || !['run', 'workflow'].includes(kind)) throw new Error('execution_lease_scope_invalid');
+    return this.mutate(async (data) => {
+      const entity = data[collection]?.[id];
+      if (!entity) throw new Error(`${kind}_not_found`);
+      const existing = entity.executionLease;
+      if (existing !== null && existing !== undefined) {
+        if (!existing || typeof existing !== 'object' || typeof existing.leaseId !== 'string' || !Number.isInteger(existing.pid) || existing.pid <= 0 || typeof existing.createdAt !== 'string' || existing.kind !== kind) {
+          throw new Error(`${kind}_execution_lease_invalid`);
+        }
+        if (!(await this.lockOwnerIsAbandoned(existing))) throw new Error(`${kind}_execution_in_progress`);
+      }
+      const lease = {
+        leaseId: randomUUID(),
+        kind,
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+        ownerIdentity: await this.ownerIdentity(process.pid)
+      };
+      entity.executionLease = lease;
+      return lease;
+    });
+  }
+
+  async releaseExecutionLease(collection, id, leaseId) {
+    return this.mutate((data) => {
+      const entity = data[collection]?.[id];
+      if (!entity) throw new Error('execution_lease_entity_missing');
+      if (!entity.executionLease) return false;
+      if (entity.executionLease.leaseId !== leaseId) return false;
+      entity.executionLease = null;
+      return true;
+    });
+  }
+
+  async withExecutionLease(collection, id, kind, operation) {
+    const lease = await this.claimExecutionLease(collection, id, kind);
+    let output;
+    let operationError = null;
+    try { output = await operation(lease); }
+    catch (error) { operationError = error; }
+    let released = false;
+    let releaseError = null;
+    try { released = await this.releaseExecutionLease(collection, id, lease.leaseId); }
+    catch (error) { releaseError = error; }
+    if (operationError) throw operationError;
+    if (releaseError) throw releaseError;
+    if (!released) throw new Error(`${kind}_execution_lease_lost`);
+    return output;
+  }
+
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
@@ -580,7 +631,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
   return plan;
 }
@@ -616,6 +667,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
   if (!Number.isInteger(plan.outputBytes) || plan.outputBytes < 0) throw new Error('Workflow outputBytes must be an integer >= 0');
+  if (plan.executionLease !== null && plan.executionLease !== undefined && (!plan.executionLease || typeof plan.executionLease !== 'object' || typeof plan.executionLease.leaseId !== 'string' || !Number.isInteger(plan.executionLease.pid) || plan.executionLease.pid <= 0 || typeof plan.executionLease.createdAt !== 'string' || plan.executionLease.kind !== 'workflow')) throw new Error('Workflow execution lease is invalid');
   if (!plan.budgets || typeof plan.budgets !== 'object' || ['maxSteps', 'maxAttempts', 'timeoutMs', 'maxOutputBytes'].some((key) => !Object.hasOwn(plan.budgets, key))) throw new Error('Workflow budgets are incomplete');
   const budget = workflowBudget(plan.budgets);
   if (plan.steps.length > budget.maxSteps) throw new Error('Workflow exceeds maxSteps budget');
@@ -718,6 +770,10 @@ export class WorkflowEngine {
   }
 
   async approve(id, stepId) {
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId));
+  }
+
+  async approveUnlocked(id, stepId) {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
       validateWorkflowPlan(plan, this.projects, this.registry);
@@ -738,8 +794,9 @@ export class WorkflowEngine {
   }
 
   async resume(id, options = {}) {
-    const pausedAt = this.now();
-    await this.update(id, (plan) => {
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
+      const pausedAt = this.now();
+      await this.update(id, (plan) => {
       validateWorkflowPlan(plan, this.projects, this.registry);
       let interrupted = false;
       for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
@@ -755,8 +812,9 @@ export class WorkflowEngine {
         plan.status = WorkflowStepStatus.BLOCKED;
         plan.pausedAt ??= pausedAt;
       }
+      });
+      return this.runUnlocked(id, options);
     });
-    return this.run(id, options);
   }
 
   remainingMs(plan) { return plan.deadlineAt - this.now(); }
@@ -853,7 +911,12 @@ export class WorkflowEngine {
     return { ok: plan.bootstrap.status === 'completed', plan };
   }
 
-  async run(id, { dryRun = false } = {}) {
+  async run(id, options = {}) {
+    if (options.dryRun) return this.runUnlocked(id, options);
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.runUnlocked(id, options));
+  }
+
+  async runUnlocked(id, { dryRun = false } = {}) {
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
@@ -1778,7 +1841,7 @@ export class Orchestrator {
   async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), executionLease: null, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -1818,7 +1881,10 @@ export class Orchestrator {
   }
 
   async decideApproval(id, approved) {
-    return this.store.mutate((data) => {
+    const snapshot = await this.store.load();
+    const pending = snapshot.approvals[id];
+    if (!pending) throw new Error('Approval not found');
+    return this.store.withExecutionLease('runs', pending.runId, 'run', async () => this.store.mutate((data) => {
       const approval = data.approvals[id];
       if (!approval) throw new Error('Approval not found');
       if (approval.status !== 'pending') return approval;
@@ -1829,7 +1895,7 @@ export class Orchestrator {
       run.pendingAction.execution = approval.execution;
       if (!approved) transition(run, RunStatus.CANCELLED);
       return approval;
-    });
+    }));
   }
 
   async plan(run, project) {
@@ -2093,6 +2159,13 @@ export class Orchestrator {
   }
 
   async continueRun(run, project) {
+    return this.store.withExecutionLease('runs', run.id, 'run', async () => {
+      const current = await this.store.getRun(run.id);
+      return this.continueRunUnlocked(current ?? run, project);
+    });
+  }
+
+  async continueRunUnlocked(run, project) {
     try {
       this.assertRunCapabilityContext(run, project);
       this.assertOrchestratorCapabilities(project);
