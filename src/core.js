@@ -1685,13 +1685,14 @@ export function report(run) {
   const planned = run.plannedActions?.map((action) => `- ${action}`).join('\n') ?? 'None';
   const deployment = run.deployment ?? run.results?.deployment;
   const changePolicy = run.results?.changePolicy;
-  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
+  const capabilityPreflight = run.results?.capabilities;
+  const reportText = `PROJECT\n${run.projectName ?? run.projectId}\n\nOBJECTIVE\n${maskSecrets(run.goal)}\n\nRUN\n${run.id}\n\nSTATUS\n${run.status}\n\nMODE\n${run.dryRun ? 'DRY RUN — no repository or GitHub writes were executed' : 'LIVE'}\n\nCAPABILITY REGISTRY\n${run.registryFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nPROJECT SKILL POLICY\n${run.projectSkillPolicyFingerprint?.slice(0, 12) ?? 'legacy/missing'}\n\nCAPABILITY PREFLIGHT\n${capabilityPreflight ? (capabilityPreflight.ok ? 'PASS' : 'FAIL') : 'not recorded'}\n\nWORKSPACE\n${run.workspace ?? 'not created'}\n\nHEAD INITIAL\n${run.initialHead ?? 'unknown'}\n\nWORKING BRANCH\n${run.workingBranch ?? 'not created'}\n\nHEAD FINAL\n${run.finalHead ?? 'unknown'}\n\nCODEX\n${run.results?.worker?.simulated ? 'SIMULATED' : run.results?.worker?.ok ? `PASS${run.results.worker.codexThreadId ? ` (${run.results.worker.codexThreadId})` : ''}` : 'NOT RUN'}\n\nCHANGED FILES\n${run.results?.diff?.paths?.length ?? 0}\n\nPULL REQUEST\n${run.pullRequestUrl ?? 'not created'}\n\nCI\n${run.results?.ci?.simulated ? 'SIMULATED' : run.results?.ci?.state ?? 'not observed'}\n\nVERCEL\n${deployment?.simulated ? 'SIMULATED' : deployment?.state ?? 'NOT_REQUIRED'}${deployment?.url ? `\n${deployment.url}` : ''}\n\nDURATION\n${run.durationMs ?? 'in progress'}\n\nCHECKS\n${checks}\n\nPLANNED ACTIONS\n${planned}\n\nWORKER ATTEMPTS\n${run.workerAttempts ?? 0}/${run.budgets.maxWorkerAttempts}\n\nAPPROVALS\n${run.approvals?.length ?? 0}\n\nRECOMMENDATION\n${run.budgetExhausted ? `Budget exhausted: ${run.budgetExhausted}` : run.evaluation?.reasons?.join('; ') ?? 'Run has not been evaluated.'}`;
   return reportText
     .replace('\n\nWORKING BRANCH', `\n\nDEFAULT BRANCH PROTECTION\n${run.repository?.defaultBranchProtected ?? 'unknown'}\n\nWORKING BRANCH`)
     .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
 }
 
-export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner() } = {}) {
+export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner(), registry = defaultToolSkillRegistry } = {}) {
   let repository;
   let githubError;
   try {
@@ -1706,6 +1707,8 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
   } catch (error) {
     execution = { configuredProvider: project.execution.provider, selectedProvider: 'unavailable', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'NOT_AVAILABLE', hostFallback: 'NONE (FAIL-SAFE)', reason: clip(error.message, 300) };
   }
+  const orchestratorCapabilities = registry.report(project, { surface: 'orchestrator' });
+  const workflowCapabilities = registry.report(project, { surface: 'workflow' });
   return {
     project: project.displayName ?? project.id,
     projectId: project.id,
@@ -1719,13 +1722,21 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
     branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
+    capabilities: {
+      registryFingerprint: registry.fingerprint,
+      projectPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}),
+      orchestratorAvailable: orchestratorCapabilities.skills.filter((skill) => skill.available).map((skill) => skill.id),
+      orchestratorUnavailable: orchestratorCapabilities.skills.filter((skill) => !skill.available).map((skill) => `${skill.id}:${skill.reason}`),
+      workflowAvailable: workflowCapabilities.skills.filter((skill) => skill.available).map((skill) => skill.id)
+    },
     execution
   };
 }
 
 export function formatDoctor(result) {
   const execution = result.execution ?? {};
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
+  const capabilities = result.capabilities ?? {};
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
