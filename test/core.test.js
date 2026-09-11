@@ -1311,3 +1311,24 @@ test('git control fingerprint detects temporary ref tampering even when final HE
   assert.ok(after.paths.some((path) => path === `refs/heads/${branchName}`));
   assert.ok(after.paths.some((path) => path === `logs/refs/heads/${branchName}`));
 });
+
+
+test('LocalGitAdapter lists worker-sensitive paths but ignores safe env examples', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-worker-sensitive-'));
+  const initialized = await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(initialized.ok, true);
+  await mkdir(join(root, 'secrets'), { recursive: true });
+  await writeFile(join(root, '.gitignore'), '.env\n*.pem\nsecrets/\n');
+  await writeFile(join(root, '.env'), 'TOKEN=fixture\n');
+  await writeFile(join(root, '.env.example'), 'TOKEN=example-only\n');
+  await writeFile(join(root, 'client.pem'), 'FIXTURE-KEY\n');
+  await writeFile(join(root, 'secrets', 'client.key'), 'FIXTURE-SECRET\n');
+  const add = await runProcess('git', ['add', '.gitignore', '.env.example'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(add.ok, true);
+
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+  const paths = await adapter.inspectWorkerSensitivePaths(configured);
+  assert.deepEqual(paths, ['.env', 'client.pem', 'secrets/client.key']);
+  assert.equal(paths.includes('.env.example'), false);
+});
