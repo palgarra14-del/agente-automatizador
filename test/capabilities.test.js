@@ -68,7 +68,8 @@ test('capability resolution distinguishes policy, binding, and execution surface
   assert.equal(inspectWorkflow.reason, 'skill_not_bound_to_surface');
 
   const inspectOrchestrator = defaultToolSkillRegistry.resolve(project, 'code.inspect', { surface: 'orchestrator' });
-  assert.equal(inspectOrchestrator.available, true);
+  assert.equal(inspectOrchestrator.available, false);
+  assert.equal(inspectOrchestrator.reason, 'skill_not_bound_to_surface');
 
   const research = defaultToolSkillRegistry.resolve(project, 'research.web', { surface: 'workflow' });
   assert.equal(research.allowed, false);
