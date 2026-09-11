@@ -775,6 +775,269 @@ export class WorkflowEngine {
     });
   }
 
+  async workspaceSnapshot(project) {
+    const repository = await this.localGit.inspect(project);
+    const changeSet = await this.localGit.inspectChangeSet(project);
+    return {
+      repository: repository.repository,
+      remote: repository.remote,
+      branch: repository.currentBranch,
+      head: repository.initialHead,
+      status: repository.status,
+      changeSet
+    };
+  }
+
+  workspaceSnapshotUnchanged(before, after) {
+    return before.repository === after.repository &&
+      before.remote === after.remote &&
+      before.branch === after.branch &&
+      before.head === after.head &&
+      before.changeSet.changeSetFingerprint === after.changeSet.changeSetFingerprint;
+  }
+
+  completedContext(plan) {
+    const context = {};
+    for (const step of plan.steps) {
+      if (step.status !== WorkflowStepStatus.COMPLETED) continue;
+      if (step.evidence?.result !== undefined) context[step.id] = step.evidence.result;
+      else if (step.evidence?.approvedAt) context[step.id] = { approvedAt: step.evidence.approvedAt };
+    }
+    return context;
+  }
+
+  async executeReadOnlyWorkflowStep(id, project, next, skillResolution) {
+    if (project.workspaceStrategy === 'managed') {
+      const workspaceResolution = this.registry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
+      if (!workspaceResolution.available) return this.blockForCapability(id, next.id, workspaceResolution);
+    }
+    const workspaceProject = await this.workspaceProject(id, project);
+    let before;
+    try {
+      before = await this.workspaceSnapshot(workspaceProject);
+    } catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'read_only_workspace_integrity_failed';
+        step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    const runningPlan = await this.get(id);
+    const runningStep = runningPlan.steps.find((item) => item.id === next.id);
+    const priorEvidence = Object.fromEntries(runningStep.dependsOn.map((dependencyId) => {
+      const dependency = runningPlan.steps.find((item) => item.id === dependencyId);
+      return [dependencyId, dependency?.evidence?.result ?? null];
+    }));
+    const remainingMs = this.remainingMs(runningPlan);
+    if (remainingMs <= 0) return this.failDeadline(id);
+    const execution = await this.skillExecutor.execute({
+      skill: runningStep.skill,
+      goal: runningPlan.goal,
+      contract: skillResolution.contract,
+      context: { projectId: project.id, priorEvidence }
+    }, {
+      workspace: workspaceProject.workspace,
+      timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
+    });
+    let after;
+    let integrityError = null;
+    try { after = await this.workspaceSnapshot(workspaceProject); }
+    catch (error) { integrityError = error; }
+    const integrityChanged = integrityError || !this.workspaceSnapshotUnchanged(before, after);
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += Number(execution.outputBytes ?? 0);
+      step.evidence = {
+        type: 'executor',
+        ok: execution.ok === true && !integrityChanged,
+        completedAt: execution.ok && !integrityChanged ? new Date().toISOString() : null,
+        skill: step.skill,
+        registryFingerprint: saved.registryFingerprint,
+        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        result: execution.ok && !integrityChanged ? execution.result : null,
+        codexThreadId: execution.codexThreadId ?? null,
+        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
+        workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
+        error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (integrityChanged) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = integrityError ? 'read_only_workspace_integrity_failed' : 'read_only_skill_modified_workspace';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (execution.ok) {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        saved.status = WorkflowStepStatus.PENDING;
+      } else if (step.attempts >= saved.budgets.maxAttempts) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = execution.timedOut ? 'skill_executor_timeout' : 'skill_executor_attempt_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else {
+        step.status = WorkflowStepStatus.READY;
+        step.error = execution.timedOut ? 'skill_executor_timeout_retry_available' : 'skill_executor_failed_retry_available';
+        saved.status = WorkflowStepStatus.PENDING;
+      }
+    });
+  }
+
+  async executeImplementationWorkflowStep(id, project, next) {
+    if (project.workspaceStrategy === 'managed') {
+      const workspaceResolution = this.registry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
+      if (!workspaceResolution.available) return this.blockForCapability(id, next.id, workspaceResolution);
+    }
+    const workspaceProject = await this.workspaceProject(id, project);
+    let before;
+    try { before = await this.workspaceSnapshot(workspaceProject); }
+    catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_implementation_workspace_integrity_failed';
+        step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (before.changeSet.paths.length) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_workspace_not_clean_before_implementation';
+        step.evidence = { type: 'governance', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, changeSet: safeJson(before.changeSet) };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    const runningPlan = await this.get(id);
+    const remainingMs = this.remainingMs(runningPlan);
+    if (remainingMs <= 0) return this.failDeadline(id);
+    const context = this.completedContext(runningPlan);
+    const worker = await this.codingWorker.execute({
+      objective: runningPlan.goal,
+      workflow: { id: runningPlan.id, profile: runningPlan.profile, stepId: next.id },
+      scope: runningPlan.scope,
+      inspectionEvidence: context['inspect-project'] ?? null,
+      diagnosis: context.diagnose ?? null,
+      approvedPlanChange: context['plan-change'] ?? null
+    }, {
+      workspace: workspaceProject.workspace,
+      timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
+    });
+    const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
+    let repositoryIntegrityError = null;
+    let changeSet = null;
+    try {
+      await this.localGit.assertRepositoryState(workspaceProject, { branch: before.branch, head: before.head, remote: before.remote });
+      changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+    } catch (error) {
+      repositoryIntegrityError = error;
+    }
+    const workerCompleted = worker.status === 'completed';
+    const hasChanges = Boolean(changeSet?.paths?.length);
+    const decision = changeSet ? evaluateChangePolicy(project, changeSet, runningPlan.scope) : null;
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += outputBytes;
+      const baseEvidence = {
+        type: 'executor',
+        ok: false,
+        completedAt: null,
+        skill: step.skill,
+        registryFingerprint: saved.registryFingerprint,
+        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        workspacePath: workspaceProject.workspace,
+        workerEvidence: {
+          status: worker.status,
+          summary: clip(worker.summary, 1_000),
+          codexThreadId: worker.codexThreadId ?? null,
+          timedOut: Boolean(worker.timedOut),
+          output: clip(worker.output, 1_000)
+        },
+        changeSet: changeSet ? safeJson(changeSet) : null,
+        changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
+        changePolicy: decision ? safeJson(decision) : null,
+        error: repositoryIntegrityError ? clip(repositoryIntegrityError.message, 1_000) : null
+      };
+      step.evidence = baseEvidence;
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (repositoryIntegrityError) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_implementation_repository_state_changed';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (!workerCompleted && hasChanges) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_failed_implementation_left_changes';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (!workerCompleted) {
+        if (step.attempts >= saved.budgets.maxAttempts) {
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = worker.timedOut ? 'workflow_implementation_timeout' : 'workflow_implementation_attempt_budget_exhausted';
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        } else {
+          step.status = WorkflowStepStatus.READY;
+          step.error = worker.timedOut ? 'workflow_implementation_timeout_retry_available' : 'workflow_implementation_failed_retry_available';
+          saved.status = WorkflowStepStatus.PENDING;
+        }
+      } else if (!hasChanges) {
+        if (step.attempts >= saved.budgets.maxAttempts) {
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = 'workflow_implementation_no_changes';
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        } else {
+          step.status = WorkflowStepStatus.READY;
+          step.error = 'workflow_implementation_no_changes_retry_available';
+          saved.status = WorkflowStepStatus.PENDING;
+        }
+      } else if (!decision?.ok) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_change_policy_rejected';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id, reason: decision?.reason ?? 'unknown' };
+      } else if (decision.classification === 'sensitive') {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_sensitive_change_requires_approval';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id, reason: decision.reason };
+      } else {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.evidence.ok = true;
+        step.evidence.completedAt = new Date().toISOString();
+        saved.status = WorkflowStepStatus.PENDING;
+      }
+    });
+  }
+
   async approve(id, stepId) {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId));
   }
