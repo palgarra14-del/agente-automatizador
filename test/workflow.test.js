@@ -15,10 +15,10 @@ async function engine({ runner, projects, workspaceManager, now } = {}) {
   return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
-function managedProject(id, root) {
+function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets } = {}) {
   return configFrom({
     id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
-    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }
+    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets
   }, join(root, id, 'config'));
 }
 
@@ -152,6 +152,7 @@ test('Callflow and LeadFinder workflows bind every command to their selected man
   assert.ok(calls.length > 0);
   assert.ok(calls.filter((call) => call.id === 'callflow').every((call) => call.workspace === expectedCallflow));
   assert.ok(calls.filter((call) => call.id === 'leadfinder').every((call) => call.workspace === expectedLeadfinder));
+  assert.equal(calls.some((call) => call.id === 'callflow' && call.name === 'install'), false);
   assert.notEqual(expectedCallflow, expectedLeadfinder);
   assert.equal(manager.prepared.length, 2);
 });
@@ -241,4 +242,128 @@ test('crash and resume preserve a managed workspace and never repeat completed s
   assert.equal(resumed.workspace.path, expectedWorkspace);
   assert.equal(manager.prepared.length, 1);
   assert.ok(calls.length > 0 && calls.every((call) => call.workspace === expectedWorkspace));
+});
+
+test('a new LeadFinder-like workspace bootstraps once before its verification commands', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test', lint: 'pnpm lint', build: 'pnpm build' } });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const order = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, runner: async (_project, name, options) => {
+    order.push(`${options.stage}:${name}`);
+    return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bootstrap dependencies' });
+  const dryRun = await instance.run(created.id, { dryRun: true });
+  assert.equal(dryRun.plannedBootstrap, 'install');
+  assert.equal(manager.prepared.length, 0);
+  assert.deepEqual(order, []);
+  const completed = await instance.run(created.id);
+  assert.deepEqual(order.slice(0, 4), ['bootstrap:install', 'post-worker:test', 'post-worker:lint', 'post-worker:build']);
+  assert.equal(order.filter((entry) => entry === 'bootstrap:install').length, 1);
+  assert.equal(manager.prepared.length, 1);
+  assert.equal(completed.bootstrap.status, 'completed');
+  assert.equal(completed.bootstrap.workspacePath, completed.workspace.path);
+  await instance.resume(created.id);
+  assert.equal(order.filter((entry) => entry === 'bootstrap:install').length, 1);
+});
+
+test('bootstrap failure or output exhaustion stops managed workflow verification', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-failure-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test', lint: 'pnpm lint', build: 'pnpm build' } });
+  const attempts = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager(), runner: async (_project, name) => {
+    attempts.push(name);
+    return { name, ok: name !== 'install', exitCode: name === 'install' ? 1 : 0, stdout: '', stderr: 'install failed' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Stop on install failure' });
+  const failed = await instance.run(created.id);
+  assert.equal(failed.result.error, 'workflow_bootstrap_failed');
+  assert.deepEqual(attempts, ['install']);
+
+  const exhausted = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager(), runner: async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'x'.repeat(2_000), stderr: '' }) });
+  const outputPlan = await exhausted.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound install output', budgets: { maxOutputBytes: 1_024 } });
+  assert.equal((await exhausted.run(outputPlan.id)).result.error, 'workflow_output_budget_exhausted');
+});
+
+test('bootstrap respects the global deadline and uses only remaining command time', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-deadline-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test' }, budgets: { commandTimeoutMs: 120_000 } });
+  let clock = 0;
+  const calls = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager(), now: () => clock, runner: async (_project, name, options) => {
+    calls.push({ name, timeoutMs: options.timeoutMs, stage: options.stage });
+    clock = 1_000;
+    return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Bound install time', budgets: { timeoutMs: 1_000 } });
+  clock = 300;
+  const failed = await instance.run(created.id);
+  assert.equal(failed.result.error, 'workflow_budget_deadline_exceeded');
+  assert.deepEqual(calls, [{ name: 'install', timeoutMs: 700, stage: 'bootstrap' }]);
+});
+
+test('bootstrap state tampering and crash resume fail closed without reinstalling a completed workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-resume-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test' } });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, runner: async (_project, name) => {
+    calls.push(name);
+    return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Resume bootstrap safely' });
+  const workspaceProject = await instance.workspaceProject(created.id, leadfinder);
+  await instance.bootstrapWorkspace(created.id, leadfinder, workspaceProject);
+  await instance.update(created.id, (plan) => {
+    plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED;
+    plan.steps.find((step) => step.id === 'validate-data').status = WorkflowStepStatus.RUNNING;
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+  const blocked = await instance.resume(created.id);
+  assert.equal(blocked.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.BLOCKED);
+  assert.deepEqual(calls, ['install']);
+  await instance.approve(created.id, 'validate-data');
+  await instance.run(created.id);
+  assert.equal(calls.filter((name) => name === 'install').length, 1);
+  assert.equal(manager.prepared.length, 1);
+
+  const callsBeforeTampering = calls.length;
+  const falseCompleted = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Reject false bootstrap' });
+  await instance.update(falseCompleted.id, (plan) => { plan.bootstrap.status = 'completed'; });
+  await assert.rejects(instance.run(falseCompleted.id), /completion evidence is invalid/);
+  const arbitraryCommand = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Reject bootstrap command' });
+  await instance.update(arbitraryCommand.id, (plan) => { plan.bootstrap.command = 'curl'; });
+  await assert.rejects(instance.run(arbitraryCommand.id), /bootstrap state is invalid/);
+  const otherProject = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Reject foreign bootstrap' });
+  await instance.update(otherProject.id, (plan) => { plan.bootstrap.projectId = 'callflow'; });
+  await assert.rejects(instance.run(otherProject.id), /bootstrap project is invalid/);
+  const otherWorkspace = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Reject foreign workspace bootstrap' });
+  await instance.workspaceProject(otherWorkspace.id, leadfinder);
+  await instance.update(otherWorkspace.id, (plan) => { plan.bootstrap.workspacePath = `${plan.workspace.path}-other`; });
+  await assert.rejects(instance.run(otherWorkspace.id), /bootstrap does not match its workspace/);
+  assert.equal(calls.length, callsBeforeTampering);
+});
+
+test('an interrupted bootstrap is never treated as completed and is retried only after resume', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-interrupted-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test' } });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, runner: async (_project, name) => {
+    calls.push(name);
+    return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+  } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Recover interrupted install' });
+  const workspaceProject = await instance.workspaceProject(created.id, leadfinder);
+  await instance.update(created.id, (plan) => {
+    plan.bootstrap.status = 'running';
+    plan.bootstrap.workspacePath = workspaceProject.workspace;
+    plan.bootstrap.attempts = 1;
+  });
+  const resumed = await instance.resume(created.id);
+  assert.equal(resumed.bootstrap.status, 'completed');
+  assert.equal(resumed.bootstrap.attempts, 2);
+  assert.equal(calls.filter((name) => name === 'install').length, 1);
+  assert.equal(manager.prepared.length, 1);
 });
