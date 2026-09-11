@@ -2176,17 +2176,29 @@ export class LocalGitAdapter {
     const gitDirectory = resolve(gitDirectoryResult.stdout.trim());
     if (!isWithin(resolve(project.workspace), gitDirectory)) throw new Error('Git control directory is outside the workspace');
     await assertSafePathChain(gitDirectory);
-    const relativePaths = ['HEAD', 'config', 'config.worktree', 'packed-refs', 'info/exclude', 'info/attributes', 'objects/info/alternates'];
-    const hooksDirectory = resolve(gitDirectory, 'hooks');
-    try {
-      const hookEntries = await readdir(hooksDirectory, { withFileTypes: true });
-      for (const entry of hookEntries) {
-        if (entry.isSymbolicLink()) throw new Error(`Git hook cannot be a symlink: ${entry.name}`);
-        if (entry.isFile()) relativePaths.push(`hooks/${entry.name}`);
+    const relativePaths = [
+      'HEAD', 'config', 'config.worktree', 'packed-refs', 'shallow',
+      'ORIG_HEAD', 'FETCH_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+      'REBASE_HEAD', 'AUTO_MERGE', 'SQUASH_MSG', 'objects/info/alternates'
+    ];
+    const collectControlTree = async (relativeDirectory) => {
+      const directory = resolve(gitDirectory, relativeDirectory);
+      if (!isWithin(gitDirectory, directory)) throw new Error('Git control directory escaped the git directory');
+      await assertSafePathChain(directory);
+      let entries;
+      try { entries = await readdir(directory, { withFileTypes: true }); }
+      catch (error) {
+        if (error.code === 'ENOENT') return;
+        throw error;
       }
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+      for (const entry of entries) {
+        const relativePath = `${relativeDirectory}/${entry.name}`;
+        if (entry.isSymbolicLink()) throw new Error(`Git control path cannot be a symlink: ${relativePath}`);
+        if (entry.isDirectory()) await collectControlTree(relativePath);
+        else if (entry.isFile()) relativePaths.push(relativePath);
+      }
+    };
+    for (const relativeDirectory of ['refs', 'logs', 'hooks', 'info']) await collectControlTree(relativeDirectory);
     const digest = createHash('sha256');
     const paths = [];
     for (const relativePath of [...new Set(relativePaths)].sort()) {
