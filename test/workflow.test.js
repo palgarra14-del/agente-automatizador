@@ -4,7 +4,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
@@ -1951,11 +1951,12 @@ test('change critic that mutates the workspace is rejected even if it returns PA
   assert.equal(verificationCalls, 0);
 });
 
-test('implementation sensitive change blocks before verification', async () => {
+test('sensitive implementation waits for fingerprint-bound approval without rerunning the worker', async () => {
   let changeCalls = 0;
+  let workerCalls = 0;
   const sensitiveChange = changedChangeSet(['package.json']);
   const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : sensitiveChange; } });
-  const codingWorker = { async execute() { return { status: 'completed', summary: 'changed package', output: '', outputBytes: 0 }; } };
+  const codingWorker = { async execute() { workerCalls += 1; return { status: 'completed', summary: 'changed package', output: '', outputBytes: 0 }; } };
   let verificationCalls = 0;
   const instance = await engine({
     localGit,
@@ -1964,13 +1965,58 @@ test('implementation sensitive change blocks before verification', async () => {
   });
   const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Sensitive change' });
   await prepareImplementation(instance, created.id);
-  const blocked = await instance.run(created.id);
-  const implementation = blocked.steps.find((step) => step.id === 'implementation');
-  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  const waiting = await instance.run(created.id);
+  const implementation = waiting.steps.find((step) => step.id === 'implementation');
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(implementation.status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(implementation.error, 'workflow_sensitive_change_requires_approval');
   assert.equal(implementation.evidence.changePolicy.classification, 'sensitive');
+  assert.equal(implementation.evidence.changeSetFingerprint, sensitiveChange.changeSetFingerprint);
+  assert.equal(workerCalls, 1);
   assert.equal(verificationCalls, 0);
-  await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
+
+  const approved = await instance.approve(created.id, 'implementation');
+  const approvedImplementation = approved.steps.find((step) => step.id === 'implementation');
+  assert.equal(approved.status, WorkflowStepStatus.PENDING);
+  assert.equal(approvedImplementation.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(approvedImplementation.evidence.sensitiveApproval.changeSetFingerprint, sensitiveChange.changeSetFingerprint);
+  assert.equal(workerCalls, 1);
+  assert.equal(verificationCalls, 0);
+});
+
+test('sensitive approval becomes stale if any governed diff changes while waiting', async () => {
+  let changeCalls = 0;
+  let observed = changedChangeSet(['package.json']);
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : observed;
+    }
+  });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'changed package', output: '', outputBytes: 0 }; } };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Reject stale sensitive approval' });
+  await prepareImplementation(instance, created.id);
+  const waiting = await instance.run(created.id);
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+
+  observed = changedChangeSet(['package.json', 'src/unapproved.js'], { contentFingerprint: '2'.repeat(64) });
+  const stale = await instance.approve(created.id, 'implementation');
+  const implementation = stale.steps.find((step) => step.id === 'implementation');
+  assert.equal(stale.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.error, 'workflow_sensitive_approval_stale');
+  assert.equal(implementation.evidence.sensitiveApproval, undefined);
+  assert.equal(implementation.evidence.approvalCheck.observedChangeSetFingerprint, observed.changeSetFingerprint);
+});
+
+test('package-manager control files are immutable even for an otherwise approvable dependency change', () => {
+  const configured = project();
+  for (const path of ['.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', '.yarnrc', '.yarnrc.yml', 'apps/web/.npmrc']) {
+    const decision = evaluateChangePolicy(configured, changedChangeSet([path]));
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /forbidden_path/);
+  }
 });
 
 test('implementation forbidden path and budget excess fail closed before verification', async () => {
