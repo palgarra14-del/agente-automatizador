@@ -134,6 +134,10 @@ test('workflow dry-run reports executable steps without invoking the command exe
   const dryRun = await instance.run(created.id, { dryRun: true });
   assert.equal(dryRun.dryRun, true);
   assert.equal(calls, 0);
+  assert.equal(dryRun.specialistRegistryFingerprint.length, 64);
+  assert.equal(dryRun.plannedSteps[0].specialist, 'data-inspector');
+  assert.equal(dryRun.plannedSteps[0].specialistMode, 'reserved');
+  assert.equal(dryRun.plannedSteps[0].specialistAuthority, 'unavailable');
   assert.equal((await instance.get(created.id)).steps[0].status, WorkflowStepStatus.READY);
 });
 
