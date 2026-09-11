@@ -43,7 +43,7 @@ node src/cli.js capabilities --project leadfinder --surface workflow
 node src/cli.js capabilities --project leadfinder --surface orchestrator
 ```
 
-`config/projects.json` contains an explicit `skills.allow` / `skills.deny` policy. `deny` takes precedence over `allow`. Existing v0.6 capabilities are registered and enforced in the Orchestrator: workspace preparation, bootstrap, project verification, coding, repository publication, PR creation, CI observation, preview observation, and human approval. Future skills such as `research.web`, `visual.review`, data analysis, requirements definition, and code inspection are registered but deliberately unavailable until reviewed executors exist.
+`config/projects.json` contains an explicit `skills.allow` / `skills.deny` policy. `deny` takes precedence over `allow`. Runs/workflows created before v0.7 do not have capability fingerprints and are intentionally not auto-migrated; they fail closed and should be recreated under the current registry. Existing v0.6 capabilities are registered and enforced in the Orchestrator: workspace preparation, bootstrap, project verification, coding, repository publication, PR creation, CI observation, preview observation, and human approval. Future skills such as `research.web`, `visual.review`, data analysis, requirements definition, and code inspection are registered but deliberately unavailable until reviewed executors exist.
 
 v0.6 added deterministic, persisted workflow plans. A workflow associates a registered project and goal with a profile, ordered dependency steps, bounded retries/budget, evidence, human checkpoints, and a Definition of Done. It does not yet use an LLM, browser, web research, or external executor.
 
