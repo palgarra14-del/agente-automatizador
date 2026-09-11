@@ -27,10 +27,10 @@ function completeStep(plan, id) {
   return step;
 }
 
-function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets } = {}) {
+function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills } = {}) {
   return configFrom({
     id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
-    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets
+    commands, acceptance: { require: ['test'] }, execution: { provider: 'local-sanitized' }, budgets, skills
   }, join(root, id, 'config'));
 }
 
@@ -558,4 +558,44 @@ test('persisted completed steps require type-appropriate evidence', async () => 
     plan.status = WorkflowStepStatus.PENDING;
   });
   await assert.rejects(instance.run(created.id), /requires .* evidence/);
+});
+
+
+test('managed workflow denies workspace preparation before clone when capability is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-workspace-capability-'));
+  const limited = managedProject('limited-workspace', root, {
+    skills: {
+      allow: ['project.verify', 'human.approval'],
+      deny: []
+    }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({ projects: new Map([[limited.id, limited]]), workspaceManager: manager });
+  const created = await instance.create({ profile: 'data-analysis', projectId: limited.id, goal: 'Do not clone' });
+  await instance.update(created.id, (plan) => { completeStep(plan, 'inspect-data'); });
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.result.error, 'skill_not_allowed');
+  assert.equal(blocked.result.skill, 'workspace.prepare');
+  assert.equal(manager.prepared.length, 0);
+});
+
+test('managed workflow denies bootstrap before clone when install capability is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-bootstrap-capability-'));
+  const limited = managedProject('limited-bootstrap', root, {
+    commands: { install: 'node --version', test: 'node --version' },
+    skills: {
+      allow: ['workspace.prepare', 'project.verify', 'human.approval'],
+      deny: []
+    }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({ projects: new Map([[limited.id, limited]]), workspaceManager: manager });
+  const created = await instance.create({ profile: 'data-analysis', projectId: limited.id, goal: 'Do not install' });
+  await instance.update(created.id, (plan) => { completeStep(plan, 'inspect-data'); });
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.result.error, 'skill_not_allowed');
+  assert.equal(blocked.result.skill, 'project.bootstrap');
+  assert.equal(manager.prepared.length, 0);
 });
