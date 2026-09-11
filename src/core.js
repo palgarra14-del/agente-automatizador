@@ -192,7 +192,16 @@ function clip(value, size = 8_000) {
 }
 
 function safeJson(value) {
-  return JSON.parse(maskSecrets(JSON.stringify(value)));
+  const serialized = JSON.stringify(value);
+  const parsed = JSON.parse(serialized);
+  const redact = (current, key = null) => {
+    if (key && secretKeyPattern.test(key)) return '[REDACTED]';
+    if (typeof current === 'string') return maskSecrets(current);
+    if (Array.isArray(current)) return current.map((item) => redact(item));
+    if (current && typeof current === 'object') return Object.fromEntries(Object.entries(current).map(([childKey, childValue]) => [childKey, redact(childValue, childKey)]));
+    return current;
+  };
+  return redact(parsed);
 }
 
 function createModelUsageState(maxCalls) {
