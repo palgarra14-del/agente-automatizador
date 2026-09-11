@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, stat, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,7 @@ import {
   maskSecrets,
   policy,
   runCommand,
+  runProcess,
   report,
   remoteMatchesProject,
   resolveExecutionUser,
@@ -1160,4 +1161,29 @@ test('project command runner counts Docker preflight once inside the command tim
   assert.equal(calls.filter(({ args }) => args[0] === 'image').length, 1);
   assert.equal(calls.filter(({ args }) => args[0] === 'run').length, 1);
   assert.equal(calls.find(({ args }) => args[0] === 'run').timeoutMs, 400);
+});
+
+
+test('LocalGitAdapter fingerprints ignored protected files without reading their contents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-protected-ignored-'));
+  const initialized = await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(initialized.ok, true);
+  await mkdir(join(root, 'secrets'), { recursive: true });
+  await writeFile(join(root, '.gitignore'), '.env\nsecrets/\n*.pem\n');
+  await writeFile(join(root, '.env'), 'TOKEN=first-secret-value\n');
+  await writeFile(join(root, 'secrets', 'client.pem'), 'PRIVATE-KEY-FIRST\n');
+
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+  const before = await adapter.inspectProtectedIgnoredState(configured);
+  assert.deepEqual(before.paths, ['.env', 'secrets/client.pem']);
+  assert.match(before.fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(before).includes('first-secret-value'), false);
+  assert.equal(JSON.stringify(before).includes('PRIVATE-KEY-FIRST'), false);
+
+  await writeFile(join(root, '.env'), 'TOKEN=second-secret-value-with-different-size\n');
+  const after = await adapter.inspectProtectedIgnoredState(configured);
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.deepEqual(after.paths, before.paths);
+  assert.equal(JSON.stringify(after).includes('second-secret-value'), false);
 });
