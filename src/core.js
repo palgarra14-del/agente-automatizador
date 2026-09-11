@@ -926,9 +926,10 @@ export function evaluateDefinitionOfDone(plan) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
-    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, commandRunner, now });
+    const resolvedPublicationBridge = publicationBridge ?? new WorkflowPublicationBridge({ localGit });
+    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, commandRunner, now });
   }
 
   async create(input) {
@@ -2682,6 +2683,23 @@ export class GitHubAdapter {
     return { number: pullRequest.number, url: pullRequest.html_url, state: pullRequest.state };
   }
 
+  async branchHead(project, branch) {
+    const data = await this.request(this.path(project, `/branches/${encodeURIComponent(branch)}`));
+    return { branch: data.name ?? branch, head: data.commit?.sha ?? null };
+  }
+
+  async pullRequest(project, number) {
+    const data = await this.request(this.path(project, `/pulls/${encodeURIComponent(number)}`));
+    return {
+      number: data.number,
+      url: data.html_url,
+      state: data.state,
+      headSha: data.head?.sha ?? null,
+      headRef: data.head?.ref ?? null,
+      baseRef: data.base?.ref ?? null
+    };
+  }
+
   async checks(project, sha) {
     const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`));
     const checks = (data.check_runs ?? []).map((check) => ({
@@ -2748,6 +2766,57 @@ export class VercelDeploymentProvider {
       await this.sleep(pollIntervalMs);
     }
   }
+}
+
+export class WorkflowPublicationBridge {
+  constructor({ localGit = new LocalGitAdapter(), github = new GitHubAdapter(), deploymentProvider = new VercelDeploymentProvider() } = {}) {
+    Object.assign(this, { localGit, github, deploymentProvider });
+  }
+
+  async inspectBase(project) { return this.github.inspect(project); }
+
+  async commit(project, context) {
+    return this.localGit.commit(project, context.branch, `publish ${context.goal}`, {
+      expectedChangeSetFingerprint: context.changeSetFingerprint,
+      expectedHead: context.baseHead,
+      expectedRemote: context.remote
+    });
+  }
+
+  async push(project, context) {
+    return this.localGit.push(project, context.branch, { expectedHead: context.commitHead, expectedRemote: context.remote });
+  }
+
+  async verifyRemoteBranch(project, branch, expectedHead) {
+    const observed = await this.github.branchHead(project, branch);
+    return { ...observed, ok: observed.branch === branch && observed.head === expectedHead };
+  }
+
+  async createPullRequest(project, context) {
+    const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
+    const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(context.goal, 90));
+    return this.github.createPullRequest(project, {
+      branch: context.branch,
+      title,
+      body: `Reviewed workflow ${context.workflowId}.\n\nThe change-set fingerprint ${context.changeSetFingerprint} passed the independent Change Critic, configured verification, and explicit release-readiness approval before publication.\n\nHuman review is required before merge. No merge or production deployment was performed.`
+    });
+  }
+
+  async verifyPullRequest(project, number, context) {
+    const observed = await this.github.pullRequest(project, number);
+    return {
+      ...observed,
+      ok: observed.number === number &&
+        observed.state === 'open' &&
+        observed.headSha === context.commitHead &&
+        observed.headRef === context.branch &&
+        observed.baseRef === project.defaultBranch
+    };
+  }
+
+  async waitForCi(project, sha, options) { return this.github.waitForCi(project, sha, options); }
+
+  async waitForPreview(project, context, options) { return this.deploymentProvider.waitForPreview(project, context, options); }
 }
 
 export class DeterministicPlanner {
