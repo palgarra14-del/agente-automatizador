@@ -2263,6 +2263,14 @@ export class WorkflowEngine {
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
+      if (next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+        const implementation = plan.steps.find((step) => step.id === 'implementation');
+        if (dependencyChangedPaths(implementation?.evidence?.changeSet ?? {}).length === 0) {
+          plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
+          if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+          continue;
+        }
+      }
       const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
       if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder' && this.skillExecutor.supports(next.skill)) {
