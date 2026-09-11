@@ -960,3 +960,82 @@ test('interrupted implementation with observed changes cannot be silently retrie
   assert.equal(implementation.evidence.changeSetFingerprint, changed.changeSetFingerprint);
   await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
 });
+
+
+test('implementation with no changes retries only within the workflow attempt budget', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return { status: 'completed', summary: 'no-op', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit: stableLocalGit(), codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Require a real change', budgets: { maxAttempts: 2 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_no_changes');
+  assert.equal(implementation.attempts, 2);
+  assert.equal(workerCalls, 2);
+});
+
+test('implementation timeout without changes retries only within the workflow attempt budget', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return { status: 'failed', timedOut: true, summary: 'timeout', output: 'timeout', outputBytes: 7 };
+    }
+  };
+  const instance = await engine({ localGit: stableLocalGit(), codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Timeout safely', budgets: { maxAttempts: 2 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_timeout');
+  assert.equal(implementation.attempts, 2);
+  assert.equal(workerCalls, 2);
+});
+
+test('implementation output budget exhaustion stops before verification', async () => {
+  let changeCalls = 0;
+  const normalChange = changedChangeSet(['src/output-budget.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : normalChange; } });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'large output', output: 'x'.repeat(2_000), outputBytes: 2_000 }; } };
+  let verificationCalls = 0;
+  const instance = await engine({
+    localGit,
+    codingWorker,
+    runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Respect output budget', budgets: { maxOutputBytes: 1_024 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_output_budget_exhausted');
+  assert.equal(verificationCalls, 0);
+});
+
+test('workflow implementation enforces allowed path scope', async () => {
+  let changeCalls = 0;
+  const outsideScope = changedChangeSet(['src/other/outside.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : outsideScope; } });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'outside scope', output: '', outputBytes: 0 }; } };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Stay scoped',
+    scope: { allowedPaths: ['src/feature'], forbiddenPaths: [] }
+  });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_change_policy_rejected');
+  assert.match(failed.result.reason, /scope_violation/);
+});
