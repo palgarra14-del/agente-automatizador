@@ -1039,3 +1039,43 @@ test('workflow implementation enforces allowed path scope', async () => {
   assert.equal(implementation.error, 'workflow_change_policy_rejected');
   assert.match(failed.result.reason, /scope_violation/);
 });
+
+
+test('verification command that mutates governed implementation diff fails closed', async () => {
+  const governed = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  const mutated = changedChangeSet(['src/feature.js', 'src/generated.js'], { additions: 3, diffLines: 3, changedBytes: 96 });
+  let changeCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      if (changeCalls <= 2) return governed;
+      return mutated;
+    }
+  });
+  let commandCalls = 0;
+  const instance = await engine({
+    localGit,
+    runner: async (_project, name) => {
+      commandCalls += 1;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Guard verification diff' });
+  await instance.update(created.id, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changeSet = governed;
+  });
+  const failed = await instance.run(created.id);
+  const testsStep = failed.steps.find((step) => step.id === 'tests');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(testsStep.error, 'workflow_change_set_changed_during_verification');
+  assert.equal(testsStep.evidence.expectedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(testsStep.evidence.observedChangeSetFingerprint, mutated.changeSetFingerprint);
+  assert.equal(commandCalls, 1);
+});
