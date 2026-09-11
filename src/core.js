@@ -631,7 +631,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(input.scope ?? {}), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
   return plan;
 }
@@ -644,6 +644,10 @@ function validateCompletedWorkflowEvidence(plan, step) {
   }
   if (step.type === 'placeholder') {
     if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
+    if (step.skill === 'code.implement') {
+      if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
+      if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
+    }
     return;
   }
   if (step.type === 'checkpoint') {
@@ -667,6 +671,8 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
   if (!Number.isInteger(plan.outputBytes) || plan.outputBytes < 0) throw new Error('Workflow outputBytes must be an integer >= 0');
+  const normalizedWorkflowScope = normalizeRunScope(plan.scope ?? {});
+  if (JSON.stringify(plan.scope ?? {}) !== JSON.stringify(normalizedWorkflowScope)) throw new Error('Workflow scope is not normalized');
   if (plan.executionLease !== null && plan.executionLease !== undefined && (!plan.executionLease || typeof plan.executionLease !== 'object' || typeof plan.executionLease.leaseId !== 'string' || !Number.isInteger(plan.executionLease.pid) || plan.executionLease.pid <= 0 || typeof plan.executionLease.createdAt !== 'string' || plan.executionLease.kind !== 'workflow')) throw new Error('Workflow execution lease is invalid');
   if (!plan.budgets || typeof plan.budgets !== 'object' || ['maxSteps', 'maxAttempts', 'timeoutMs', 'maxOutputBytes'].some((key) => !Object.hasOwn(plan.budgets, key))) throw new Error('Workflow budgets are incomplete');
   const budget = workflowBudget(plan.budgets);
@@ -730,9 +736,9 @@ export function evaluateDefinitionOfDone(plan) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, workspaceManager = new WorkspaceManager(), skillExecutor = new CodexReadOnlySkillExecutor(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
-    if (!store || !projects || !registry || !skillExecutor) throw new Error('WorkflowEngine requires store, projects, registry, and skillExecutor');
-    Object.assign(this, { store, projects, registry, workspaceManager, skillExecutor, commandRunner, now });
+  constructor({ store, projects, registry = defaultToolSkillRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+    if (!store || !projects || !registry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, localGit, skillExecutor, and codingWorker');
+    Object.assign(this, { store, projects, registry, workspaceManager, localGit, skillExecutor, codingWorker, commandRunner, now });
   }
 
   async create(input) {
@@ -1501,15 +1507,18 @@ export class CodexSdkWorker extends CodingWorker {
         webSearchMode: 'disabled'
       });
       const turn = await thread.run(buildWorkerPrompt(task), { signal: controller.signal });
+      const output = clip(turn.finalResponse);
       return {
         status: 'completed',
         summary: 'Codex SDK completed the coding task',
         codexThreadId: thread.id,
-        usage: safeJson(turn.usage),
-        output: clip(turn.finalResponse)
+        usage: turn.usage === undefined ? null : safeJson(turn.usage),
+        output,
+        outputBytes: Buffer.byteLength(String(turn.finalResponse ?? ''))
       };
     } catch (error) {
-      return { status: 'failed', summary: 'Codex SDK did not complete the coding task', timedOut, output: clip(error.message) };
+      const output = clip(error.message);
+      return { status: 'failed', summary: 'Codex SDK did not complete the coding task', timedOut, output, outputBytes: Buffer.byteLength(String(error.message ?? '')) };
     } finally {
       clearTimeout(timer);
     }
