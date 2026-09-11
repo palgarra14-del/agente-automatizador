@@ -116,6 +116,17 @@ test('workflow model usage state is persisted and fails closed on tampering', ()
     startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
   }));
   assert.throws(() => validateWorkflowPlan(exceeded, new Map([[configured.id, configured]])), /calls exceeds maxCalls/);
+
+  const summaryTampered = JSON.parse(JSON.stringify(plan));
+  summaryTampered.modelUsage.calls = 1;
+  summaryTampered.modelUsage.inputTokens = 999;
+  summaryTampered.modelUsage.outputTokens = 1;
+  summaryTampered.modelUsage.totalTokens = 1000;
+  summaryTampered.modelUsage.entries = [{
+    id: 'model-call-1', status: 'completed', surface: 'workflow', skill: 'code.inspect', stepId: 'inspect-project', specialist: 'code-inspector', attempt: 1,
+    startedAt: '2026-09-11T00:00:00.000Z', completedAt: '2026-09-11T00:00:01.000Z', usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 }
+  }];
+  assert.throws(() => validateWorkflowPlan(summaryTampered, new Map([[configured.id, configured]])), /token totals do not match entries/);
 });
 
 test('workflow resume fails closed when the configured model-call budget changes', () => {
