@@ -841,7 +841,7 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       const pullRequest = step.evidence.pullRequest;
       const ci = step.evidence.ci;
       const preview = step.evidence.preview;
-      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote) throw new Error('Completed publication evidence does not match the managed workflow workspace');
+      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote || step.evidence.finalBaseObservation?.head !== plan.workspace.baseHead || step.evidence.finalBaseObservation?.defaultBranch !== project.defaultBranch) throw new Error('Completed publication evidence does not match the managed workflow workspace');
       if (!expectedFingerprint || step.evidence.reviewedChangeSetFingerprint !== expectedFingerprint || step.evidence.approvedChangeSetFingerprint !== expectedFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release?.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) throw new Error('Completed publication evidence is not bound to the reviewed implementation');
       if (!commit || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit.finalHead ?? '') || commit.committedChangeSetFingerprint !== expectedFingerprint || JSON.stringify([...(commit.committedPaths ?? [])].sort()) !== JSON.stringify(expectedPaths)) throw new Error('Completed publication commit evidence is invalid');
       if (!push || push.branch !== plan.workspace.workingBranch || push.finalHead !== commit.finalHead || push.remoteBranchHead !== commit.finalHead) throw new Error('Completed publication push evidence is invalid');
@@ -1486,7 +1486,9 @@ export class WorkflowEngine {
       });
       let remote;
       let pullRequest;
+      let base;
       try {
+        base = await this.publicationBridge.inspectBase(project);
         remote = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, existing.commit.finalHead);
         pullRequest = await this.publicationBridge.verifyPullRequest(project, existing.pullRequest.number, {
           branch: plan.workspace.workingBranch,
@@ -1494,6 +1496,9 @@ export class WorkflowEngine {
         });
       } catch (error) {
         return this.stopPublication(id, next.id, 'workflow_publication_remote_revalidation_failed', { phase: 'resume-preflight', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (base.head !== plan.workspace.baseHead || base.defaultBranch !== project.defaultBranch) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed', { blocked: false, phase: 'resume-preflight', patch: { observedBase: base } });
       }
       if (!remote.ok || !pullRequest.ok) {
         return this.stopPublication(id, next.id, 'workflow_publication_remote_state_changed', { blocked: false, phase: 'resume-preflight', patch: { remote, pullRequest } });
@@ -1561,6 +1566,14 @@ export class WorkflowEngine {
     }
 
     if (!evidence.pullRequest) {
+      let prePrBase;
+      try { prePrBase = await this.publicationBridge.inspectBase(project); }
+      catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_revalidation_failed', { phase: 'before-pr', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (prePrBase.head !== plan.workspace.baseHead || prePrBase.defaultBranch !== project.defaultBranch) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed_after_push', { phase: 'before-pr', patch: { observedBase: prePrBase } });
+      }
       await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.evidence = { ...step.evidence, phase: 'pr-started' };
@@ -1656,7 +1669,9 @@ export class WorkflowEngine {
 
     let finalRemote;
     let finalPullRequest;
+    let finalBase;
     try {
+      finalBase = await this.publicationBridge.inspectBase(project);
       finalRemote = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, commit.finalHead);
       finalPullRequest = await this.publicationBridge.verifyPullRequest(project, evidence.pullRequest.number, {
         branch: plan.workspace.workingBranch,
@@ -1664,6 +1679,9 @@ export class WorkflowEngine {
       });
     } catch (error) {
       return this.stopPublication(id, next.id, 'workflow_publication_final_revalidation_failed', { blocked: false, phase: 'final-revalidation', patch: { error: clip(error.message, 1_000) } });
+    }
+    if (finalBase.head !== plan.workspace.baseHead || finalBase.defaultBranch !== project.defaultBranch) {
+      return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed_after_review', { blocked: false, phase: 'final-revalidation', patch: { finalBase } });
     }
     if (!finalRemote.ok || !finalPullRequest.ok) {
       return this.stopPublication(id, next.id, 'workflow_publication_remote_state_changed', { blocked: false, phase: 'final-revalidation', patch: { finalRemote, finalPullRequest } });
@@ -1673,7 +1691,7 @@ export class WorkflowEngine {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.COMPLETED;
       step.error = null;
-      step.evidence = { ...step.evidence, type: 'executor', ok: true, phase: 'completed', completedAt: new Date().toISOString(), ...workflowEvidenceContext(saved, step) };
+      step.evidence = { ...step.evidence, type: 'executor', ok: true, phase: 'completed', completedAt: new Date().toISOString(), finalBaseObservation: safeJson(finalBase), ...workflowEvidenceContext(saved, step) };
       saved.status = WorkflowStepStatus.PENDING;
       saved.pausedAt = null;
     });
