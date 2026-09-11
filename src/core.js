@@ -1154,6 +1154,7 @@ export class WorkflowEngine {
     const reviewedImplementation = runningStep.skill === 'code.review'
       ? runningPlan.steps.find((item) => item.id === 'implementation')
       : null;
+    if (reviewedImplementation && !Object.hasOwn(priorEvidence, 'implementation')) priorEvidence.implementation = workflowDependencyEvidence(reviewedImplementation);
     const reviewedChangeSetFingerprint = reviewedImplementation?.evidence?.changeSetFingerprint ?? null;
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
