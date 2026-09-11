@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   CodexSdkWorker,
+  DockerContainerExecution,
+  LocalSanitizedExecution,
   GitHubAdapter,
   JsonStore,
   LocalGitAdapter,
   Orchestrator,
+  ProjectCommandRunner,
   RunStatus,
   VercelDeploymentProvider,
   WorkspaceManager,
@@ -21,11 +24,14 @@ import {
   evaluateChangePolicy,
   fingerprintChangeSet,
   formatDoctor,
+  imageIsPinned,
   loadProjects,
   maskSecrets,
   policy,
   runCommand,
   report,
+  remoteMatchesProject,
+  resolveExecutionUser,
   safeCommandEnvironment,
   transition,
   managedWorkspacePath
@@ -77,8 +83,9 @@ class FakeLocalGit {
     return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
   }
 
-  async commit(_project, branch, _message, { expectedChangeSetFingerprint } = {}) {
+  async commit(_project, branch, _message, { expectedChangeSetFingerprint, ...options } = {}) {
     assert.equal(branch, this.current);
+    this.commitOptions = options;
     const changeSet = await this.inspectChangeSet();
     assert.equal(changeSet.changeSetFingerprint, expectedChangeSetFingerprint);
     this.commitCalls += 1;
@@ -88,7 +95,7 @@ class FakeLocalGit {
     return { message: 'agent: safe change', finalHead: this.currentHead, committedPaths: changeSet.paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
-  async push(_project, branch) { this.pushCalls += 1; return { branch, finalHead: this.currentHead }; }
+  async push(_project, branch, options = {}) { this.pushCalls += 1; this.pushOptions = options; return { branch, finalHead: this.currentHead }; }
 }
 
 function governedChangeSet(paths = ['src/worker-fixture.js'], { additions = 1, deletions = 0, contentFingerprint = 'content-a', sensitiveContent = false } = {}) {
@@ -187,8 +194,18 @@ test('configuration confines workspaces and policy blocks protected branch actio
 test('self project keeps a shell-free cross-platform typecheck command', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
   assert.equal(configured.get('self').commands.typecheck, 'node --check src/core.js');
-  assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500 });
-  assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200 });
+  assert.equal(configured.get('self').toolchain.command, 'npm');
+  assert.deepEqual(configured.get('leadfinder').toolchain, { command: 'pnpm', version: '11.19.0' });
+  assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
+  assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
+});
+
+test('v0.5 treats only the self control-plane project configuration as sensitive', async () => {
+  const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
+  const controlPlane = evaluateChangePolicy(configured.get('self'), { paths: ['config/projects.json'], changedFiles: 1, diffLines: 1 });
+  const ordinarySource = evaluateChangePolicy(configured.get('self'), { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1 });
+  assert.equal(controlPlane.classification, 'sensitive');
+  assert.equal(ordinarySource.classification, 'normal');
 });
 
 test('v0.4 change policy rejects forbidden files, workspace escape, scope violations, and over-budget diffs', () => {
@@ -219,7 +236,8 @@ test('doctor reports governed project readiness without exposing configuration s
   const result = await doctor(leadfinderProject(), {
     github: { inspect: async () => ({ defaultBranchProtected: false }) },
     codexAvailable: () => true,
-    environment: {}
+    environment: {},
+    executionRunner: { doctor: async () => ({ configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'YES', containerAvailable: 'YES', postWorkerNetwork: 'DENIED (--network none)', hostFallback: 'NONE (FAIL-SAFE)' }) }
   });
   assert.equal(result.githubConnectivity, 'YES');
   assert.equal(result.codexAvailable, 'YES');
@@ -227,6 +245,22 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.vercelToken, 'NO');
   assert.equal(result.branchProtection, 'NO');
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
+  assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
+});
+
+test('security rejects control characters in governed paths and keeps state private', async () => {
+  const configured = project();
+  const decision = evaluateChangePolicy(configured, { paths: ['safe\n.env'], changedFiles: 1, diffLines: 1 });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.reason, 'forbidden_path:workspace_escape');
+
+  const directory = await mkdtemp(join(tmpdir(), 'agent-private-state-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file);
+  await store.mutate((data) => { data.runs.example = { id: 'example' }; });
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+  }
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
@@ -261,6 +295,196 @@ test('command runner finds npm through the current Node installation on Windows'
     assert.equal(calls[0].binary, process.execPath);
     assert.match(calls[0].args[0], /npm-cli\.js$/);
   }
+});
+
+test('v0.5 resolves container runtime user from the host without requiring root', () => {
+  const expected = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+    ? `${process.getuid()}:${process.getgid()}`
+    : '1000:1000';
+  assert.equal(resolveExecutionUser('host'), expected);
+  assert.equal(resolveExecutionUser('1234:5678'), '1234:5678');
+
+  const configured = project({
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim', user: 'host' }
+  });
+  assert.equal(configured.execution.user, 'host');
+  const execution = new DockerContainerExecution();
+  const { containerArgs } = execution.commandArguments(configured, 'test', { containerName: 'agent-test', gitMetadata: join(configured.workspace, '.git') });
+  assert.equal(containerArgs[containerArgs.indexOf('--user') + 1], expected);
+});
+
+test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
+  const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
+  assert.equal(configured.get('self').execution.provider, 'container-required');
+  assert.equal(configured.get('self').execution.image, 'node:22-bookworm-slim');
+  assert.equal(configured.get('leadfinder').execution.provider, 'container-required');
+  assert.equal(configured.get('leadfinder').execution.image, 'agent-node22-pnpm11:local');
+  assert.equal(imageIsPinned('registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), true);
+  assert.equal(imageIsPinned(configured.get('leadfinder').execution.image), false);
+  assert.throws(() => project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), /cannot use a host fallback/);
+  assert.throws(() => project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', user: 'root' } }), /numeric uid:gid/);
+});
+
+test('v0.5 container execution mounts workspace read-write and nested git metadata read-only with no other host mounts', async () => {
+  const calls = [];
+  const runner = async (binary, args, options) => {
+    calls.push({ binary, args, options });
+    if (args[0] === 'version') return { ok: true, exitCode: 0, stdout: '27.0', stderr: '' };
+    if (args[0] === 'image' && args[1] === 'inspect') return { ok: true, exitCode: 0, stdout: 'image', stderr: '' };
+    return { ok: true, exitCode: 0, stdout: 'PASS', stderr: '', durationMs: 1 };
+  };
+  const configured = project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', resources: { memoryMb: 256, cpuCount: 1, pidsLimit: 64 } } });
+  const result = await new DockerContainerExecution({ processRunner: runner }).execute(configured, 'test', { stage: 'post-worker' });
+  assert.equal(result.ok, true);
+  const container = calls.at(-1);
+  assert.equal(container.binary, 'docker');
+  assert.deepEqual(container.args.slice(0, 5), ['run', '--pull', 'never', '--rm', '--init']);
+  assert.match(container.args[container.args.indexOf('--name') + 1], /^agent-command-[0-9a-f-]+$/);
+  assert.equal(container.args[container.args.indexOf('--network') + 1], 'none');
+  for (const flag of ['--read-only', '--tmpfs', '--cap-drop', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--user']) assert.ok(container.args.includes(flag));
+  const mounts = container.args.filter((value) => String(value).includes('type=bind,'));
+  assert.equal(mounts.length, 2);
+  assert.equal(mounts.filter((value) => /dst=\/workspace(?:,|$)/.test(value)).length, 1);
+  assert.equal(mounts.some((value) => /dst=\/workspace(?:,|$).*readonly/.test(value)), false);
+  assert.equal(mounts.some((value) => /src=.*\.git,dst=\/workspace\/\.git,readonly$/.test(value)), true);
+  assert.equal(mounts.filter((value) => /dst=\/workspace\/\.git,readonly$/.test(value)).length, 1);
+  assert.equal(container.args.some((value) => /docker(?:_engine)?\.sock|\.ssh|\.gitconfig|\.codex|--privileged|type=volume|--volume/i.test(String(value))), false);
+  assert.equal(container.options.env.GITHUB_TOKEN, undefined);
+  assert.equal(container.options.env.VERCEL_TOKEN, undefined);
+  assert.equal(container.options.env.HOME, undefined);
+  assert.equal(container.options.inheritEnvironment, false);
+  assert.equal(container.options.restrictEnvironment, true);
+  assert.equal(container.options.timeoutMs, configured.budgets.commandTimeoutMs);
+});
+
+test('v0.5 force-removes a named container after a timed out project command', async () => {
+  const calls = [];
+  const runner = async (_binary, args) => {
+    calls.push(args);
+    if (args[0] === 'version' || (args[0] === 'image' && args[1] === 'inspect')) return { ok: true, exitCode: 0, stdout: 'ok', stderr: '' };
+    if (args[0] === 'rm') return { ok: true, exitCode: 0, stdout: '', stderr: '' };
+    return { ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'timeout' };
+  };
+  const result = await new DockerContainerExecution({ processRunner: runner }).execute(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test');
+  assert.equal(result.timedOut, true);
+  assert.equal(result.cleanup.attempted, true);
+  assert.equal(result.cleanup.ok, true);
+  const cleanup = calls.find((args) => args[0] === 'rm');
+  assert.deepEqual(cleanup.slice(0, 2), ['rm', '--force']);
+  assert.equal(cleanup[2], result.cleanup.containerName);
+});
+
+test('v0.5 allows network only for pre-worker bootstrap and never pulls a missing image', async () => {
+  const calls = [];
+  const availableRunner = async (_binary, args) => {
+    calls.push(args);
+    if (args[0] === 'version' || (args[0] === 'image' && args[1] === 'inspect')) return { ok: true, exitCode: 0, stdout: 'ok', stderr: '' };
+    return { ok: true, exitCode: 0, stdout: '', stderr: '' };
+  };
+  const configured = project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }, commands: { install: 'npm ci', test: 'npm test', typecheck: 'node --version', lint: 'npm test', build: 'npm test' } });
+  await new DockerContainerExecution({ processRunner: availableRunner }).execute(configured, 'install', { stage: 'bootstrap' });
+  assert.equal(calls.at(-1).includes('--network'), false);
+  assert.equal(calls.some((args) => args[0] === 'pull'), false);
+  const unavailable = new DockerContainerExecution({ processRunner: async (_binary, args) => args[0] === 'version' ? { ok: true, exitCode: 0, stdout: 'ok', stderr: '' } : { ok: false, exitCode: 1, stdout: '', stderr: 'missing image' } });
+  const blocked = await unavailable.execute(configured, 'test', { stage: 'post-worker' });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.stderr, /execution_provider_unavailable/);
+});
+
+test('v0.5 container-required fails safe and local fallback is only explicit', async () => {
+  let localCalls = 0;
+  const local = { availability: async () => ({ available: true, provider: 'local-sanitized', sandboxed: false }), execute: async () => { localCalls += 1; return { ok: true, execution: { provider: 'local-sanitized' } }; } };
+  const unavailableContainer = { availability: async () => ({ available: false, provider: 'container', reason: 'Docker unavailable' }), probe: async () => ({ available: false, reason: 'Docker unavailable' }) };
+  const required = new ProjectCommandRunner({ localExecution: local, containerExecution: unavailableContainer });
+  const blocked = await required.run(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test');
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.stderr, /execution_provider_unavailable/);
+  assert.equal(localCalls, 0);
+  const fallback = new ProjectCommandRunner({ localExecution: local, containerExecution: unavailableContainer });
+  const run = await fallback.run(project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), 'test');
+  assert.equal(run.ok, true);
+  assert.equal(localCalls, 1);
+});
+
+test('v0.5 command selection is fixed by project configuration and cannot be overridden by a worker option', async () => {
+  let containerCalls = 0;
+  let localCalls = 0;
+  const selected = new ProjectCommandRunner({
+    containerExecution: { availability: async () => ({ available: true, provider: 'container', sandboxed: true }), probe: async () => ({ available: true }), execute: async () => { containerCalls += 1; return { ok: true, execution: { provider: 'container' } }; } },
+    localExecution: { availability: async () => ({ available: true, provider: 'local-sanitized' }), execute: async () => { localCalls += 1; return { ok: true, execution: { provider: 'local-sanitized' } }; } }
+  });
+  const result = await selected.run(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), 'test', { executionProvider: 'local-sanitized' });
+  assert.equal(result.execution.provider, 'container');
+  assert.equal(containerCalls, 1);
+  assert.equal(localCalls, 0);
+});
+
+test('v0.5 runs install only before the worker and never reruns it after a sensitive package change', async () => {
+  const localGit = new GovernedFakeGit(governedChangeSet(['package.json'], { contentFingerprint: 'package-after-worker' }));
+  const commandCalls = [];
+  const configured = project({
+    commands: { install: 'node --version', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    acceptance: { require: ['install', 'test', 'typecheck', 'lint', 'build', 'ci'] },
+    execution: { provider: 'local-sanitized' }
+  });
+  const orchestrator = new Orchestrator({
+    store: await temporaryStore(), github: new FakeGitHub(), localGit, worker: new FakeWorker(),
+    commandRunner: async (_project, name, options) => { commandCalls.push({ name, stage: options.stage ?? 'post-worker' }); return { name, ok: true, stdout: '', stderr: '', durationMs: 1 }; }
+  });
+  const waiting = await orchestrator.run(configured, 'Do not reinstall package metadata changed by the worker');
+  assert.equal(waiting.status, RunStatus.WAITING_APPROVAL);
+  assert.deepEqual(commandCalls, [{ name: 'install', stage: 'bootstrap' }]);
+  await orchestrator.decideApproval(waiting.pendingAction.approvalId, true);
+  const completed = await orchestrator.resume(waiting.id, configured);
+  assert.equal(completed.status, RunStatus.COMPLETED);
+  assert.equal(commandCalls.filter(({ name }) => name === 'install').length, 1);
+});
+
+test('v0.5 doctor distinguishes an unavailable container from an explicit local fallback', async () => {
+  const unavailableContainer = { availability: async () => ({ available: false, provider: 'container', reason: 'Docker unavailable' }), probe: async () => ({ available: false, reason: 'Docker unavailable' }) };
+  const executionRunner = new ProjectCommandRunner({ localExecution: new LocalSanitizedExecution({ processRunner: async () => ({ ok: true }) }), containerExecution: unavailableContainer });
+  const result = await doctor(project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' } }), { github: { inspect: async () => ({}) }, codexAvailable: () => true, environment: {}, executionRunner });
+  assert.deepEqual(result.execution, {
+    configuredProvider: 'container-required', selectedProvider: 'container', sandboxAvailable: 'NO', containerAvailable: 'NO', dockerAvailable: 'NO', imageAvailable: 'NO', imagePinned: 'NO', projectToolchain: 'npm', runtimeUser: resolveExecutionUser('host'), gitMetadata: 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)', postWorkerNetwork: 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)', hostFallback: 'NONE (FAIL-SAFE)', reason: 'Docker unavailable'
+  });
+  assert.match(formatDoctor(result), /DOCKER AVAILABLE\nNO/);
+});
+
+test('v0.5 accepts only exact configured GitHub HTTPS or SSH origin remotes', () => {
+  const configured = project();
+  for (const remote of ['https://github.com/owner/repo.git', 'https://github.com/owner/repo', 'git@github.com:owner/repo.git', 'ssh://git@github.com/owner/repo.git']) {
+    assert.equal(remoteMatchesProject(remote, configured), true, remote);
+  }
+  for (const remote of ['https://github.com/owner/repo-evil.git', 'https://github.com/owner/repo.git.evil', 'https://evil.example/owner/repo.git', 'https://github.com/owner/repo/extra', 'git@github.com:owner/repository.git']) {
+    assert.equal(remoteMatchesProject(remote, configured), false, remote);
+  }
+});
+
+test('v0.5 revalidates repository identity before controlled commit and push and skips hooks', async () => {
+  const configured = project();
+  const adapter = new LocalGitAdapter();
+  const observed = [];
+  const changeSet = governedChangeSet();
+  adapter.assertRepositoryState = async (_project, expected) => { observed.push(expected); return { currentBranch: 'agent/test', initialHead: expected.head, remote: expected.remote }; };
+  adapter.assertWorkingBranch = async () => {};
+  adapter.inspectChangeSet = async () => changeSet;
+  adapter.head = async () => 'commit-head';
+  adapter.git = async (args) => {
+    if (args[0] === 'diff' && args[1] === '--cached') return { exitCode: 1, stdout: '', stderr: '' };
+    observed.push(args);
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+  await adapter.commit(configured, 'agent/test', 'safe change', {
+    expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
+    expectedHead: 'base-head',
+    expectedRemote: 'https://github.com/owner/repo.git'
+  });
+  await adapter.push(configured, 'agent/test', { expectedHead: 'commit-head', expectedRemote: 'https://github.com/owner/repo.git' });
+  assert.deepEqual(observed.filter((value) => !Array.isArray(value)), [
+    { branch: 'agent/test', head: 'base-head', remote: 'https://github.com/owner/repo.git' },
+    { branch: 'agent/test', head: 'commit-head', remote: 'https://github.com/owner/repo.git' }
+  ]);
+  assert.deepEqual(observed.find((args) => Array.isArray(args) && args[0] === 'commit').slice(0, 2), ['commit', '--no-verify']);
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
@@ -537,6 +761,27 @@ test('install failure stops before worker, push and PR creation', async () => {
     commandRunner: async (_project, name) => ({ name, ok: name !== 'install', stderr: name === 'install' ? 'install failed' : '' })
   }).run(leadfinderProject(), 'Stop on bootstrap failure');
   assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(worker.calls, 0);
+  assert.equal(github.pullRequests, 0);
+});
+
+test('bootstrap changes to governed files fail before the worker starts', async () => {
+  class BootstrapMutationGit extends FakeLocalGit {
+    constructor() { super(); this.inspections = 0; }
+    async inspectChangeSet() {
+      this.inspections += 1;
+      return this.inspections === 1 ? governedChangeSet([]) : governedChangeSet(['package.json'], { contentFingerprint: 'bootstrap-mutated' });
+    }
+  }
+  const worker = new FakeWorker();
+  const github = new FakeGitHub();
+  const run = await new Orchestrator({
+    store: await temporaryStore(), workspaceManager: new FakeWorkspaceManager(), deploymentProvider: new FakeDeployment(), github, localGit: new BootstrapMutationGit(), worker,
+    commandRunner: async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })
+  }).run(leadfinderProject(), 'Reject bootstrap changes before the worker');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.match(run.failureReason, /bootstrap_modified_governed_files/);
+  assert.equal(run.results.bootstrapGovernance.ok, false);
   assert.equal(worker.calls, 0);
   assert.equal(github.pullRequests, 0);
 });

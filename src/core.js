@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createReadStream, existsSync } from 'node:fs';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
@@ -44,14 +44,27 @@ const forbiddenActions = new Set([
   'approval_bypass', 'delete_protected_branch'
 ]);
 const protectedFilePattern = /(^|\/)(?:\.env(?:\.|$)|.*\.(?:pem|key)$|secrets?(?:\.|$))/i;
-const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization)/i;
+const secretKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization|cookie|session)/i;
 const defaultAcceptance = ['test', 'typecheck', 'lint', 'build', 'ci'];
 const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
-const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth)/i;
+const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth|cookie|session)/i;
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
 const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
+
+export function imageIsPinned(image) {
+  return typeof image === 'string' && /@sha256:[a-f0-9]{64}$/i.test(image);
+}
+
+export function remoteMatchesProject(remote, project) {
+  if (typeof remote !== 'string') return false;
+  const match = remote.trim().match(/^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/]+)\/([^/?#]+)\/?$/i);
+  if (!match) return false;
+  const owner = match[1].toLowerCase();
+  const name = match[2].replace(/\.git$/i, '').toLowerCase();
+  return owner === String(project.repository.owner).toLowerCase() && name === String(project.repository.name).toLowerCase();
+}
 
 function isWithin(parent, child) {
   const rel = relative(parent, child);
@@ -64,10 +77,18 @@ function positiveInteger(value, fallback, label, minimum = 1) {
   return result;
 }
 
+function hasControlCharacters(value) {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
 function normalizeRepositoryPath(path, label = 'path') {
   if (typeof path !== 'string' || !path.trim()) throw new Error(`${label} must be a non-empty repository-relative path`);
   const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
-  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.includes('*')) {
+  if (hasControlCharacters(normalized) || !normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some((part) => !part || part === '.' || part === '..') || normalized.includes('*')) {
     throw new Error(`${label} must be a literal repository-relative path`);
   }
   return normalized;
@@ -103,7 +124,9 @@ function changePolicyFrom(input = {}) {
     sensitivePaths: [...new Set([...defaultSensitivePathRoots, ...normalizePathList(input.sensitivePaths, 'changePolicy.sensitivePaths')])],
     budgets: {
       maxChangedFiles: positiveInteger(budgets.maxChangedFiles, 8, 'maxChangedFiles'),
-      maxDiffLines: positiveInteger(budgets.maxDiffLines, 500, 'maxDiffLines')
+      maxDiffLines: positiveInteger(budgets.maxDiffLines, 500, 'maxDiffLines'),
+      maxChangedBytes: positiveInteger(budgets.maxChangedBytes, 8 * 1024 * 1024, 'maxChangedBytes'),
+      maxFileBytes: positiveInteger(budgets.maxFileBytes, 4 * 1024 * 1024, 'maxFileBytes')
     }
   };
 }
@@ -126,8 +149,15 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
   if (scopeViolation) return { ok: false, reason: `scope_violation:${scopeViolation}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
   const changedFiles = changeSet.changedFiles ?? paths.length;
   const diffLines = changeSet.diffLines ?? 0;
-  if (changedFiles > policy.budgets.maxChangedFiles || diffLines > policy.budgets.maxDiffLines) {
-    return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, budgets: policy.budgets, changeSetFingerprint };
+  const changedBytes = changeSet.changedBytes ?? 0;
+  const maxFileBytes = changeSet.maxFileBytes ?? 0;
+  if (
+    changedFiles > policy.budgets.maxChangedFiles ||
+    diffLines > policy.budgets.maxDiffLines ||
+    changedBytes > policy.budgets.maxChangedBytes ||
+    maxFileBytes > policy.budgets.maxFileBytes
+  ) {
+    return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, changedBytes, maxFileBytes, budgets: policy.budgets, changeSetFingerprint };
   }
   const sensitivePath = paths.find((path) => pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
   const sensitive = Boolean(sensitivePath || changeSet.sensitiveContent);
@@ -141,6 +171,8 @@ export function fingerprintChangeSet(changeSet = {}) {
     additions: Number(changeSet.additions ?? 0),
     deletions: Number(changeSet.deletions ?? 0),
     diffLines: Number(changeSet.diffLines ?? 0),
+    changedBytes: Number(changeSet.changedBytes ?? 0),
+    maxFileBytes: Number(changeSet.maxFileBytes ?? 0),
     contentFingerprint: String(changeSet.contentFingerprint ?? '')
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
@@ -165,11 +197,59 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
+function toolchainFrom(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('toolchain must be an object');
+  const command = input.command ?? 'npm';
+  if (!['npm', 'pnpm', 'node'].includes(command)) throw new Error('toolchain.command must be npm, pnpm, or node');
+  const version = input.version ?? null;
+  if (version !== null && (typeof version !== 'string' || !/^[0-9]+(?:\.[0-9]+){0,2}(?:[-+][A-Za-z0-9.-]+)?$/.test(version))) throw new Error('toolchain.version must be a version string');
+  return { command, version };
+}
+
+function executionFrom(input = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('execution must be an object');
+  const provider = input.provider ?? 'local-sanitized';
+  if (!['local-sanitized', 'container', 'container-required'].includes(provider)) throw new Error('execution.provider must be local-sanitized, container, or container-required');
+  const fallbackProvider = input.fallbackProvider ?? 'none';
+  if (!['none', 'local-sanitized'].includes(fallbackProvider)) throw new Error('execution.fallbackProvider must be none or local-sanitized');
+  if (provider === 'container-required' && fallbackProvider !== 'none') throw new Error('container-required cannot use a host fallback');
+  const image = input.image;
+  if (provider !== 'local-sanitized' && (typeof image !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/@:-]*$/.test(image))) throw new Error('container execution requires a literal image name');
+  const user = input.user ?? 'host';
+  if (user !== 'host' && !/^[0-9]+:[0-9]+$/.test(user)) throw new Error('execution.user must be host or a numeric uid:gid pair');
+  const resources = input.resources ?? {};
+  return {
+    provider,
+    fallbackProvider,
+    image,
+    user,
+    resources: {
+      memoryMb: positiveInteger(resources.memoryMb, 1024, 'execution.resources.memoryMb', 64),
+      cpuCount: positiveInteger(resources.cpuCount, 1, 'execution.resources.cpuCount'),
+      pidsLimit: positiveInteger(resources.pidsLimit, 128, 'execution.resources.pidsLimit')
+    }
+  };
+}
+
+export function resolveExecutionUser(user = 'host') {
+  if (user !== 'host') return user;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const gid = typeof process.getgid === 'function' ? process.getgid() : null;
+  if (Number.isInteger(uid) && uid >= 0 && Number.isInteger(gid) && gid >= 0) return `${uid}:${gid}`;
+  return '1000:1000';
+}
+
 export function maskSecrets(value) {
+  const secretField = '[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization|cookie|session)[A-Za-z0-9_-]*';
+  const assignment = `\\b(${secretField}\\s*[=:]\\s*)`;
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b((?:api[_-]?key|token|secret|password|credential)\s*[=:]\s*)[^\s"']+/gi, '$1[REDACTED]');
+    .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}]+/gi, '$1[REDACTED]')
+    .replace(new RegExp(`("${secretField}"\\s*:\\s*)"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
+    .replace(new RegExp(`('${secretField}'\\s*:\\s*)'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
+    .replace(new RegExp(`${assignment}"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
+    .replace(new RegExp(`${assignment}'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
+    .replace(new RegExp(`${assignment}[^\\s"',;}]+`, 'gi'), '$1[REDACTED]');
 }
 
 export function transition(run, nextStatus) {
@@ -233,6 +313,8 @@ export function configFrom(input, baseDirectory = process.cwd()) {
   safeCommandEnvironment(input.commandEnvironment ?? {});
   const commandEnvironment = safeJson(input.commandEnvironment ?? {});
   const changePolicy = changePolicyFrom(input.changePolicy);
+  const execution = executionFrom(input.execution);
+  const toolchain = toolchainFrom(input.toolchain);
   const budgets = input.budgets ?? {};
   const project = {
     ...input,
@@ -244,6 +326,8 @@ export function configFrom(input, baseDirectory = process.cwd()) {
     deployment,
     commandEnvironment,
     changePolicy,
+    execution,
+    toolchain,
     workingBranchPattern: input.workingBranchPattern ?? 'agent/{runId}',
     budgets: {
       maxIterations: positiveInteger(budgets.maxIterations, 3, 'maxIterations'),
@@ -271,7 +355,13 @@ export async function loadProjects(file) {
 }
 
 export class JsonStore {
-  constructor(file) { this.file = file; }
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
+    this.file = file;
+    this.lockFile = `${file}.lock`;
+    this.recoveryLockFile = `${file}.lock.recovery`;
+    this.lockTimeoutMs = lockTimeoutMs;
+    this.lockPollMs = lockPollMs;
+  }
 
   async load() {
     try { return JSON.parse(await readFile(this.file, 'utf8')); }
@@ -284,49 +374,182 @@ export class JsonStore {
   async save(data) {
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(data, null, 2));
+    await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
     await rename(temporary, this.file);
   }
 
+  async ownerIdentity(pid) {
+    if (process.platform !== 'linux') return null;
+    try {
+      const contents = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = contents.slice(contents.lastIndexOf(')') + 1).trim().split(/\s+/);
+      return fields[19] ?? null;
+    } catch { return null; }
+  }
+
+  async readLock(file = this.lockFile) {
+    try {
+      const metadata = JSON.parse(await readFile(file, 'utf8'));
+      if (!Number.isInteger(metadata.pid) || metadata.pid <= 0 || typeof metadata.createdAt !== 'string') return null;
+      return metadata;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      return null;
+    }
+  }
+
+  async lockOwnerIsAbandoned(metadata) {
+    try { process.kill(metadata.pid, 0); }
+    catch (error) {
+      if (error.code === 'ESRCH') return true;
+      return false;
+    }
+    if (metadata.ownerIdentity && process.platform === 'linux') {
+      const currentIdentity = await this.ownerIdentity(metadata.pid);
+      return Boolean(currentIdentity && currentIdentity !== metadata.ownerIdentity);
+    }
+    return false;
+  }
+
+  sameLock(left, right) {
+    return left?.leaseId === right?.leaseId && left?.pid === right?.pid && left?.createdAt === right?.createdAt && left?.ownerIdentity === right?.ownerIdentity;
+  }
+
+  async writeLock(file) {
+    await writeFile(file, JSON.stringify({ leaseId: randomUUID(), pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: await this.ownerIdentity(process.pid) }), { flag: 'wx', mode: 0o600 });
+  }
+
+  async claimRecoveryLock() {
+    try {
+      await this.writeLock(this.recoveryLockFile);
+      return true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const owner = await this.readLock(this.recoveryLockFile);
+      if (owner && await this.lockOwnerIsAbandoned(owner)) {
+        try { await unlink(this.recoveryLockFile); } catch (unlockError) { if (unlockError.code !== 'ENOENT') throw unlockError; }
+      }
+      return false;
+    }
+  }
+
+  async acquireLock() {
+    await mkdir(dirname(this.file), { recursive: true });
+    const deadline = Date.now() + this.lockTimeoutMs;
+    while (true) {
+      try {
+        await this.writeLock(this.lockFile);
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const observed = await this.readLock();
+        if (observed && await this.lockOwnerIsAbandoned(observed) && await this.claimRecoveryLock()) {
+          let recoveryUnlockError = null;
+          try {
+            const current = await this.readLock();
+            if (this.sameLock(observed, current) && await this.lockOwnerIsAbandoned(current)) await unlink(this.lockFile);
+          } finally {
+            try { await unlink(this.recoveryLockFile); } catch (unlockError) { if (unlockError.code !== 'ENOENT') recoveryUnlockError = unlockError; }
+          }
+          if (recoveryUnlockError) throw recoveryUnlockError;
+          continue;
+        }
+        if (Date.now() >= deadline) throw new Error('state_lock_timeout', { cause: error });
+        await new Promise((resolveWait) => setTimeout(resolveWait, this.lockPollMs));
+      }
+    }
+  }
+
   async mutate(mutator) {
-    const data = await this.load();
-    const output = await mutator(data);
-    await this.save(data);
+    await this.acquireLock();
+    let output;
+    let operationError = null;
+    try {
+      const data = await this.load();
+      output = await mutator(data);
+      await this.save(data);
+    } catch (error) {
+      operationError = error;
+    }
+    let unlockError = null;
+    try { await unlink(this.lockFile); }
+    catch (error) { if (error.code !== 'ENOENT') unlockError = error; }
+    if (operationError) throw operationError;
+    if (unlockError) throw unlockError;
     return output;
   }
 
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
-export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, outputLimit = 8_000, captureOutputDigest = false } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000 } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     const stdoutHash = captureOutputDigest ? createHash('sha256') : null;
     let timedOut = false;
     let settled = false;
+    let killTimer = null;
     const startedAt = Date.now();
+    const appendBounded = (current, data) => {
+      const text = data.toString('utf8');
+      if (current.length >= outputLimit) return { text: current, truncated: text.length > 0 };
+      const visible = text.slice(0, outputLimit - current.length);
+      return { text: current + visible, truncated: visible.length < text.length };
+    };
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
+      if (killTimer) clearTimeout(killTimer);
+      resolveResult({ ...result, timedOut, stdout: clip(stdout, outputLimit), stderr: clip(stderr, outputLimit), stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated, ...(stdoutHash ? { stdoutDigest: stdoutHash.digest('hex') } : {}), durationMs: Date.now() - startedAt });
     };
-    const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : { ...safeCommandEnvironment(), ...env };
-    const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true });
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeoutMs);
-    child.stdout.on('data', (data) => { stdout += data; stdoutHash?.update(data); });
-    child.stderr.on('data', (data) => { stderr += data; });
-    child.on('error', (error) => { clearTimeout(timer); stderr += error.message; finish({ ok: false, exitCode: null }); });
+    const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : restrictEnvironment ? { ...env } : { ...safeCommandEnvironment(), ...env };
+    const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+    const terminate = (signal) => {
+      if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, signal); return; } catch { /* Child exited before group signalling. */ }
+      }
+      child.kill(signal);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate('SIGTERM');
+      killTimer = setTimeout(() => { if (!settled) terminate('SIGKILL'); }, killGraceMs);
+    }, timeoutMs);
+    child.stdout.on('data', (data) => {
+      stdoutBytes += data.length;
+      const appended = appendBounded(stdout, data);
+      stdout = appended.text;
+      stdoutTruncated ||= appended.truncated;
+      stdoutHash?.update(data);
+    });
+    child.stderr.on('data', (data) => {
+      stderrBytes += data.length;
+      const appended = appendBounded(stderr, data);
+      stderr = appended.text;
+      stderrTruncated ||= appended.truncated;
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      const appended = appendBounded(stderr, Buffer.from(error.message));
+      stderr = appended.text;
+      stderrTruncated ||= appended.truncated;
+      finish({ ok: false, exitCode: null });
+    });
     child.on('close', (exitCode) => { clearTimeout(timer); finish({ ok: exitCode === 0 && !timedOut, exitCode }); });
   });
 }
 
-export async function runCommand(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, processRunner = runProcess } = {}) {
+function commandInvocation(project, name, { hostRuntime = false } = {}) {
   const command = project.commands[name];
   if (!command) throw new Error(`Command not allowlisted: ${name}`);
   if (/[;&|`$<>\n\r]/.test(command)) throw new Error('Unsafe configured command');
-  if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '' };
   let [binary, ...args] = command.split(/\s+/);
+  if (!hostRuntime) return { command, binary, args };
   const npmCli = [
     resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     process.env.ProgramFiles ? resolve(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js') : null
@@ -343,13 +566,159 @@ export async function runCommand(project, name, { timeoutMs = project.budgets.co
     args = [pnpmCli, ...args];
     binary = process.execPath;
   }
-  const result = await processRunner(binary, args, {
-    cwd: project.workspace,
-    env: safeCommandEnvironment({ CI: 'true', ...project.commandEnvironment }),
-    timeoutMs,
-    inheritEnvironment: false
-  });
-  return { name, command, ...result };
+  return { command, binary, args };
+}
+
+export class ExecutionProvider {
+  async availability() { throw new Error('ExecutionProvider.availability must be implemented'); }
+  async execute() { throw new Error('ExecutionProvider.execute must be implemented'); }
+}
+
+export class LocalSanitizedExecution extends ExecutionProvider {
+  constructor({ processRunner = runProcess } = {}) { super(); this.processRunner = processRunner; }
+
+  async availability() {
+    return { available: true, provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'host-workspace', secrets: 'sanitized-environment-only', reason: 'Explicit local-sanitized provider; this is not container isolation.' };
+  }
+
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false } = {}) {
+    const { command, binary, args } = commandInvocation(project, name, { hostRuntime: true });
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'local-sanitized', sandboxed: false } };
+    const result = await this.processRunner(binary, args, {
+      cwd: project.workspace,
+      env: safeCommandEnvironment({ CI: 'true', ...project.commandEnvironment }),
+      timeoutMs,
+      inheritEnvironment: false
+    });
+    return { name, command, ...result, execution: { provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'workspace-cwd' } };
+  }
+}
+
+export class DockerContainerExecution extends ExecutionProvider {
+  constructor({ processRunner = runProcess, dockerBinary = 'docker' } = {}) { super(); Object.assign(this, { processRunner, dockerBinary }); }
+
+  dockerClientOptions(timeoutMs = 5_000) {
+    const environment = safeCommandEnvironment({ CI: 'true' });
+    for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) delete environment[name];
+    return { timeoutMs, env: environment, inheritEnvironment: false, restrictEnvironment: true };
+  }
+
+  async probe() {
+    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions());
+    return result.ok ? { available: true, provider: 'container', technology: 'docker', version: result.stdout.trim() || 'available' } : { available: false, provider: 'container', technology: 'docker', reason: clip(result.stderr || result.stdout || 'Docker daemon is unavailable', 300) };
+  }
+
+  async availability(project) {
+    const execution = project.execution;
+    const probe = await this.probe();
+    if (!probe.available) return { ...probe, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image) };
+    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions());
+    if (!image.ok) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
+    return { ...probe, image: execution.image, imageAvailable: true, imagePinned: imageIsPinned(execution.image), sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only with read-only .git', secrets: 'no host credential or home mounts' };
+  }
+
+  async gitMetadataPath(project) {
+    const workspace = resolve(project.workspace);
+    const metadata = resolve(workspace, '.git');
+    if (!isWithin(workspace, metadata)) throw new Error('git_metadata_mount_escapes_workspace');
+    const details = await lstat(metadata);
+    if (!details.isDirectory() || details.isSymbolicLink()) throw new Error('git_metadata_mount_requires_real_directory');
+    return metadata;
+  }
+
+  commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git') } = {}) {
+    const execution = project.execution;
+    const { command, binary, args } = commandInvocation(project, name);
+    const workspace = resolve(project.workspace);
+    const postWorker = stage !== 'bootstrap';
+    const containerArgs = [
+      'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
+      '--workdir', '/workspace',
+      '--mount', `type=bind,src=${workspace},dst=/workspace`,
+      '--mount', `type=bind,src=${gitMetadata},dst=/workspace/.git,readonly`,
+      '--read-only',
+      '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
+      '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges=true',
+      '--pids-limit', String(execution.resources.pidsLimit),
+      '--memory', `${execution.resources.memoryMb}m`,
+      '--memory-swap', `${execution.resources.memoryMb}m`,
+      '--cpus', String(execution.resources.cpuCount),
+      '--user', resolveExecutionUser(execution.user),
+      '--env', 'CI=true',
+      '--env', 'npm_config_cache=/tmp/npm-cache'
+    ];
+    for (const [key, value] of Object.entries(project.commandEnvironment)) containerArgs.push('--env', `${key}=${value}`);
+    if (postWorker) containerArgs.push('--network', 'none');
+    containerArgs.push(execution.image, binary, ...args);
+    return { command, containerArgs, postWorker };
+  }
+
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+    const containerName = `agent-command-${randomUUID()}`;
+    const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
+    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
+    const available = await this.availability(project);
+    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
+    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(timeoutMs), cwd: project.workspace });
+    let cleanup;
+    if (result.timedOut) {
+      const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
+      cleanup = { attempted: true, ok: Boolean(removed.ok), containerName };
+    }
+    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled', filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
+  }
+}
+
+export class ProjectCommandRunner {
+  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution() } = {}) { Object.assign(this, { localExecution, containerExecution }); }
+
+  async availability(project) {
+    const execution = project.execution;
+    if (execution.provider === 'local-sanitized') return this.localExecution.availability(project);
+    const container = await this.containerExecution.availability(project);
+    if (container.available) return container;
+    if (execution.provider === 'container' && execution.fallbackProvider === 'local-sanitized') {
+      return { ...(await this.localExecution.availability(project)), configuredProvider: 'container', fallbackFrom: 'container', containerReason: container.reason };
+    }
+    return { ...container, configuredProvider: execution.provider, failSafe: true };
+  }
+
+  async doctor(project) {
+    const selected = await this.availability(project);
+    const container = await this.containerExecution.probe();
+    const unavailableContainerContract = !selected.available && project.execution.provider !== 'local-sanitized';
+    return {
+      configuredProvider: project.execution.provider,
+      selectedProvider: selected.provider,
+      sandboxAvailable: selected.sandboxed ? 'YES' : 'NO',
+      containerAvailable: container.available ? 'YES' : 'NO',
+      dockerAvailable: container.available ? 'YES' : 'NO',
+      imageAvailable: selected.imageAvailable ? 'YES' : 'NO',
+      imagePinned: imageIsPinned(project.execution.image) ? 'YES' : 'NO',
+      projectToolchain: `${project.toolchain.command}${project.toolchain.version ? ` ${project.toolchain.version}` : ''}`,
+      runtimeUser: resolveExecutionUser(project.execution.user),
+      gitMetadata: selected.sandboxed ? 'READ ONLY' : unavailableContainerContract ? 'READ ONLY BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
+      postWorkerNetwork: selected.sandboxed ? 'DENIED (--network none)' : unavailableContainerContract ? 'DENIED BY CONTRACT (PROVIDER UNAVAILABLE)' : 'NOT_ISOLATED',
+      hostFallback: selected.fallbackFrom ? 'EXPLICIT_LOCAL_SANITIZED' : project.execution.provider === 'local-sanitized' ? 'EXPLICIT_LOCAL_SANITIZED' : 'NONE (FAIL-SAFE)',
+      reason: selected.reason ?? selected.containerReason
+    };
+  }
+
+  async run(project, name, options = {}) {
+    const selected = await this.availability(project);
+    if (!selected.available) {
+      const { command } = commandInvocation(project, name);
+      return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${selected.reason}`, execution: { provider: project.execution.provider, failSafe: true } };
+    }
+    if (selected.provider === 'container') return this.containerExecution.execute(project, name, options);
+    return this.localExecution.execute(project, name, options);
+  }
+}
+
+export async function runCommand(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, processRunner = runProcess } = {}) {
+  return new LocalSanitizedExecution({ processRunner }).execute(project, name, { timeoutMs, dryRun });
 }
 
 export function managedWorkspacePath(project, runId) {
@@ -502,9 +871,16 @@ export class LocalGitAdapter {
     const repository = (await this.git(['rev-parse', '--show-toplevel'], project)).stdout.trim();
     if (!isWithin(project.workspace, repository) || !isWithin(repository, project.workspace)) throw new Error('Workspace is not the repository root');
     const remote = (await this.git(['remote', 'get-url', 'origin'], project)).stdout.trim();
-    const expected = `${project.repository.owner}/${project.repository.name}`.toLowerCase();
-    if (!remote.toLowerCase().replace(/\.git$/, '').includes(expected)) throw new Error('Remote repository does not match project configuration');
+    if (!remoteMatchesProject(remote, project)) throw new Error('Remote repository does not match project configuration');
     return { repository, remote, currentBranch: await this.currentBranch(project), initialHead: await this.head(project), status: (await this.git(['status', '--porcelain'], project)).stdout };
+  }
+
+  async assertRepositoryState(project, { branch, head, remote } = {}) {
+    const inspection = await this.inspect(project);
+    if (branch && inspection.currentBranch !== branch) throw new Error(`Unexpected current branch: ${inspection.currentBranch}`);
+    if (head && inspection.initialHead !== head) throw new Error(`Unexpected HEAD: ${inspection.initialHead}`);
+    if (remote && inspection.remote !== remote) throw new Error('Unexpected origin remote');
+    return inspection;
   }
 
   async prepareWorkingBranch(project, runId, expectedBaseHead) {
@@ -552,30 +928,54 @@ export class LocalGitAdapter {
     const trackedStats = (await this.git(['diff', 'HEAD', '--numstat'], project)).stdout.split(/\r?\n/).filter(Boolean);
     let additions = 0;
     let deletions = 0;
+    let maxFileBytes = 0;
     for (const entry of trackedStats) {
       const [added, removed] = entry.split('\t');
       additions += Number.parseInt(added, 10) || 0;
       deletions += Number.parseInt(removed, 10) || 0;
     }
+    for (const path of paths) {
+      try {
+        const info = await lstat(resolve(project.workspace, path));
+        if (info.isFile()) maxFileBytes = Math.max(maxFileBytes, info.size);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
     const untracked = new Set((await this.git(['ls-files', '--others', '--exclude-standard'], project)).stdout.split(/\r?\n/).filter(Boolean).map((path) => normalizeRepositoryPath(path, 'untracked path')));
-    const trackedDiff = await this.git(['diff', 'HEAD', '--binary', '--no-ext-diff'], project, { outputLimit: 1_000_000, captureOutputDigest: true });
+    const trackedDiffLimit = Math.min(project.changePolicy.budgets.maxChangedBytes + 65_536, 16 * 1024 * 1024);
+    const trackedDiff = await this.git(['diff', 'HEAD', '--binary', '--no-ext-diff'], project, { outputLimit: trackedDiffLimit, captureOutputDigest: true });
+    let changedBytes = trackedDiff.stdoutBytes ?? Buffer.byteLength(trackedDiff.stdout);
     const contentHash = createHash('sha256').update(trackedDiff.stdoutDigest ?? createHash('sha256').update(trackedDiff.stdout).digest('hex'));
     let sensitiveContent = sensitiveContentPattern.test(trackedDiff.stdout);
     for (const path of paths.filter((path) => untracked.has(path))) {
-      const content = await readFile(resolve(project.workspace, path));
-      const text = content.toString('utf8');
-      additions += text ? text.split(/\r?\n/).length : 0;
-      sensitiveContent ||= sensitiveContentPattern.test(text.slice(0, 100_000));
-      contentHash.update(path).update('\0').update(content).update('\0');
+      const filePath = resolve(project.workspace, path);
+      const info = await lstat(filePath);
+      if (!info.isFile()) continue;
+      changedBytes += info.size;
+      let sample = '';
+      let newlineCount = 0;
+      let sawData = false;
+      contentHash.update(path).update('\0');
+      for await (const chunk of createReadStream(filePath)) {
+        contentHash.update(chunk);
+        sawData ||= chunk.length > 0;
+        for (const byte of chunk) if (byte === 10) newlineCount += 1;
+        if (sample.length < 100_000) sample += chunk.toString('utf8').slice(0, 100_000 - sample.length);
+      }
+      contentHash.update('\0');
+      additions += sawData ? newlineCount + 1 : 0;
+      sensitiveContent ||= sensitiveContentPattern.test(sample);
     }
     const contentFingerprint = contentHash.digest('hex');
-    const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, sensitiveContent, contentFingerprint };
+    const changeSet = { paths, changedFiles: paths.length, additions, deletions, diffLines: additions + deletions, changedBytes, maxFileBytes, sensitiveContent, contentFingerprint };
     return { ...changeSet, changeSetFingerprint: fingerprintChangeSet(changeSet) };
   }
 
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
-  async commit(project, branch, message, { expectedChangeSetFingerprint } = {}) {
+  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote } = {}) {
+    await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     let changeSet = await this.inspectChangeSet(project);
     let { paths } = changeSet;
@@ -590,14 +990,15 @@ export class LocalGitAdapter {
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--message', safeMessage], project);
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project);
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
-  async push(project, branch) {
+  async push(project, branch, { expectedHead, expectedRemote } = {}) {
+    await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     assertAllowedWorkingBranch(project, branch);
-    await this.git(['push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
+    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
     return { branch, finalHead: await this.head(project) };
   }
 }
@@ -758,7 +1159,7 @@ export function report(run) {
     .replace('\n\nPULL REQUEST', `\n\nCHANGE POLICY\n${changePolicy ? `${changePolicy.ok ? 'PASS' : 'FAIL'} — ${changePolicy.classification ?? changePolicy.reason}` : 'not evaluated'}\n\nPULL REQUEST`);
 }
 
-export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env } = {}) {
+export async function doctor(project, { github = new GitHubAdapter(), codexAvailable = () => typeof Codex === 'function', environment = process.env, executionRunner = new ProjectCommandRunner() } = {}) {
   let repository;
   let githubError;
   try {
@@ -767,6 +1168,12 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     githubError = clip(error.message, 300);
   }
   const vercelConfigured = project.deployment?.provider === 'vercel' && Boolean(project.deployment.projectId && project.deployment.teamId);
+  let execution;
+  try {
+    execution = await executionRunner.doctor(project);
+  } catch (error) {
+    execution = { configuredProvider: project.execution.provider, selectedProvider: 'unavailable', sandboxAvailable: 'NO', containerAvailable: 'NO', postWorkerNetwork: 'NOT_AVAILABLE', hostFallback: 'NONE (FAIL-SAFE)', reason: clip(error.message, 300) };
+  }
   return {
     project: project.displayName ?? project.id,
     projectId: project.id,
@@ -779,17 +1186,19 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     commandsConfigured: Object.keys(project.commands),
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
-    branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN'
+    branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
+    execution
   };
 }
 
 export function formatDoctor(result) {
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}`;
+  const execution = result.execution ?? {};
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {
-  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), commandRunner = runCommand }) {
-    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, commandRunner });
+  constructor({ store, planner = new DeterministicPlanner(), github = new GitHubAdapter(), localGit = new LocalGitAdapter(), workspaceManager = new WorkspaceManager(), deploymentProvider = new VercelDeploymentProvider(), worker = new CodexSdkWorker(), executionRunner = new ProjectCommandRunner(), commandRunner } = {}) {
+    Object.assign(this, { store, planner, github, localGit, workspaceManager, deploymentProvider, worker, executionRunner, commandRunner: commandRunner ?? ((project, name, options) => executionRunner.run(project, name, options)) });
   }
 
   async event(runId, component, event, details = {}) {
@@ -886,10 +1295,17 @@ export class Orchestrator {
   }
 
   async bootstrap(run, project) {
-    const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())) });
-    const updated = await this.updateRun(run.id, (saved) => { saved.results.install = safeJson(result); });
+    const beforeBootstrap = await this.localGit.inspectChangeSet(project);
+    const result = await this.commandRunner(project, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, run.deadlineAt - Date.now())), stage: 'bootstrap' });
+    const afterBootstrap = result.ok ? await this.localGit.inspectChangeSet(project) : null;
+    const bootstrapClean = !afterBootstrap || beforeBootstrap.changeSetFingerprint === afterBootstrap.changeSetFingerprint;
+    const updated = await this.updateRun(run.id, (saved) => {
+      saved.results.install = safeJson(result);
+      saved.results.bootstrapGovernance = safeJson({ ok: bootstrapClean, beforeChangeSetFingerprint: beforeBootstrap.changeSetFingerprint, afterChangeSetFingerprint: afterBootstrap?.changeSetFingerprint ?? null });
+    });
     await this.event(run.id, 'workspace', 'install.completed', { ok: result.ok, durationMs: result.durationMs, exitCode: result.exitCode });
     if (!result.ok) return this.fail(run.id, `install failed: ${result.stderr || result.stdout}`);
+    if (!bootstrapClean) return this.fail(run.id, 'bootstrap_modified_governed_files');
     return updated;
   }
 
@@ -970,9 +1386,9 @@ export class Orchestrator {
       saved.results.diff = { ok: changeSet.paths.length > 0, ...safeJson(changeSet) };
       saved.results.changePolicy = { ok: decision.ok, phase, ...safeJson(decision) };
       saved.governanceHistory ??= [];
-      saved.governanceHistory.push({ phase, ok: decision.ok, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, timestamp: new Date().toISOString() });
+      saved.governanceHistory.push({ phase, ok: decision.ok, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, changedBytes: decision.changedBytes, maxFileBytes: decision.maxFileBytes, timestamp: new Date().toISOString() });
     });
-    await this.event(run.id, 'policy', 'change_set.evaluated', { phase, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines });
+    await this.event(run.id, 'policy', 'change_set.evaluated', { phase, classification: decision.classification, reason: decision.reason, changeSetFingerprint: decision.changeSetFingerprint, changedFiles: decision.changedFiles, diffLines: decision.diffLines, changedBytes: decision.changedBytes, maxFileBytes: decision.maxFileBytes });
     if (!changeSet.paths.length) return phase === 'before_checks' ? this.retryOrFail(run, 'worker produced no diff') : this.fail(run.id, 'governed_change_set_empty');
     if (!decision.ok) return this.fail(run.id, decision.reason);
     if (approvedFingerprint && approvedFingerprint !== decision.changeSetFingerprint) {
@@ -1005,14 +1421,18 @@ export class Orchestrator {
     if (run.status !== RunStatus.TESTING) return run;
     const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
-    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, { expectedChangeSetFingerprint });
+    const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, {
+      expectedChangeSetFingerprint,
+      expectedHead: run.results.branch.initialHead,
+      expectedRemote: run.results.branch.remote
+    });
     const expectedPaths = [...run.results.changePolicy.paths].sort();
     const committedPaths = [...(commit.committedPaths ?? [])].sort();
     if (commit.committedChangeSetFingerprint !== expectedChangeSetFingerprint || JSON.stringify(committedPaths) !== JSON.stringify(expectedPaths)) {
       return this.fail(run.id, 'committed_change_set_does_not_match_governed_change_set');
     }
     run = await this.updateRun(run.id, (saved) => { saved.finalHead = commit.finalHead; saved.results.commit = { ok: true, ...commit }; });
-    const push = await this.localGit.push(project, run.workingBranch);
+    const push = await this.localGit.push(project, run.workingBranch, { expectedHead: run.finalHead, expectedRemote: run.results.branch.remote });
     run = await this.updateRun(run.id, (saved) => { saved.results.push = { ok: true, ...push }; });
     if (!run.pullRequestNumber) {
       const approvalId = await this.requireApproval(run, 'create_pull_request', 'Publish validated engineering work for review', { branch: run.workingBranch, finalHead: run.finalHead }, project);

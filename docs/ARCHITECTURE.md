@@ -15,7 +15,18 @@ The evaluation requires successful worker completion, a governed diff, configure
 - `GitHubAdapter`: authenticated repository/branch reads, PR creation, and check-run polling.
 - `WorkspaceManager`: isolated clone lifecycle beneath the managed root; successful and failed workspaces are retained for diagnosis.
 - `VercelDeploymentProvider`: read-only Vercel deployment lookup and bounded polling by configured project/team, branch, and commit SHA.
+- `ProjectCommandRunner`: selects only the project-configured execution provider; a worker cannot choose it.
+- `DockerContainerExecution`: real Docker boundary for `container` and `container-required`, with only an explicit workspace bind mount and no automatic image pull.
+- `LocalSanitizedExecution`: an explicit, less-isolated fallback for projects that deliberately select it.
 - `MockCodingWorker`: test-only implementation.
+
+## v0.5 command execution boundary
+
+`execution.provider` is one of `container-required`, `container`, or `local-sanitized`. Registered projects use `container-required` with a configured literal image name. Docker availability and local-image availability are checked with read-only CLI probes, and command execution uses `--pull never`. The orchestrator never downloads an image. If a `container-required` provider is unavailable, the command fails as `execution_provider_unavailable`; it never silently falls back to the host. A `container` provider can use `local-sanitized` only when `fallbackProvider: "local-sanitized"` is explicit in configuration.
+
+Post-worker container commands run shell-free with an explicit `/workspace` bind mount, `--network none`, `--read-only`, `/tmp` as a bounded tmpfs, dropped capabilities, `no-new-privileges`, numeric non-root identity, memory/CPU/PID limits, and command timeout. No HOME, SSH, Git, Codex, orchestrator credential, or Docker-socket mount is created. Only bootstrap `install`, before the worker, is allowed the default container network; it is not in the post-worker check list and is never automatically repeated after the worker modifies package metadata.
+
+`local-sanitized` keeps the prior shell-free and credential-sanitized process environment but is deliberately reported by doctor as not container-isolated: host filesystem and network enforcement are weaker. It is an explicit compatibility choice, not a simulation of the container contract.
 
 ## State and resume
 
@@ -29,6 +40,6 @@ Supported meaningful states are `working`, `testing`, `pushing`, `waiting_ci`, `
 
 ## Doctor and scope
 
-`agent doctor --project <id>` has no write path. It reads the configured project and attempts the existing GitHub inspection, reporting connectivity and default-branch protection as `YES`, `NO`, or `UNKNOWN`; it also reports Codex SDK availability, workspace root, configured commands, Vercel configuration, and whether `VERCEL_TOKEN` is present without revealing any value.
+`agent doctor --project <id>` has no write path. It reads the configured project and attempts the existing GitHub inspection, reporting connectivity and default-branch protection as `YES`, `NO`, or `UNKNOWN`; it also reports Codex SDK availability, workspace root, configured commands, Vercel configuration, whether `VERCEL_TOKEN` is present, configured/selected execution provider, Docker availability, post-worker network policy, and host fallback without revealing any value.
 
 `agent run` accepts repeated `--allowed-path` and `--forbidden-path` flags. Each value is one literal repository-relative root, persisted with the run and included in the worker task. It is not an instruction DSL; after worker completion the controlled Git adapter evaluates actual changed paths and cannot be bypassed by the task text.
