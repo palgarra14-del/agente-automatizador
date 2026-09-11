@@ -563,7 +563,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
     if (!/^[a-z][a-z0-9-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('Workflow step ids must be unique');
     if (!workflowStepTypes.has(step.type)) throw new Error(`Unknown workflow step type: ${step.type}`);
     if (!Object.values(WorkflowStepStatus).includes(step.status)) throw new Error(`Workflow step has an invalid status: ${step.id}`);
-    if (!Number.isInteger(step.attempts) || step.attempts < 0) throw new Error(`Workflow step attempts must be an integer >= 0: ${step.id}`);
+    if (!Number.isInteger(step.attempts) || step.attempts < 0 || step.attempts > budget.maxAttempts) throw new Error(`Workflow step attempts exceed the configured budget: ${step.id}`);
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
@@ -603,6 +603,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
   if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
   if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
+  if (plan.bootstrap?.attempts > budget.maxAttempts) throw new Error('Workflow bootstrap attempts exceed the configured budget');
   validateWorkflowBootstrap(plan.bootstrap, plan.workspace, project);
   return { ok: true, stepCount: plan.steps.length, budgets: budget };
 }
@@ -646,11 +647,12 @@ export class WorkflowEngine {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
       const step = plan.steps.find((candidate) => candidate.id === stepId);
-      if (!step || ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(step.status)) throw new Error('Workflow step is not awaiting approval');
-      if (step.error === 'capability_not_implemented') throw new Error('Workflow step requires an executor, not human approval');
+      const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
+      const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
+      if (!checkpointApproval && !interruptedApproval) throw new Error('Workflow step is not awaiting human approval');
       if (Number.isFinite(plan.pausedAt)) plan.deadlineAt += Math.max(0, approvedAt - plan.pausedAt);
       plan.pausedAt = null;
-      step.status = step.type === 'checkpoint' ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
+      step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
       step.evidence = { approvedAt: new Date(approvedAt).toISOString() };
       plan.status = WorkflowStepStatus.PENDING;
