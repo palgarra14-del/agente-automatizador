@@ -3,6 +3,12 @@ import { defaultToolSkillRegistry } from './capabilities.js';
 
 const idPattern = /^[a-z][a-z0-9.-]*$/;
 const modes = new Set(['read-only', 'workspace-write', 'verification', 'human', 'reserved']);
+const modeSkillRisks = new Map([
+  ['read-only', new Set(['workspace-read'])],
+  ['workspace-write', new Set(['workspace-write'])],
+  ['verification', new Set(['workspace-execution', 'network-workspace-execution'])],
+  ['human', new Set(['approval'])]
+]);
 
 function sorted(value) {
   if (Array.isArray(value)) return value.map(sorted);
@@ -19,7 +25,21 @@ function normalizeSpecialist(input, capabilityRegistry) {
   if (!modes.has(input.mode)) throw new Error(`Specialist mode is invalid: ${input.id}`);
   if (!Array.isArray(input.skills) || !input.skills.length) throw new Error(`Specialist skills are required: ${input.id}`);
   const skills = [...new Set(input.skills)].sort();
-  for (const skill of skills) if (!capabilityRegistry.getSkill(skill)) throw new Error(`Specialist references unknown skill: ${input.id} -> ${skill}`);
+  const skillDefinitions = skills.map((skillId) => {
+    const skill = capabilityRegistry.getSkill(skillId);
+    if (!skill) throw new Error(`Specialist references unknown skill: ${input.id} -> ${skillId}`);
+    return skill;
+  });
+  if (input.mode === 'reserved') {
+    if (skillDefinitions.some((skill) => skill.surfaces.length > 0)) throw new Error(`Reserved specialist may only own unavailable skills: ${input.id}`);
+    if (input.executor !== null && input.executor !== undefined) throw new Error(`Reserved specialist cannot declare an executor: ${input.id}`);
+  } else {
+    const allowedRisks = modeSkillRisks.get(input.mode);
+    for (const skill of skillDefinitions) {
+      if (!skill.surfaces.includes('workflow') || !allowedRisks?.has(skill.risk)) throw new Error(`Specialist mode is incompatible with skill authority: ${input.id} -> ${skill.id}`);
+    }
+    if (typeof input.executor !== 'string' || !input.executor.trim()) throw new Error(`Active specialist executor is required: ${input.id}`);
+  }
   if (typeof input.authority !== 'string' || !input.authority.trim()) throw new Error(`Specialist authority is required: ${input.id}`);
   if (input.executor !== null && input.executor !== undefined && (typeof input.executor !== 'string' || !input.executor.trim())) throw new Error(`Specialist executor is invalid: ${input.id}`);
   return Object.freeze({
