@@ -932,7 +932,17 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
   if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
   if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
-  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt) && plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval').length !== 1) throw new Error('Paused blocked workflow must represent one interrupted step');
+  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt)) {
+    const pausedBlocked = plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED);
+    const validPausedBlock = pausedBlocked.length === 1 && (
+      pausedBlocked[0].error === 'interrupted_step_requires_human_approval' ||
+      (
+        pausedBlocked[0].skill === 'release.publish-reviewed-workflow' &&
+        ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout', 'workflow_publication_preview_not_configured'].includes(pausedBlocked[0].error)
+      )
+    );
+    if (!validPausedBlock) throw new Error('Paused blocked workflow must represent one resumable interrupted or publication-observation step');
+  }
   if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
   if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
