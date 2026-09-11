@@ -1,18 +1,51 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
 
-async function engine({ runner, projects, workspaceManager, now } = {}) {
+function emptyChangeSet() {
+  const base = { paths: [], changedFiles: 0, additions: 0, deletions: 0, diffLines: 0, changedBytes: 0, maxFileBytes: 0, sensitiveContent: false, contentFingerprint: '0'.repeat(64) };
+  return { ...base, changeSetFingerprint: fingerprintChangeSet(base) };
+}
+
+function emptyProtectedIgnoredState() {
+  return { paths: [], fingerprint: createHash('sha256').update('[]').digest('hex') };
+}
+
+function emptyRepositoryControlState() {
+  return { paths: [], fingerprint: createHash('sha256').update('').digest('hex') };
+}
+
+function stableLocalGit(overrides = {}) {
+  return {
+    async inspect(project) {
+      return { repository: project.workspace, remote: `https://github.com/${project.repository.owner}/${project.repository.name}.git`, currentBranch: project.defaultBranch, initialHead: 'deadbeef', status: '' };
+    },
+    async inspectChangeSet() { return emptyChangeSet(); },
+    async inspectProtectedIgnoredState() { return emptyProtectedIgnoredState(); },
+    async inspectRepositoryControlState() { return emptyRepositoryControlState(); },
+    async assertRepositoryState(project, expected = {}) {
+      const current = await this.inspect(project);
+      if (expected.branch && current.currentBranch !== expected.branch) throw new Error('Unexpected current branch');
+      if (expected.head && current.initialHead !== expected.head) throw new Error('Unexpected HEAD');
+      if (expected.remote && current.remote !== expected.remote) throw new Error('Unexpected origin remote');
+      return current;
+    },
+    ...overrides
+  };
+}
+
+async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function completeStep(plan, id) {
@@ -26,7 +59,8 @@ function completeStep(plan, id) {
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
   };
-  if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint, repositoryControlFingerprint: emptyRepositoryControlState().fingerprint };
+  else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
@@ -661,4 +695,581 @@ test('stale capability context blocks workflow approval and resume before mutati
   assert.equal(afterResume.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.RUNNING);
   assert.equal(afterResume.status, WorkflowStepStatus.RUNNING);
   assert.notEqual(afterResume.projectSkillPolicyFingerprint, originalPolicyFingerprint);
+});
+
+
+test('app-improvement executes read-only inspection and diagnosis in one run before the human checkpoint', async () => {
+  const configured = configFrom({
+    id: 'readonly-app',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: {
+      allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'],
+      deny: []
+    }
+  });
+  const calls = [];
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls.push(request);
+      if (request.skill === 'code.inspect') {
+        return { ok: true, status: 'completed', outputBytes: 120, codexThreadId: 'inspect-thread', result: { inspectionEvidence: { summary: 'inspected', relevantPaths: ['src/core.js'] } } };
+      }
+      return { ok: true, status: 'completed', outputBytes: 100, codexThreadId: 'diagnose-thread', result: { diagnosis: { summary: 'diagnosed', cause: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Improve one app behavior' });
+  const waiting = await instance.run(created.id);
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'diagnose').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].contract.outputs, ['inspectionEvidence']);
+  assert.deepEqual(calls[1].contract.outputs, ['diagnosis']);
+  assert.equal(calls[1].context.priorEvidence['inspect-project'].inspectionEvidence.summary, 'inspected');
+  assert.equal(waiting.outputBytes, 220);
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
+  assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
+});
+
+test('read-only skill executor retries within workflow attempt budget and persists bounded failure evidence', async () => {
+  const configured = configFrom({
+    id: 'readonly-retry',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      calls += 1;
+      return { ok: false, status: 'failed', outputBytes: 25, error: 'invalid structured output from fixture' };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Retry inspection', budgets: { maxAttempts: 2 } });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.attempts, 2);
+  assert.equal(step.error, 'skill_executor_attempt_budget_exhausted');
+  assert.equal(calls, 2);
+  assert.equal(failed.outputBytes, 50);
+  assert.equal(step.evidence.error, 'invalid structured output from fixture');
+});
+
+
+function changedChangeSet(paths, overrides = {}) {
+  const base = {
+    paths,
+    changedFiles: paths.length,
+    additions: overrides.additions ?? paths.length,
+    deletions: overrides.deletions ?? 0,
+    diffLines: overrides.diffLines ?? paths.length,
+    changedBytes: overrides.changedBytes ?? Math.max(1, paths.length * 32),
+    maxFileBytes: overrides.maxFileBytes ?? 32,
+    sensitiveContent: overrides.sensitiveContent ?? false,
+    contentFingerprint: overrides.contentFingerprint ?? '1'.repeat(64)
+  };
+  return { ...base, changeSetFingerprint: fingerprintChangeSet(base) };
+}
+
+async function prepareImplementation(instance, workflowId) {
+  await instance.update(workflowId, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture inspection', relevantPaths: ['src/core.js'] } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture diagnosis', cause: 'fixture cause' } };
+    completeStep(plan, 'plan-change');
+  });
+}
+
+test('read-only workflow step fails closed if workspace changes despite read-only sandbox', async () => {
+  const configured = configFrom({
+    id: 'readonly-integrity',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let snapshots = 0;
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      snapshots += 1;
+      return snapshots === 1 ? emptyChangeSet() : changedChangeSet(['src/unexpected.js']);
+    }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 20, result: { inspectionEvidence: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Inspect only' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'read_only_skill_modified_workspace');
+  assert.equal(step.evidence.ok, false);
+  assert.notEqual(step.evidence.workspaceBeforeFingerprint, step.evidence.workspaceAfterFingerprint);
+});
+
+test('app-improvement implementation completes only after normal governed change evidence and verification', async () => {
+  let changeCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js'], { additions: 3, diffLines: 3, changedBytes: 96 });
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    }
+  });
+  const codingWorker = {
+    async execute(task, options) {
+      assert.equal(task.objective, 'Implement safely');
+      assert.equal(task.workflow.profile, 'app-improvement');
+      assert.ok(task.inspectionEvidence);
+      assert.ok(task.diagnosis);
+      assert.ok(task.approvedPlanChange?.approvedAt);
+      assert.equal(options.workspace.length > 0, true);
+      return { status: 'completed', summary: 'implemented', codexThreadId: 'write-thread', output: 'done', outputBytes: 4 };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Implement safely' });
+  await prepareImplementation(instance, created.id);
+  const result = await instance.run(created.id);
+  const implementation = result.steps.find((step) => step.id === 'implementation');
+  assert.equal(implementation.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(implementation.evidence.ok, true);
+  assert.equal(implementation.evidence.workerEvidence.status, 'completed');
+  assert.equal(implementation.evidence.changePolicy.classification, 'normal');
+  assert.equal(implementation.evidence.changeSetFingerprint, normalChange.changeSetFingerprint);
+  assert.equal(result.steps.find((step) => step.id === 'tests').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(result.steps.find((step) => step.id === 'verification').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(result.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(result.status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
+test('implementation sensitive change blocks before verification', async () => {
+  let changeCalls = 0;
+  const sensitiveChange = changedChangeSet(['package.json']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : sensitiveChange; } });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'changed package', output: '', outputBytes: 0 }; } };
+  let verificationCalls = 0;
+  const instance = await engine({
+    localGit,
+    codingWorker,
+    runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Sensitive change' });
+  await prepareImplementation(instance, created.id);
+  const blocked = await instance.run(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.error, 'workflow_sensitive_change_requires_approval');
+  assert.equal(implementation.evidence.changePolicy.classification, 'sensitive');
+  assert.equal(verificationCalls, 0);
+  await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
+});
+
+test('implementation forbidden path and budget excess fail closed before verification', async () => {
+  for (const fixture of [
+    { name: 'forbidden', change: changedChangeSet(['.env']), expectedReason: /forbidden_path/ },
+    { name: 'budget', change: changedChangeSet(Array.from({ length: 9 }, (_, index) => `src/file-${index}.js`)), expectedReason: /change_budget_exceeded/ }
+  ]) {
+    let changeCalls = 0;
+    const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : fixture.change; } });
+    const codingWorker = { async execute() { return { status: 'completed', summary: fixture.name, output: '', outputBytes: 0 }; } };
+    let verificationCalls = 0;
+    const instance = await engine({
+      localGit,
+      codingWorker,
+      runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+    });
+    const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: fixture.name });
+    await prepareImplementation(instance, created.id);
+    const failed = await instance.run(created.id);
+    const implementation = failed.steps.find((step) => step.id === 'implementation');
+    assert.equal(failed.status, WorkflowStepStatus.FAILED);
+    assert.equal(implementation.error, 'workflow_change_policy_rejected');
+    assert.match(failed.result.reason, fixture.expectedReason);
+    assert.equal(verificationCalls, 0);
+  }
+});
+
+test('failed implementation that leaves changes blocks instead of retrying', async () => {
+  let changeCalls = 0;
+  const partial = changedChangeSet(['src/partial.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : partial; } });
+  let workerCalls = 0;
+  const codingWorker = { async execute() { workerCalls += 1; return { status: 'failed', summary: 'failed', output: 'worker error', outputBytes: 12 }; } };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Partial failure' });
+  await prepareImplementation(instance, created.id);
+  const blocked = await instance.run(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.error, 'workflow_failed_implementation_left_changes');
+  assert.equal(implementation.attempts, 1);
+  assert.equal(workerCalls, 1);
+});
+
+test('interrupted implementation with observed changes cannot be silently retried', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-interrupted-implementation-'));
+  const configured = managedProject('interrupted-implementation', root, {
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changed = changedChangeSet(['src/already-written.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { return changed; } });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Recover safely' });
+  await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    implementation.status = WorkflowStepStatus.RUNNING;
+    implementation.attempts = 1;
+    implementation.evidence = {
+      type: 'executor-start',
+      skill: implementation.skill,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+  const blocked = await instance.resume(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.pausedAt, null);
+  assert.equal(implementation.error, 'interrupted_implementation_changes_detected');
+  assert.equal(implementation.evidence.changeSetFingerprint, changed.changeSetFingerprint);
+  await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
+});
+
+
+test('implementation with no changes retries only within the workflow attempt budget', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return { status: 'completed', summary: 'no-op', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit: stableLocalGit(), codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Require a real change', budgets: { maxAttempts: 2 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_no_changes');
+  assert.equal(implementation.attempts, 2);
+  assert.equal(workerCalls, 2);
+});
+
+test('implementation timeout without changes retries only within the workflow attempt budget', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return { status: 'failed', timedOut: true, summary: 'timeout', output: 'timeout', outputBytes: 7 };
+    }
+  };
+  const instance = await engine({ localGit: stableLocalGit(), codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Timeout safely', budgets: { maxAttempts: 2 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_timeout');
+  assert.equal(implementation.attempts, 2);
+  assert.equal(workerCalls, 2);
+});
+
+test('implementation output budget exhaustion stops before verification', async () => {
+  let changeCalls = 0;
+  const normalChange = changedChangeSet(['src/output-budget.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : normalChange; } });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'large output', output: 'x'.repeat(2_000), outputBytes: 2_000 }; } };
+  let verificationCalls = 0;
+  const instance = await engine({
+    localGit,
+    codingWorker,
+    runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Respect output budget', budgets: { maxOutputBytes: 1_024 } });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_output_budget_exhausted');
+  assert.equal(verificationCalls, 0);
+});
+
+test('workflow implementation enforces allowed path scope', async () => {
+  let changeCalls = 0;
+  const outsideScope = changedChangeSet(['src/other/outside.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : outsideScope; } });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'outside scope', output: '', outputBytes: 0 }; } };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Stay scoped',
+    scope: { allowedPaths: ['src/feature'], forbiddenPaths: [] }
+  });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_change_policy_rejected');
+  assert.match(failed.result.reason, /scope_violation/);
+});
+
+
+test('verification command that mutates governed implementation diff fails closed', async () => {
+  const governed = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  const mutated = changedChangeSet(['src/feature.js', 'src/generated.js'], { additions: 3, diffLines: 3, changedBytes: 96 });
+  let changeCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? governed : mutated;
+    }
+  });
+  let commandCalls = 0;
+  const configured = project();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    runner: async (_project, name) => {
+      commandCalls += 1;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Guard verification diff' });
+  const workspaceProject = await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.workspacePath = workspaceProject.workspace;
+  });
+  const failed = await instance.run(created.id);
+  const testsStep = failed.steps.find((step) => step.id === 'tests');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(testsStep.error, 'workflow_change_set_changed_during_verification');
+  assert.equal(testsStep.evidence.expectedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(testsStep.evidence.observedChangeSetFingerprint, mutated.changeSetFingerprint);
+  assert.equal(commandCalls, 1);
+});
+
+
+test('verification command that changes repository state fails closed even when the diff fingerprint is unchanged', async () => {
+  const governed = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  let commandCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect(project) {
+      return {
+        repository: project.workspace,
+        remote: `https://github.com/${project.repository.owner}/${project.repository.name}.git`,
+        currentBranch: commandCalls === 0 ? project.defaultBranch : 'unexpected-branch',
+        initialHead: 'deadbeef',
+        status: ''
+      };
+    },
+    async inspectChangeSet() { return governed; }
+  });
+  const configured = project();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    runner: async (_project, name) => {
+      commandCalls += 1;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Guard repository identity' });
+  const workspaceProject = await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.workspacePath = workspaceProject.workspace;
+    implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+  });
+  const failed = await instance.run(created.id);
+  const testsStep = failed.steps.find((step) => step.id === 'tests');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(testsStep.error, 'workflow_change_set_integrity_failed_during_verification');
+  assert.match(testsStep.evidence.error, /Unexpected current branch/);
+  assert.equal(commandCalls, 1);
+});
+
+
+test('read-only workflow detects ignored protected-file mutation even when normal git diff is unchanged', async () => {
+  const configured = configFrom({
+    id: 'readonly-ignored-secret',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let ignoredCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectProtectedIgnoredState() {
+      ignoredCalls += 1;
+      return ignoredCalls === 1
+        ? { paths: ['.env'], fingerprint: '1'.repeat(64) }
+        : { paths: ['.env'], fingerprint: '2'.repeat(64) };
+    }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 12, result: { inspectionEvidence: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not touch ignored secrets' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'read_only_skill_modified_workspace');
+  assert.equal(step.evidence.protectedIgnoredBeforeFingerprint, '1'.repeat(64));
+  assert.equal(step.evidence.protectedIgnoredAfterFingerprint, '2'.repeat(64));
+});
+
+test('implementation fails if an ignored protected file changes even when normal git diff is empty', async () => {
+  let ignoredCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectProtectedIgnoredState() {
+      ignoredCalls += 1;
+      return ignoredCalls === 1
+        ? { paths: ['.env'], fingerprint: '3'.repeat(64) }
+        : { paths: ['.env'], fingerprint: '4'.repeat(64) };
+    }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'attempted hidden change', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Protect ignored files' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
+  assert.match(implementation.evidence.error, /protected_ignored_state_changed/);
+});
+
+
+test('read-only workflow detects git control-state mutation even when worktree diff is unchanged', async () => {
+  const configured = configFrom({
+    id: 'readonly-git-control',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let controlCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectRepositoryControlState() {
+      controlCalls += 1;
+      return controlCalls === 1
+        ? { paths: ['config', 'info/exclude'], fingerprint: '5'.repeat(64) }
+        : { paths: ['config', 'info/exclude'], fingerprint: '6'.repeat(64) };
+    }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 8, result: { inspectionEvidence: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not alter git controls' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'read_only_skill_modified_workspace');
+  assert.equal(step.evidence.repositoryControlBeforeFingerprint, '5'.repeat(64));
+  assert.equal(step.evidence.repositoryControlAfterFingerprint, '6'.repeat(64));
+});
+
+test('implementation fails if git control state changes even when normal diff is acceptable', async () => {
+  let changeCalls = 0;
+  let controlCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js']);
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    },
+    async inspectRepositoryControlState() {
+      controlCalls += 1;
+      return controlCalls === 1
+        ? { paths: ['config'], fingerprint: '7'.repeat(64) }
+        : { paths: ['config'], fingerprint: '8'.repeat(64) };
+    }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'changed git controls', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Protect git controls' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
+  assert.match(implementation.evidence.error, /repository_control_state_changed/);
 });

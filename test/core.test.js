@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, stat, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,6 +18,7 @@ import {
   WorkspaceManager,
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
+  codexWorkerSecurityConfig,
   configFrom,
   doctor,
   evaluate,
@@ -29,6 +30,7 @@ import {
   maskSecrets,
   policy,
   runCommand,
+  runProcess,
   report,
   remoteMatchesProject,
   resolveExecutionUser,
@@ -518,8 +520,8 @@ test('project command environment permits literal non-secret values only', () =>
   }));
 });
 
-test('worker prompt redacts secrets and Codex SDK receives constrained thread options', async () => {
-  let invocation = {};
+test('worker prompt redacts secrets and Codex SDK receives isolated permission-profile configuration', async () => {
+  const invocation = {};
   class FakeCodex {
     constructor(options) { invocation.clientOptions = options; }
 
@@ -535,13 +537,46 @@ test('worker prompt redacts secrets and Codex SDK receives constrained thread op
       };
     }
   }
-  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, environment: () => ({ PATH: '/safe/bin' }) });
+  let cleaned = false;
+  const worker = new CodexSdkWorker({
+    CodexClient: FakeCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_HOME: '/real/codex-home', HOME: '/real/home' }),
+    codexHomeFactory: async (sourceEnvironment) => {
+      invocation.sourceEnvironment = sourceEnvironment;
+      return { path: '/isolated/codex-home', cleanup: async () => { cleaned = true; } };
+    },
+    platform: 'linux'
+  });
   const result = await worker.execute({ objective: 'update fixture', token: 'ghp_hiddenToken', nested: { password: 'hidden' } }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(result.status, 'completed');
   assert.equal(invocation.clientOptions.env.PATH, '/safe/bin');
+  assert.equal(invocation.clientOptions.env.CODEX_HOME, '/isolated/codex-home');
+  assert.equal(invocation.clientOptions.env.HOME, '/isolated/codex-home');
+  assert.notEqual(invocation.clientOptions.env.CODEX_HOME, invocation.sourceEnvironment.CODEX_HOME);
+  assert.equal(cleaned, true);
   assert.deepEqual(invocation.threadOptions, {
-    workingDirectory: '/safe/workspace', sandboxMode: 'workspace-write', approvalPolicy: 'never', networkAccessEnabled: false, webSearchMode: 'disabled'
+    workingDirectory: '/safe/workspace', approvalPolicy: 'never', webSearchMode: 'disabled'
   });
+  const overrides = invocation.clientOptions.configOverrides;
+  for (const required of [
+    'default_permissions="agent-workflow"',
+    'permissions.agent-workflow.network.enabled=false',
+    'allow_login_shell=false',
+    'shell_environment_policy.inherit="none"',
+    'project_doc_max_bytes=0',
+    'skills.include_instructions=false',
+    'skills.bundled.enabled=false',
+    'features.apps=false',
+    'features.plugins=false',
+    'features.browser_use=false',
+    'features.computer_use=false',
+    'agents.enabled=false',
+    'history.persistence="none"',
+    'ephemeral=true'
+  ]) assert.ok(overrides.includes(required), required);
+  assert.ok(overrides.some((entry) => entry.includes('":root"="deny"') && entry.includes('"."="write"') && entry.includes('".git"="read"')));
+  assert.equal(Object.hasOwn(invocation.threadOptions, 'sandboxMode'), false);
+  assert.equal(Object.hasOwn(invocation.threadOptions, 'networkAccessEnabled'), false);
   assert.equal(invocation.prompt.includes('ghp_hiddenToken'), false);
   assert.equal(invocation.prompt.includes('hidden'), false);
   assert.equal(buildWorkerPrompt({ authorization: 'Bearer abcdef123456' }).includes('abcdef123456'), false);
@@ -1160,4 +1195,119 @@ test('project command runner counts Docker preflight once inside the command tim
   assert.equal(calls.filter(({ args }) => args[0] === 'image').length, 1);
   assert.equal(calls.filter(({ args }) => args[0] === 'run').length, 1);
   assert.equal(calls.find(({ args }) => args[0] === 'run').timeoutMs, 400);
+});
+
+
+test('LocalGitAdapter fingerprints ignored protected files without reading their contents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-protected-ignored-'));
+  const initialized = await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(initialized.ok, true);
+  await mkdir(join(root, 'secrets'), { recursive: true });
+  await writeFile(join(root, '.gitignore'), '.env\nsecrets/\n*.pem\n');
+  await writeFile(join(root, '.env'), 'TOKEN=first-secret-value\n');
+  await writeFile(join(root, 'secrets', 'client.pem'), 'PRIVATE-KEY-FIRST\n');
+
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+  const before = await adapter.inspectProtectedIgnoredState(configured);
+  assert.deepEqual(before.paths, ['.env', 'secrets/client.pem']);
+  assert.match(before.fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(before).includes('first-secret-value'), false);
+  assert.equal(JSON.stringify(before).includes('PRIVATE-KEY-FIRST'), false);
+
+  await writeFile(join(root, '.env'), 'TOKEN=second-secret-value-with-different-size\n');
+  const after = await adapter.inspectProtectedIgnoredState(configured);
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.deepEqual(after.paths, before.paths);
+  assert.equal(JSON.stringify(after).includes('second-secret-value'), false);
+});
+
+
+test('LocalGitAdapter fingerprints git control files without exposing their contents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-git-control-'));
+  const initialized = await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 });
+  assert.equal(initialized.ok, true);
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+
+  const before = await adapter.inspectRepositoryControlState(configured);
+  assert.match(before.fingerprint, /^[a-f0-9]{64}$/);
+  assert.ok(before.paths.includes('config'));
+  assert.ok(before.paths.includes('info/exclude'));
+
+  const excludePath = join(root, '.git', 'info', 'exclude');
+  await writeFile(excludePath, '# changed by fixture\nprivate-cache/\n');
+  const after = await adapter.inspectRepositoryControlState(configured);
+
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.equal(JSON.stringify(after).includes('private-cache'), false);
+  assert.equal(JSON.stringify(after).includes('changed by fixture'), false);
+});
+
+
+test('Codex worker permission profile is fail-closed on native Windows', async () => {
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
+  const result = await worker.execute({ objective: 'fixture' }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.output, 'codex_worker_read_isolation_unverified_on_win32');
+  assert.equal(constructed, 0);
+});
+
+test('Codex worker security config denies root reads and selects only requested workspace authority', () => {
+  const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux' });
+  const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin' });
+  assert.equal(write.supported, true);
+  assert.equal(read.supported, true);
+  const writeProfile = write.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  const readProfile = read.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  assert.match(writeProfile, /":root"="deny"/);
+  assert.match(writeProfile, /":minimal"="read"/);
+  assert.match(writeProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
+  assert.match(readProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
+  assert.ok(write.configOverrides.includes('shell_environment_policy.set.PATH="/bin:/usr/bin"'));
+  assert.equal(codexWorkerSecurityConfig({ platform: 'win32' }).supported, false);
+});
+
+test('Codex worker rejects project-local Codex control configuration before starting the SDK', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-worker-project-config-'));
+  await mkdir(join(workspace, '.codex'), { recursive: true });
+  await writeFile(join(workspace, '.codex', 'config.toml'), '[features]\napps = true\n');
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'linux', environment: () => ({ PATH: '/safe/bin' }) });
+  const result = await worker.execute({ objective: 'fixture' }, { workspace, timeoutMs: 100 });
+  assert.equal(result.status, 'failed');
+  assert.match(result.output, /worker_project_control_file_present:\.codex\/config\.toml/);
+  assert.equal(constructed, 0);
+});
+
+
+test('git control fingerprint detects temporary ref tampering even when final HEAD is restored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-git-control-reflog-'));
+  assert.equal((await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  await writeFile(join(root, 'fixture.txt'), 'one\n');
+  assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'first'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  const first = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+
+  await writeFile(join(root, 'fixture.txt'), 'two\n');
+  assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'second'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  const second = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+  const branchName = (await runProcess('git', ['branch', '--show-current'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+  const before = await adapter.inspectRepositoryControlState(configured);
+
+  assert.equal((await runProcess('git', ['update-ref', `refs/heads/${branchName}`, first], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['update-ref', `refs/heads/${branchName}`, second], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim(), second);
+
+  const after = await adapter.inspectRepositoryControlState(configured);
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.ok(after.paths.some((path) => path === `refs/heads/${branchName}`));
+  assert.ok(after.paths.some((path) => path === `logs/refs/heads/${branchName}`));
 });

@@ -91,7 +91,9 @@
           "repository.publish",
           "code.implement",
           "release.observe-ci",
-          "release.publish-pr"
+          "release.publish-pr",
+          "code.inspect",
+          "code.diagnose"
         ],
         "deny": []
       }
@@ -193,7 +195,9 @@
           "code.implement",
           "release.observe-ci",
           "release.publish-pr",
-          "release.observe-preview"
+          "release.observe-preview",
+          "code.inspect",
+          "code.diagnose"
         ],
         "deny": []
       }
@@ -294,7 +298,9 @@
           "code.implement",
           "release.observe-ci",
           "release.publish-pr",
-          "release.observe-preview"
+          "release.observe-preview",
+          "code.inspect",
+          "code.diagnose"
         ],
         "deny": []
       }

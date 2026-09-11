@@ -55,7 +55,12 @@ try {
     if (action === 'create') {
       const project = projects.get(take('--project'));
       if (!project) throw new Error('Unknown --project');
-      console.log(JSON.stringify(await workflows.create({ profile: args[2], projectId: project.id, goal: take('--goal') ?? 'Untitled workflow' }), null, 2));
+      console.log(JSON.stringify(await workflows.create({
+        profile: args[2],
+        projectId: project.id,
+        goal: take('--goal') ?? 'Untitled workflow',
+        scope: { allowedPaths: takeAll('--allowed-path'), forbiddenPaths: takeAll('--forbidden-path') }
+      }), null, 2));
     } else if (action === 'run') {
       console.log(JSON.stringify(await workflows.run(args[2], { dryRun: has('--dry-run') }), null, 2));
     } else if (action === 'status') {
@@ -68,7 +73,7 @@ try {
       console.log(JSON.stringify(await workflows.approve(args[2], args[3]), null, 2));
     } else if (action === 'list') {
       console.log(JSON.stringify(await workflows.list(), null, 2));
-    } else throw new Error('Usage: agent workflow create <website-build|app-improvement|data-analysis> --project <id> --goal "..." | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
+    } else throw new Error('Usage: agent workflow create <website-build|app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
     console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
