@@ -1133,6 +1133,301 @@ async function prepareImplementation(instance, workflowId) {
   });
 }
 
+async function prepareReviewedPublication(instance, workflowId, changeSet) {
+  await instance.update(workflowId, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture inspection', relevantPaths: changeSet.paths } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture diagnosis', cause: 'fixture cause' } };
+    completeStep(plan, 'plan-change');
+
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = plan.workspace.path;
+    implementation.evidence.repositoryState = { branch: plan.workspace.workingBranch, head: plan.workspace.baseHead, remote: plan.workspace.remote };
+    implementation.evidence.changeSet = changeSet;
+    implementation.evidence.changeSetFingerprint = changeSet.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+    implementation.evidence.workerEvidence = { status: 'completed', summary: 'fixture implementation' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+
+    const review = completeStep(plan, 'review');
+    review.evidence.reviewedChangeSetFingerprint = changeSet.changeSetFingerprint;
+    review.evidence.result = { reviewEvidence: { verdict: 'PASS', summary: 'fixture critic pass', findings: [] } };
+
+    completeStep(plan, 'tests');
+    completeStep(plan, 'verification');
+
+    const release = completeStep(plan, 'release-readiness');
+    release.evidence.approvedChangeSetFingerprint = changeSet.changeSetFingerprint;
+    release.evidence.reviewedChangeSetFingerprint = changeSet.changeSetFingerprint;
+
+    const publication = plan.steps.find((step) => step.id === 'publication');
+    publication.status = WorkflowStepStatus.PENDING;
+    publication.error = null;
+    publication.evidence = null;
+    plan.status = WorkflowStepStatus.PENDING;
+    plan.pausedAt = null;
+    plan.result = null;
+  });
+}
+
+
+test('reviewed workflow publication completes only with exact commit, push, PR, CI, and preview evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-happy-'));
+  const configured = managedProject('publication-happy', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js'], { additions: 4, diffLines: 4 });
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId, expectedBaseHead) {
+      assert.equal(expectedBaseHead, baseHead);
+      branch = `agent/${runId}`;
+      return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead };
+    },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; } });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Publish reviewed change' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+
+  const completed = await instance.run(created.id);
+  const publication = completed.steps.find((step) => step.id === 'publication');
+  assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(publication.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(publication.evidence.ok, true);
+  assert.equal(publication.evidence.phase, 'completed');
+  assert.equal(publication.evidence.commit.finalHead, commitHead);
+  assert.equal(publication.evidence.commit.committedChangeSetFingerprint, changeSet.changeSetFingerprint);
+  assert.equal(publication.evidence.push.remoteBranchHead, commitHead);
+  assert.equal(publication.evidence.pullRequest.number, 42);
+  assert.equal(publication.evidence.pullRequest.headSha, commitHead);
+  assert.equal(publication.evidence.ci.state, 'success');
+  assert.equal(publication.evidence.preview.state, 'NOT_REQUIRED');
+  assert.deepEqual(publicationBridge.calls, ['inspectBase', 'commit', 'push', 'verifyRemoteBranch', 'createPullRequest', 'verifyPullRequest', 'waitForCi', 'waitForPreview', 'verifyRemoteBranch', 'verifyPullRequest']);
+  assert.equal(typeof publicationBridge.merge, 'undefined');
+  assert.equal(typeof publicationBridge.deployProduction, 'undefined');
+});
+
+test('reviewed publication blocks before external writes when default branch head changed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-base-drift-'));
+  const configured = managedProject('publication-base-drift', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js']);
+  const baseHead = 'a'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: baseHead, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead: 'c'.repeat(40), changeSet });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject base drift' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+  const blocked = await instance.run(created.id);
+  const publication = blocked.steps.find((step) => step.id === 'publication');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(publication.error, 'workflow_publication_base_head_changed');
+  assert.deepEqual(publicationBridge.calls, ['inspectBase']);
+});
+
+test('reviewed publication rejects a diff changed after critic and release approval', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-diff-drift-'));
+  const configured = managedProject('publication-diff-drift', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const approved = changedChangeSet(['src/feature.js']);
+  const mutated = changedChangeSet(['src/feature.js', 'src/unapproved.js']);
+  const baseHead = 'a'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let observed = approved;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: baseHead, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return observed; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead, changeSet: approved });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject changed diff' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, approved);
+  observed = mutated;
+  const failed = await instance.run(created.id);
+  const publication = failed.steps.find((step) => step.id === 'publication');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(publication.error, 'workflow_change_set_changed_during_verification');
+  assert.equal(publication.evidence.expectedChangeSetFingerprint, approved.changeSetFingerprint);
+  assert.equal(publication.evidence.observedChangeSetFingerprint, mutated.changeSetFingerprint);
+  assert.deepEqual(publicationBridge.calls, []);
+});
+
+for (const fixture of [
+  { failAt: 'commit', error: 'workflow_publication_commit_state_uncertain', forbidden: ['push', 'createPullRequest'] },
+  { failAt: 'push', error: 'workflow_publication_push_state_uncertain', forbidden: ['createPullRequest'] },
+  { failAt: 'createPullRequest', error: 'workflow_publication_pr_state_uncertain', forbidden: ['waitForCi'] }
+]) {
+  test(`reviewed publication blocks uncertain external write at ${fixture.failAt} without replaying later stages`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `agent-workflow-publication-${fixture.failAt}-`));
+    const configured = managedProject(`publication-${fixture.failAt}`, root, {
+      skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+    });
+    const manager = new FakeWorkflowWorkspaceManager();
+    const changeSet = changedChangeSet(['src/feature.js']);
+    const baseHead = 'a'.repeat(40);
+    const commitHead = 'b'.repeat(40);
+    const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+    let branch = configured.defaultBranch;
+    let head = baseHead;
+    const localGit = stableLocalGit({
+      async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+      async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+      async inspectChangeSet() { return changeSet; }
+    });
+    const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead, commitHead, changeSet, failAt: fixture.failAt, onCommit: (nextHead) => { head = nextHead; } });
+    const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+    const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Fail external write safely' });
+    await instance.workspaceProject(created.id, configured);
+    await prepareReviewedPublication(instance, created.id, changeSet);
+    const blocked = await instance.run(created.id);
+    const publication = blocked.steps.find((step) => step.id === 'publication');
+    assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+    assert.equal(publication.error, fixture.error);
+    for (const name of fixture.forbidden) assert.equal(publicationBridge.calls.includes(name), false);
+    const resumed = await instance.resume(created.id);
+    assert.equal(resumed.status, WorkflowStepStatus.BLOCKED);
+    assert.equal(resumed.steps.find((step) => step.id === 'publication').error, fixture.error);
+  });
+}
+
+test('reviewed publication records CI failure after PR and never attempts preview', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-ci-fail-'));
+  const configured = managedProject('publication-ci-fail', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js']);
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
+    ci: { state: 'failure', checks: [{ name: 'CI', status: 'completed', conclusion: 'failure' }], durationMs: 1 }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Observe CI failure' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+  const failed = await instance.run(created.id);
+  const publication = failed.steps.find((step) => step.id === 'publication');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(publication.error, 'workflow_publication_ci_failed');
+  assert.equal(publication.evidence.pullRequest.number, 42);
+  assert.equal(publication.evidence.ci.state, 'failure');
+  assert.equal(publicationBridge.calls.includes('waitForPreview'), false);
+});
+
+test('reviewed publication requires a ready preview when deployment acceptance requires it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-preview-fail-'));
+  const configured = managedProject('publication-preview-fail', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] },
+    acceptance: { require: ['test', 'ci', 'deployment'] },
+    deployment: { provider: 'vercel', projectId: 'prj_fixture', teamId: 'team_fixture', requirePreviewReady: true }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js']);
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
+    preview: { provider: 'vercel', state: 'ERROR', ok: false, environment: 'preview', url: 'https://preview.example' }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Require preview' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+  const failed = await instance.run(created.id);
+  const publication = failed.steps.find((step) => step.id === 'publication');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(publication.error, 'workflow_publication_preview_failed');
+  assert.equal(publication.evidence.ci.state, 'success');
+  assert.equal(publication.evidence.preview.state, 'ERROR');
+});
+
+test('CI observation timeout resumes from the persisted PR without repeating commit, push, or PR creation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-ci-resume-'));
+  const configured = managedProject('publication-ci-resume', root, {
+    budgets: { maxModelCalls: 6 },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js']);
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  let clock = Date.now();
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
+    ci: { state: 'timeout', checks: [], durationMs: 1 }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge, now: () => clock });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Resume CI observation' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+  const blocked = await instance.run(created.id);
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.steps.find((step) => step.id === 'publication').error, 'workflow_publication_ci_timeout');
+  assert.equal(publicationBridge.calls.filter((name) => name === 'commit').length, 1);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'push').length, 1);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'createPullRequest').length, 1);
+
+  publicationBridge.ci = { state: 'success', checks: [{ name: 'CI', status: 'completed', conclusion: 'success' }], durationMs: 1 };
+  clock += 5_000;
+  const completed = await instance.resume(created.id);
+  assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'commit').length, 1);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'push').length, 1);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'createPullRequest').length, 1);
+  assert.equal(publicationBridge.calls.filter((name) => name === 'waitForCi').length, 2);
+});
+
 test('read-only workflow step fails closed if workspace changes despite read-only sandbox', async () => {
   const configured = configFrom({
     id: 'readonly-integrity',
