@@ -834,6 +834,11 @@ function validateCompletedWorkflowEvidence(plan, step) {
   }
   if (step.type === 'checkpoint') {
     if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    if (plan.profile === 'app-improvement' && step.id === 'release-readiness') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
+    }
     return;
   }
   if (step.type === 'command' || step.type === 'verification') {
@@ -1378,7 +1383,15 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString() };
+      const releaseBinding = checkpointApproval && plan.profile === 'app-improvement' && step.id === 'release-readiness'
+        ? (() => {
+            const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+            const review = plan.steps.find((candidate) => candidate.id === 'review');
+            if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
+            return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
+          })()
+        : {};
+      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString(), ...releaseBinding };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -1404,6 +1417,17 @@ export class WorkflowEngine {
         }
       });
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+      if (interruptedStep?.skill === 'release.publish-reviewed-workflow') {
+        plan = await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === interruptedStep.id);
+          step.error = 'interrupted_publication_state_uncertain';
+          step.evidence = { ...step.evidence, type: 'interrupted-publication', ok: false };
+          saved.pausedAt = null;
+          saved.status = WorkflowStepStatus.BLOCKED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+        return plan;
+      }
       if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'code.implement'].includes(interruptedStep.skill)) {
         const project = this.projects.get(plan.projectId);
         const expected = interruptedStep.evidence?.repositoryState;
