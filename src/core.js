@@ -535,7 +535,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]));
   return plan;
 }
@@ -547,6 +547,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
+  if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < 0)) throw new Error('Workflow pausedAt must be null or a finite timestamp');
   if (!Number.isInteger(plan.outputBytes) || plan.outputBytes < 0) throw new Error('Workflow outputBytes must be an integer >= 0');
   if (!plan.budgets || typeof plan.budgets !== 'object' || ['maxSteps', 'maxAttempts', 'timeoutMs', 'maxOutputBytes'].some((key) => !Object.hasOwn(plan.budgets, key))) throw new Error('Workflow budgets are incomplete');
   const budget = workflowBudget(plan.budgets);
@@ -624,31 +625,42 @@ export class WorkflowEngine {
   }
 
   readySteps(plan) {
-    const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED || step.status === WorkflowStepStatus.SKIPPED).map((step) => step.id));
+    const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
     return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
   }
 
   async approve(id, stepId) {
+    const approvedAt = this.now();
     return this.update(id, (plan) => {
       const step = plan.steps.find((candidate) => candidate.id === stepId);
       if (!step || ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(step.status)) throw new Error('Workflow step is not awaiting approval');
+      if (step.error === 'capability_not_implemented') throw new Error('Workflow step requires an executor, not human approval');
+      if (Number.isFinite(plan.pausedAt)) plan.deadlineAt += Math.max(0, approvedAt - plan.pausedAt);
+      plan.pausedAt = null;
       step.status = step.type === 'checkpoint' ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
-      step.evidence = { approvedAt: new Date().toISOString() };
+      step.error = null;
+      step.evidence = { approvedAt: new Date(approvedAt).toISOString() };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
 
   async resume(id, options = {}) {
+    const pausedAt = this.now();
     await this.update(id, (plan) => {
+      let interrupted = false;
       for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
         step.status = WorkflowStepStatus.BLOCKED;
         step.error = 'interrupted_step_requires_human_approval';
+        interrupted = true;
       }
       if (plan.bootstrap?.status === 'running') {
         plan.bootstrap.status = 'pending';
         plan.bootstrap.error = 'interrupted_bootstrap_requires_retry';
       }
-      if (plan.status === WorkflowStepStatus.RUNNING) plan.status = WorkflowStepStatus.BLOCKED;
+      if (interrupted || plan.status === WorkflowStepStatus.RUNNING) {
+        plan.status = WorkflowStepStatus.BLOCKED;
+        plan.pausedAt ??= pausedAt;
+      }
     });
     return this.run(id, options);
   }
@@ -672,7 +684,21 @@ export class WorkflowEngine {
       if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
       return projectAtWorkspace(project, plan.workspace.path);
     }
-    const allocation = await this.workspaceManager.prepare(project, plan.id);
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) {
+      await this.failDeadline(id);
+      throw new Error('workflow_budget_deadline_exceeded');
+    }
+    let allocation;
+    try {
+      allocation = await this.workspaceManager.prepare(project, plan.id, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs) });
+    } catch (error) {
+      if (error.message === 'workspace_clone_timeout' || this.remainingMs(await this.get(id)) <= 0) {
+        await this.failDeadline(id);
+        throw new Error('workflow_budget_deadline_exceeded');
+      }
+      throw error;
+    }
     const workspace = workflowWorkspaceEvidence(project, allocation);
     validateWorkflowWorkspace(workspace, project);
     if (workspace.managed) await assertSafePathChain(workspace.path);
@@ -690,6 +716,15 @@ export class WorkflowEngine {
     }
     if (bootstrap.status === 'running') throw new Error('Workflow bootstrap requires resume after interruption');
     if (bootstrap.status === 'failed') return { ok: false, plan };
+    if (bootstrap.attempts >= plan.budgets.maxAttempts) {
+      plan = await this.update(id, (saved) => {
+        saved.bootstrap.status = 'failed';
+        saved.bootstrap.error = 'workflow_bootstrap_attempt_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: saved.bootstrap.error };
+      });
+      return { ok: false, plan };
+    }
     if (this.remainingMs(plan) <= 0) return { ok: false, plan: await this.failDeadline(id) };
     plan = await this.update(id, (saved) => {
       saved.bootstrap.status = 'running';
@@ -722,6 +757,7 @@ export class WorkflowEngine {
     const project = this.projects.get(plan.projectId);
     validateWorkflowPlan(plan, this.projects);
     if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
+    if ([WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
       plan = await this.get(id);
@@ -729,7 +765,21 @@ export class WorkflowEngine {
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
-      if (next.type === 'checkpoint') return this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.AWAITING_APPROVAL; saved.status = WorkflowStepStatus.AWAITING_APPROVAL; });
+      if (next.type === 'placeholder') return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'capability_not_implemented';
+        step.evidence = { type: 'placeholder', executable: false };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+      if (next.type === 'checkpoint') return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        step.error = null;
+        saved.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        saved.pausedAt ??= this.now();
+      });
       if (next.type === 'command' || next.type === 'verification') {
         const workspaceProject = await this.workspaceProject(id, project);
         const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
@@ -742,19 +792,27 @@ export class WorkflowEngine {
         const workspaceProject = await this.workspaceProject(id, project);
         const commands = next.commands;
         const outcomes = [];
+        let stepOutputBytes = 0;
         for (const name of commands) {
           const remainingMs = this.remainingMs(plan);
-          if (remainingMs <= 0) { result = { ok: false, deadlineExceeded: true, evidence: { commands: outcomes } }; break; }
-          outcomes.push(await this.commandRunner(workspaceProject, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'post-worker' }));
+          if (remainingMs <= 0) { result = { ok: false, deadlineExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } }; break; }
+          const outcome = await this.commandRunner(workspaceProject, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'post-worker' });
+          outcomes.push(outcome);
+          stepOutputBytes += Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+          if ((plan.outputBytes ?? 0) + stepOutputBytes > plan.budgets.maxOutputBytes) {
+            result = { ok: false, outputBudgetExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } };
+            break;
+          }
         }
-        if (!result.deadlineExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: outcomes.reduce((total, outcome) => total + Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? ''))), 0), evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) } };
+        if (!result.deadlineExceeded && !result.outputBudgetExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: stepOutputBytes, evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) } };
+        else result.evidence = { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) };
       }
       plan = await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.evidence = result.evidence;
         saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
         if (result.deadlineExceeded) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_budget_deadline_exceeded'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
-        else if (saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else if (result.outputBudgetExceeded || saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
         else if (result.ok) { step.status = WorkflowStepStatus.COMPLETED; step.error = null; saved.status = WorkflowStepStatus.PENDING; }
         else if (step.attempts >= saved.budgets.maxAttempts) { step.status = WorkflowStepStatus.FAILED; step.error = 'step_attempt_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
         else { step.status = WorkflowStepStatus.READY; step.error = 'step_failed_retry_available'; saved.status = WorkflowStepStatus.PENDING; }
@@ -1083,7 +1141,7 @@ export class WorkspaceManager {
     return { ...managedWorkspacePath(project, runId), managed: true, retained: true };
   }
 
-  async prepare(project, runId) {
+  async prepare(project, runId, { timeoutMs = project.budgets.commandTimeoutMs } = {}) {
     const details = this.describe(project, runId);
     if (!details.managed) return details;
     await assertSafePathChain(details.workspace);
@@ -1093,9 +1151,10 @@ export class WorkspaceManager {
     const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
     const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
-      timeoutMs: project.budgets.commandTimeoutMs
+      timeoutMs
     });
-    if (!clone.ok || clone.timedOut) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+    if (clone.timedOut) throw new Error('workspace_clone_timeout');
+    if (!clone.ok) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
     await assertSafePathChain(details.workspace);
     return { ...details, remoteUrl, clone: { ok: true, durationMs: clone.durationMs, exitCode: clone.exitCode } };
   }
