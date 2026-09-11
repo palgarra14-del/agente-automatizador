@@ -1980,14 +1980,19 @@ export function projectAtWorkspace(project, workspace) {
   return { ...project, workspace: resolvedWorkspace };
 }
 
-function workflowWorkspaceEvidence(project, allocation) {
+function workflowWorkspaceEvidence(project, allocation, branchEvidence = null) {
   return {
     path: resolve(allocation.workspace),
     managed: Boolean(allocation.managed),
     projectId: project.id,
     repository: { owner: project.repository.owner, name: project.repository.name },
     initializedAt: new Date().toISOString(),
-    ...(allocation.remoteUrl ? { remoteUrl: allocation.remoteUrl } : {})
+    ...(allocation.remoteUrl ? { remoteUrl: allocation.remoteUrl } : {}),
+    ...(branchEvidence ? {
+      workingBranch: branchEvidence.workingBranch,
+      baseHead: branchEvidence.initialHead,
+      remote: branchEvidence.remote
+    } : {})
   };
 }
 
@@ -1997,6 +2002,10 @@ function validateWorkflowWorkspace(workspace, project) {
     throw new Error('Workflow workspace evidence is invalid');
   }
   if (workspace.managed !== (project.workspaceStrategy === 'managed')) throw new Error('Workflow workspace strategy does not match the project');
+  if (workspace.workingBranch !== undefined) {
+    if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch || typeof workspace.baseHead !== 'string' || !workspace.baseHead || typeof workspace.remote !== 'string' || !workspace.remote) throw new Error('Workflow publication branch evidence is invalid');
+    assertAllowedWorkingBranch(project, workspace.workingBranch);
+  } else if (workspace.baseHead !== undefined || workspace.remote !== undefined) throw new Error('Workflow publication branch evidence is incomplete');
   projectAtWorkspace(project, workspace.path);
 }
 
