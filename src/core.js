@@ -1387,14 +1387,34 @@ export class WorkflowEngine {
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
     const context = this.completedContext(runningPlan);
-    const worker = await this.codingWorker.execute({
-      objective: runningPlan.goal,
-      workflow: { id: runningPlan.id, profile: runningPlan.profile, stepId: next.id },
-      scope: runningPlan.scope,
-      inspectionEvidence: context['inspect-project'] ?? null,
-      diagnosis: context.diagnose ?? null,
-      approvedPlanChange: context['plan-change'] ?? null
-    }, {
+    const workerTask = runningPlan.profile === 'website-build'
+      ? (() => {
+          const requirements = runningPlan.steps.find((step) => step.id === 'requirements');
+          const design = runningPlan.steps.find((step) => step.id === 'design');
+          if (requirements?.status !== WorkflowStepStatus.COMPLETED || design?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint || design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('website_build_plan_not_approved');
+          return {
+            objective: runningPlan.goal,
+            workflow: { id: runningPlan.id, profile: runningPlan.profile, stepId: next.id },
+            scope: runningPlan.scope,
+            businessBrief: safeJson(runningPlan.input.businessBrief),
+            businessBriefFingerprint: runningPlan.inputFingerprint,
+            websitePlan: safeJson(requirements.evidence.result.websitePlan),
+            websitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
+            approvedDesign: {
+              approvedAt: design.evidence.approvedAt,
+              approvedWebsitePlanFingerprint: design.evidence.approvedWebsitePlanFingerprint
+            }
+          };
+        })()
+      : {
+          objective: runningPlan.goal,
+          workflow: { id: runningPlan.id, profile: runningPlan.profile, stepId: next.id },
+          scope: runningPlan.scope,
+          inspectionEvidence: context['inspect-project'] ?? null,
+          diagnosis: context.diagnose ?? null,
+          approvedPlanChange: context['plan-change'] ?? null
+        };
+    const worker = await this.codingWorker.execute(workerTask, {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
@@ -1501,8 +1521,8 @@ export class WorkflowEngine {
 
   async guardImplementationChangeSet(id, project, stepId, phase, { outcomes = [], outputBytes = 0 } = {}) {
     const plan = await this.get(id);
-    if (plan.profile !== 'app-improvement') return { ok: true, plan };
     const implementation = plan.steps.find((step) => step.id === 'implementation');
+    if (!implementation) return { ok: true, plan };
     if (implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) return { ok: true, plan };
     const workspaceProject = await this.workspaceProject(id, project);
     let changeSet = null;
@@ -1582,7 +1602,9 @@ export class WorkflowEngine {
     const release = plan.steps.find((step) => step.id === 'release-readiness');
     const existing = next.evidence?.commit ? safeJson(next.evidence) : null;
     const expectedFingerprint = implementation?.evidence?.changeSetFingerprint ?? null;
-    if (plan.profile !== 'app-improvement' || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || release?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !expectedFingerprint || review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) {
+    const visual = plan.steps.find((step) => step.id === 'visual-verification');
+    const websiteVisualInvalid = plan.profile === 'website-build' && (visual?.status !== WorkflowStepStatus.COMPLETED || visual.evidence?.approvedChangeSetFingerprint !== expectedFingerprint);
+    if (!['app-improvement', 'website-build'].includes(plan.profile) || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || release?.status !== WorkflowStepStatus.COMPLETED || websiteVisualInvalid || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !expectedFingerprint || review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) {
       return this.stopPublication(id, next.id, 'workflow_publication_prerequisites_invalid', { blocked: false, phase: 'preflight' });
     }
     if (!plan.workspace?.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) {
@@ -1951,7 +1973,7 @@ export class WorkflowEngine {
         });
         return plan;
       }
-      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'code.implement'].includes(interruptedStep.skill)) {
+      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'website.plan', 'code.implement'].includes(interruptedStep.skill)) {
         const project = this.projects.get(plan.projectId);
         const expected = interruptedStep.evidence?.repositoryState;
         if (!plan.workspace || !expected) {
@@ -1991,7 +2013,7 @@ export class WorkflowEngine {
         if (repositoryChanged || filesChanged) {
           await this.update(id, (saved) => {
             const step = saved.steps.find((item) => item.id === interruptedStep.id);
-            const readOnly = ['code.inspect', 'code.diagnose', 'code.review'].includes(step.skill);
+            const readOnly = ['code.inspect', 'code.diagnose', 'code.review', 'website.plan'].includes(step.skill);
             step.error = readOnly ? 'interrupted_read_only_changes_detected' : 'interrupted_implementation_changes_detected';
             step.evidence = {
               ...step.evidence,
@@ -2028,7 +2050,7 @@ export class WorkflowEngine {
     const plan = await this.get(id);
     const expected = this.workspaceManager.describe(project, plan.id);
     const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
-    const publicationEnabled = plan.profile === 'app-improvement' && publicationCapability.available;
+    const publicationEnabled = plan.steps.some((step) => step.skill === 'release.publish-reviewed-workflow') && publicationCapability.available;
     if (plan.workspace) {
       validateWorkflowWorkspace(plan.workspace, project);
       if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
@@ -2178,12 +2200,12 @@ export class WorkflowEngine {
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
+      if (next.type === 'placeholder' && next.skill === 'code.implement') {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && plan.profile === 'app-improvement') {
+      if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow') {
         plan = await this.executePublicationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
