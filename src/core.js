@@ -846,6 +846,15 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
     }
+    if (step.skill === 'project.dependencies.refresh') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const expectedFingerprint = implementation?.evidence?.changeSetFingerprint;
+      const expectedDependencyPaths = dependencyChangedPaths(implementation?.evidence?.changeSet ?? {});
+      if (!expectedFingerprint || step.evidence.changeSetFingerprint !== expectedFingerprint || JSON.stringify(step.evidence.dependencyPaths ?? []) !== JSON.stringify(expectedDependencyPaths)) throw new Error('Completed dependency refresh is not bound to the governed implementation');
+      if (expectedDependencyPaths.length) {
+        if (step.evidence.required !== true || step.evidence.command?.name !== 'dependencyRefresh' || step.evidence.command?.ok !== true || step.evidence.executionProvider !== 'container-required' || step.evidence.lifecycleScripts !== 'disabled') throw new Error('Completed dependency refresh requires successful frozen container evidence');
+      } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
+    }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const persistedReview = validateReviewEvidence(step.evidence.result?.reviewEvidence);
@@ -1372,6 +1381,160 @@ export class WorkflowEngine {
         step.evidence.completedAt = new Date().toISOString();
         saved.status = WorkflowStepStatus.PENDING;
       }
+    });
+  }
+
+  async executeDependencyRefreshWorkflowStep(id, project, next) {
+    let plan = await this.get(id);
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    if (plan.profile !== 'app-improvement' || implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_prerequisites_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    const dependencyPaths = dependencyChangedPaths(implementation.evidence.changeSet ?? {});
+    if (!dependencyPaths.length) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.attempts += 1;
+        step.evidence = {
+          type: 'executor',
+          ok: true,
+          completedAt: new Date().toISOString(),
+          ...workflowEvidenceContext(saved, step),
+          required: false,
+          dependencyPaths: [],
+          changeSetFingerprint: implementation.evidence.changeSetFingerprint
+        };
+        saved.status = WorkflowStepStatus.PENDING;
+      });
+    }
+    if (implementation.evidence.changePolicy?.classification !== 'sensitive' ||
+        implementation.evidence.sensitiveApproval?.changeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+        !Number.isFinite(Date.parse(implementation.evidence.sensitiveApproval?.approvedAt ?? ''))) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_dependency_refresh_requires_sensitive_approval';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths, changeSetFingerprint: implementation.evidence.changeSetFingerprint };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (!Object.hasOwn(project.commands ?? {}, 'dependencyRefresh')) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_dependency_refresh_not_configured';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths, changeSetFingerprint: implementation.evidence.changeSetFingerprint };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (project.execution.provider !== 'container-required') {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_requires_container';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    const governed = await this.guardImplementationChangeSet(id, project, next.id, 'before-dependency-refresh');
+    if (!governed.ok) return governed.plan;
+    const workspaceProject = await this.workspaceProject(id, project);
+    let before;
+    try { before = await this.workspaceSnapshot(workspaceProject); }
+    catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_workspace_integrity_failed';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      step.error = null;
+      step.evidence = {
+        type: 'executor-start',
+        ...workflowEvidenceContext(saved, step),
+        required: true,
+        dependencyPaths,
+        changeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        workspacePath: workspaceProject.workspace
+      };
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) return this.failDeadline(id);
+    const outcome = await this.commandRunner(workspaceProject, 'dependencyRefresh', {
+      timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs),
+      stage: 'dependency-refresh'
+    });
+    const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+    let after = null;
+    let integrityError = null;
+    try {
+      after = await this.workspaceSnapshot(workspaceProject);
+      if (!this.workspaceSnapshotUnchanged(before, after)) throw new Error('dependency_refresh_modified_governed_state');
+    } catch (error) {
+      integrityError = error;
+    }
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += outputBytes;
+      step.evidence = {
+        type: 'executor',
+        ok: false,
+        completedAt: null,
+        ...workflowEvidenceContext(saved, step),
+        required: true,
+        dependencyPaths,
+        changeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        executionProvider: project.execution.provider,
+        lifecycleScripts: 'disabled',
+        command: {
+          name: 'dependencyRefresh',
+          ok: Boolean(outcome.ok),
+          exitCode: outcome.exitCode ?? null,
+          stdout: clip(maskSecrets(outcome.stdout), 1_000),
+          stderr: clip(maskSecrets(outcome.stderr), 1_000)
+        },
+        error: integrityError ? clip(integrityError.message, 1_000) : null
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+      } else if (integrityError) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_modified_governed_state';
+      } else if (outcome.ok) {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.evidence.ok = true;
+        step.evidence.completedAt = new Date().toISOString();
+      } else if (step.attempts >= saved.budgets.maxAttempts) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_attempt_budget_exhausted';
+      } else {
+        step.status = WorkflowStepStatus.READY;
+        step.error = 'workflow_dependency_refresh_retry_available';
+      }
+      saved.status = step.status === WorkflowStepStatus.COMPLETED || step.status === WorkflowStepStatus.READY ? WorkflowStepStatus.PENDING : WorkflowStepStatus.FAILED;
+      if (saved.status === WorkflowStepStatus.FAILED) saved.result = { error: step.error, stepId: step.id };
     });
   }
 
@@ -2109,6 +2272,11 @@ export class WorkflowEngine {
       }
       if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+        plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
