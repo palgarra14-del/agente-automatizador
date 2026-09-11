@@ -1383,6 +1383,10 @@ export class WorkflowEngine {
           const outcome = await this.commandRunner(workspaceProject, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'post-worker' });
           outcomes.push(outcome);
           stepOutputBytes += Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+          if (this.remainingMs(await this.get(id)) <= 0) {
+            result = { ok: false, deadlineExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } };
+            break;
+          }
           if ((plan.outputBytes ?? 0) + stepOutputBytes > plan.budgets.maxOutputBytes) {
             result = { ok: false, outputBudgetExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } };
             break;
