@@ -1137,3 +1137,65 @@ test('verification command that changes repository state fails closed even when 
   assert.match(testsStep.evidence.error, /Unexpected current branch/);
   assert.equal(commandCalls, 1);
 });
+
+
+test('read-only workflow detects ignored protected-file mutation even when normal git diff is unchanged', async () => {
+  const configured = configFrom({
+    id: 'readonly-ignored-secret',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let ignoredCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectProtectedIgnoredState() {
+      ignoredCalls += 1;
+      return ignoredCalls === 1
+        ? { paths: ['.env'], fingerprint: '1'.repeat(64) }
+        : { paths: ['.env'], fingerprint: '2'.repeat(64) };
+    }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 12, result: { inspectionEvidence: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not touch ignored secrets' });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.error, 'read_only_skill_modified_workspace');
+  assert.equal(step.evidence.protectedIgnoredBeforeFingerprint, '1'.repeat(64));
+  assert.equal(step.evidence.protectedIgnoredAfterFingerprint, '2'.repeat(64));
+});
+
+test('implementation fails if an ignored protected file changes even when normal git diff is empty', async () => {
+  let ignoredCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectProtectedIgnoredState() {
+      ignoredCalls += 1;
+      return ignoredCalls === 1
+        ? { paths: ['.env'], fingerprint: '3'.repeat(64) }
+        : { paths: ['.env'], fingerprint: '4'.repeat(64) };
+    }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'attempted hidden change', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Protect ignored files' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
+  assert.match(implementation.evidence.error, /protected_ignored_state_changed/);
+});
