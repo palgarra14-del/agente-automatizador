@@ -301,6 +301,80 @@ test('workflow stops command execution as soon as accumulated output exceeds its
   assert.deepEqual(calls, ['test']);
 });
 
+test('release-readiness approval is bound to the exact reviewed implementation fingerprint', async () => {
+  const instance = await engine();
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Bind release approval' });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSet = changedChangeSet(['src/feature.js']);
+    implementation.evidence.changeSetFingerprint = implementation.evidence.changeSet.changeSetFingerprint;
+    const review = completeStep(plan, 'review');
+    review.evidence.reviewedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
+    completeStep(plan, 'tests');
+    completeStep(plan, 'verification');
+    const release = plan.steps.find((step) => step.id === 'release-readiness');
+    release.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.pausedAt = plan.deadlineAt - 1;
+  });
+
+  const approved = await instance.approve(created.id, 'release-readiness');
+  const implementation = approved.steps.find((step) => step.id === 'implementation');
+  const release = approved.steps.find((step) => step.id === 'release-readiness');
+  assert.equal(release.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(release.evidence.approvedChangeSetFingerprint, implementation.evidence.changeSetFingerprint);
+  assert.equal(release.evidence.reviewedChangeSetFingerprint, implementation.evidence.changeSetFingerprint);
+
+  const tampered = JSON.parse(JSON.stringify(approved));
+  tampered.steps.find((step) => step.id === 'release-readiness').evidence.approvedChangeSetFingerprint = 'f'.repeat(64);
+  assert.throws(
+    () => validateWorkflowPlan(tampered, new Map([['workflow-project', project()]])),
+    /release-readiness approval is not bound/
+  );
+});
+
+test('interrupted reviewed publication is non-approvable because external-write state is uncertain', async () => {
+  const instance = await engine();
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Do not replay publication writes' });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSet = changedChangeSet(['src/feature.js']);
+    implementation.evidence.changeSetFingerprint = implementation.evidence.changeSet.changeSetFingerprint;
+    const review = completeStep(plan, 'review');
+    review.evidence.reviewedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
+    completeStep(plan, 'tests');
+    completeStep(plan, 'verification');
+    const release = completeStep(plan, 'release-readiness');
+    release.evidence.approvedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
+    release.evidence.reviewedChangeSetFingerprint = implementation.evidence.changeSetFingerprint;
+    const publication = plan.steps.find((step) => step.id === 'publication');
+    publication.status = WorkflowStepStatus.RUNNING;
+    publication.attempts = 1;
+    publication.evidence = {
+      type: 'publication-start',
+      skill: publication.skill,
+      specialist: publication.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+
+  const blocked = await instance.resume(created.id);
+  const publication = blocked.steps.find((step) => step.id === 'publication');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.pausedAt, null);
+  assert.equal(publication.error, 'interrupted_publication_state_uncertain');
+  await assert.rejects(instance.approve(created.id, 'publication'), /not awaiting human approval/);
+});
+
 test('workflow resume blocks an interrupted executable step until a human approves it', async () => {
   const instance = await engine();
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Recover safely' });
