@@ -23,7 +23,7 @@ export const RunStatus = Object.freeze({
 });
 
 const transitions = Object.freeze({
-  created: ['planning', 'cancelled'],
+  created: ['planning', 'failed', 'cancelled'],
   planning: ['working', 'waiting_approval', 'failed', 'cancelled'],
   working: ['testing', 'evaluating', 'worker_failed_retryable', 'waiting_approval', 'failed', 'cancelled'],
   worker_failed_retryable: ['working', 'failed', 'cancelled'],
