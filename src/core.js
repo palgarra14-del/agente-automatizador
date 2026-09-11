@@ -61,6 +61,16 @@ const protectedIgnoredPathspecs = Object.freeze([
   ':(glob)**/secrets/**', ':(glob)**/credentials/**', ':(glob)**/creds/**'
 ]);
 
+const workerSensitivePathspecs = Object.freeze([
+  '.env', '.env.local', '.env.development', '.env.test', '.env.staging', '.env.production',
+  '*.pem', '*.key',
+  'secrets/**', 'credentials/**', 'creds/**',
+  ':(glob)**/.env', ':(glob)**/.env.local', ':(glob)**/.env.development', ':(glob)**/.env.test',
+  ':(glob)**/.env.staging', ':(glob)**/.env.production',
+  ':(glob)**/*.pem', ':(glob)**/*.key',
+  ':(glob)**/secrets/**', ':(glob)**/credentials/**', ':(glob)**/creds/**'
+]);
+
 export function imageIsPinned(image) {
   return typeof image === 'string' && /@sha256:[a-f0-9]{64}$/i.test(image);
 }
@@ -793,6 +803,7 @@ export class WorkflowEngine {
     const repository = await this.localGit.inspect(project);
     const changeSet = await this.localGit.inspectChangeSet(project);
     const protectedIgnored = await this.localGit.inspectProtectedIgnoredState(project);
+    const workerSensitivePaths = await this.localGit.inspectWorkerSensitivePaths(project);
     return {
       repository: repository.repository,
       remote: repository.remote,
@@ -801,7 +812,8 @@ export class WorkflowEngine {
       status: repository.status,
       repositoryControl,
       changeSet,
-      protectedIgnored
+      protectedIgnored,
+      workerSensitivePaths
     };
   }
 
@@ -840,6 +852,23 @@ export class WorkflowEngine {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'read_only_workspace_integrity_failed';
         step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (before.workerSensitivePaths.length) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'worker_sensitive_files_present';
+        step.evidence = {
+          type: 'worker-preflight',
+          ok: false,
+          skill: step.skill,
+          registryFingerprint: saved.registryFingerprint,
+          projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+          paths: before.workerSensitivePaths
+        };
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -944,6 +973,23 @@ export class WorkflowEngine {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_implementation_workspace_integrity_failed';
         step.evidence = { type: 'executor', ok: false, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (before.workerSensitivePaths.length) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'worker_sensitive_files_present';
+        step.evidence = {
+          type: 'worker-preflight',
+          ok: false,
+          skill: step.skill,
+          registryFingerprint: saved.registryFingerprint,
+          projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+          paths: before.workerSensitivePaths
+        };
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
       });
@@ -2219,6 +2265,25 @@ export class LocalGitAdapter {
       digest.update('\0');
     }
     return { paths, fingerprint: digest.digest('hex') };
+  }
+
+  async inspectWorkerSensitivePaths(project) {
+    const trackedOrUntracked = await this.git(
+      ['ls-files', '--cached', '--others', '--exclude-standard', '--', ...workerSensitivePathspecs],
+      project,
+      { outputLimit: 64 * 1024 }
+    );
+    const ignored = await this.git(
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '--', ...workerSensitivePathspecs],
+      project,
+      { outputLimit: 64 * 1024 }
+    );
+    if (trackedOrUntracked.stdoutTruncated || ignored.stdoutTruncated) throw new Error('worker_sensitive_path_listing_too_large');
+    return [...new Set(
+      [...trackedOrUntracked.stdout.split(/\r?\n/), ...ignored.stdout.split(/\r?\n/)]
+        .filter(Boolean)
+        .map((path) => normalizeRepositoryPath(path, 'worker sensitive path'))
+    )].sort();
   }
 
   async inspectProtectedIgnoredState(project) {
