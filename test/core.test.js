@@ -1110,3 +1110,31 @@ test('deterministic evaluator fails incomplete engineering evidence', () => {
   assert.equal(evaluate({ worker: { ok: true } }, { retryable: true }).decision, 'NEEDS_RETRY');
   assert.equal(evaluate({ ci: { state: 'pending' } }).decision, 'WAITING');
 });
+
+
+test('project command runner counts Docker preflight once inside the command timeout budget', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-preflight-budget-'));
+  await mkdir(join(root, '.git'), { recursive: true });
+  const configured = configFrom({
+    id: 'budgeted', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    commands: { test: 'node --version' }, execution: { provider: 'container-required', image: 'node:22-bookworm-slim' },
+    budgets: { commandTimeoutMs: 1_000 }
+  }, root);
+  let clock = 0;
+  const calls = [];
+  const processRunner = async (_binary, args, options) => {
+    calls.push({ args, timeoutMs: options.timeoutMs });
+    if (args[0] === 'version') { clock += 300; return { ok: true, exitCode: 0, stdout: '27.0', stderr: '' }; }
+    if (args[0] === 'image') { clock += 300; return { ok: true, exitCode: 0, stdout: 'image', stderr: '' }; }
+    if (args[0] === 'run') return { ok: true, exitCode: 0, stdout: 'PASS', stderr: '', durationMs: 1 };
+    throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+  };
+  const containerExecution = new DockerContainerExecution({ processRunner, now: () => clock });
+  const runner = new ProjectCommandRunner({ containerExecution, now: () => clock });
+  const result = await runner.run(configured, 'test', { timeoutMs: 1_000 });
+  assert.equal(result.ok, true);
+  assert.equal(calls.filter(({ args }) => args[0] === 'version').length, 1);
+  assert.equal(calls.filter(({ args }) => args[0] === 'image').length, 1);
+  assert.equal(calls.filter(({ args }) => args[0] === 'run').length, 1);
+  assert.equal(calls.find(({ args }) => args[0] === 'run').timeoutMs, 400);
+});
