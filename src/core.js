@@ -3065,7 +3065,7 @@ export class GitHubAdapter {
   async checkRuns(project, sha, { perPage = 100, maxPages = 10 } = {}) {
     const collected = [];
     for (let page = 1; page <= maxPages; page += 1) {
-      const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs?per_page=${perPage}&page=${page}`));
+      const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs?filter=latest&per_page=${perPage}&page=${page}`));
       const batch = data.check_runs ?? [];
       collected.push(...batch);
       const total = Number.isInteger(data.total_count) ? data.total_count : null;
@@ -3090,6 +3090,15 @@ export class GitHubAdapter {
       this.checkRuns(project, sha),
       this.commitStatuses(project, sha)
     ]);
+    const latestStatuses = new Map();
+    for (const status of commitStatuses) {
+      const context = status.context;
+      if (typeof context !== 'string' || !context) continue;
+      const previous = latestStatuses.get(context);
+      const timestamp = Date.parse(status.updated_at ?? status.created_at ?? '');
+      const previousTimestamp = previous ? Date.parse(previous.updated_at ?? previous.created_at ?? '') : Number.NEGATIVE_INFINITY;
+      if (!previous || (Number.isFinite(timestamp) && (!Number.isFinite(previousTimestamp) || timestamp > previousTimestamp))) latestStatuses.set(context, status);
+    }
     const checks = checkRuns.map((check) => ({
       name: check.name,
       status: check.status,
@@ -3098,7 +3107,7 @@ export class GitHubAdapter {
       completedAt: check.completed_at,
       detailsUrl: check.details_url
     }));
-    const statuses = commitStatuses.map((status) => ({
+    const statuses = [...latestStatuses.values()].map((status) => ({
       context: status.context,
       state: status.state,
       description: status.description ?? null,
