@@ -93,6 +93,7 @@ test('workflow plan persists registry fingerprint and exact skill ids', () => {
   const project = configuredProject();
   const plan = createWorkflowPlan({ profile: 'app-improvement', project, goal: 'Inspect capabilities' });
   assert.equal(plan.registryFingerprint, defaultToolSkillRegistry.fingerprint);
+  assert.equal(plan.projectSkillPolicyFingerprint, defaultToolSkillRegistry.policyFingerprint(project.skills));
   assert.equal(plan.steps.find((step) => step.id === 'inspect-project').skill, 'code.inspect');
   assert.equal(plan.steps.find((step) => step.id === 'tests').skill, 'project.verify');
   assert.equal(validateWorkflowPlan(plan, new Map([[project.id, project]])).ok, true);
@@ -107,4 +108,18 @@ test('workflow validation fails closed on registry fingerprint or skill tamperin
   const skillTampered = createWorkflowPlan({ profile: 'app-improvement', project, goal: 'Reject skill tampering' });
   skillTampered.steps.find((step) => step.id === 'tests').skill = 'human.approval';
   assert.throws(() => validateWorkflowPlan(skillTampered, new Map([[project.id, project]])), /step skill/);
+});
+
+
+test('workflow validation fails closed when project skill policy changes after plan creation', () => {
+  const project = configuredProject();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project, goal: 'Freeze project capability policy' });
+  const changedProject = configuredProject({
+    skills: {
+      allow: ['project.verify', 'human.approval', 'code.inspect', 'code.implement', 'release.observe-ci', 'requirements.define'],
+      deny: []
+    }
+  });
+  assert.notEqual(defaultToolSkillRegistry.policyFingerprint(project.skills), defaultToolSkillRegistry.policyFingerprint(changedProject.skills));
+  assert.throws(() => validateWorkflowPlan(plan, new Map([[changedProject.id, changedProject]])), /project skill policy fingerprint/);
 });
