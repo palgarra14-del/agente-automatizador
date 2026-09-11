@@ -967,7 +967,7 @@ export class LocalSanitizedExecution extends ExecutionProvider {
 }
 
 export class DockerContainerExecution extends ExecutionProvider {
-  constructor({ processRunner = runProcess, dockerBinary = 'docker' } = {}) { super(); Object.assign(this, { processRunner, dockerBinary }); }
+  constructor({ processRunner = runProcess, dockerBinary = 'docker', now = () => Date.now() } = {}) { super(); Object.assign(this, { processRunner, dockerBinary, now }); }
 
   dockerClientOptions(timeoutMs = 5_000) {
     const environment = safeCommandEnvironment({ CI: 'true' });
@@ -975,16 +975,20 @@ export class DockerContainerExecution extends ExecutionProvider {
     return { timeoutMs, env: environment, inheritEnvironment: false, restrictEnvironment: true };
   }
 
-  async probe() {
-    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions());
+  async probe({ timeoutMs = 5_000 } = {}) {
+    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions(timeoutMs));
     return result.ok ? { available: true, provider: 'container', technology: 'docker', version: result.stdout.trim() || 'available' } : { available: false, provider: 'container', technology: 'docker', reason: clip(result.stderr || result.stdout || 'Docker daemon is unavailable', 300) };
   }
 
-  async availability(project) {
+  async availability(project, { timeoutMs = 5_000 } = {}) {
     const execution = project.execution;
-    const probe = await this.probe();
+    const deadlineAt = this.now() + timeoutMs;
+    const remaining = () => Math.max(0, deadlineAt - this.now());
+    if (remaining() <= 0) return { available: false, provider: 'container', image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: 'execution_provider_preflight_timeout' };
+    const probe = await this.probe({ timeoutMs: remaining() });
     if (!probe.available) return { ...probe, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image) };
-    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions());
+    if (remaining() <= 0) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: 'execution_provider_preflight_timeout' };
+    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions(remaining()));
     if (!image.ok) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
     return { ...probe, image: execution.image, imageAvailable: true, imagePinned: imageIsPinned(execution.image), sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only with read-only .git', secrets: 'no host credential or home mounts' };
   }
@@ -1026,14 +1030,17 @@ export class DockerContainerExecution extends ExecutionProvider {
     return { command, containerArgs, postWorker };
   }
 
-  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
     const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
-    const available = await this.availability(project);
+    const startedAt = this.now();
+    const available = preflight ?? await this.availability(project, { timeoutMs });
     if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
-    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(timeoutMs), cwd: project.workspace });
+    const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
+    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled' } };
+    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(remainingMs), cwd: project.workspace });
     let cleanup;
     if (result.timedOut) {
       const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
@@ -1044,12 +1051,12 @@ export class DockerContainerExecution extends ExecutionProvider {
 }
 
 export class ProjectCommandRunner {
-  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution() } = {}) { Object.assign(this, { localExecution, containerExecution }); }
+  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution(), now = () => Date.now() } = {}) { Object.assign(this, { localExecution, containerExecution, now }); }
 
-  async availability(project) {
+  async availability(project, { timeoutMs = 5_000 } = {}) {
     const execution = project.execution;
     if (execution.provider === 'local-sanitized') return this.localExecution.availability(project);
-    const container = await this.containerExecution.availability(project);
+    const container = await this.containerExecution.availability(project, { timeoutMs });
     if (container.available) return container;
     if (execution.provider === 'container' && execution.fallbackProvider === 'local-sanitized') {
       return { ...(await this.localExecution.availability(project)), configuredProvider: 'container', fallbackFrom: 'container', containerReason: container.reason };
@@ -1079,13 +1086,20 @@ export class ProjectCommandRunner {
   }
 
   async run(project, name, options = {}) {
-    const selected = await this.availability(project);
+    const timeoutMs = options.timeoutMs ?? project.budgets.commandTimeoutMs;
+    const startedAt = this.now();
+    const selected = await this.availability(project, { timeoutMs });
     if (!selected.available) {
       const { command } = commandInvocation(project, name);
       return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${selected.reason}`, execution: { provider: project.execution.provider, failSafe: true } };
     }
-    if (selected.provider === 'container') return this.containerExecution.execute(project, name, options);
-    return this.localExecution.execute(project, name, options);
+    const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
+    if (remainingMs <= 0) {
+      const { command } = commandInvocation(project, name);
+      return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: selected.provider, failSafe: true } };
+    }
+    if (selected.provider === 'container') return this.containerExecution.execute(project, name, { ...options, timeoutMs: remainingMs, preflight: selected });
+    return this.localExecution.execute(project, name, { ...options, timeoutMs: remainingMs });
   }
 }
 
