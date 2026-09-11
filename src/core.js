@@ -648,10 +648,133 @@ const workflowPlanStatuses = new Set([
   WorkflowStepStatus.PENDING, WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED,
   WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL
 ]);
+function boundedText(value, label, { required = false, max = 500 } = {}) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw new Error(`${label} is required`);
+    return '';
+  }
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`);
+  const normalized = value.trim();
+  if (required && !normalized) throw new Error(`${label} is required`);
+  if (normalized.length > max) throw new Error(`${label} exceeds ${max} characters`);
+  return normalized;
+}
+
+function boundedTextList(value, label, { required = false, min = required ? 1 : 0, max = 20, itemMax = 300 } = {}) {
+  if (value === undefined || value === null) value = [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length < min || value.length > max) throw new Error(`${label} must contain between ${min} and ${max} items`);
+  return value.map((item, index) => boundedText(item, `${label}[${index}]`, { required: true, max: itemMax }));
+}
+
+function assertObjectKeys(value, allowed, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unexpected.length) throw new Error(`${label} contains unknown fields: ${unexpected.join(', ')}`);
+}
+
+function normalizeOptionalContact(value = {}) {
+  assertObjectKeys(value, new Set(['phone', 'whatsapp', 'email', 'address', 'website']), 'businessBrief.contact');
+  return {
+    phone: boundedText(value.phone, 'businessBrief.contact.phone', { max: 80 }) || null,
+    whatsapp: boundedText(value.whatsapp, 'businessBrief.contact.whatsapp', { max: 80 }) || null,
+    email: boundedText(value.email, 'businessBrief.contact.email', { max: 160 }) || null,
+    address: boundedText(value.address, 'businessBrief.contact.address', { max: 240 }) || null,
+    website: boundedText(value.website, 'businessBrief.contact.website', { max: 240 }) || null
+  };
+}
+
+function normalizeBrand(value = {}) {
+  assertObjectKeys(value, new Set(['tone', 'primaryColor', 'secondaryColor', 'notes']), 'businessBrief.brand');
+  const color = (input, label) => {
+    const normalized = boundedText(input, label, { max: 7 });
+    if (normalized && !/^#[0-9a-fA-F]{6}$/.test(normalized)) throw new Error(`${label} must be a six-digit hex color`);
+    return normalized || null;
+  };
+  return {
+    tone: boundedText(value.tone, 'businessBrief.brand.tone', { max: 120 }) || null,
+    primaryColor: color(value.primaryColor, 'businessBrief.brand.primaryColor'),
+    secondaryColor: color(value.secondaryColor, 'businessBrief.brand.secondaryColor'),
+    notes: boundedText(value.notes, 'businessBrief.brand.notes', { max: 800 }) || null
+  };
+}
+
+function normalizeWebsiteIntent(value = {}) {
+  assertObjectKeys(value, new Set(['language', 'primaryGoal', 'requiredPages', 'requiredFeatures']), 'businessBrief.website');
+  return {
+    language: boundedText(value.language ?? 'es', 'businessBrief.website.language', { required: true, max: 32 }),
+    primaryGoal: boundedText(value.primaryGoal ?? 'contact', 'businessBrief.website.primaryGoal', { required: true, max: 120 }),
+    requiredPages: boundedTextList(value.requiredPages ?? ['home', 'services', 'contact'], 'businessBrief.website.requiredPages', { min: 1, max: 20, itemMax: 80 }),
+    requiredFeatures: boundedTextList(value.requiredFeatures ?? [], 'businessBrief.website.requiredFeatures', { max: 30, itemMax: 160 })
+  };
+}
+
+function normalizeBusinessAssets(value = {}) {
+  assertObjectKeys(value, new Set(['logoPath', 'photoPaths', 'notes']), 'businessBrief.assets');
+  const normalizeAssetPath = (input, label) => {
+    const text = boundedText(input, label, { max: 240 });
+    return text ? normalizeRepositoryPath(text, label) : null;
+  };
+  const photoPaths = value.photoPaths ?? [];
+  if (!Array.isArray(photoPaths) || photoPaths.length > 30) throw new Error('businessBrief.assets.photoPaths must contain at most 30 items');
+  return {
+    logoPath: normalizeAssetPath(value.logoPath, 'businessBrief.assets.logoPath'),
+    photoPaths: photoPaths.map((item, index) => normalizeAssetPath(item, `businessBrief.assets.photoPaths[${index}]`)),
+    notes: boundedText(value.notes, 'businessBrief.assets.notes', { max: 800 }) || null
+  };
+}
+
+export function normalizeBusinessBrief(value) {
+  assertObjectKeys(value, new Set(['version', 'businessName', 'category', 'summary', 'locations', 'services', 'contact', 'brand', 'website', 'facts', 'contentRestrictions', 'assets']), 'businessBrief');
+  if (value.version !== undefined && value.version !== 1) throw new Error('businessBrief.version must be 1');
+  if (!Array.isArray(value.services) || value.services.length < 1 || value.services.length > 20) throw new Error('businessBrief.services must contain between 1 and 20 items');
+  const services = value.services.map((service, index) => {
+    if (typeof service === 'string') return { name: boundedText(service, `businessBrief.services[${index}]`, { required: true, max: 120 }), description: null };
+    assertObjectKeys(service, new Set(['name', 'description']), `businessBrief.services[${index}]`);
+    return {
+      name: boundedText(service.name, `businessBrief.services[${index}].name`, { required: true, max: 120 }),
+      description: boundedText(service.description, `businessBrief.services[${index}].description`, { max: 500 }) || null
+    };
+  });
+  return safeJson({
+    version: 1,
+    businessName: boundedText(value.businessName, 'businessBrief.businessName', { required: true, max: 120 }),
+    category: boundedText(value.category, 'businessBrief.category', { required: true, max: 120 }),
+    summary: boundedText(value.summary, 'businessBrief.summary', { max: 1_200 }) || null,
+    locations: boundedTextList(value.locations, 'businessBrief.locations', { required: true, min: 1, max: 12, itemMax: 120 }),
+    services,
+    contact: normalizeOptionalContact(value.contact ?? {}),
+    brand: normalizeBrand(value.brand ?? {}),
+    website: normalizeWebsiteIntent(value.website ?? {}),
+    facts: boundedTextList(value.facts ?? [], 'businessBrief.facts', { max: 40, itemMax: 400 }),
+    contentRestrictions: boundedTextList(value.contentRestrictions ?? [], 'businessBrief.contentRestrictions', { max: 30, itemMax: 300 }),
+    assets: normalizeBusinessAssets(value.assets ?? {})
+  });
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+  return value;
+}
+
+function evidenceFingerprint(value) {
+  return createHash('sha256').update(JSON.stringify(canonicalValue(value))).digest('hex');
+}
+
+function normalizeWorkflowInput(profile, input) {
+  if (profile === 'website-build') {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => key !== 'businessBrief')) throw new Error('website-build requires input.businessBrief and no unknown workflow input fields');
+    return { businessBrief: normalizeBusinessBrief(input.businessBrief) };
+  }
+  if (input !== undefined && input !== null) throw new Error(`Workflow input is not supported for profile: ${profile}`);
+  return null;
+}
+
 const workflowProfiles = Object.freeze({
   'website-build': {
-    definitionOfDone: [{ id: 'implementationCompleted', steps: ['implementation'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
-    steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
+    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'app-improvement': {
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
@@ -673,7 +796,7 @@ function workflowBudget(input = {}) {
 }
 
 const workflowVerificationCommands = Object.freeze({
-  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint'], 'release-readiness': ['build'] }),
+  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint', 'build'] }),
   'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
   'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
 });
@@ -686,14 +809,14 @@ function workflowCommands(project, profile, stepId, type) {
 
 const workflowStepSkills = Object.freeze({
   'website-build': Object.freeze({
-    research: 'research.web',
-    'business-analysis': 'business.analyze',
-    requirements: 'requirements.define',
+    requirements: 'website.plan',
     design: 'human.approval',
     implementation: 'code.implement',
+    review: 'code.review',
     quality: 'project.verify',
     'visual-verification': 'human.approval',
-    'release-readiness': 'project.verify'
+    'release-readiness': 'human.approval',
+    publication: 'release.publish-reviewed-workflow'
   }),
   'app-improvement': Object.freeze({
     'inspect-project': 'code.inspect',
@@ -718,14 +841,14 @@ const workflowStepSkills = Object.freeze({
 
 const workflowStepSpecialists = Object.freeze({
   'website-build': Object.freeze({
-    research: 'researcher',
-    'business-analysis': 'business-analyst',
     requirements: 'requirements-engineer',
     design: 'human-supervisor',
     implementation: 'implementer',
+    review: 'change-critic',
     quality: 'verifier',
     'visual-verification': 'human-supervisor',
-    'release-readiness': 'verifier'
+    'release-readiness': 'human-supervisor',
+    publication: 'release-manager'
   }),
   'app-improvement': Object.freeze({
     'inspect-project': 'code-inspector',
