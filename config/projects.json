@@ -95,7 +95,8 @@
           "release.publish-pr",
           "project.bootstrap",
           "repository.observe",
-          "repository.publish"
+          "repository.publish",
+          "workspace.prepare"
         ],
         "deny": []
       }
@@ -201,7 +202,8 @@
           "release.observe-preview",
           "project.bootstrap",
           "repository.observe",
-          "repository.publish"
+          "repository.publish",
+          "workspace.prepare"
         ],
         "deny": []
       }
@@ -307,7 +309,8 @@
           "release.observe-preview",
           "project.bootstrap",
           "repository.observe",
-          "repository.publish"
+          "repository.publish",
+          "workspace.prepare"
         ],
         "deny": []
       }
