@@ -93,7 +93,8 @@
           "release.observe-ci",
           "release.publish-pr",
           "code.inspect",
-          "code.diagnose"
+          "code.diagnose",
+          "code.review"
         ],
         "deny": []
       }
@@ -197,7 +198,8 @@
           "release.publish-pr",
           "release.observe-preview",
           "code.inspect",
-          "code.diagnose"
+          "code.diagnose",
+          "code.review"
         ],
         "deny": []
       }
@@ -300,7 +302,8 @@
           "release.publish-pr",
           "release.observe-preview",
           "code.inspect",
-          "code.diagnose"
+          "code.diagnose",
+          "code.review"
         ],
         "deny": []
       }
