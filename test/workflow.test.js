@@ -106,10 +106,10 @@ test('workflow model usage state is persisted and fails closed on tampering', ()
   const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Persist model budget' });
   assert.equal(plan.modelUsage.maxCalls, configured.budgets.maxModelCalls);
   assert.equal(plan.modelUsage.calls, 0);
-  const missing = structuredClone(plan);
+  const missing = JSON.parse(JSON.stringify(plan));
   delete missing.modelUsage;
   assert.throws(() => validateWorkflowPlan(missing, new Map([[configured.id, configured]])), /workflow\.modelUsage is missing/);
-  const exceeded = structuredClone(plan);
+  const exceeded = JSON.parse(JSON.stringify(plan));
   exceeded.modelUsage.calls = exceeded.modelUsage.maxCalls + 1;
   exceeded.modelUsage.entries = Array.from({ length: exceeded.modelUsage.calls }, (_, index) => ({
     id: `model-call-${index + 1}`, status: 'started', surface: 'workflow', skill: 'code.inspect', stepId: 'inspect-project', specialist: 'code-inspector', attempt: 1,
