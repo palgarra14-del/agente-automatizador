@@ -1439,7 +1439,25 @@ export class WorkflowEngine {
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
     validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
-    if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, skill: step.skill, capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }), commands: step.commands })) };
+    if (dryRun) return {
+      ...plan,
+      dryRun: true,
+      plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null,
+      specialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+      plannedSteps: this.readySteps(plan).map((step) => {
+        const specialist = this.specialistRegistry.get(step.specialist);
+        return {
+          id: step.id,
+          type: step.type,
+          skill: step.skill,
+          specialist: step.specialist,
+          specialistMode: specialist.mode,
+          specialistAuthority: specialist.authority,
+          capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }),
+          commands: step.commands
+        };
+      })
+    };
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
