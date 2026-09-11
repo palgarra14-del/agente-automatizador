@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 import { URLSearchParams } from 'node:url';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
@@ -1869,9 +1870,108 @@ export class MockCodingWorker extends CodingWorker {
   async execute() { return { status: 'completed', summary: 'Mock worker performed no filesystem writes', output: '' }; }
 }
 
-function workerEnvironment() {
-  const allowed = ['APPDATA', 'CODEX_HOME', 'HOME', 'LOCALAPPDATA', 'PATH', 'SystemRoot', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE'];
-  return Object.fromEntries(allowed.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+function workerEnvironment(environment = process.env) {
+  const allowed = ['CODEX_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'];
+  return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
+}
+
+const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
+const workerProjectControlFiles = Object.freeze(['.codex/config.toml', '.codex/requirements.toml']);
+
+export function codexWorkerSecurityConfig({ writeAccess = false, pathValue = process.env.PATH ?? '', platform = process.platform } = {}) {
+  if (!verifiedCodexWorkerPlatforms.has(platform)) {
+    return { supported: false, error: `codex_worker_read_isolation_unverified_on_${platform}`, configOverrides: [] };
+  }
+  const workspaceAccess = writeAccess ? 'write' : 'read';
+  const filesystemProfile = `{":root"="deny",":minimal"="read",":tmpdir"="deny",":slash_tmp"="deny",":workspace_roots"={"."="${workspaceAccess}",".git"="read"}}`;
+  return {
+    supported: true,
+    error: null,
+    configOverrides: [
+      'approval_policy="never"',
+      'default_permissions="agent-workflow"',
+      `permissions.agent-workflow.filesystem=${filesystemProfile}`,
+      'permissions.agent-workflow.network.enabled=false',
+      'allow_login_shell=false',
+      'shell_environment_policy.inherit="none"',
+      `shell_environment_policy.set.PATH=${JSON.stringify(String(pathValue))}`,
+      'shell_environment_policy.set.CI="true"',
+      'project_doc_max_bytes=0',
+      'project_doc_fallback_filenames=[]',
+      'skills.include_instructions=false',
+      'skills.bundled.enabled=false',
+      'features.apps=false',
+      'features.plugins=false',
+      'features.connectors=false',
+      'features.browser_use=false',
+      'features.browser_use_external=false',
+      'features.browser_use_full_cdp_access=false',
+      'features.computer_use=false',
+      'features.in_app_browser=false',
+      'features.enable_mcp_apps=false',
+      'features.hooks=false',
+      'features.codex_hooks=false',
+      'features.plugin_hooks=false',
+      'features.collab=false',
+      'features.enable_fanout=false',
+      'features.multi_agent=false',
+      'features.multi_agent_v2.enabled=false',
+      'features.memories=false',
+      'features.memory_tool=false',
+      'features.external_agent_memory_import=false',
+      'agents.enabled=false',
+      'notify=[]',
+      'history.persistence="none"',
+      'ephemeral=true'
+    ]
+  };
+}
+
+async function assertWorkerProjectControlSurface(workspace) {
+  for (const relativePath of workerProjectControlFiles) {
+    const target = resolve(workspace, relativePath);
+    if (!isWithin(resolve(workspace), target)) throw new Error('worker_project_control_path_escape');
+    let info;
+    try { info = await lstat(target); }
+    catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (info.isSymbolicLink() || info.isFile() || info.isDirectory()) throw new Error(`worker_project_control_file_present:${relativePath}`);
+  }
+}
+
+async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
+  const isolatedHome = await mkdtemp(resolve(tmpdir(), 'agent-codex-home-'));
+  await chmod(isolatedHome, 0o700);
+  const sourceHome = resolve(sourceEnvironment.CODEX_HOME ?? resolve(sourceEnvironment.HOME ?? homedir(), '.codex'));
+  const sourceAuth = resolve(sourceHome, 'auth.json');
+  try {
+    const info = await lstat(sourceAuth);
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error('codex_auth_source_must_be_regular_file');
+    const targetAuth = resolve(isolatedHome, 'auth.json');
+    await copyFile(sourceAuth, targetAuth);
+    await chmod(targetAuth, 0o600);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      await rm(isolatedHome, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  return {
+    path: isolatedHome,
+    cleanup: async () => rm(isolatedHome, { recursive: true, force: true })
+  };
+}
+
+function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
+  const environment = {};
+  for (const name of ['PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
+    if (sourceEnvironment[name] !== undefined) environment[name] = sourceEnvironment[name];
+  }
+  environment.CODEX_HOME = isolatedHome;
+  environment.HOME = isolatedHome;
+  return environment;
 }
 
 export class CodexSdkWorker extends CodingWorker {
