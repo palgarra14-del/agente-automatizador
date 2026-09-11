@@ -617,3 +617,45 @@ test('completed workflow evidence cannot be replayed under a different skill or 
   fingerprintStep.evidence.registryFingerprint = '0'.repeat(64);
   assert.throws(() => validateWorkflowPlan(fingerprintPlan, new Map([['workflow-project', project()]])), /capability context/);
 });
+
+
+test('stale capability context blocks workflow approval and resume before mutation', async () => {
+  const instance = await engine();
+  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Freeze capability context' });
+  await instance.update(created.id, (plan) => {
+    for (const id of ['inspect-project', 'diagnose']) completeStep(plan, id);
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.pausedAt = plan.deadlineAt - plan.budgets.timeoutMs + 1;
+  });
+  const beforeApproval = structuredClone(await instance.get(created.id));
+  await instance.update(created.id, (plan) => { plan.registryFingerprint = '0'.repeat(64); });
+  await assert.rejects(instance.approve(created.id, 'plan-change'), /registry fingerprint/);
+  const afterApproval = await instance.get(created.id);
+  assert.equal(afterApproval.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(afterApproval.pausedAt, beforeApproval.pausedAt);
+
+  await instance.update(created.id, (plan) => {
+    plan.registryFingerprint = beforeApproval.registryFingerprint;
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.COMPLETED;
+    checkpoint.evidence = {
+      skill: checkpoint.skill,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      approvedAt: '2026-09-11T00:00:00.000Z'
+    };
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    implementation.status = WorkflowStepStatus.RUNNING;
+    plan.status = WorkflowStepStatus.RUNNING;
+    plan.pausedAt = null;
+  });
+  const beforeResume = structuredClone(await instance.get(created.id));
+  await instance.update(created.id, (plan) => { plan.projectSkillPolicyFingerprint = 'f'.repeat(64); });
+  await assert.rejects(instance.resume(created.id), /project skill policy fingerprint/);
+  const afterResume = await instance.get(created.id);
+  assert.equal(afterResume.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.RUNNING);
+  assert.equal(afterResume.status, WorkflowStepStatus.RUNNING);
+  assert.notEqual(afterResume.projectSkillPolicyFingerprint, beforeResume.projectSkillPolicyFingerprint);
+});
