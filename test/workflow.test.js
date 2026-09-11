@@ -90,10 +90,10 @@ function completeStep(plan, id) {
   return step;
 }
 
-function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills, acceptance = { require: ['test'] }, deployment = { provider: 'none' }, pullRequest } = {}) {
+function managedProject(id, root, { commands = { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, budgets, skills, acceptance = { require: ['test'] }, deployment = { provider: 'none' }, pullRequest, execution = { provider: 'local-sanitized' }, toolchain } = {}) {
   return configFrom({
     id, repository: { owner: 'owner', name: `${id}-repo` }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', workspaceStrategy: 'managed', managedWorkspaceRoot: '.managed-workspaces',
-    commands, acceptance, deployment, pullRequest, execution: { provider: 'local-sanitized' }, budgets, skills
+    commands, acceptance, deployment, pullRequest, execution, toolchain, budgets, skills
   }, join(root, id, 'config'));
 }
 
@@ -2084,6 +2084,7 @@ test('interrupted change critic with observed changes cannot be approved or retr
     implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
     implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
 
+    completeStep(plan, 'dependency-refresh');
     const review = plan.steps.find((step) => step.id === 'review');
     review.status = WorkflowStepStatus.RUNNING;
     review.attempts = 1;
