@@ -1181,14 +1181,16 @@ export class WorkspaceManager {
       const root = await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--show-toplevel'], { cwd: details.projectDirectory, timeoutMs });
       const remote = root.ok ? await this.processRunner('git', ['-C', details.workspace, 'remote', 'get-url', 'origin'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
       const head = root.ok && remote.ok ? await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--verify', 'HEAD^{commit}'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
-      if (root.ok && remote.ok && head.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project)) {
+      const currentBranch = head.ok ? await this.processRunner('git', ['-C', details.workspace, 'branch', '--show-current'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      const status = currentBranch.ok ? await this.processRunner('git', ['-C', details.workspace, 'status', '--porcelain'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      if (root.ok && remote.ok && head.ok && currentBranch.ok && status.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project) && currentBranch.stdout.trim() === project.defaultBranch && status.stdout.trim() === '') {
         return { ...details, remoteUrl, clone: { ok: true, reused: true, durationMs: 0, exitCode: 0 } };
       }
       const failedWorkspace = `${details.workspace}.failed-${randomUUID().slice(0, 8)}`;
       await rename(details.workspace, failedWorkspace);
     }
     await assertSafePathChain(details.workspace);
-    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
+    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--branch', project.defaultBranch, remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
       timeoutMs
     });
