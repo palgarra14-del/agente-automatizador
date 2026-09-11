@@ -654,8 +654,8 @@ const workflowProfiles = Object.freeze({
     steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
   },
   'app-improvement': {
-    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
-    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
@@ -703,7 +703,8 @@ const workflowStepSkills = Object.freeze({
     review: 'code.review',
     tests: 'project.verify',
     verification: 'project.verify',
-    'release-readiness': 'human.approval'
+    'release-readiness': 'human.approval',
+    publication: 'release.publish-reviewed-workflow'
   }),
   'data-analysis': Object.freeze({
     'inspect-data': 'data.inspect',
@@ -734,7 +735,8 @@ const workflowStepSpecialists = Object.freeze({
     review: 'change-critic',
     tests: 'verifier',
     verification: 'verifier',
-    'release-readiness': 'human-supervisor'
+    'release-readiness': 'human-supervisor',
+    publication: 'release-manager'
   }),
   'data-analysis': Object.freeze({
     'inspect-data': 'data-inspector',
