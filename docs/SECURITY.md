@@ -12,6 +12,14 @@ v0.7 adds an immutable Tool/Skill Registry as an additional authority boundary. 
 
 The registry fingerprint covers executable bindings, surfaces, risks, dependencies, and versioned input/output contracts. The normalized project-policy fingerprint is persisted with each run/workflow. Resume fails closed if either fingerprint changes, preventing a saved task from silently gaining permissions after a registry or project-policy update. Real Orchestrator actions still re-check the specific skill immediately before the operation; the preflight is defense in depth, not the sole gate.
 
+## v0.8 workflow execution
+
+Workflow read-only analysis and workspace-write implementation are separate authority levels. `code.inspect` and `code.diagnose` run with Codex `read-only`, approvals disabled, network disabled, and web search disabled. The engine independently snapshots repository identity, branch, HEAD, remote, and working-tree fingerprint before/after execution; a persistent mutation fails closed even if the model reports success.
+
+`code.implement` reuses the existing `CodexSdkWorker` in workspace-write mode. It receives sanitized workflow evidence and optional literal path scope, but no GitHub/Vercel/OpenAI token values. After execution, controlled Git code reasserts branch/HEAD/remote and evaluates actual changed paths/content with the existing immutable-path, scope, sensitive-change, and size budgets. A normal governed change can advance to verification; a sensitive change blocks, a forbidden/over-budget change fails, and a failed/timed-out worker that left files changed cannot be retried automatically.
+
+WorkflowEngine has no commit, push, PR, merge, domain, environment-variable, deployment, or production action. Those repository publication authorities remain in Orchestrator. Persisted execution leases prevent concurrent run/resume/approval from duplicating the same worker/command sequence. Interrupted worker state records its starting repository identity; if recovery observes changes or repository-state mutation, retry is blocked.
+
 ## Git and paths
 
 - Only an ID in `config/projects.json` is eligible for a run; the LLM cannot supply the repository URL, owner, repo, workspace root, or branch pattern.
