@@ -647,6 +647,25 @@ test('GitHub adapter treats a failing check run as failure even while a commit s
   assert.equal((await adapter.checks(project(), 'sha')).state, 'failure');
 });
 
+test('GitHub adapter evaluates only the latest status for each commit status context', async () => {
+  const responses = [
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [
+      { context: 'external', state: 'failure', updated_at: '2026-09-11T10:00:00Z' },
+      { context: 'external', state: 'success', updated_at: '2026-09-11T10:01:00Z' }
+    ]
+  ];
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async () => ({ ok: true, json: async () => responses.shift() })
+  });
+  const result = await adapter.checks(project(), 'sha');
+  assert.equal(result.state, 'success');
+  assert.equal(result.statuses.length, 1);
+  assert.equal(result.statuses[0].context, 'external');
+  assert.equal(result.statuses[0].state, 'success');
+});
+
 test('GitHub adapter paginates CI signals and observes failures beyond the first page', async () => {
   const checkPageOne = Array.from({ length: 100 }, (_, index) => ({ name: `check-${index}`, status: 'completed', conclusion: 'success' }));
   const statusPageOne = Array.from({ length: 100 }, (_, index) => ({ context: `status-${index}`, state: 'success' }));
@@ -671,7 +690,7 @@ test('GitHub adapter paginates CI signals and observes failures beyond the first
   assert.equal(result.state, 'failure');
   assert.equal(result.checks.length, 101);
   assert.equal(result.statuses.length, 101);
-  assert.equal(requested.some((url) => url.includes('check-runs?per_page=100&page=2')), true);
+  assert.equal(requested.some((url) => url.includes('check-runs?filter=latest&per_page=100&page=2')), true);
   assert.equal(requested.some((url) => url.includes('/statuses?per_page=100&page=2')), true);
 });
 
