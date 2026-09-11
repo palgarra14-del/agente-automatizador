@@ -608,20 +608,43 @@ test('default worker environment excludes GitHub, Vercel, and OpenAI credentials
   }
 });
 
-test('GitHub adapter maps check runs to pending, success, and failure without exposing its token', async () => {
+test('GitHub adapter requires both check runs and commit status contexts to be healthy', async () => {
   const responses = [
     { check_runs: [{ name: 'verify', status: 'in_progress', conclusion: null }] },
+    { statuses: [] },
     { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
-    { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'failure' }] }
+    { statuses: [{ context: 'external', state: 'success', description: 'ok', target_url: 'https://example.test/success' }] },
+    { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    { statuses: [{ context: 'external', state: 'failure', description: 'failed', target_url: 'https://example.test/failure' }] },
+    { check_runs: [] },
+    { statuses: [{ context: 'legacy-ci', state: 'success', description: 'ok', target_url: null }] },
+    { check_runs: [] },
+    { statuses: [] }
   ];
   const adapter = new GitHubAdapter({
     token: 'ghp_adapterToken',
     fetchImpl: async () => ({ ok: true, json: async () => responses.shift() })
   });
-  assert.equal((await adapter.checks(project(), 'sha')).state, 'pending');
+  const pending = await adapter.checks(project(), 'sha');
+  assert.equal(pending.state, 'pending');
+  const success = await adapter.checks(project(), 'sha');
+  assert.equal(success.state, 'success');
+  assert.equal(success.statuses[0].context, 'external');
+  const failedStatus = await adapter.checks(project(), 'sha');
+  assert.equal(failedStatus.state, 'failure');
+  assert.equal(failedStatus.statuses[0].state, 'failure');
   assert.equal((await adapter.checks(project(), 'sha')).state, 'success');
-  assert.equal((await adapter.checks(project(), 'sha')).state, 'failure');
+  assert.equal((await adapter.checks(project(), 'sha')).state, 'pending');
   assert.equal(maskSecrets('ghp_adapterToken').includes('ghp_adapterToken'), false);
+});
+
+test('GitHub adapter treats a failing check run as failure even while a commit status is pending', async () => {
+  const responses = [
+    { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'failure' }] },
+    { statuses: [{ context: 'external', state: 'pending' }] }
+  ];
+  const adapter = new GitHubAdapter({ token: 'ghp_adapterToken', fetchImpl: async () => ({ ok: true, json: async () => responses.shift() }) });
+  assert.equal((await adapter.checks(project(), 'sha')).state, 'failure');
 });
 
 test('LocalGitAdapter creates the working branch at the fetched remote base and rejects a changed base', async () => {
