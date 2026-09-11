@@ -2466,7 +2466,8 @@ export class LocalSanitizedExecution extends ExecutionProvider {
     return { available: true, provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'host-workspace', secrets: 'sanitized-environment-only', reason: 'Explicit local-sanitized provider; this is not container isolation.' };
   }
 
-  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false } = {}) {
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+    if (stage === 'dependency-refresh') return { name, command: project.commands[name] ?? null, ok: false, exitCode: null, stdout: '', stderr: 'dependency_refresh_requires_container_required', execution: { provider: 'local-sanitized', sandboxed: false, network: 'denied-by-policy' } };
     const { command, binary, args } = commandInvocation(project, name, { hostRuntime: true });
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'local-sanitized', sandboxed: false } };
     const result = await this.processRunner(binary, args, {
@@ -2516,10 +2517,13 @@ export class DockerContainerExecution extends ExecutionProvider {
   }
 
   commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git') } = {}) {
+    if (!['bootstrap', 'post-worker', 'dependency-refresh'].includes(stage)) throw new Error('Unknown execution stage');
+    if (stage === 'dependency-refresh' && name !== 'dependencyRefresh') throw new Error('Dependency refresh stage only allows dependencyRefresh');
     const execution = project.execution;
     const { command, binary, args } = commandInvocation(project, name);
     const workspace = resolve(project.workspace);
-    const postWorker = stage !== 'bootstrap';
+    const postWorker = stage === 'post-worker';
+    const networkEnabled = stage === 'bootstrap' || stage === 'dependency-refresh';
     const containerArgs = [
       'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
       '--workdir', '/workspace',
@@ -2538,28 +2542,29 @@ export class DockerContainerExecution extends ExecutionProvider {
       '--env', 'npm_config_cache=/tmp/npm-cache'
     ];
     for (const [key, value] of Object.entries(project.commandEnvironment)) containerArgs.push('--env', `${key}=${value}`);
-    if (postWorker) containerArgs.push('--network', 'none');
+    if (!networkEnabled) containerArgs.push('--network', 'none');
     containerArgs.push(execution.image, binary, ...args);
-    return { command, containerArgs, postWorker };
+    return { command, containerArgs, postWorker, stage, networkEnabled };
   }
 
   async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
-    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
-    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
+    const { command, containerArgs, postWorker, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
+    const networkPolicy = networkEnabled ? (stage === 'dependency-refresh' ? 'dependency-refresh-network-enabled' : 'bootstrap-network-enabled') : 'none';
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, stage, postWorkerNetwork: networkPolicy } };
     const startedAt = this.now();
     const available = preflight ?? await this.availability(project, { timeoutMs });
-    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
+    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, stage, postWorkerNetwork: networkPolicy } };
     const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
-    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled' } };
+    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, stage, postWorkerNetwork: networkPolicy } };
     const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(remainingMs), cwd: project.workspace });
     let cleanup;
     if (result.timedOut) {
       const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
       cleanup = { attempted: true, ok: Boolean(removed.ok), containerName };
     }
-    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled', filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
+    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, stage, postWorkerNetwork: networkPolicy, filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
   }
 }
 
@@ -2599,6 +2604,13 @@ export class ProjectCommandRunner {
   }
 
   async run(project, name, options = {}) {
+    const stage = options.stage ?? 'post-worker';
+    if (!['bootstrap', 'post-worker', 'dependency-refresh'].includes(stage)) throw new Error('Unknown execution stage');
+    if (stage === 'dependency-refresh') {
+      if (name !== 'dependencyRefresh') throw new Error('Dependency refresh stage only allows dependencyRefresh');
+      if (project.execution.provider !== 'container-required') throw new Error('Dependency refresh requires container-required execution');
+      if (project.commands.dependencyRefresh !== expectedDependencyRefreshCommand(project.toolchain)) throw new Error('Dependency refresh command no longer matches the frozen policy');
+    }
     const timeoutMs = options.timeoutMs ?? project.budgets.commandTimeoutMs;
     const startedAt = this.now();
     const selected = await this.availability(project, { timeoutMs });
