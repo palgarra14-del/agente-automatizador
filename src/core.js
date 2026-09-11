@@ -487,6 +487,7 @@ export const WorkflowStepStatus = Object.freeze({
 });
 
 const workflowStepTypes = new Set(['placeholder', 'command', 'verification', 'checkpoint']);
+const workflowBootstrapStatuses = new Set(['pending', 'running', 'completed', 'failed', 'not_required']);
 const workflowPlanStatuses = new Set([
   WorkflowStepStatus.PENDING, WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED,
   WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL
@@ -521,6 +522,11 @@ function workflowCommands(project, type) {
   return [];
 }
 
+function workflowBootstrap(project) {
+  const required = project.workspaceStrategy === 'managed' && Object.hasOwn(project.commands ?? {}, 'install');
+  return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
+}
+
 export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), nowMs = Date.now(), budgets } = {}) {
   const template = workflowProfiles[profile];
   if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
@@ -529,7 +535,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, outputBytes: 0, workspace: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]));
   return plan;
 }
@@ -583,6 +589,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
   if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
   if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
+  validateWorkflowBootstrap(plan.bootstrap, plan.workspace, project);
   return { ok: true, stepCount: plan.steps.length, budgets: budget };
 }
 
@@ -637,6 +644,10 @@ export class WorkflowEngine {
         step.status = WorkflowStepStatus.BLOCKED;
         step.error = 'interrupted_step_requires_human_approval';
       }
+      if (plan.bootstrap?.status === 'running') {
+        plan.bootstrap.status = 'pending';
+        plan.bootstrap.error = 'interrupted_bootstrap_requires_retry';
+      }
       if (plan.status === WorkflowStepStatus.RUNNING) plan.status = WorkflowStepStatus.BLOCKED;
     });
     return this.run(id, options);
@@ -646,6 +657,7 @@ export class WorkflowEngine {
 
   async failDeadline(id) {
     return this.update(id, (saved) => {
+      if (saved.bootstrap?.status === 'running') { saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_budget_deadline_exceeded'; }
       saved.status = WorkflowStepStatus.FAILED;
       saved.result = { error: 'workflow_budget_deadline_exceeded' };
     });
@@ -668,12 +680,48 @@ export class WorkflowEngine {
     return projectAtWorkspace(project, workspace.path);
   }
 
+  async bootstrapWorkspace(id, project, workspaceProject) {
+    let plan = await this.get(id);
+    const bootstrap = plan.bootstrap;
+    if (!bootstrap.required) return { ok: true, plan };
+    if (bootstrap.status === 'completed') {
+      if (bootstrap.workspacePath !== workspaceProject.workspace || bootstrap.projectId !== project.id) throw new Error('Workflow bootstrap does not match its workspace');
+      return { ok: true, plan };
+    }
+    if (bootstrap.status === 'running') throw new Error('Workflow bootstrap requires resume after interruption');
+    if (bootstrap.status === 'failed') return { ok: false, plan };
+    if (this.remainingMs(plan) <= 0) return { ok: false, plan: await this.failDeadline(id) };
+    plan = await this.update(id, (saved) => {
+      saved.bootstrap.status = 'running';
+      saved.bootstrap.workspacePath = workspaceProject.workspace;
+      saved.bootstrap.projectId = project.id;
+      saved.bootstrap.attempts += 1;
+      saved.bootstrap.error = null;
+    });
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) return { ok: false, plan: await this.failDeadline(id) };
+    const outcome = await this.commandRunner(workspaceProject, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'bootstrap' });
+    const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+    plan = await this.update(id, (saved) => {
+      saved.outputBytes += outputBytes;
+      saved.bootstrap.evidence = { name: 'install', ok: Boolean(outcome.ok), exitCode: outcome.exitCode ?? null, stdout: clip(outcome.stdout, 1_000), stderr: clip(outcome.stderr, 1_000) };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: saved.bootstrap.error };
+      } else if (outcome.ok) {
+        saved.bootstrap.status = 'completed'; saved.bootstrap.completedAt = new Date().toISOString(); saved.bootstrap.error = null;
+      } else {
+        saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_bootstrap_failed'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: saved.bootstrap.error };
+      }
+    });
+    return { ok: plan.bootstrap.status === 'completed', plan };
+  }
+
   async run(id, { dryRun = false } = {}) {
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
     validateWorkflowPlan(plan, this.projects);
-    if (dryRun) return { ...plan, dryRun: true, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
+    if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
       plan = await this.get(id);
@@ -682,6 +730,12 @@ export class WorkflowEngine {
       const next = this.readySteps(plan)[0];
       if (!next) break;
       if (next.type === 'checkpoint') return this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.AWAITING_APPROVAL; saved.status = WorkflowStepStatus.AWAITING_APPROVAL; });
+      if (next.type === 'command' || next.type === 'verification') {
+        const workspaceProject = await this.workspaceProject(id, project);
+        const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
+        if (!bootstrap.ok) return bootstrap.plan;
+        if (this.remainingMs(bootstrap.plan) <= 0) return this.failDeadline(id);
+      }
       await this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.RUNNING; step.attempts += 1; saved.status = WorkflowStepStatus.RUNNING; });
       let result = { ok: true, evidence: { type: next.type, completedAt: new Date().toISOString() } };
       if (next.type === 'command' || next.type === 'verification') {
@@ -1003,6 +1057,22 @@ function validateWorkflowWorkspace(workspace, project) {
   }
   if (workspace.managed !== (project.workspaceStrategy === 'managed')) throw new Error('Workflow workspace strategy does not match the project');
   projectAtWorkspace(project, workspace.path);
+}
+
+function validateWorkflowBootstrap(bootstrap, workspace, project) {
+  if (!project) {
+    if (!bootstrap || typeof bootstrap !== 'object' || !workflowBootstrapStatuses.has(bootstrap.status) || !Number.isInteger(bootstrap.attempts) || bootstrap.attempts < 0) throw new Error('Workflow bootstrap state is invalid');
+    return;
+  }
+  const expected = workflowBootstrap(project);
+  if (!bootstrap || typeof bootstrap !== 'object' || bootstrap.required !== expected.required || !workflowBootstrapStatuses.has(bootstrap.status) || bootstrap.command !== expected.command || !Number.isInteger(bootstrap.attempts) || bootstrap.attempts < 0) throw new Error('Workflow bootstrap state is invalid');
+  if (!expected.required) {
+    if (bootstrap.status !== 'not_required' || bootstrap.workspacePath !== null || bootstrap.projectId !== null || bootstrap.completedAt !== null) throw new Error('Workflow bootstrap must be not required for this project');
+    return;
+  }
+  if (bootstrap.status === 'not_required' || bootstrap.projectId !== project.id) throw new Error('Workflow bootstrap project is invalid');
+  if (bootstrap.workspacePath !== null && (!workspace || bootstrap.workspacePath !== workspace.path)) throw new Error('Workflow bootstrap does not match its workspace');
+  if (bootstrap.status === 'completed' && (!workspace || bootstrap.workspacePath !== workspace.path || !Number.isFinite(Date.parse(bootstrap.completedAt)) || !bootstrap.evidence || bootstrap.evidence.name !== 'install' || bootstrap.evidence.ok !== true)) throw new Error('Workflow bootstrap completion evidence is invalid');
 }
 
 export class WorkspaceManager {
