@@ -18,13 +18,23 @@ Workflow read-only analysis and workspace-write implementation are separate auth
 
 `code.implement` reuses the existing `CodexSdkWorker` in workspace-write mode. It receives sanitized workflow evidence and optional literal path scope, but no GitHub/Vercel/OpenAI token values. After execution, controlled Git code reasserts branch/HEAD/remote and evaluates actual changed paths/content with the existing immutable-path, scope, sensitive-change, and size budgets. A normal governed change can advance to verification; a sensitive change blocks, a forbidden/over-budget change fails, and a failed/timed-out worker that left files changed cannot be retried automatically.
 
-WorkflowEngine has no commit, push, PR, merge, domain, environment-variable, deployment, or production action. Those repository publication authorities remain in Orchestrator. Persisted execution leases prevent concurrent run/resume/approval from duplicating the same worker/command sequence. Interrupted worker state records its starting repository identity; if recovery observes changes or repository-state mutation, retry is blocked.
+The v0.8 execution path stopped before commit/push/PR. v0.11 adds only the dedicated reviewed-publication capability described below; merge, production deployment, domain/environment/secret mutation, and destructive/data actions remain unavailable. Persisted execution leases prevent concurrent run/resume/approval from duplicating the same worker/command sequence. Interrupted worker or critic state records its starting repository identity; if recovery observes changes or repository-state mutation, retry is blocked.
 
 ## Specialist and model-use integrity
 
 Specialist identity is evidence, not a permission source. Project skill policy remains authoritative, specialist mode must match the assigned skill risk, and specialist-registry fingerprints bind saved workflows to the reviewed specialist contract. Change Critic PASS evidence is structurally validated, tied to the exact implementation change-set fingerprint, and cannot authorize repository writes.
 
 Model-use accounting is also fail-closed. Saved runs/workflows must contain a model ledger whose maximum matches the active project configuration. Calls are reserved before execution; retries consume additional reservations; exceeding the cap stops before another model-backed executor runs. Reported token counts are evidence only and are never trusted to reduce the call count.
+
+## Reviewed publication boundary
+
+`release.publish-reviewed-workflow` is the only external-write skill exposed to WorkflowEngine. It depends on a single `workflow-publication` binding; the lower-level Git/GitHub/Vercel publisher/observer tools remain unavailable on the workflow surface. Project allow/deny policy, registry fingerprinting, specialist authority checks, and execution leases apply before publication.
+
+Publication requires a managed workspace and an `agent/<workflowId>` branch created from the exact configured default-branch SHA. Release approval is fingerprint-bound to the Change Critic-reviewed implementation. The worktree, protected ignored files, Git control state, branch, remote, change-set fingerprint, and current GitHub default-branch SHA are revalidated before writes. Default-branch drift before PR or before completion fails closed.
+
+The external-write sequence is persisted around each irreversible phase. If execution is interrupted while commit, push, or PR creation may have occurred, state becomes uncertain and cannot be approved/retried automatically. Only CI/preview observations are safe to resume; they do not repeat commit/push/PR and first revalidate the remote branch and PR against the recorded commit SHA.
+
+A completed publication requires exact commit-path/fingerprint evidence, remote-branch SHA equality, an open PR with exact head/base identity, successful CI, and—when required by project acceptance—a READY preview for that same non-production commit/branch. Publication completion never implies merge or production deployment.
 
 ## Git and paths
 

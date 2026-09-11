@@ -654,8 +654,8 @@ const workflowProfiles = Object.freeze({
     steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
   },
   'app-improvement': {
-    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
-    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
@@ -703,7 +703,8 @@ const workflowStepSkills = Object.freeze({
     review: 'code.review',
     tests: 'project.verify',
     verification: 'project.verify',
-    'release-readiness': 'human.approval'
+    'release-readiness': 'human.approval',
+    publication: 'release.publish-reviewed-workflow'
   }),
   'data-analysis': Object.freeze({
     'inspect-data': 'data.inspect',
@@ -734,7 +735,8 @@ const workflowStepSpecialists = Object.freeze({
     review: 'change-critic',
     tests: 'verifier',
     verification: 'verifier',
-    'release-readiness': 'human-supervisor'
+    'release-readiness': 'human-supervisor',
+    publication: 'release-manager'
   }),
   'data-analysis': Object.freeze({
     'inspect-data': 'data-inspector',
@@ -806,7 +808,7 @@ export function createWorkflowPlan({ profile, project, goal, scope = {}, now = (
   return plan;
 }
 
-function validateCompletedWorkflowEvidence(plan, step) {
+function validateCompletedWorkflowEvidence(plan, step, project = null) {
   if (step.status !== WorkflowStepStatus.COMPLETED) return;
   if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
   if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.specialist !== step.specialist || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint || step.evidence.specialistRegistryFingerprint !== plan.specialistRegistryFingerprint) {
@@ -828,10 +830,37 @@ function validateCompletedWorkflowEvidence(plan, step) {
       if (persistedReview.verdict !== 'PASS') throw new Error(`Completed change review requires PASS evidence: ${step.id}`);
       if (!implementation?.evidence?.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error(`Completed change review is not bound to the governed implementation: ${step.id}`);
     }
+    if (step.skill === 'release.publish-reviewed-workflow') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      const release = plan.steps.find((candidate) => candidate.id === 'release-readiness');
+      const expectedFingerprint = implementation?.evidence?.changeSetFingerprint;
+      const expectedPaths = [...(implementation?.evidence?.changeSet?.paths ?? [])].sort();
+      const commit = step.evidence.commit;
+      const push = step.evidence.push;
+      const pullRequest = step.evidence.pullRequest;
+      const ci = step.evidence.ci;
+      const preview = step.evidence.preview;
+      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote || step.evidence.finalBaseObservation?.head !== plan.workspace.baseHead || step.evidence.finalBaseObservation?.defaultBranch !== project.defaultBranch) throw new Error('Completed publication evidence does not match the managed workflow workspace');
+      if (!expectedFingerprint || step.evidence.reviewedChangeSetFingerprint !== expectedFingerprint || step.evidence.approvedChangeSetFingerprint !== expectedFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release?.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) throw new Error('Completed publication evidence is not bound to the reviewed implementation');
+      if (!commit || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit.finalHead ?? '') || commit.committedChangeSetFingerprint !== expectedFingerprint || JSON.stringify([...(commit.committedPaths ?? [])].sort()) !== JSON.stringify(expectedPaths)) throw new Error('Completed publication commit evidence is invalid');
+      if (!push || push.branch !== plan.workspace.workingBranch || push.finalHead !== commit.finalHead || push.remoteBranchHead !== commit.finalHead) throw new Error('Completed publication push evidence is invalid');
+      if (!pullRequest || !Number.isInteger(pullRequest.number) || pullRequest.number < 1 || typeof pullRequest.url !== 'string' || !pullRequest.url || pullRequest.state !== 'open' || pullRequest.headSha !== commit.finalHead || pullRequest.headRef !== plan.workspace.workingBranch || pullRequest.baseRef !== project.defaultBranch) throw new Error('Completed publication pull request evidence is invalid');
+      if (!ci || ci.state !== 'success') throw new Error('Completed publication requires successful CI evidence');
+      const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
+      if (previewRequired) {
+        if (!preview || preview.ok !== true || preview.state !== 'READY' || preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch) throw new Error('Completed publication requires a ready preview bound to the published commit');
+      } else if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
+    }
     return;
   }
   if (step.type === 'checkpoint') {
     if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    if (plan.profile === 'app-improvement' && step.id === 'release-readiness') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
+    }
     return;
   }
   if (step.type === 'command' || step.type === 'verification') {
@@ -870,7 +899,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
-    validateCompletedWorkflowEvidence(plan, step);
+    validateCompletedWorkflowEvidence(plan, step, project);
     ids.add(step.id);
   }
   for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
@@ -903,7 +932,17 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
   if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
   if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
-  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt) && plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval').length !== 1) throw new Error('Paused blocked workflow must represent one interrupted step');
+  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt)) {
+    const pausedBlocked = plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED);
+    const validPausedBlock = pausedBlocked.length === 1 && (
+      pausedBlocked[0].error === 'interrupted_step_requires_human_approval' ||
+      (
+        pausedBlocked[0].skill === 'release.publish-reviewed-workflow' &&
+        ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout', 'workflow_publication_preview_not_configured'].includes(pausedBlocked[0].error)
+      )
+    );
+    if (!validPausedBlock) throw new Error('Paused blocked workflow must represent one resumable interrupted or publication-observation step');
+  }
   if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
   if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
   if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
@@ -919,9 +958,10 @@ export function evaluateDefinitionOfDone(plan) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
-    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, commandRunner, now });
+    const resolvedPublicationBridge = publicationBridge ?? new WorkflowPublicationBridge({ localGit });
+    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, commandRunner, now });
   }
 
   async create(input) {
@@ -1357,6 +1397,306 @@ export class WorkflowEngine {
     return { ok: false, plan: failed };
   }
 
+  async stopPublication(id, stepId, error, { blocked = true, pause = false, phase = null, patch = {} } = {}) {
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      step.status = blocked ? WorkflowStepStatus.BLOCKED : WorkflowStepStatus.FAILED;
+      step.error = error;
+      step.evidence = {
+        ...(step.evidence ?? {}),
+        type: 'executor',
+        ok: false,
+        ...workflowEvidenceContext(saved, step),
+        ...(phase ? { phase } : {}),
+        ...safeJson(patch)
+      };
+      saved.status = step.status;
+      saved.pausedAt = pause ? (saved.pausedAt ?? this.now()) : null;
+      saved.result = { error, stepId: step.id, phase: step.evidence.phase ?? null };
+    });
+  }
+
+  async executePublicationWorkflowStep(id, project, next) {
+    let plan = await this.get(id);
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    const review = plan.steps.find((step) => step.id === 'review');
+    const release = plan.steps.find((step) => step.id === 'release-readiness');
+    const existing = next.evidence?.commit ? safeJson(next.evidence) : null;
+    const expectedFingerprint = implementation?.evidence?.changeSetFingerprint ?? null;
+    if (plan.profile !== 'app-improvement' || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || release?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !expectedFingerprint || review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) {
+      return this.stopPublication(id, next.id, 'workflow_publication_prerequisites_invalid', { blocked: false, phase: 'preflight' });
+    }
+    if (!plan.workspace?.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) {
+      return this.stopPublication(id, next.id, 'workflow_publication_workspace_invalid', { blocked: false, phase: 'preflight' });
+    }
+    if (next.attempts >= plan.budgets.maxAttempts) {
+      return this.stopPublication(id, next.id, 'workflow_publication_attempt_budget_exhausted', { blocked: false, phase: existing?.phase ?? 'preflight' });
+    }
+
+    const workspaceProject = await this.workspaceProject(id, project);
+
+    if (!existing) {
+      const governed = await this.guardImplementationChangeSet(id, project, next.id, 'before-publication');
+      if (!governed.ok) return governed.plan;
+      let base;
+      try { base = await this.publicationBridge.inspectBase(project); }
+      catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_observation_failed', { blocked: false, phase: 'preflight', patch: { error: clip(error.message, 1_000) } });
+      }
+      const expectedRepository = `${project.repository.owner}/${project.repository.name}`;
+      if (base.repository !== expectedRepository || base.defaultBranch !== project.defaultBranch || base.head !== plan.workspace.baseHead) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed', {
+          phase: 'preflight',
+          patch: { expectedBaseHead: plan.workspace.baseHead, observedBase: safeJson(base) }
+        });
+      }
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.RUNNING;
+        step.attempts += 1;
+        step.error = null;
+        step.evidence = {
+          type: 'executor',
+          ok: false,
+          ...workflowEvidenceContext(saved, step),
+          phase: 'preflight',
+          workspacePath: saved.workspace.path,
+          branch: saved.workspace.workingBranch,
+          baseHead: saved.workspace.baseHead,
+          remote: saved.workspace.remote,
+          reviewedChangeSetFingerprint: expectedFingerprint,
+          approvedChangeSetFingerprint: expectedFingerprint,
+          baseObservation: safeJson(base)
+        };
+        saved.status = WorkflowStepStatus.RUNNING;
+        saved.pausedAt = null;
+      });
+    } else {
+      if (!existing.push || !existing.pullRequest || existing.commit.committedChangeSetFingerprint !== expectedFingerprint) {
+        return this.stopPublication(id, next.id, 'workflow_publication_write_evidence_incomplete', { phase: existing.phase ?? 'unknown' });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.RUNNING;
+        step.attempts += 1;
+        step.error = null;
+        step.evidence = { ...step.evidence, type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+        saved.status = WorkflowStepStatus.RUNNING;
+        saved.pausedAt = null;
+      });
+      let remote;
+      let pullRequest;
+      let base;
+      try {
+        base = await this.publicationBridge.inspectBase(project);
+        remote = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, existing.commit.finalHead);
+        pullRequest = await this.publicationBridge.verifyPullRequest(project, existing.pullRequest.number, {
+          branch: plan.workspace.workingBranch,
+          commitHead: existing.commit.finalHead
+        });
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_remote_revalidation_failed', { phase: 'resume-preflight', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (base.head !== plan.workspace.baseHead || base.defaultBranch !== project.defaultBranch) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed', { blocked: false, phase: 'resume-preflight', patch: { observedBase: base } });
+      }
+      if (!remote.ok || !pullRequest.ok) {
+        return this.stopPublication(id, next.id, 'workflow_publication_remote_state_changed', { blocked: false, phase: 'resume-preflight', patch: { remote, pullRequest } });
+      }
+    }
+
+    plan = await this.get(id);
+    let evidence = plan.steps.find((step) => step.id === next.id).evidence;
+    let commit = evidence.commit ?? null;
+
+    if (!commit) {
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'commit-started' };
+      });
+      try {
+        commit = await this.publicationBridge.commit(workspaceProject, {
+          workflowId: plan.id,
+          goal: plan.goal,
+          branch: plan.workspace.workingBranch,
+          baseHead: plan.workspace.baseHead,
+          remote: plan.workspace.remote,
+          changeSetFingerprint: expectedFingerprint
+        });
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_commit_state_uncertain', { phase: 'commit-uncertain', patch: { error: clip(error.message, 1_000) } });
+      }
+      const expectedPaths = [...(implementation.evidence.changeSet?.paths ?? [])].sort();
+      const committedPaths = [...(commit.committedPaths ?? [])].sort();
+      if (commit.committedChangeSetFingerprint !== expectedFingerprint || JSON.stringify(committedPaths) !== JSON.stringify(expectedPaths) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit.finalHead ?? '')) {
+        return this.stopPublication(id, next.id, 'workflow_publication_commit_mismatch', { phase: 'commit-invalid', patch: { commit } });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'committed', commit: safeJson(commit) };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+    }
+
+    if (!evidence.push) {
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'push-started' };
+      });
+      let push;
+      let remoteBranch;
+      try {
+        push = await this.publicationBridge.push(workspaceProject, {
+          branch: plan.workspace.workingBranch,
+          commitHead: commit.finalHead,
+          remote: plan.workspace.remote
+        });
+        remoteBranch = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, commit.finalHead);
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_push_state_uncertain', { phase: 'push-uncertain', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (push.finalHead !== commit.finalHead || !remoteBranch.ok) {
+        return this.stopPublication(id, next.id, 'workflow_publication_remote_branch_mismatch', { phase: 'push-invalid', patch: { push, remoteBranch } });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'pushed', push: { ...safeJson(push), remoteBranchHead: remoteBranch.head } };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+    }
+
+    if (!evidence.pullRequest) {
+      let prePrBase;
+      try { prePrBase = await this.publicationBridge.inspectBase(project); }
+      catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_revalidation_failed', { phase: 'before-pr', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (prePrBase.head !== plan.workspace.baseHead || prePrBase.defaultBranch !== project.defaultBranch) {
+        return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed_after_push', { phase: 'before-pr', patch: { observedBase: prePrBase } });
+      }
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'pr-started' };
+      });
+      let created;
+      let observed;
+      try {
+        created = await this.publicationBridge.createPullRequest(project, {
+          workflowId: plan.id,
+          goal: plan.goal,
+          branch: plan.workspace.workingBranch,
+          commitHead: commit.finalHead,
+          changeSetFingerprint: expectedFingerprint
+        });
+        if (!Number.isInteger(created.number) || created.number < 1 || typeof created.url !== 'string' || !created.url) throw new Error('pull_request_creation_evidence_invalid');
+        observed = await this.publicationBridge.verifyPullRequest(project, created.number, {
+          branch: plan.workspace.workingBranch,
+          commitHead: commit.finalHead
+        });
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_pr_state_uncertain', { phase: 'pr-uncertain', patch: { error: clip(error.message, 1_000) } });
+      }
+      if (!observed.ok) {
+        return this.stopPublication(id, next.id, 'workflow_publication_pr_mismatch', { phase: 'pr-invalid', patch: { created, observed } });
+      }
+      const pullRequest = { number: observed.number, url: observed.url, state: observed.state, headSha: observed.headSha, headRef: observed.headRef, baseRef: observed.baseRef };
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'pr-created', pullRequest: safeJson(pullRequest) };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+    }
+
+    let ci = evidence.ci ?? null;
+    if (!ci || ci.state !== 'success') {
+      let remaining = this.remainingMs(await this.get(id));
+      if (remaining <= 0) return this.stopPublication(id, next.id, 'workflow_publication_ci_timeout', { pause: true, phase: 'ci-timeout' });
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'ci-observing' };
+      });
+      try {
+        ci = await this.publicationBridge.waitForCi(project, commit.finalHead, {
+          timeoutMs: Math.min(project.budgets.ciTimeoutMs, remaining),
+          pollIntervalMs: project.budgets.ciPollIntervalMs
+        });
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_ci_observation_failed', { blocked: false, phase: 'ci-error', patch: { error: clip(error.message, 1_000) } });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'ci-observed', ci: safeJson(ci) };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+      if (ci.state === 'failure') return this.stopPublication(id, next.id, 'workflow_publication_ci_failed', { blocked: false, phase: 'ci-failed', patch: { ci } });
+      if (ci.state !== 'success') {
+        const attempts = plan.steps.find((step) => step.id === next.id).attempts;
+        if (attempts >= plan.budgets.maxAttempts) return this.stopPublication(id, next.id, 'workflow_publication_observation_attempt_budget_exhausted', { blocked: false, phase: 'ci-timeout', patch: { ci } });
+        return this.stopPublication(id, next.id, 'workflow_publication_ci_timeout', { pause: true, phase: 'ci-timeout', patch: { ci } });
+      }
+    }
+
+    let preview = evidence.preview ?? null;
+    const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
+    if (!preview || (previewRequired && preview.state !== 'READY')) {
+      const remaining = this.remainingMs(await this.get(id));
+      if (remaining <= 0) return this.stopPublication(id, next.id, 'workflow_publication_preview_timeout', { pause: true, phase: 'preview-timeout' });
+      await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'preview-observing' };
+      });
+      try {
+        preview = await this.publicationBridge.waitForPreview(project, { commitSha: commit.finalHead, branch: plan.workspace.workingBranch }, {
+          timeoutMs: Math.min(project.budgets.deploymentTimeoutMs, remaining),
+          pollIntervalMs: project.budgets.deploymentPollIntervalMs
+        });
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_preview_observation_failed', { blocked: false, phase: 'preview-error', patch: { error: clip(error.message, 1_000) } });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'preview-observed', preview: safeJson(preview) };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+      if (previewRequired && preview.state === 'ERROR') return this.stopPublication(id, next.id, 'workflow_publication_preview_failed', { blocked: false, phase: 'preview-failed', patch: { preview } });
+      if (previewRequired && (preview.state === 'TIMEOUT' || preview.state === 'NOT_CONFIGURED' || preview.ok !== true)) {
+        const attempts = plan.steps.find((step) => step.id === next.id).attempts;
+        if (attempts >= plan.budgets.maxAttempts) return this.stopPublication(id, next.id, 'workflow_publication_observation_attempt_budget_exhausted', { blocked: false, phase: 'preview-timeout', patch: { preview } });
+        return this.stopPublication(id, next.id, preview.state === 'NOT_CONFIGURED' ? 'workflow_publication_preview_not_configured' : 'workflow_publication_preview_timeout', { pause: true, phase: 'preview-timeout', patch: { preview } });
+      }
+      if (!previewRequired && preview.ok !== true && preview.state !== 'NOT_REQUIRED') return this.stopPublication(id, next.id, 'workflow_publication_preview_observation_failed', { blocked: false, phase: 'preview-error', patch: { preview } });
+    }
+
+    let finalRemote;
+    let finalPullRequest;
+    let finalBase;
+    try {
+      finalBase = await this.publicationBridge.inspectBase(project);
+      finalRemote = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, commit.finalHead);
+      finalPullRequest = await this.publicationBridge.verifyPullRequest(project, evidence.pullRequest.number, {
+        branch: plan.workspace.workingBranch,
+        commitHead: commit.finalHead
+      });
+    } catch (error) {
+      return this.stopPublication(id, next.id, 'workflow_publication_final_revalidation_failed', { blocked: false, phase: 'final-revalidation', patch: { error: clip(error.message, 1_000) } });
+    }
+    if (finalBase.head !== plan.workspace.baseHead || finalBase.defaultBranch !== project.defaultBranch) {
+      return this.stopPublication(id, next.id, 'workflow_publication_base_head_changed_after_review', { blocked: false, phase: 'final-revalidation', patch: { finalBase } });
+    }
+    if (!finalRemote.ok || !finalPullRequest.ok) {
+      return this.stopPublication(id, next.id, 'workflow_publication_remote_state_changed', { blocked: false, phase: 'final-revalidation', patch: { finalRemote, finalPullRequest } });
+    }
+
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.COMPLETED;
+      step.error = null;
+      step.evidence = { ...step.evidence, type: 'executor', ok: true, phase: 'completed', completedAt: new Date().toISOString(), finalBaseObservation: safeJson(finalBase), ...workflowEvidenceContext(saved, step) };
+      saved.status = WorkflowStepStatus.PENDING;
+      saved.pausedAt = null;
+    });
+  }
+
   async approve(id, stepId) {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId));
   }
@@ -1376,7 +1716,15 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString() };
+      const releaseBinding = checkpointApproval && plan.profile === 'app-improvement' && step.id === 'release-readiness'
+        ? (() => {
+            const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+            const review = plan.steps.find((candidate) => candidate.id === 'review');
+            if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
+            return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
+          })()
+        : {};
+      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString(), ...releaseBinding };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -1401,7 +1749,35 @@ export class WorkflowEngine {
           saved.pausedAt ??= pausedAt;
         }
       });
+      const resumablePublication = plan.steps.find((step) =>
+        step.status === WorkflowStepStatus.BLOCKED &&
+        step.skill === 'release.publish-reviewed-workflow' &&
+        ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout', 'workflow_publication_preview_not_configured'].includes(step.error)
+      );
+      if (resumablePublication) {
+        await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === resumablePublication.id);
+          if (Number.isFinite(saved.pausedAt)) saved.deadlineAt += Math.max(0, this.now() - saved.pausedAt);
+          saved.pausedAt = null;
+          step.status = WorkflowStepStatus.READY;
+          step.error = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        });
+        return this.runUnlocked(id, options);
+      }
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+      if (interruptedStep?.skill === 'release.publish-reviewed-workflow') {
+        plan = await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === interruptedStep.id);
+          step.error = 'interrupted_publication_state_uncertain';
+          step.evidence = { ...step.evidence, type: 'interrupted-publication', ok: false };
+          saved.pausedAt = null;
+          saved.status = WorkflowStepStatus.BLOCKED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+        return plan;
+      }
       if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'code.implement'].includes(interruptedStep.skill)) {
         const project = this.projects.get(plan.projectId);
         const expected = interruptedStep.evidence?.repositoryState;
@@ -1478,11 +1854,24 @@ export class WorkflowEngine {
   async workspaceProject(id, project) {
     const plan = await this.get(id);
     const expected = this.workspaceManager.describe(project, plan.id);
+    const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
+    const publicationEnabled = plan.profile === 'app-improvement' && publicationCapability.available;
     if (plan.workspace) {
       validateWorkflowWorkspace(plan.workspace, project);
       if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
       if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
-      return projectAtWorkspace(project, plan.workspace.path);
+      const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
+      if (publicationEnabled) {
+        if (!plan.workspace.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) throw new Error('Workflow publication branch evidence is missing');
+        const publicationStep = plan.steps.find((step) => step.id === 'publication');
+        const persistedCommitHead = publicationStep?.evidence?.commit?.finalHead ?? null;
+        await this.localGit.assertRepositoryState(workspaceProject, {
+          branch: plan.workspace.workingBranch,
+          head: persistedCommitHead ?? plan.workspace.baseHead,
+          remote: plan.workspace.remote
+        });
+      }
+      return workspaceProject;
     }
     const remainingMs = this.remainingMs(plan);
     if (remainingMs <= 0) {
@@ -1507,7 +1896,14 @@ export class WorkflowEngine {
       }
       throw error;
     }
-    const workspace = workflowWorkspaceEvidence(project, allocation);
+    const allocatedProject = projectAtWorkspace(project, allocation.workspace);
+    let branchEvidence = null;
+    if (publicationEnabled) {
+      if (!allocation.managed) throw new Error('Reviewed workflow publication requires a managed workspace');
+      const initial = await this.localGit.inspect(allocatedProject);
+      branchEvidence = await this.localGit.prepareWorkingBranch(allocatedProject, plan.id, initial.initialHead);
+    }
+    const workspace = workflowWorkspaceEvidence(project, allocation, branchEvidence);
     validateWorkflowWorkspace(workspace, project);
     if (workspace.managed) await assertSafePathChain(workspace.path);
     await this.update(id, (saved) => { saved.workspace = workspace; });
@@ -1574,11 +1970,13 @@ export class WorkflowEngine {
       dryRun: true,
       plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null,
       specialistRegistryFingerprint: this.specialistRegistry.fingerprint,
-      plannedSteps: this.readySteps(plan).map((step) => {
+      plannedSteps: plan.steps.map((step) => {
         const specialist = this.specialistRegistry.get(step.specialist);
         return {
           id: step.id,
           type: step.type,
+          status: step.status,
+          dependsOn: [...step.dependsOn],
           skill: step.skill,
           specialist: step.specialist,
           specialistMode: specialist.mode,
@@ -1586,7 +1984,10 @@ export class WorkflowEngine {
           capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }),
           commands: step.commands
         };
-      })
+      }),
+      plannedExternalWrites: plan.steps
+        .filter((step) => this.specialistRegistry.get(step.specialist).authority === 'external-write')
+        .map((step) => ({ id: step.id, skill: step.skill, specialist: step.specialist }))
     };
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
@@ -1605,6 +2006,11 @@ export class WorkflowEngine {
       }
       if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && plan.profile === 'app-improvement') {
+        plan = await this.executePublicationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
@@ -1978,14 +2384,19 @@ export function projectAtWorkspace(project, workspace) {
   return { ...project, workspace: resolvedWorkspace };
 }
 
-function workflowWorkspaceEvidence(project, allocation) {
+function workflowWorkspaceEvidence(project, allocation, branchEvidence = null) {
   return {
     path: resolve(allocation.workspace),
     managed: Boolean(allocation.managed),
     projectId: project.id,
     repository: { owner: project.repository.owner, name: project.repository.name },
     initializedAt: new Date().toISOString(),
-    ...(allocation.remoteUrl ? { remoteUrl: allocation.remoteUrl } : {})
+    ...(allocation.remoteUrl ? { remoteUrl: allocation.remoteUrl } : {}),
+    ...(branchEvidence ? {
+      workingBranch: branchEvidence.workingBranch,
+      baseHead: branchEvidence.initialHead,
+      remote: branchEvidence.remote
+    } : {})
   };
 }
 
@@ -1995,6 +2406,10 @@ function validateWorkflowWorkspace(workspace, project) {
     throw new Error('Workflow workspace evidence is invalid');
   }
   if (workspace.managed !== (project.workspaceStrategy === 'managed')) throw new Error('Workflow workspace strategy does not match the project');
+  if (workspace.workingBranch !== undefined) {
+    if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(workspace.baseHead ?? '') || typeof workspace.remote !== 'string' || !workspace.remote || !remoteMatchesProject(workspace.remote, project)) throw new Error('Workflow publication branch evidence is invalid');
+    assertAllowedWorkingBranch(project, workspace.workingBranch);
+  } else if (workspace.baseHead !== undefined || workspace.remote !== undefined) throw new Error('Workflow publication branch evidence is incomplete');
   projectAtWorkspace(project, workspace.path);
 }
 
@@ -2627,6 +3042,23 @@ export class GitHubAdapter {
     return { number: pullRequest.number, url: pullRequest.html_url, state: pullRequest.state };
   }
 
+  async branchHead(project, branch) {
+    const data = await this.request(this.path(project, `/branches/${encodeURIComponent(branch)}`));
+    return { branch: data.name ?? branch, head: data.commit?.sha ?? null };
+  }
+
+  async pullRequest(project, number) {
+    const data = await this.request(this.path(project, `/pulls/${encodeURIComponent(number)}`));
+    return {
+      number: data.number,
+      url: data.html_url,
+      state: data.state,
+      headSha: data.head?.sha ?? null,
+      headRef: data.head?.ref ?? null,
+      baseRef: data.base?.ref ?? null
+    };
+  }
+
   async checks(project, sha) {
     const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`));
     const checks = (data.check_runs ?? []).map((check) => ({
@@ -2693,6 +3125,57 @@ export class VercelDeploymentProvider {
       await this.sleep(pollIntervalMs);
     }
   }
+}
+
+export class WorkflowPublicationBridge {
+  constructor({ localGit = new LocalGitAdapter(), github = new GitHubAdapter(), deploymentProvider = new VercelDeploymentProvider() } = {}) {
+    Object.assign(this, { localGit, github, deploymentProvider });
+  }
+
+  async inspectBase(project) { return this.github.inspect(project); }
+
+  async commit(project, context) {
+    return this.localGit.commit(project, context.branch, `publish ${context.goal}`, {
+      expectedChangeSetFingerprint: context.changeSetFingerprint,
+      expectedHead: context.baseHead,
+      expectedRemote: context.remote
+    });
+  }
+
+  async push(project, context) {
+    return this.localGit.push(project, context.branch, { expectedHead: context.commitHead, expectedRemote: context.remote });
+  }
+
+  async verifyRemoteBranch(project, branch, expectedHead) {
+    const observed = await this.github.branchHead(project, branch);
+    return { ...observed, ok: observed.branch === branch && observed.head === expectedHead };
+  }
+
+  async createPullRequest(project, context) {
+    const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
+    const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(context.goal, 90));
+    return this.github.createPullRequest(project, {
+      branch: context.branch,
+      title,
+      body: `Reviewed workflow ${context.workflowId}.\n\nThe change-set fingerprint ${context.changeSetFingerprint} passed the independent Change Critic, configured verification, and explicit release-readiness approval before publication.\n\nHuman review is required before merge. No merge or production deployment was performed.`
+    });
+  }
+
+  async verifyPullRequest(project, number, context) {
+    const observed = await this.github.pullRequest(project, number);
+    return {
+      ...observed,
+      ok: observed.number === number &&
+        observed.state === 'open' &&
+        observed.headSha === context.commitHead &&
+        observed.headRef === context.branch &&
+        observed.baseRef === project.defaultBranch
+    };
+  }
+
+  async waitForCi(project, sha, options) { return this.github.waitForCi(project, sha, options); }
+
+  async waitForPreview(project, context, options) { return this.deploymentProvider.waitForPreview(project, context, options); }
 }
 
 export class DeterministicPlanner {

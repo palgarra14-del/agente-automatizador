@@ -81,6 +81,21 @@ test('capability resolution distinguishes policy, binding, and execution surface
   assert.equal(research.reason, 'skill_not_allowed');
 });
 
+test('reviewed workflow publication is encapsulated behind one workflow authority', () => {
+  const publicationProject = configuredProject({
+    skills: { allow: ['release.publish-reviewed-workflow', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const publication = defaultToolSkillRegistry.resolve(publicationProject, 'release.publish-reviewed-workflow', { surface: 'workflow' });
+  assert.equal(publication.available, true);
+  assert.deepEqual(publication.tools.map((tool) => tool.id), ['workflow-publication']);
+  assert.deepEqual(defaultToolSkillRegistry.getTool('git-publish').surfaces, ['orchestrator']);
+  assert.deepEqual(defaultToolSkillRegistry.getTool('github-publish').surfaces, ['orchestrator']);
+  assert.deepEqual(defaultToolSkillRegistry.getTool('github-observe').surfaces, ['orchestrator']);
+  assert.deepEqual(defaultToolSkillRegistry.getTool('vercel-observe').surfaces, ['orchestrator']);
+  assert.equal(defaultToolSkillRegistry.resolve(publicationProject, 'repository.publish', { surface: 'workflow' }).available, false);
+  assert.equal(defaultToolSkillRegistry.resolve(publicationProject, 'release.publish-pr', { surface: 'workflow' }).available, false);
+});
+
 test('capability report never claims unbound future tools are available', () => {
   const project = configuredProject({
     skills: { allow: ['project.verify', 'human.approval', 'research.web'], deny: [] }

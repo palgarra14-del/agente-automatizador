@@ -38,13 +38,25 @@ Execution Integration adds persistent execution leases and connects reviewed wor
 
 Specialist Agents adds an immutable Specialist Registry, explicit specialist ownership for workflow steps, specialist-registry fingerprinting, authority/risk compatibility checks, persisted specialist evidence, and fail-closed resume on specialist-contract drift. App-improvement now includes an independent read-only Change Critic bound to the exact governed implementation fingerprint. Verification may proceed only after a structurally valid critic `PASS`; critic failure, malformed output, workspace mutation, or stale/replayed review evidence fails closed. Specialist ownership is visible in dry-runs and through `agent specialists`.
 
-## v0.10 — current
+## v0.10 — complete
 
 Model Budget Enforcement turns `maxModelCalls` into an actual persisted execution limit across Orchestrator and WorkflowEngine. A model call is reserved before invocation and remains consumed across interruption/crash, preventing retries from silently exceeding the cap. Usage reported by the Codex SDK is normalized into input/output token evidence and attributed by execution surface, skill, workflow step, specialist, and attempt. Registered projects currently cap each run/workflow at six model calls.
 
 v0.10 deliberately does not claim exact monetary spend enforcement: SDK usage may be absent for a call, in which case the call is still counted and marked as missing usage evidence. Token ceilings and price-based budgets remain future hardening work.
 
-WorkflowEngine still cannot commit, push, open PRs, merge, browse the web, or deploy. Browser/research/data-analysis executors remain deferred.
+v0.10 remains a call-count governor rather than an exact monetary spend cap: SDK usage may still be absent for individual calls.
+
+## v0.10.1 — complete
+
+Interrupted Change Critic recovery is now fail-closed. If a process dies during `code.review`, repository/worktree/control-state changes are checked before any retry can occur; an observed mutation becomes a non-approvable block.
+
+## v0.11 — current
+
+Reviewed Workflow Publication extends the app-improvement Definition of Done with a controlled review-only publication step. The workflow prepares its managed `agent/<workflowId>` branch before model execution, binds release-readiness approval to the exact reviewed change-set fingerprint, revalidates the unchanged default-branch base, commits the exact governed diff, pushes only the allowlisted review branch, creates and verifies a PR, waits for CI, and observes a required preview when configured.
+
+Publication is encapsulated behind one workflow-only `workflow-publication` authority. Low-level Git/GitHub/Vercel tools remain on the Orchestrator surface. Commit/push/PR phases persist before and after external writes; interrupted external-write state is never replayed automatically. CI/preview observation timeouts may resume without repeating writes. Merge, production deployment, domains, environment variables, secrets, and destructive/data actions remain unavailable to WorkflowEngine.
+
+Browser/research/data-analysis executors remain deferred.
 
 ## Deferred
 
