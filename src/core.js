@@ -1721,6 +1721,23 @@ export class WorkflowEngine {
           saved.pausedAt ??= pausedAt;
         }
       });
+      const resumablePublication = plan.steps.find((step) =>
+        step.status === WorkflowStepStatus.BLOCKED &&
+        step.skill === 'release.publish-reviewed-workflow' &&
+        ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout', 'workflow_publication_preview_not_configured'].includes(step.error)
+      );
+      if (resumablePublication) {
+        plan = await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === resumablePublication.id);
+          if (Number.isFinite(saved.pausedAt)) saved.deadlineAt += Math.max(0, this.now() - saved.pausedAt);
+          saved.pausedAt = null;
+          step.status = WorkflowStepStatus.READY;
+          step.error = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        });
+        return this.runUnlocked(id, options);
+      }
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
       if (interruptedStep?.skill === 'release.publish-reviewed-workflow') {
         plan = await this.update(id, (saved) => {
