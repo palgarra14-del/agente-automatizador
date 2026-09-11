@@ -720,6 +720,10 @@ export class WorkflowEngine {
   async approve(id, stepId) {
     const approvedAt = this.now();
     return this.update(id, (plan) => {
+      validateWorkflowPlan(plan, this.projects, this.registry);
+      const project = this.projects.get(plan.projectId);
+      const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
+      if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
       const step = plan.steps.find((candidate) => candidate.id === stepId);
       const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
       const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
@@ -736,6 +740,7 @@ export class WorkflowEngine {
   async resume(id, options = {}) {
     const pausedAt = this.now();
     await this.update(id, (plan) => {
+      validateWorkflowPlan(plan, this.projects, this.registry);
       let interrupted = false;
       for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
         step.status = WorkflowStepStatus.BLOCKED;
