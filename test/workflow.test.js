@@ -824,7 +824,6 @@ test('read-only workflow step fails closed if workspace changes despite read-onl
 });
 
 test('app-improvement implementation completes only after normal governed change evidence and verification', async () => {
-  const configured = project();
   let changeCalls = 0;
   const normalChange = changedChangeSet(['src/feature.js'], { additions: 3, diffLines: 3, changedBytes: 96 });
   const localGit = stableLocalGit({
@@ -861,7 +860,6 @@ test('app-improvement implementation completes only after normal governed change
 });
 
 test('implementation sensitive change blocks before verification', async () => {
-  const configured = project();
   let changeCalls = 0;
   const sensitiveChange = changedChangeSet(['package.json']);
   const localGit = stableLocalGit({ async inspectChangeSet() { changeCalls += 1; return changeCalls === 1 ? emptyChangeSet() : sensitiveChange; } });
