@@ -93,7 +93,7 @@ class FakeWorkflowWorkspaceManager {
 }
 
 class FakeWorkflowPublicationBridge {
-  constructor({ baseHead = 'a'.repeat(40), commitHead = 'b'.repeat(40), changeSet, ci = { state: 'success', checks: [], durationMs: 1 }, preview = { provider: 'none', state: 'NOT_REQUIRED', ok: true, durationMs: 0 }, failAt = null, onCommit = null } = {}) {
+  constructor({ baseHead = 'a'.repeat(40), commitHead = 'b'.repeat(40), changeSet, ci = { state: 'success', checks: [{ name: 'CI', status: 'completed', conclusion: 'success' }], statuses: [], durationMs: 1 }, preview = { provider: 'none', state: 'NOT_REQUIRED', ok: true, durationMs: 0 }, failAt = null, onCommit = null } = {}) {
     Object.assign(this, { baseHead, commitHead, changeSet, ci, preview, failAt, onCommit, calls: [] });
   }
   fail(name) { if (this.failAt === name) throw new Error(`fixture_${name}_failure`); }
@@ -1252,6 +1252,33 @@ test('reviewed workflow publication completes only with exact commit, push, PR, 
     () => validateWorkflowPlan(tampered, new Map([[configured.id, configured]])),
     /publication pull request evidence is invalid/
   );
+
+  const ciTampered = JSON.parse(JSON.stringify(completed));
+  const ciEvidence = ciTampered.steps.find((step) => step.id === 'publication').evidence.ci;
+  ciEvidence.state = 'success';
+  ciEvidence.checks = [{ name: 'CI', status: 'completed', conclusion: 'failure' }];
+  ciEvidence.statuses = [];
+  assert.throws(
+    () => validateWorkflowPlan(ciTampered, new Map([[configured.id, configured]])),
+    /internally consistent successful CI evidence/
+  );
+
+  const previewTampered = JSON.parse(JSON.stringify(completed));
+  previewTampered.steps.find((step) => step.id === 'publication').evidence.preview = {
+    provider: 'vercel', ok: true, state: 'READY', environment: 'preview',
+    commitSha: 'f'.repeat(40), branch: completed.workspace.workingBranch
+  };
+  assert.throws(
+    () => validateWorkflowPlan(previewTampered, new Map([[configured.id, configured]])),
+    /READY preview is not bound/
+  );
+
+  const baseTampered = JSON.parse(JSON.stringify(completed));
+  baseTampered.steps.find((step) => step.id === 'publication').evidence.finalBaseObservation.repository = 'owner/other';
+  assert.throws(
+    () => validateWorkflowPlan(baseTampered, new Map([[configured.id, configured]])),
+    /does not match the managed workflow workspace/
+  );
 });
 
 test('reviewed publication blocks before external writes when default branch head changed', async () => {
@@ -1371,7 +1398,7 @@ test('reviewed publication records CI failure after PR and never attempts previe
   });
   const publicationBridge = new FakeWorkflowPublicationBridge({
     baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
-    ci: { state: 'failure', checks: [{ name: 'CI', status: 'completed', conclusion: 'failure' }], durationMs: 1 }
+    ci: { state: 'failure', checks: [{ name: 'CI', status: 'completed', conclusion: 'failure' }], statuses: [], durationMs: 1 }
   });
   const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Observe CI failure' });
@@ -1442,7 +1469,7 @@ test('CI observation timeout resumes from the persisted PR without repeating com
   });
   const publicationBridge = new FakeWorkflowPublicationBridge({
     baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
-    ci: { state: 'timeout', checks: [], durationMs: 1 }
+    ci: { state: 'timeout', checks: [], statuses: [], durationMs: 1 }
   });
   const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge, now: () => clock });
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Resume CI observation' });
@@ -1455,7 +1482,7 @@ test('CI observation timeout resumes from the persisted PR without repeating com
   assert.equal(publicationBridge.calls.filter((name) => name === 'push').length, 1);
   assert.equal(publicationBridge.calls.filter((name) => name === 'createPullRequest').length, 1);
 
-  publicationBridge.ci = { state: 'success', checks: [{ name: 'CI', status: 'completed', conclusion: 'success' }], durationMs: 1 };
+  publicationBridge.ci = { state: 'success', checks: [{ name: 'CI', status: 'completed', conclusion: 'success' }], statuses: [], durationMs: 1 };
   clock += 5_000;
   const completed = await instance.resume(created.id);
   assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
@@ -1571,7 +1598,7 @@ test('publication observation resume fails closed if the remote review branch ch
   });
   const publicationBridge = new FakeWorkflowPublicationBridge({
     baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
-    ci: { state: 'timeout', checks: [], durationMs: 1 }
+    ci: { state: 'timeout', checks: [], statuses: [], durationMs: 1 }
   });
   const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge, now: () => clock });
   const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject remote tamper' });
@@ -1584,7 +1611,7 @@ test('publication observation resume fails closed if the remote review branch ch
     publicationBridge.calls.push('verifyRemoteBranch');
     return { branch: currentBranch, head: 'd'.repeat(40), ok: false };
   };
-  publicationBridge.ci = { state: 'success', checks: [], durationMs: 1 };
+  publicationBridge.ci = { state: 'success', checks: [{ name: 'CI', status: 'completed', conclusion: 'success' }], statuses: [], durationMs: 1 };
   clock += 1_000;
   const failed = await instance.resume(created.id);
   const publication = failed.steps.find((step) => step.id === 'publication');

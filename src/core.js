@@ -841,16 +841,16 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       const pullRequest = step.evidence.pullRequest;
       const ci = step.evidence.ci;
       const preview = step.evidence.preview;
-      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote || step.evidence.finalBaseObservation?.head !== plan.workspace.baseHead || step.evidence.finalBaseObservation?.defaultBranch !== project.defaultBranch) throw new Error('Completed publication evidence does not match the managed workflow workspace');
+      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote || step.evidence.finalBaseObservation?.repository !== `${project.repository.owner}/${project.repository.name}` || step.evidence.finalBaseObservation?.head !== plan.workspace.baseHead || step.evidence.finalBaseObservation?.defaultBranch !== project.defaultBranch) throw new Error('Completed publication evidence does not match the managed workflow workspace');
       if (!expectedFingerprint || step.evidence.reviewedChangeSetFingerprint !== expectedFingerprint || step.evidence.approvedChangeSetFingerprint !== expectedFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release?.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) throw new Error('Completed publication evidence is not bound to the reviewed implementation');
       if (!commit || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit.finalHead ?? '') || commit.committedChangeSetFingerprint !== expectedFingerprint || JSON.stringify([...(commit.committedPaths ?? [])].sort()) !== JSON.stringify(expectedPaths)) throw new Error('Completed publication commit evidence is invalid');
       if (!push || push.branch !== plan.workspace.workingBranch || push.finalHead !== commit.finalHead || push.remoteBranchHead !== commit.finalHead) throw new Error('Completed publication push evidence is invalid');
       if (!pullRequest || !Number.isInteger(pullRequest.number) || pullRequest.number < 1 || typeof pullRequest.url !== 'string' || !pullRequest.url || pullRequest.state !== 'open' || pullRequest.headSha !== commit.finalHead || pullRequest.headRef !== plan.workspace.workingBranch || pullRequest.baseRef !== project.defaultBranch) throw new Error('Completed publication pull request evidence is invalid');
-      if (!ci || ci.state !== 'success') throw new Error('Completed publication requires successful CI evidence');
+      if (!ci || !Array.isArray(ci.checks) || !Array.isArray(ci.statuses) || ci.state !== 'success' || ciState(ci.checks, ci.statuses) !== 'success') throw new Error('Completed publication requires internally consistent successful CI evidence');
       const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
-      if (previewRequired) {
-        if (!preview || preview.ok !== true || preview.state !== 'READY' || preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch) throw new Error('Completed publication requires a ready preview bound to the published commit');
-      } else if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
+      if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
+      if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch)) throw new Error('Completed publication READY preview is not bound to the published commit');
+      if (preview.state === 'NOT_REQUIRED' && (previewRequired || project.deployment?.provider === 'vercel')) throw new Error('Completed publication cannot omit configured preview evidence');
     }
     return;
   }
@@ -3001,10 +3001,13 @@ export class LocalGitAdapter {
   }
 }
 
-function ciState(checkRuns) {
-  if (!checkRuns.length || checkRuns.some((check) => check.status !== 'completed')) return 'pending';
-  const failures = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
-  return checkRuns.some((check) => failures.has(check.conclusion)) ? 'failure' : 'success';
+function ciState(checkRuns, statuses = []) {
+  const checkFailures = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
+  const statusFailures = new Set(['failure', 'error']);
+  if (checkRuns.some((check) => checkFailures.has(check.conclusion)) || statuses.some((status) => statusFailures.has(status.state))) return 'failure';
+  if (checkRuns.some((check) => check.status !== 'completed') || statuses.some((status) => status.state === 'pending')) return 'pending';
+  if (!checkRuns.length && !statuses.length) return 'pending';
+  return 'success';
 }
 
 export class GitHubAdapter {
@@ -3059,9 +3062,44 @@ export class GitHubAdapter {
     };
   }
 
+  async checkRuns(project, sha, { perPage = 100, maxPages = 10 } = {}) {
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs?filter=latest&per_page=${perPage}&page=${page}`));
+      const batch = data.check_runs ?? [];
+      collected.push(...batch);
+      const total = Number.isInteger(data.total_count) ? data.total_count : null;
+      if ((total !== null && collected.length >= total) || batch.length < perPage) return collected;
+    }
+    throw new Error('github_ci_check_runs_pagination_limit_exceeded');
+  }
+
+  async commitStatuses(project, sha, { perPage = 100, maxPages = 10 } = {}) {
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const batch = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/statuses?per_page=${perPage}&page=${page}`));
+      if (!Array.isArray(batch)) throw new Error('github_ci_statuses_response_invalid');
+      collected.push(...batch);
+      if (batch.length < perPage) return collected;
+    }
+    throw new Error('github_ci_statuses_pagination_limit_exceeded');
+  }
+
   async checks(project, sha) {
-    const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`));
-    const checks = (data.check_runs ?? []).map((check) => ({
+    const [checkRuns, commitStatuses] = await Promise.all([
+      this.checkRuns(project, sha),
+      this.commitStatuses(project, sha)
+    ]);
+    const latestStatuses = new Map();
+    for (const status of commitStatuses) {
+      const context = status.context;
+      if (typeof context !== 'string' || !context) continue;
+      const previous = latestStatuses.get(context);
+      const timestamp = Date.parse(status.updated_at ?? status.created_at ?? '');
+      const previousTimestamp = previous ? Date.parse(previous.updated_at ?? previous.created_at ?? '') : Number.NEGATIVE_INFINITY;
+      if (!previous || (Number.isFinite(timestamp) && (!Number.isFinite(previousTimestamp) || timestamp > previousTimestamp))) latestStatuses.set(context, status);
+    }
+    const checks = checkRuns.map((check) => ({
       name: check.name,
       status: check.status,
       conclusion: check.conclusion,
@@ -3069,7 +3107,15 @@ export class GitHubAdapter {
       completedAt: check.completed_at,
       detailsUrl: check.details_url
     }));
-    return { state: ciState(checks), checks };
+    const statuses = [...latestStatuses.values()].map((status) => ({
+      context: status.context,
+      state: status.state,
+      description: status.description ?? null,
+      targetUrl: status.target_url ?? null,
+      createdAt: status.created_at ?? null,
+      updatedAt: status.updated_at ?? null
+    }));
+    return { state: ciState(checks, statuses), checks, statuses };
   }
 
   async waitForCi(project, sha, { timeoutMs, pollIntervalMs }) {

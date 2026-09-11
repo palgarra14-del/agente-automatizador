@@ -608,20 +608,102 @@ test('default worker environment excludes GitHub, Vercel, and OpenAI credentials
   }
 });
 
-test('GitHub adapter maps check runs to pending, success, and failure without exposing its token', async () => {
+test('GitHub adapter requires both check runs and commit status contexts to be healthy', async () => {
   const responses = [
-    { check_runs: [{ name: 'verify', status: 'in_progress', conclusion: null }] },
-    { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
-    { check_runs: [{ name: 'verify', status: 'completed', conclusion: 'failure' }] }
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'in_progress', conclusion: null }] },
+    [],
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [{ context: 'external', state: 'success', description: 'ok', target_url: 'https://example.test/success' }],
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [{ context: 'external', state: 'failure', description: 'failed', target_url: 'https://example.test/failure' }],
+    { total_count: 0, check_runs: [] },
+    [{ context: 'legacy-ci', state: 'success', description: 'ok', target_url: null }],
+    { total_count: 0, check_runs: [] },
+    []
   ];
   const adapter = new GitHubAdapter({
     token: 'ghp_adapterToken',
     fetchImpl: async () => ({ ok: true, json: async () => responses.shift() })
   });
-  assert.equal((await adapter.checks(project(), 'sha')).state, 'pending');
+  const pending = await adapter.checks(project(), 'sha');
+  assert.equal(pending.state, 'pending');
+  const success = await adapter.checks(project(), 'sha');
+  assert.equal(success.state, 'success');
+  assert.equal(success.statuses[0].context, 'external');
+  const failedStatus = await adapter.checks(project(), 'sha');
+  assert.equal(failedStatus.state, 'failure');
+  assert.equal(failedStatus.statuses[0].state, 'failure');
   assert.equal((await adapter.checks(project(), 'sha')).state, 'success');
-  assert.equal((await adapter.checks(project(), 'sha')).state, 'failure');
+  assert.equal((await adapter.checks(project(), 'sha')).state, 'pending');
   assert.equal(maskSecrets('ghp_adapterToken').includes('ghp_adapterToken'), false);
+});
+
+test('GitHub adapter treats a failing check run as failure even while a commit status is pending', async () => {
+  const responses = [
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'failure' }] },
+    [{ context: 'external', state: 'pending' }]
+  ];
+  const adapter = new GitHubAdapter({ token: 'ghp_adapterToken', fetchImpl: async () => ({ ok: true, json: async () => responses.shift() }) });
+  assert.equal((await adapter.checks(project(), 'sha')).state, 'failure');
+});
+
+test('GitHub adapter evaluates only the latest status for each commit status context', async () => {
+  const responses = [
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [
+      { context: 'external', state: 'failure', updated_at: '2026-09-11T10:00:00Z' },
+      { context: 'external', state: 'success', updated_at: '2026-09-11T10:01:00Z' }
+    ]
+  ];
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async () => ({ ok: true, json: async () => responses.shift() })
+  });
+  const result = await adapter.checks(project(), 'sha');
+  assert.equal(result.state, 'success');
+  assert.equal(result.statuses.length, 1);
+  assert.equal(result.statuses[0].context, 'external');
+  assert.equal(result.statuses[0].state, 'success');
+});
+
+test('GitHub adapter paginates CI signals and observes failures beyond the first page', async () => {
+  const checkPageOne = Array.from({ length: 100 }, (_, index) => ({ name: `check-${index}`, status: 'completed', conclusion: 'success' }));
+  const statusPageOne = Array.from({ length: 100 }, (_, index) => ({ context: `status-${index}`, state: 'success' }));
+  const requested = [];
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async (url) => {
+      requested.push(url);
+      const checkRuns = url.includes('/check-runs');
+      const pageTwo = url.includes('page=2');
+      const body = checkRuns
+        ? (pageTwo
+            ? { total_count: 101, check_runs: [{ name: 'late-check', status: 'completed', conclusion: 'failure' }] }
+            : { total_count: 101, check_runs: checkPageOne })
+        : (pageTwo
+            ? [{ context: 'late-status', state: 'success' }]
+            : statusPageOne);
+      return { ok: true, json: async () => body };
+    }
+  });
+  const result = await adapter.checks(project(), 'sha');
+  assert.equal(result.state, 'failure');
+  assert.equal(result.checks.length, 101);
+  assert.equal(result.statuses.length, 101);
+  assert.equal(requested.some((url) => url.includes('check-runs?filter=latest&per_page=100&page=2')), true);
+  assert.equal(requested.some((url) => url.includes('/statuses?per_page=100&page=2')), true);
+});
+
+test('GitHub adapter fails closed when CI pagination exceeds its bounded evidence limit', async () => {
+  const fullPage = Array.from({ length: 100 }, (_, index) => ({ context: `status-${index}`, state: 'success' }));
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async (url) => ({
+      ok: true,
+      json: async () => url.includes('/check-runs') ? { total_count: 0, check_runs: [] } : fullPage
+    })
+  });
+  await assert.rejects(adapter.checks(project(), 'sha'), /github_ci_statuses_pagination_limit_exceeded/);
 });
 
 test('LocalGitAdapter creates the working branch at the fetched remote base and rejects a changed base', async () => {
