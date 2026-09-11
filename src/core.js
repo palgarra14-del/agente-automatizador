@@ -855,7 +855,8 @@ export class WorkflowEngine {
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
-        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint
+        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
+        repositoryControlFingerprint: before.repositoryControl.fingerprint
       };
       saved.status = WorkflowStepStatus.RUNNING;
     });
@@ -897,6 +898,8 @@ export class WorkflowEngine {
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
         protectedIgnoredBeforeFingerprint: before.protectedIgnored.fingerprint,
         protectedIgnoredAfterFingerprint: after?.protectedIgnored?.fingerprint ?? null,
+        repositoryControlBeforeFingerprint: before.repositoryControl.fingerprint,
+        repositoryControlAfterFingerprint: after?.repositoryControl?.fingerprint ?? null,
         error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
@@ -966,7 +969,8 @@ export class WorkflowEngine {
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
-        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint
+        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
+        repositoryControlFingerprint: before.repositoryControl.fingerprint
       };
       saved.status = WorkflowStepStatus.RUNNING;
     });
@@ -989,7 +993,10 @@ export class WorkflowEngine {
     let repositoryIntegrityError = null;
     let changeSet = null;
     let protectedIgnored;
+    let repositoryControl;
     try {
+      repositoryControl = await this.localGit.inspectRepositoryControlState(workspaceProject);
+      if (repositoryControl.fingerprint !== before.repositoryControl.fingerprint) throw new Error('repository_control_state_changed');
       await this.localGit.assertRepositoryState(workspaceProject, { branch: before.branch, head: before.head, remote: before.remote });
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
       protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
@@ -1013,6 +1020,7 @@ export class WorkflowEngine {
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
+        repositoryControlFingerprint: before.repositoryControl.fingerprint,
         workerEvidence: {
           status: worker.status,
           summary: clip(worker.summary, 1_000),
