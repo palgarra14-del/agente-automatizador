@@ -1131,7 +1131,7 @@ export class WorkflowEngine {
           current.remote !== expected.remote;
         const filesChanged = Boolean(changeSet?.paths?.length);
         if (repositoryChanged || filesChanged) {
-          plan = await this.update(id, (saved) => {
+          await this.update(id, (saved) => {
             const step = saved.steps.find((item) => item.id === interruptedStep.id);
             const readOnly = step.skill === 'code.inspect' || step.skill === 'code.diagnose';
             step.error = readOnly ? 'interrupted_read_only_changes_detected' : 'interrupted_implementation_changes_detected';
