@@ -532,7 +532,7 @@ test('worker prompt redacts secrets and Codex SDK receives isolated permission-p
         run: async (prompt, turnOptions) => {
           invocation.prompt = prompt;
           invocation.turnOptions = turnOptions;
-          return { finalResponse: 'changed one fixture', usage: { input_tokens: 1 } };
+          return { finalResponse: 'Authorization: Bearer WRITE_SECRET_TOKEN_123456789', usage: { input_tokens: 1 } };
         }
       };
     }
@@ -578,6 +578,8 @@ test('worker prompt redacts secrets and Codex SDK receives isolated permission-p
   assert.equal(Object.hasOwn(invocation.threadOptions, 'sandboxMode'), false);
   assert.equal(Object.hasOwn(invocation.threadOptions, 'networkAccessEnabled'), false);
   assert.equal(invocation.prompt.includes('ghp_hiddenToken'), false);
+  assert.equal(result.output.includes('WRITE_SECRET_TOKEN_123456789'), false);
+  assert.match(result.output, /\[REDACTED\]/);
   assert.equal(invocation.prompt.includes('hidden'), false);
   assert.equal(buildWorkerPrompt({ authorization: 'Bearer abcdef123456' }).includes('abcdef123456'), false);
 });
