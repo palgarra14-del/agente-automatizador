@@ -1872,6 +1872,7 @@ export class Orchestrator {
   }
 
   async simulateDryRun(run, project) {
+    this.assertRunCapabilityContext(run, project);
     this.requireSkill(project, 'repository.observe');
     const capabilityPlan = this.requiredSkills(project).map((skillId) => this.registry.resolve(project, skillId, { surface: 'orchestrator' }));
     const repository = await this.github.inspect(project);
