@@ -78,6 +78,10 @@ export class ToolSkillRegistry {
     return Object.freeze({ allow: Object.freeze([...new Set(allow)].sort()), deny: Object.freeze([...new Set(deny)].sort()) });
   }
 
+  policyFingerprint(policy = {}) {
+    return fingerprint(this.validateProjectPolicy(policy));
+  }
+
   resolve(project, skillId, { surface = 'workflow' } = {}) {
     if (!['workflow', 'orchestrator'].includes(surface)) throw new Error('Unknown capability surface');
     const skill = this.skills.get(skillId);
@@ -102,6 +106,7 @@ export class ToolSkillRegistry {
   report(project, { surface = 'workflow' } = {}) {
     return {
       registryFingerprint: this.fingerprint,
+      projectPolicyFingerprint: this.policyFingerprint(project?.skills ?? {}),
       projectId: project?.id ?? null,
       surface,
       skills: [...this.skills.keys()].sort().map((id) => this.resolve(project, id, { surface }))
