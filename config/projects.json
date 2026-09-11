@@ -300,7 +300,6 @@
         "allow": [
           "workspace.prepare",
           "project.verify",
-          "project.dependencies.refresh",
           "human.approval",
           "repository.observe",
           "repository.publish",
