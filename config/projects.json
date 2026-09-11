@@ -94,7 +94,8 @@
           "release.publish-pr",
           "code.inspect",
           "code.diagnose",
-          "code.review"
+          "code.review",
+          "release.publish-reviewed-workflow"
         ],
         "deny": []
       }
@@ -199,7 +200,8 @@
           "release.observe-preview",
           "code.inspect",
           "code.diagnose",
-          "code.review"
+          "code.review",
+          "release.publish-reviewed-workflow"
         ],
         "deny": []
       }
@@ -303,7 +305,8 @@
           "release.observe-preview",
           "code.inspect",
           "code.diagnose",
-          "code.review"
+          "code.review",
+          "release.publish-reviewed-workflow"
         ],
         "deny": []
       }
