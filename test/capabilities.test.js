@@ -219,3 +219,22 @@ test('custom registry can validate project configuration and workflow execution 
   assert.deepEqual(configured.skills.allow, ['custom.skill', 'human.approval', 'project.verify']);
   assert.equal(registry.resolve(configured, 'custom.skill', { surface: 'workflow' }).available, true);
 });
+
+
+test('default project policy does not pre-authorize future capabilities', () => {
+  const configured = configFrom({
+    id: 'least-privilege-default',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' }
+  });
+  for (const skillId of ['research.web', 'visual.review', 'code.inspect', 'requirements.define', 'data.inspect', 'data.analyze', 'data.summarize']) {
+    const resolution = defaultToolSkillRegistry.resolve(configured, skillId, { surface: 'orchestrator' });
+    assert.equal(resolution.allowed, false, skillId);
+    assert.equal(resolution.available, false, skillId);
+    assert.equal(resolution.reason, 'skill_not_allowed', skillId);
+  }
+});
