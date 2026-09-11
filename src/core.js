@@ -54,7 +54,8 @@ const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credentia
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
-const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
+const dependencyControlPaths = Object.freeze(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json']);
+const defaultSensitivePathRoots = [...dependencyControlPaths, '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 const protectedIgnoredPathspecs = Object.freeze([
   '.env', '.env.*', '*.pem', '*.key',
   'secrets/**', 'credentials/**', 'creds/**',
@@ -123,6 +124,16 @@ export function normalizeRunScope(scope = {}) {
     allowedPaths: normalizePathList(scope.allowedPaths, 'allowedPaths'),
     forbiddenPaths: normalizePathList(scope.forbiddenPaths, 'forbiddenPaths')
   };
+}
+
+function dependencyChangedPaths(changeSet = {}) {
+  return [...new Set((changeSet.paths ?? []).map((path) => String(path).replaceAll('\\', '/')).filter((path) => dependencyControlPaths.includes(path)))].sort();
+}
+
+function expectedDependencyRefreshCommand(toolchain) {
+  if (toolchain.command === 'npm') return 'npm ci --ignore-scripts';
+  if (toolchain.command === 'pnpm') return 'pnpm install --frozen-lockfile --ignore-scripts';
+  return null;
 }
 
 function changePolicyFrom(input = {}) {
@@ -416,6 +427,11 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
   const changePolicy = changePolicyFrom(input.changePolicy);
   const execution = executionFrom(input.execution);
   const toolchain = toolchainFrom(input.toolchain);
+  if (Object.hasOwn(input.commands, 'dependencyRefresh')) {
+    const expected = expectedDependencyRefreshCommand(toolchain);
+    if (!expected || input.commands.dependencyRefresh !== expected) throw new Error('dependencyRefresh must be the exact frozen no-lifecycle-script command for the configured toolchain');
+    if (execution.provider !== 'container-required') throw new Error('dependencyRefresh requires container-required execution');
+  }
   const skills = registry.validateProjectPolicy(input.skills ?? {});
   const budgets = input.budgets ?? {};
   const project = {
@@ -654,8 +670,8 @@ const workflowProfiles = Object.freeze({
     steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
   },
   'app-improvement': {
-    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
-    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
@@ -700,6 +716,7 @@ const workflowStepSkills = Object.freeze({
     diagnose: 'code.diagnose',
     'plan-change': 'human.approval',
     implementation: 'code.implement',
+    'dependency-refresh': 'project.dependencies.refresh',
     review: 'code.review',
     tests: 'project.verify',
     verification: 'project.verify',
@@ -732,6 +749,7 @@ const workflowStepSpecialists = Object.freeze({
     diagnose: 'diagnostician',
     'plan-change': 'human-supervisor',
     implementation: 'implementer',
+    'dependency-refresh': 'dependency-manager',
     review: 'change-critic',
     tests: 'verifier',
     verification: 'verifier',
