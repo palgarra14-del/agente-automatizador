@@ -585,19 +585,22 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   return plan;
 }
 
-function validateCompletedWorkflowEvidence(step) {
+function validateCompletedWorkflowEvidence(plan, step) {
   if (step.status !== WorkflowStepStatus.COMPLETED) return;
   if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
+  if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint) {
+    throw new Error(`Completed workflow step evidence does not match its capability context: ${step.id}`);
+  }
   if (step.type === 'placeholder') {
-    if (!step.evidence || step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
+    if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
     return;
   }
   if (step.type === 'checkpoint') {
-    if (!step.evidence || !Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
     return;
   }
   if (step.type === 'command' || step.type === 'verification') {
-    const commands = step.evidence?.commands;
+    const commands = step.evidence.commands;
     if (!Array.isArray(commands) || commands.length !== step.commands.length || commands.some((outcome, index) => outcome?.name !== step.commands[index] || outcome.ok !== true)) throw new Error(`Completed executable step requires successful command evidence: ${step.id}`);
   }
 }
@@ -626,7 +629,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
-    validateCompletedWorkflowEvidence(step);
+    validateCompletedWorkflowEvidence(plan, step);
     ids.add(step.id);
   }
   for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
@@ -708,7 +711,7 @@ export class WorkflowEngine {
       const step = saved.steps.find((item) => item.id === stepId);
       step.status = WorkflowStepStatus.BLOCKED;
       step.error = resolution.reason;
-      step.evidence = { type: 'skill-resolution', resolution };
+      step.evidence = { type: 'skill-resolution', skill: resolution.id, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint, resolution };
       saved.status = WorkflowStepStatus.BLOCKED;
       saved.result = { error: step.error, stepId: step.id, skill: resolution.id };
     });
@@ -725,7 +728,7 @@ export class WorkflowEngine {
       plan.pausedAt = null;
       step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
       step.error = null;
-      step.evidence = { approvedAt: new Date(approvedAt).toISOString() };
+      step.evidence = { skill: step.skill, registryFingerprint: plan.registryFingerprint, projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint, approvedAt: new Date(approvedAt).toISOString() };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -921,7 +924,7 @@ export class WorkflowEngine {
       }
       plan = await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
-        step.evidence = result.evidence;
+        step.evidence = { ...result.evidence, skill: step.skill, registryFingerprint: saved.registryFingerprint, projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint };
         saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
         if (result.deadlineExceeded) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_budget_deadline_exceeded'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
         else if (result.outputBudgetExceeded || saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
