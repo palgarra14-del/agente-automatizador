@@ -195,6 +195,343 @@ function safeJson(value) {
   return JSON.parse(maskSecrets(JSON.stringify(value)));
 }
 
+
+const businessToneValues = new Set(['professional', 'premium', 'friendly', 'technical', 'modern', 'traditional', 'urgent', 'minimal']);
+const businessGoalValues = new Set(['lead-generation', 'phone-calls', 'whatsapp', 'email-enquiries', 'bookings', 'credibility']);
+const businessClaimCategories = new Set(['service', 'experience', 'availability', 'certification', 'coverage', 'pricing', 'other']);
+const businessAssetKinds = new Set(['logo', 'photo', 'icon', 'document']);
+const businessAssetProvenance = new Set(['business-owned', 'licensed-stock', 'unknown']);
+const websiteSectionKinds = new Set(['hero', 'services', 'trust', 'process', 'about', 'coverage', 'contact', 'faq', 'gallery', 'testimonials', 'cta']);
+const websiteTypographyStyles = new Set(['sans-modern', 'sans-corporate', 'serif-editorial', 'mixed-premium']);
+const websiteDensityValues = new Set(['compact', 'balanced', 'spacious']);
+const websiteImageStrategies = new Set(['business-assets-first', 'licensed-stock-allowed', 'minimal-no-photography']);
+
+function assertExactObject(value, allowedKeys, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const unknown = Object.keys(value).filter((key) => !allowedKeys.includes(key));
+  if (unknown.length) throw new Error(`${label} contains unsupported fields: ${unknown.sort().join(', ')}`);
+  return value;
+}
+
+function normalizedText(value, label, { required = false, max = 500 } = {}) {
+  if (value === undefined || value === null) {
+    if (required) throw new Error(`${label} is required`);
+    return null;
+  }
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`);
+  const text = maskSecrets(value).trim();
+  if (required && !text) throw new Error(`${label} is required`);
+  if (hasControlCharacters(text)) throw new Error(`${label} contains control characters`);
+  if (text.length > max) throw new Error(`${label} exceeds ${max} characters`);
+  return text || null;
+}
+
+function normalizedTextList(value, label, { maxItems = 20, maxLength = 240, allowed = null, defaultValue = [] } = {}) {
+  if (value === undefined) return [...defaultValue];
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${label} must be an array with at most ${maxItems} items`);
+  const items = value.map((item, index) => normalizedText(item, `${label}[${index}]`, { required: true, max: maxLength }));
+  if (allowed) for (const item of items) if (!allowed.has(item)) throw new Error(`${label} contains unsupported value: ${item}`);
+  return [...new Set(items)];
+}
+
+function normalizeWebsiteSlug(value, label) {
+  const slug = normalizedText(value, label, { required: true, max: 80 });
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) throw new Error(`${label} must be a lowercase URL slug`);
+  return slug;
+}
+
+export function normalizeBusinessInput(input) {
+  assertExactObject(input, [
+    'schemaVersion', 'businessName', 'category', 'description', 'language', 'location', 'contact', 'services',
+    'serviceAreas', 'differentiators', 'targetCustomers', 'openingHours', 'brand', 'goals', 'claims', 'reviews',
+    'assets', 'requestedPages'
+  ], 'businessInput');
+  if ((input.schemaVersion ?? 1) !== 1) throw new Error('businessInput.schemaVersion must be 1');
+
+  const location = assertExactObject(input.location, ['city', 'region', 'country', 'address'], 'businessInput.location');
+  const normalizedLocation = {
+    city: normalizedText(location.city, 'businessInput.location.city', { required: true, max: 120 }),
+    region: normalizedText(location.region, 'businessInput.location.region', { max: 120 }),
+    country: normalizedText(location.country ?? 'España', 'businessInput.location.country', { required: true, max: 120 }),
+    address: normalizedText(location.address, 'businessInput.location.address', { max: 240 })
+  };
+
+  const contact = assertExactObject(input.contact, ['phone', 'whatsapp', 'email'], 'businessInput.contact');
+  const normalizedContact = {
+    phone: normalizedText(contact.phone, 'businessInput.contact.phone', { max: 80 }),
+    whatsapp: normalizedText(contact.whatsapp, 'businessInput.contact.whatsapp', { max: 80 }),
+    email: normalizedText(contact.email, 'businessInput.contact.email', { max: 160 })
+  };
+  if (!Object.values(normalizedContact).some(Boolean)) throw new Error('businessInput.contact requires at least one contact channel');
+
+  if (!Array.isArray(input.services) || input.services.length < 1 || input.services.length > 30) throw new Error('businessInput.services must contain 1-30 services');
+  const services = input.services.map((service, index) => {
+    assertExactObject(service, ['name', 'description'], `businessInput.services[${index}]`);
+    return {
+      name: normalizedText(service.name, `businessInput.services[${index}].name`, { required: true, max: 120 }),
+      description: normalizedText(service.description, `businessInput.services[${index}].description`, { max: 500 })
+    };
+  });
+
+  const brandInput = input.brand ?? {};
+  assertExactObject(brandInput, ['tone', 'colors', 'styleNotes'], 'businessInput.brand');
+  const colors = normalizedTextList(brandInput.colors, 'businessInput.brand.colors', { maxItems: 6, maxLength: 7 });
+  for (const color of colors) if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error(`Invalid brand color: ${color}`);
+  const brand = {
+    tone: normalizedTextList(brandInput.tone, 'businessInput.brand.tone', { maxItems: 4, maxLength: 40, allowed: businessToneValues }),
+    colors: colors.map((color) => color.toLowerCase()),
+    styleNotes: normalizedText(brandInput.styleNotes, 'businessInput.brand.styleNotes', { max: 600 })
+  };
+
+  const claimsInput = input.claims ?? [];
+  if (!Array.isArray(claimsInput) || claimsInput.length > 20) throw new Error('businessInput.claims must contain at most 20 items');
+  const claims = claimsInput.map((claim, index) => {
+    assertExactObject(claim, ['text', 'category', 'approvedForPublication'], `businessInput.claims[${index}]`);
+    const category = normalizedText(claim.category ?? 'other', `businessInput.claims[${index}].category`, { required: true, max: 40 });
+    if (!businessClaimCategories.has(category)) throw new Error(`Unsupported claim category: ${category}`);
+    if (typeof claim.approvedForPublication !== 'boolean') throw new Error(`businessInput.claims[${index}].approvedForPublication must be boolean`);
+    return {
+      text: normalizedText(claim.text, `businessInput.claims[${index}].text`, { required: true, max: 400 }),
+      category,
+      approvedForPublication: claim.approvedForPublication
+    };
+  });
+
+  const reviewsInput = input.reviews ?? [];
+  if (!Array.isArray(reviewsInput) || reviewsInput.length > 12) throw new Error('businessInput.reviews must contain at most 12 items');
+  const reviews = reviewsInput.map((review, index) => {
+    assertExactObject(review, ['quote', 'attribution', 'approvedForPublication'], `businessInput.reviews[${index}]`);
+    if (typeof review.approvedForPublication !== 'boolean') throw new Error(`businessInput.reviews[${index}].approvedForPublication must be boolean`);
+    return {
+      quote: normalizedText(review.quote, `businessInput.reviews[${index}].quote`, { required: true, max: 600 }),
+      attribution: normalizedText(review.attribution, `businessInput.reviews[${index}].attribution`, { required: true, max: 120 }),
+      approvedForPublication: review.approvedForPublication
+    };
+  });
+
+  const assetsInput = input.assets ?? [];
+  if (!Array.isArray(assetsInput) || assetsInput.length > 50) throw new Error('businessInput.assets must contain at most 50 items');
+  const assets = assetsInput.map((asset, index) => {
+    assertExactObject(asset, ['path', 'kind', 'provenance', 'approvedForPublication'], `businessInput.assets[${index}]`);
+    const kind = normalizedText(asset.kind, `businessInput.assets[${index}].kind`, { required: true, max: 40 });
+    const provenance = normalizedText(asset.provenance, `businessInput.assets[${index}].provenance`, { required: true, max: 40 });
+    if (!businessAssetKinds.has(kind)) throw new Error(`Unsupported asset kind: ${kind}`);
+    if (!businessAssetProvenance.has(provenance)) throw new Error(`Unsupported asset provenance: ${provenance}`);
+    if (typeof asset.approvedForPublication !== 'boolean') throw new Error(`businessInput.assets[${index}].approvedForPublication must be boolean`);
+    if (asset.approvedForPublication && provenance === 'unknown') throw new Error('Unknown-provenance assets cannot be approved for publication');
+    return {
+      path: normalizeRepositoryPath(asset.path, `businessInput.assets[${index}].path`),
+      kind,
+      provenance,
+      approvedForPublication: asset.approvedForPublication
+    };
+  });
+
+  const requestedPages = normalizedTextList(input.requestedPages, 'businessInput.requestedPages', { maxItems: 12, maxLength: 80 }).map((slug, index) => normalizeWebsiteSlug(slug, `businessInput.requestedPages[${index}]`));
+
+  return {
+    schemaVersion: 1,
+    businessName: normalizedText(input.businessName, 'businessInput.businessName', { required: true, max: 160 }),
+    category: normalizedText(input.category, 'businessInput.category', { required: true, max: 160 }),
+    description: normalizedText(input.description, 'businessInput.description', { max: 1_000 }),
+    language: normalizedText(input.language ?? 'es', 'businessInput.language', { required: true, max: 12 }),
+    location: normalizedLocation,
+    contact: normalizedContact,
+    services,
+    serviceAreas: normalizedTextList(input.serviceAreas, 'businessInput.serviceAreas', { maxItems: 30, maxLength: 160 }),
+    differentiators: normalizedTextList(input.differentiators, 'businessInput.differentiators', { maxItems: 20, maxLength: 240 }),
+    targetCustomers: normalizedTextList(input.targetCustomers, 'businessInput.targetCustomers', { maxItems: 12, maxLength: 160 }),
+    openingHours: normalizedTextList(input.openingHours, 'businessInput.openingHours', { maxItems: 14, maxLength: 160 }),
+    brand,
+    goals: normalizedTextList(input.goals, 'businessInput.goals', { maxItems: 6, maxLength: 40, allowed: businessGoalValues, defaultValue: ['lead-generation'] }),
+    claims,
+    reviews,
+    assets,
+    requestedPages
+  };
+}
+
+function fingerprintBusinessInput(input) {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
+
+function buildBusinessFactInventory(input) {
+  const facts = [];
+  const add = (id, kind, value, publishable = true) => {
+    if (value === null || value === undefined || value === '') return;
+    facts.push({ id, kind, value, publishable, source: 'user' });
+  };
+  add('business.name', 'business', input.businessName);
+  add('business.category', 'business', input.category);
+  add('business.description', 'business', input.description);
+  add('location.city', 'location', input.location.city);
+  add('location.region', 'location', input.location.region);
+  add('location.country', 'location', input.location.country);
+  add('location.address', 'location', input.location.address);
+  add('contact.phone', 'contact', input.contact.phone);
+  add('contact.whatsapp', 'contact', input.contact.whatsapp);
+  add('contact.email', 'contact', input.contact.email);
+  input.services.forEach((service, index) => {
+    add(`services.${index}.name`, 'service', service.name);
+    add(`services.${index}.description`, 'service', service.description);
+  });
+  input.serviceAreas.forEach((value, index) => add(`serviceAreas.${index}`, 'coverage', value));
+  input.differentiators.forEach((value, index) => add(`differentiators.${index}`, 'differentiator', value));
+  input.targetCustomers.forEach((value, index) => add(`targetCustomers.${index}`, 'audience', value));
+  input.openingHours.forEach((value, index) => add(`openingHours.${index}`, 'hours', value));
+  input.claims.forEach((claim, index) => add(`claims.${index}`, `claim:${claim.category}`, claim.text, claim.approvedForPublication));
+  input.reviews.forEach((review, index) => {
+    add(`reviews.${index}.quote`, 'review', review.quote, review.approvedForPublication);
+    add(`reviews.${index}.attribution`, 'review-attribution', review.attribution, review.approvedForPublication);
+  });
+  return facts;
+}
+
+export function createBusinessIntakeEvidence(input) {
+  const businessInput = normalizeBusinessInput(input);
+  const intakeFingerprint = fingerprintBusinessInput(businessInput);
+  const factInventory = buildBusinessFactInventory(businessInput);
+  const allowedFactIds = factInventory.filter((fact) => fact.publishable).map((fact) => fact.id);
+  const blockedFactIds = factInventory.filter((fact) => !fact.publishable).map((fact) => fact.id);
+  const publishableAssets = businessInput.assets.filter((asset) => asset.approvedForPublication && asset.provenance !== 'unknown');
+  return {
+    schemaVersion: 1,
+    intakeFingerprint,
+    businessInput,
+    factInventory,
+    allowedFactIds,
+    blockedFactIds,
+    publishableAssets,
+    guardrails: {
+      mustUseFactRefs: true,
+      noInventedClaims: true,
+      noInventedReviews: true,
+      noInventedAccreditations: true,
+      noInventedPrices: true,
+      noInventedAvailability: true,
+      noInventedLocations: true
+    }
+  };
+}
+
+function validateBusinessIntakeEvidence(originalInput, evidence) {
+  const expected = createBusinessIntakeEvidence(originalInput);
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) throw new Error('business_intake_evidence_invalid');
+  if (JSON.stringify(evidence) !== JSON.stringify(expected)) throw new Error('business_intake_evidence_mismatch');
+  return expected;
+}
+
+export class BusinessIntakeValidator {
+  validate(input) { return createBusinessIntakeEvidence(input); }
+}
+
+function validateWebsiteSpecification(specification, intakeEvidence) {
+  if (!intakeEvidence) throw new Error('website_specification_missing_intake');
+  const intake = validateBusinessIntakeEvidence(intakeEvidence.businessInput, intakeEvidence);
+  assertExactObject(specification, ['version', 'intakeFingerprint', 'primaryGoal', 'pages', 'navigation', 'globalCtas', 'visualDirection', 'specificationFingerprint'], 'websiteSpecification');
+  if (specification.version !== 1) throw new Error('websiteSpecification.version must be 1');
+  if (specification.intakeFingerprint !== intake.intakeFingerprint) throw new Error('website_specification_intake_fingerprint_mismatch');
+  const primaryGoal = normalizedText(specification.primaryGoal, 'websiteSpecification.primaryGoal', { required: true, max: 40 });
+  if (!intake.businessInput.goals.includes(primaryGoal)) throw new Error('website_specification_primary_goal_not_authorized');
+
+  const allowedFacts = new Set(intake.allowedFactIds);
+  const checkRefs = (refs, label) => {
+    if (!Array.isArray(refs) || refs.length > 40) throw new Error(`${label} must be an array`);
+    const normalized = [...new Set(refs.map((ref, index) => normalizedText(ref, `${label}[${index}]`, { required: true, max: 160 })))];
+    for (const ref of normalized) if (!allowedFacts.has(ref)) throw new Error(`${label} contains unauthorized factRef: ${ref}`);
+    return normalized;
+  };
+  const normalizeCta = (cta, label) => {
+    if (cta === null || cta === undefined) return null;
+    assertExactObject(cta, ['channel', 'labelIntent', 'contactFactRef'], label);
+    const channel = normalizedText(cta.channel, `${label}.channel`, { required: true, max: 20 });
+    if (!['phone', 'whatsapp', 'email'].includes(channel)) throw new Error(`${label}.channel is invalid`);
+    const contactFactRef = normalizedText(cta.contactFactRef, `${label}.contactFactRef`, { required: true, max: 80 });
+    if (contactFactRef !== `contact.${channel}` || !allowedFacts.has(contactFactRef)) throw new Error(`${label}.contactFactRef is not available in the intake`);
+    return {
+      channel,
+      labelIntent: normalizedText(cta.labelIntent, `${label}.labelIntent`, { required: true, max: 100 }),
+      contactFactRef
+    };
+  };
+
+  if (!Array.isArray(specification.pages) || specification.pages.length < 1 || specification.pages.length > 12) throw new Error('websiteSpecification.pages must contain 1-12 pages');
+  const pages = specification.pages.map((page, pageIndex) => {
+    assertExactObject(page, ['slug', 'title', 'purpose', 'sections', 'seo'], `websiteSpecification.pages[${pageIndex}]`);
+    const slug = normalizeWebsiteSlug(page.slug, `websiteSpecification.pages[${pageIndex}].slug`);
+    if (!Array.isArray(page.sections) || page.sections.length < 1 || page.sections.length > 14) throw new Error(`websiteSpecification.pages[${pageIndex}].sections must contain 1-14 sections`);
+    const sectionIds = new Set();
+    const sections = page.sections.map((section, sectionIndex) => {
+      assertExactObject(section, ['id', 'kind', 'headingIntent', 'purpose', 'factRefs', 'cta'], `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}]`);
+      const id = normalizeWebsiteSlug(section.id, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].id`);
+      if (sectionIds.has(id)) throw new Error(`Duplicate website section id: ${slug}/${id}`);
+      sectionIds.add(id);
+      const kind = normalizedText(section.kind, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].kind`, { required: true, max: 40 });
+      if (!websiteSectionKinds.has(kind)) throw new Error(`Unsupported website section kind: ${kind}`);
+      const factRefs = checkRefs(section.factRefs, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].factRefs`);
+      if (kind === 'testimonials' && !factRefs.some((ref) => ref.startsWith('reviews.'))) throw new Error('Testimonials section requires approved review factRefs');
+      return {
+        id,
+        kind,
+        headingIntent: normalizedText(section.headingIntent, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].headingIntent`, { required: true, max: 140 }),
+        purpose: normalizedText(section.purpose, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].purpose`, { required: true, max: 300 }),
+        factRefs,
+        cta: normalizeCta(section.cta, `websiteSpecification.pages[${pageIndex}].sections[${sectionIndex}].cta`)
+      };
+    });
+    assertExactObject(page.seo, ['titleIntent', 'descriptionIntent', 'topicFactRefs'], `websiteSpecification.pages[${pageIndex}].seo`);
+    return {
+      slug,
+      title: normalizedText(page.title, `websiteSpecification.pages[${pageIndex}].title`, { required: true, max: 80 }),
+      purpose: normalizedText(page.purpose, `websiteSpecification.pages[${pageIndex}].purpose`, { required: true, max: 300 }),
+      sections,
+      seo: {
+        titleIntent: normalizedText(page.seo.titleIntent, `websiteSpecification.pages[${pageIndex}].seo.titleIntent`, { required: true, max: 160 }),
+        descriptionIntent: normalizedText(page.seo.descriptionIntent, `websiteSpecification.pages[${pageIndex}].seo.descriptionIntent`, { required: true, max: 240 }),
+        topicFactRefs: checkRefs(page.seo.topicFactRefs, `websiteSpecification.pages[${pageIndex}].seo.topicFactRefs`)
+      }
+    };
+  });
+  const slugs = pages.map((page) => page.slug);
+  if (new Set(slugs).size !== slugs.length) throw new Error('websiteSpecification page slugs must be unique');
+  if (!slugs.includes('home')) throw new Error('websiteSpecification must include a home page');
+  for (const requested of intake.businessInput.requestedPages) if (!slugs.includes(requested)) throw new Error(`websiteSpecification is missing requested page: ${requested}`);
+
+  if (!Array.isArray(specification.navigation) || specification.navigation.length < 1 || specification.navigation.length > pages.length) throw new Error('websiteSpecification.navigation is invalid');
+  const navigation = [...new Set(specification.navigation.map((slug, index) => normalizeWebsiteSlug(slug, `websiteSpecification.navigation[${index}]`)))];
+  if (navigation.length !== specification.navigation.length || navigation.some((slug) => !slugs.includes(slug))) throw new Error('websiteSpecification.navigation must reference unique planned pages');
+  if (!navigation.includes('home')) throw new Error('websiteSpecification.navigation must include home');
+
+  if (!Array.isArray(specification.globalCtas) || specification.globalCtas.length > 4) throw new Error('websiteSpecification.globalCtas must be an array with at most 4 items');
+  const globalCtas = specification.globalCtas.map((cta, index) => normalizeCta(cta, `websiteSpecification.globalCtas[${index}]`));
+
+  assertExactObject(specification.visualDirection, ['style', 'tone', 'palette', 'typographyStyle', 'density', 'imageStrategy'], 'websiteSpecification.visualDirection');
+  const tone = normalizedTextList(specification.visualDirection.tone, 'websiteSpecification.visualDirection.tone', { maxItems: 4, maxLength: 40, allowed: businessToneValues });
+  if (intake.businessInput.brand.tone.length && tone.some((item) => !intake.businessInput.brand.tone.includes(item))) throw new Error('websiteSpecification visual tone conflicts with supplied brand tone');
+  const palette = normalizedTextList(specification.visualDirection.palette, 'websiteSpecification.visualDirection.palette', { maxItems: 6, maxLength: 7 });
+  for (const color of palette) if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error(`Invalid website palette color: ${color}`);
+  if (intake.businessInput.brand.colors.length && palette.some((color) => !intake.businessInput.brand.colors.includes(color.toLowerCase()))) throw new Error('websiteSpecification palette conflicts with supplied brand colors');
+  const typographyStyle = normalizedText(specification.visualDirection.typographyStyle, 'websiteSpecification.visualDirection.typographyStyle', { required: true, max: 40 });
+  const density = normalizedText(specification.visualDirection.density, 'websiteSpecification.visualDirection.density', { required: true, max: 40 });
+  const imageStrategy = normalizedText(specification.visualDirection.imageStrategy, 'websiteSpecification.visualDirection.imageStrategy', { required: true, max: 60 });
+  if (!websiteTypographyStyles.has(typographyStyle)) throw new Error('websiteSpecification typographyStyle is invalid');
+  if (!websiteDensityValues.has(density)) throw new Error('websiteSpecification density is invalid');
+  if (!websiteImageStrategies.has(imageStrategy)) throw new Error('websiteSpecification imageStrategy is invalid');
+  const visualDirection = {
+    style: normalizedText(specification.visualDirection.style, 'websiteSpecification.visualDirection.style', { required: true, max: 240 }),
+    tone,
+    palette: palette.map((color) => color.toLowerCase()),
+    typographyStyle,
+    density,
+    imageStrategy
+  };
+
+  const canonical = { version: 1, intakeFingerprint: intake.intakeFingerprint, primaryGoal, pages, navigation, globalCtas, visualDirection };
+  const specificationFingerprint = createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+  if (specification.specificationFingerprint !== undefined && specification.specificationFingerprint !== specificationFingerprint) throw new Error('website_specification_fingerprint_mismatch');
+  return { ...canonical, specificationFingerprint };
+}
+
 function createModelUsageState(maxCalls) {
   return { maxCalls, calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, unknownUsageCalls: 0, entries: [] };
 }
