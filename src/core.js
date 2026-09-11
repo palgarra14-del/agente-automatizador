@@ -657,6 +657,7 @@ function validateCompletedWorkflowEvidence(plan, step) {
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
       if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
+      if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
     }
     return;
@@ -787,6 +788,7 @@ export class WorkflowEngine {
   }
 
   async workspaceSnapshot(project) {
+    const repositoryControl = await this.localGit.inspectRepositoryControlState(project);
     const repository = await this.localGit.inspect(project);
     const changeSet = await this.localGit.inspectChangeSet(project);
     const protectedIgnored = await this.localGit.inspectProtectedIgnoredState(project);
@@ -796,6 +798,7 @@ export class WorkflowEngine {
       branch: repository.currentBranch,
       head: repository.initialHead,
       status: repository.status,
+      repositoryControl,
       changeSet,
       protectedIgnored
     };
@@ -806,6 +809,7 @@ export class WorkflowEngine {
       before.remote === after.remote &&
       before.branch === after.branch &&
       before.head === after.head &&
+      before.repositoryControl.fingerprint === after.repositoryControl.fingerprint &&
       before.changeSet.changeSetFingerprint === after.changeSet.changeSetFingerprint &&
       before.protectedIgnored.fingerprint === after.protectedIgnored.fingerprint;
   }
