@@ -629,15 +629,17 @@ test('stale capability context blocks workflow approval and resume before mutati
     plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
     plan.pausedAt = plan.deadlineAt - plan.budgets.timeoutMs + 1;
   });
-  const beforeApproval = structuredClone(await instance.get(created.id));
+  const beforeApproval = await instance.get(created.id);
+  const originalRegistryFingerprint = beforeApproval.registryFingerprint;
+  const originalPausedAt = beforeApproval.pausedAt;
   await instance.update(created.id, (plan) => { plan.registryFingerprint = '0'.repeat(64); });
   await assert.rejects(instance.approve(created.id, 'plan-change'), /registry fingerprint/);
   const afterApproval = await instance.get(created.id);
   assert.equal(afterApproval.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
-  assert.equal(afterApproval.pausedAt, beforeApproval.pausedAt);
+  assert.equal(afterApproval.pausedAt, originalPausedAt);
 
   await instance.update(created.id, (plan) => {
-    plan.registryFingerprint = beforeApproval.registryFingerprint;
+    plan.registryFingerprint = originalRegistryFingerprint;
     const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
     checkpoint.status = WorkflowStepStatus.COMPLETED;
     checkpoint.evidence = {
@@ -651,11 +653,12 @@ test('stale capability context blocks workflow approval and resume before mutati
     plan.status = WorkflowStepStatus.RUNNING;
     plan.pausedAt = null;
   });
-  const beforeResume = structuredClone(await instance.get(created.id));
+  const beforeResume = await instance.get(created.id);
+  const originalPolicyFingerprint = beforeResume.projectSkillPolicyFingerprint;
   await instance.update(created.id, (plan) => { plan.projectSkillPolicyFingerprint = 'f'.repeat(64); });
   await assert.rejects(instance.resume(created.id), /project skill policy fingerprint/);
   const afterResume = await instance.get(created.id);
   assert.equal(afterResume.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.RUNNING);
   assert.equal(afterResume.status, WorkflowStepStatus.RUNNING);
-  assert.notEqual(afterResume.projectSkillPolicyFingerprint, beforeResume.projectSkillPolicyFingerprint);
+  assert.notEqual(afterResume.projectSkillPolicyFingerprint, originalPolicyFingerprint);
 });
