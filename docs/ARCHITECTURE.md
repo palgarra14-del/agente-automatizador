@@ -30,7 +30,7 @@ Post-worker container commands run shell-free with an explicit `/workspace` bind
 
 ## State and resume
 
-`JsonStore` atomically replaces `.agent/state.json`. v0.3 is intentionally single-writer/single-process; do not run two orchestrator processes over the same state file. A resumed run reconstructs its project configuration and continues an approved PR creation, CI wait, or preview observation. The Codex SDK thread id is persisted with the worker result for future worker-level continuation.
+`JsonStore` atomically replaces `.agent/state.json` and protects mutations with a filesystem lock. Concurrent writers serialize through that lock, and stale locks whose owning process is demonstrably dead can be recovered conservatively. A resumed run reconstructs its project configuration and continues an approved PR creation, CI wait, or preview observation. Workflow plans separately persist their managed workspace, bootstrap evidence, active-execution deadline, checkpoint pause timestamp, step evidence, and Definition of Done state. The Codex SDK thread id is persisted with the worker result for future worker-level continuation.
 
 Supported meaningful states are `working`, `testing`, `pushing`, `waiting_ci`, `evaluating`, `waiting_approval`, and `worker_failed_retryable`, plus terminal states. There is no in-memory-only continuation requirement.
 
