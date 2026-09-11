@@ -1970,11 +1970,13 @@ export class WorkflowEngine {
       dryRun: true,
       plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null,
       specialistRegistryFingerprint: this.specialistRegistry.fingerprint,
-      plannedSteps: this.readySteps(plan).map((step) => {
+      plannedSteps: plan.steps.map((step) => {
         const specialist = this.specialistRegistry.get(step.specialist);
         return {
           id: step.id,
           type: step.type,
+          status: step.status,
+          dependsOn: [...step.dependsOn],
           skill: step.skill,
           specialist: step.specialist,
           specialistMode: specialist.mode,
@@ -1982,7 +1984,10 @@ export class WorkflowEngine {
           capability: this.registry.resolve(project, step.skill, { surface: 'workflow' }),
           commands: step.commands
         };
-      })
+      }),
+      plannedExternalWrites: plan.steps
+        .filter((step) => this.specialistRegistry.get(step.specialist).authority === 'external-write')
+        .map((step) => ({ id: step.id, skill: step.skill, specialist: step.specialist }))
     };
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
