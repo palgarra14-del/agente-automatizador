@@ -808,7 +808,7 @@ export function createWorkflowPlan({ profile, project, goal, scope = {}, now = (
   return plan;
 }
 
-function validateCompletedWorkflowEvidence(plan, step) {
+function validateCompletedWorkflowEvidence(plan, step, project = null) {
   if (step.status !== WorkflowStepStatus.COMPLETED) return;
   if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
   if (!step.evidence || step.evidence.skill !== step.skill || step.evidence.specialist !== step.specialist || step.evidence.registryFingerprint !== plan.registryFingerprint || step.evidence.projectSkillPolicyFingerprint !== plan.projectSkillPolicyFingerprint || step.evidence.specialistRegistryFingerprint !== plan.specialistRegistryFingerprint) {
@@ -829,6 +829,28 @@ function validateCompletedWorkflowEvidence(plan, step) {
       const persistedReview = validateReviewEvidence(step.evidence.result?.reviewEvidence);
       if (persistedReview.verdict !== 'PASS') throw new Error(`Completed change review requires PASS evidence: ${step.id}`);
       if (!implementation?.evidence?.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error(`Completed change review is not bound to the governed implementation: ${step.id}`);
+    }
+    if (step.skill === 'release.publish-reviewed-workflow') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      const release = plan.steps.find((candidate) => candidate.id === 'release-readiness');
+      const expectedFingerprint = implementation?.evidence?.changeSetFingerprint;
+      const expectedPaths = [...(implementation?.evidence?.changeSet?.paths ?? [])].sort();
+      const commit = step.evidence.commit;
+      const push = step.evidence.push;
+      const pullRequest = step.evidence.pullRequest;
+      const ci = step.evidence.ci;
+      const preview = step.evidence.preview;
+      if (!project || !plan.workspace?.managed || step.evidence.phase !== 'completed' || step.evidence.workspacePath !== plan.workspace.path || step.evidence.branch !== plan.workspace.workingBranch || step.evidence.baseHead !== plan.workspace.baseHead || step.evidence.remote !== plan.workspace.remote) throw new Error('Completed publication evidence does not match the managed workflow workspace');
+      if (!expectedFingerprint || step.evidence.reviewedChangeSetFingerprint !== expectedFingerprint || step.evidence.approvedChangeSetFingerprint !== expectedFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release?.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) throw new Error('Completed publication evidence is not bound to the reviewed implementation');
+      if (!commit || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit.finalHead ?? '') || commit.committedChangeSetFingerprint !== expectedFingerprint || JSON.stringify([...(commit.committedPaths ?? [])].sort()) !== JSON.stringify(expectedPaths)) throw new Error('Completed publication commit evidence is invalid');
+      if (!push || push.branch !== plan.workspace.workingBranch || push.finalHead !== commit.finalHead || push.remoteBranchHead !== commit.finalHead) throw new Error('Completed publication push evidence is invalid');
+      if (!pullRequest || !Number.isInteger(pullRequest.number) || pullRequest.number < 1 || typeof pullRequest.url !== 'string' || !pullRequest.url || pullRequest.state !== 'open' || pullRequest.headSha !== commit.finalHead || pullRequest.headRef !== plan.workspace.workingBranch || pullRequest.baseRef !== project.defaultBranch) throw new Error('Completed publication pull request evidence is invalid');
+      if (!ci || ci.state !== 'success') throw new Error('Completed publication requires successful CI evidence');
+      const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
+      if (previewRequired) {
+        if (!preview || preview.ok !== true || preview.state !== 'READY' || preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch) throw new Error('Completed publication requires a ready preview bound to the published commit');
+      } else if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
     }
     return;
   }
@@ -877,7 +899,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
-    validateCompletedWorkflowEvidence(plan, step);
+    validateCompletedWorkflowEvidence(plan, step, project);
     ids.add(step.id);
   }
   for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
@@ -1515,10 +1537,10 @@ export class WorkflowEngine {
       if (publicationEnabled) {
         if (!plan.workspace.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) throw new Error('Workflow publication branch evidence is missing');
         const publicationStep = plan.steps.find((step) => step.id === 'publication');
-        const publishedOrPublishing = publicationStep && [WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED].includes(publicationStep.status);
+        const persistedCommitHead = publicationStep?.evidence?.commit?.finalHead ?? null;
         await this.localGit.assertRepositoryState(workspaceProject, {
           branch: plan.workspace.workingBranch,
-          ...(publishedOrPublishing ? {} : { head: plan.workspace.baseHead }),
+          head: persistedCommitHead ?? plan.workspace.baseHead,
           remote: plan.workspace.remote
         });
       }
