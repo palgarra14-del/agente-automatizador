@@ -501,3 +501,22 @@ test('workflow state validation ties checkpoint pause state to awaiting approval
   plan.pausedAt = 150;
   assert.equal(validateWorkflowPlan(plan, new Map([['workflow-project', project()]])).ok, true);
 });
+
+
+test('workspace clone timeout is distinct from exhausting the global workflow deadline', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-clone-timeout-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { test: 'pnpm test' }, budgets: { commandTimeoutMs: 200 } });
+  const manager = new FakeWorkflowWorkspaceManager();
+  manager.prepare = async () => {
+    const error = new Error('workspace_clone_timeout');
+    error.code = 'WORKSPACE_CLONE_TIMEOUT';
+    throw error;
+  };
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: manager, now: () => 100 });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Distinguish clone timeout', budgets: { timeoutMs: 1_000 } });
+  await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
+  await assert.rejects(instance.run(created.id), /workspace_clone_timeout/);
+  const failed = await instance.get(created.id);
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'workspace_clone_timeout');
+});
