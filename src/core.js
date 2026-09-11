@@ -918,15 +918,17 @@ function workflowBootstrap(project) {
   return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
 }
 
-export function createWorkflowPlan({ profile, project, goal, scope = {}, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry } = {}) {
+export function createWorkflowPlan({ profile, project, goal, input, scope = {}, now = () => new Date().toISOString(), nowMs = Date.now(), budgets, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry } = {}) {
   const template = workflowProfiles[profile];
   if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
   if (!project?.id) throw new Error('Workflow project is required');
   if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
+  const normalizedInput = normalizeWorkflowInput(profile, input);
+  const inputFingerprint = normalizedInput ? evidenceFingerprint(normalizedInput) : null;
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), specialist: workflowSpecialist(profile, id, specialistRegistry), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, input: normalizedInput, inputFingerprint, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry, specialistRegistry);
   return plan;
 }
@@ -1000,6 +1002,10 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
+  const normalizedInput = normalizeWorkflowInput(plan.profile, plan.input);
+  if (JSON.stringify(plan.input) !== JSON.stringify(normalizedInput)) throw new Error('Workflow input is not normalized');
+  const expectedInputFingerprint = normalizedInput ? evidenceFingerprint(normalizedInput) : null;
+  if (plan.inputFingerprint !== expectedInputFingerprint) throw new Error('Workflow input fingerprint does not match persisted input');
   if (project) validateModelUsageState(plan.modelUsage, project.budgets.maxModelCalls, 'workflow.modelUsage');
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
@@ -2093,6 +2099,7 @@ export class WorkflowEngine {
       dryRun: true,
       plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null,
       specialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+      inputFingerprint: plan.inputFingerprint,
       plannedSteps: plan.steps.map((step) => {
         const specialist = this.specialistRegistry.get(step.specialist);
         return {
