@@ -25,6 +25,30 @@ test('specialist registry rejects duplicate ids, invalid modes, and unknown skil
   );
 });
 
+test('specialist mode cannot understate the authority of an assigned skill', () => {
+  assert.throws(
+    () => new SpecialistRegistry({
+      specialists: [{ id: 'fake-reader', mode: 'read-only', skills: ['code.implement'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor' }],
+      capabilityRegistry: defaultToolSkillRegistry
+    }),
+    /mode is incompatible with skill authority/
+  );
+  assert.throws(
+    () => new SpecialistRegistry({
+      specialists: [{ id: 'fake-reserved', mode: 'reserved', skills: ['code.inspect'], authority: 'unavailable', executor: null }],
+      capabilityRegistry: defaultToolSkillRegistry
+    }),
+    /Reserved specialist may only own unavailable skills/
+  );
+  assert.throws(
+    () => new SpecialistRegistry({
+      specialists: [{ id: 'missing-executor', mode: 'read-only', skills: ['code.inspect'], authority: 'workspace-read' }],
+      capabilityRegistry: defaultToolSkillRegistry
+    }),
+    /Active specialist executor is required/
+  );
+});
+
 test('specialist assignment is explicit and fail-closed', () => {
   const inspector = defaultSpecialistRegistry.validateAssignment('code-inspector', 'code.inspect');
   assert.equal(inspector.mode, 'read-only');
