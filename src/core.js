@@ -1202,69 +1202,13 @@ export class WorkflowEngine {
       const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
       if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder' && this.skillExecutor.supports(next.skill)) {
-        if (project.workspaceStrategy === 'managed') {
-          const workspaceResolution = this.registry.resolve(project, 'workspace.prepare', { surface: 'workflow' });
-          if (!workspaceResolution.available) return this.blockForCapability(id, next.id, workspaceResolution);
-        }
-        const workspaceProject = await this.workspaceProject(id, project);
-        await this.update(id, (saved) => {
-          const step = saved.steps.find((item) => item.id === next.id);
-          step.status = WorkflowStepStatus.RUNNING;
-          step.attempts += 1;
-          saved.status = WorkflowStepStatus.RUNNING;
-        });
-        const runningPlan = await this.get(id);
-        const runningStep = runningPlan.steps.find((item) => item.id === next.id);
-        const priorEvidence = Object.fromEntries(runningStep.dependsOn.map((dependencyId) => {
-          const dependency = runningPlan.steps.find((item) => item.id === dependencyId);
-          return [dependencyId, dependency?.evidence?.result ?? null];
-        }));
-        const remainingMs = this.remainingMs(runningPlan);
-        if (remainingMs <= 0) return this.failDeadline(id);
-        const execution = await this.skillExecutor.execute({
-          skill: runningStep.skill,
-          goal: runningPlan.goal,
-          contract: skillResolution.contract,
-          context: { projectId: project.id, priorEvidence }
-        }, {
-          workspace: workspaceProject.workspace,
-          timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
-        });
-        plan = await this.update(id, (saved) => {
-          const step = saved.steps.find((item) => item.id === next.id);
-          saved.outputBytes += Number(execution.outputBytes ?? 0);
-          step.evidence = {
-            type: 'executor',
-            ok: execution.ok === true,
-            completedAt: execution.ok ? new Date().toISOString() : null,
-            skill: step.skill,
-            registryFingerprint: saved.registryFingerprint,
-            projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
-            result: execution.ok ? execution.result : null,
-            codexThreadId: execution.codexThreadId ?? null,
-            error: execution.error ?? null
-          };
-          if (saved.outputBytes > saved.budgets.maxOutputBytes) {
-            step.status = WorkflowStepStatus.FAILED;
-            step.error = 'workflow_output_budget_exhausted';
-            saved.status = WorkflowStepStatus.FAILED;
-            saved.result = { error: step.error, stepId: step.id };
-          } else if (execution.ok) {
-            step.status = WorkflowStepStatus.COMPLETED;
-            step.error = null;
-            saved.status = WorkflowStepStatus.PENDING;
-          } else if (step.attempts >= saved.budgets.maxAttempts) {
-            step.status = WorkflowStepStatus.FAILED;
-            step.error = execution.timedOut ? 'skill_executor_timeout' : 'skill_executor_attempt_budget_exhausted';
-            saved.status = WorkflowStepStatus.FAILED;
-            saved.result = { error: step.error, stepId: step.id };
-          } else {
-            step.status = WorkflowStepStatus.READY;
-            step.error = execution.timedOut ? 'skill_executor_timeout_retry_available' : 'skill_executor_failed_retry_available';
-            saved.status = WorkflowStepStatus.PENDING;
-          }
-        });
-        if (plan.status === WorkflowStepStatus.FAILED) return plan;
+        plan = await this.executeReadOnlyWorkflowStep(id, project, next, skillResolution);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'code.implement') {
+        plan = await this.executeImplementationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
       if (next.type === 'placeholder') return this.update(id, (saved) => {
