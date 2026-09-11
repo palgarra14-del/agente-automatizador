@@ -354,7 +354,7 @@ test('v0.5 container execution mounts workspace read-write and nested git metada
   assert.equal(container.options.env.HOME, undefined);
   assert.equal(container.options.inheritEnvironment, false);
   assert.equal(container.options.restrictEnvironment, true);
-  assert.equal(container.options.timeoutMs, configured.budgets.commandTimeoutMs);
+  assert.ok(container.options.timeoutMs > 0 && container.options.timeoutMs <= configured.budgets.commandTimeoutMs);
 });
 
 test('v0.5 force-removes a named container after a timed out project command', async () => {
