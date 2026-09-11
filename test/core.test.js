@@ -518,6 +518,17 @@ test('project subprocesses retain PATH but never inherit orchestrator credential
   }
 });
 
+test('structured redaction preserves JSON syntax when free text contains authorization secrets', () => {
+  const configured = project({
+    commandEnvironment: {
+      SAFE_NOTE: 'Deploy note: Authorization: Bearer top-secret-token-value, then continue.'
+    }
+  });
+  assert.equal(configured.commandEnvironment.SAFE_NOTE.includes('top-secret-token-value'), false);
+  assert.match(configured.commandEnvironment.SAFE_NOTE, /Authorization:\s*\[REDACTED\]/i);
+  assert.match(JSON.stringify(configured.commandEnvironment), /^\{"SAFE_NOTE":/);
+});
+
 test('project command environment permits literal non-secret values only', () => {
   assert.equal(safeCommandEnvironment({ NEXT_TELEMETRY_DISABLED: '1' }).NEXT_TELEMETRY_DISABLED, '1');
   assert.throws(() => configFrom({
