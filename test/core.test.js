@@ -200,6 +200,10 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.deepEqual(configured.get('leadfinder').toolchain, { command: 'pnpm', version: '11.19.0' });
   assert.deepEqual(configured.get('self').changePolicy.budgets, { maxChangedFiles: 8, maxDiffLines: 500, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
   assert.deepEqual(configured.get('leadfinder').changePolicy.budgets, { maxChangedFiles: 3, maxDiffLines: 200, maxChangedBytes: 8 * 1024 * 1024, maxFileBytes: 4 * 1024 * 1024 });
+  assert.equal(configured.get('self').budgets.maxModelCalls, 6);
+  assert.equal(configured.get('leadfinder').budgets.maxModelCalls, 6);
+  assert.equal(configured.get('callflow').budgets.maxModelCalls, 6);
+  assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
 });
 
 test('v0.5 treats only the self control-plane project configuration as sensitive', async () => {
@@ -246,6 +250,8 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.vercelConfigured, 'YES');
   assert.equal(result.vercelToken, 'NO');
   assert.equal(result.branchProtection, 'NO');
+  assert.equal(result.modelCallBudget, 6);
+  assert.match(formatDoctor(result), /MODEL CALL BUDGET\n6/);
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
   assert.match(formatDoctor(result), /CAPABILITY REGISTRY\n[0-9a-f]{12}/);
   assert.match(formatDoctor(result), /ORCHESTRATOR SKILLS AVAILABLE/);
@@ -676,10 +682,13 @@ test('report exposes capability fingerprints and preflight outcome without raw p
     registryFingerprint: 'a'.repeat(64),
     projectSkillPolicyFingerprint: 'b'.repeat(64),
     results: { capabilities: { ok: false } },
-    budgets: { maxWorkerAttempts: 1 },
+    budgets: { maxWorkerAttempts: 1, maxModelCalls: 3 },
+    modelUsage: { maxCalls: 3, calls: 1, inputTokens: 12, outputTokens: 4, totalTokens: 16, unknownUsageCalls: 0, entries: [] },
     workerAttempts: 0,
     approvals: []
   });
+  assert.match(rendered, /MODEL CALLS\n1\/3/);
+  assert.match(rendered, /REPORTED TOKENS\n16 total \(12 input \/ 4 output\), 0 call\(s\) without usage evidence/);
   assert.match(rendered, /CAPABILITY REGISTRY\na{12}/);
   assert.match(rendered, /PROJECT SKILL POLICY\nb{12}/);
   assert.match(rendered, /CAPABILITY PREFLIGHT\nFAIL/);
@@ -1088,6 +1097,61 @@ test('v0.4 commits exactly the final governed change set', async () => {
   assert.equal(run.status, RunStatus.COMPLETED);
   assert.deepEqual(run.results.commit.committedPaths, run.results.changePolicy.paths);
   assert.equal(run.results.commit.committedChangeSetFingerprint, run.results.changePolicy.changeSetFingerprint);
+});
+
+test('orchestrator model-call budget stops a retry before another worker invocation', async () => {
+  const store = await temporaryStore();
+  const worker = new FakeWorker();
+  let testCalls = 0;
+  const configured = project({ budgets: { maxModelCalls: 1, maxWorkerAttempts: 2, commandTimeoutMs: 1_000, ciTimeoutMs: 1_000, ciPollIntervalMs: 1_000 } });
+  const orchestrator = new Orchestrator({
+    store,
+    github: new FakeGitHub(),
+    localGit: new FakeLocalGit(),
+    worker,
+    commandRunner: async (_project, name) => {
+      if (name === 'test') testCalls += 1;
+      return { name, ok: name !== 'test', stdout: '', stderr: name === 'test' ? 'failure' : '', durationMs: 1 };
+    }
+  });
+  const run = await orchestrator.run(configured, 'Bound Codex retries');
+  assert.equal(run.status, RunStatus.FAILED);
+  assert.equal(run.failureReason, 'model_call_budget_exhausted');
+  assert.equal(run.budgetExhausted, 'maxModelCalls');
+  assert.equal(worker.calls, 1);
+  assert.equal(testCalls, 1);
+  assert.equal(run.modelUsage.calls, 1);
+  assert.equal(run.modelUsage.maxCalls, 1);
+  assert.equal(run.modelUsage.unknownUsageCalls, 1);
+  assert.equal(run.modelUsage.entries[0].skill, 'code.implement');
+  assert.equal(run.modelUsage.entries[0].status, 'completed');
+});
+
+test('orchestrator records reported token usage for the coding worker', async () => {
+  const worker = {
+    calls: 0,
+    async execute() {
+      this.calls += 1;
+      return { status: 'completed', summary: 'changed fixture', output: '', usage: { input_tokens: 11, output_tokens: 7 } };
+    }
+  };
+  const run = await new Orchestrator({
+    store: await temporaryStore(),
+    github: new FakeGitHub(),
+    localGit: new FakeLocalGit(),
+    worker,
+    commandRunner: async (_project, name) => ({ name, ok: true, stdout: '', stderr: '', durationMs: 1 })
+  }).run(project(), 'Account for model usage');
+
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.equal(worker.calls, 1);
+  assert.equal(run.modelUsage.calls, 1);
+  assert.equal(run.modelUsage.inputTokens, 11);
+  assert.equal(run.modelUsage.outputTokens, 7);
+  assert.equal(run.modelUsage.totalTokens, 18);
+  assert.equal(run.modelUsage.unknownUsageCalls, 0);
+  assert.equal(run.modelUsage.entries[0].surface, 'orchestrator');
+  assert.equal(run.modelUsage.entries[0].status, 'completed');
 });
 
 test('failed checks retry once and eventually complete without an infinite loop', async () => {
