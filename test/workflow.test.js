@@ -1294,6 +1294,61 @@ test('interrupted implementation with observed changes cannot be silently retrie
 });
 
 
+test('interrupted change critic with observed changes cannot be approved or retried', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-interrupted-critic-'));
+  const configured = managedProject('interrupted-critic', root, {
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/feature.js']);
+  const mutated = changedChangeSet(['src/feature.js', 'src/reviewer-side-effect.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { return mutated; } });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Recover critic safely' });
+  await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = plan.workspace.path;
+    implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+    implementation.evidence.workerEvidence = { status: 'completed', summary: 'fixture' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+
+    const review = plan.steps.find((step) => step.id === 'review');
+    review.status = WorkflowStepStatus.RUNNING;
+    review.attempts = 1;
+    review.evidence = {
+      type: 'executor-start',
+      skill: review.skill,
+      specialist: review.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: implementation.evidence.repositoryState,
+      workspaceBeforeFingerprint: governed.changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+
+  const blocked = await instance.resume(created.id);
+  const review = blocked.steps.find((step) => step.id === 'review');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(blocked.pausedAt, null);
+  assert.equal(review.error, 'interrupted_read_only_changes_detected');
+  assert.equal(review.evidence.changeSetFingerprint, mutated.changeSetFingerprint);
+  await assert.rejects(instance.approve(created.id, 'review'), /not awaiting human approval/);
+});
+
 test('implementation with no changes retries only within the workflow attempt budget', async () => {
   let workerCalls = 0;
   const codingWorker = {

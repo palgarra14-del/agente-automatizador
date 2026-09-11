@@ -1402,7 +1402,7 @@ export class WorkflowEngine {
         }
       });
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
-      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.implement'].includes(interruptedStep.skill)) {
+      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'code.implement'].includes(interruptedStep.skill)) {
         const project = this.projects.get(plan.projectId);
         const expected = interruptedStep.evidence?.repositoryState;
         if (!plan.workspace || !expected) {
@@ -1442,7 +1442,7 @@ export class WorkflowEngine {
         if (repositoryChanged || filesChanged) {
           await this.update(id, (saved) => {
             const step = saved.steps.find((item) => item.id === interruptedStep.id);
-            const readOnly = step.skill === 'code.inspect' || step.skill === 'code.diagnose';
+            const readOnly = ['code.inspect', 'code.diagnose', 'code.review'].includes(step.skill);
             step.error = readOnly ? 'interrupted_read_only_changes_detected' : 'interrupted_implementation_changes_detected';
             step.evidence = {
               ...step.evidence,
