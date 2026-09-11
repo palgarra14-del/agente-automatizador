@@ -583,7 +583,7 @@ test('workflow global deadline is enforced before start, between steps, between 
   const betweenCommands = await engine({ now: () => clock, runner: async (_project, name, options) => { calls += 1; commandTimeouts.push(options.timeoutMs); clock = 1_000; return { name, ok: false, stdout: '', stderr: '' }; } });
   const commandPlan = await betweenCommands.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
   await betweenCommands.update(commandPlan.id, (plan) => {
-    for (const id of ['inspect-project', 'diagnose', 'plan-change', 'implementation', 'review', 'tests']) completeStep(plan, id);
+    for (const id of ['inspect-project', 'diagnose', 'plan-change', 'implementation', 'dependency-refresh', 'review', 'tests']) completeStep(plan, id);
   });
   const deadlineFailed = await betweenCommands.run(commandPlan.id);
   assert.equal(deadlineFailed.result.error, 'workflow_budget_deadline_exceeded');
@@ -1917,6 +1917,7 @@ test('completed critic PASS cannot be replayed against a different implementatio
   completeStep(plan, 'dependency-refresh');
   completeStep(plan, 'review');
   implementation.evidence.changeSetFingerprint = 'f'.repeat(64);
+  plan.steps.find((step) => step.id === 'dependency-refresh').evidence.changeSetFingerprint = implementation.evidence.changeSetFingerprint;
   assert.throws(
     () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
     /Completed change review is not bound to the governed implementation/
