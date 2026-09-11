@@ -191,6 +191,68 @@ test('workflow validation rejects duplicate ids, missing dependencies, cycles, a
   assert.throws(() => createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Validate', budgets: { maxSteps: 1 } }), /maxSteps/);
 });
 
+test('reviewed publication prepares and revalidates the exact managed review branch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-branch-'));
+  const configured = managedProject('publication-branch', root, {
+    skills: { allow: ['workspace.prepare', 'release.publish-reviewed-workflow', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const baseHead = 'a'.repeat(40);
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  let prepareCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect(project) {
+      return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' };
+    },
+    async prepareWorkingBranch(_project, runId, expectedBaseHead) {
+      prepareCalls += 1;
+      assert.equal(expectedBaseHead, baseHead);
+      branch = `agent/${runId}`;
+      return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead };
+    }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Prepare exact review branch' });
+
+  await instance.workspaceProject(created.id, configured);
+  const persisted = await instance.get(created.id);
+  assert.equal(prepareCalls, 1);
+  assert.equal(persisted.workspace.managed, true);
+  assert.equal(persisted.workspace.workingBranch, `agent/${created.id}`);
+  assert.equal(persisted.workspace.baseHead, baseHead);
+  assert.equal(persisted.workspace.remote, remote);
+
+  await instance.workspaceProject(created.id, configured);
+  assert.equal(prepareCalls, 1);
+
+  branch = 'agent/unexpected';
+  await assert.rejects(instance.workspaceProject(created.id, configured), /Unexpected current branch/);
+});
+
+test('reviewed workflow publication refuses an unmanaged workspace before Git mutation', async () => {
+  const configured = configFrom({
+    id: 'publication-unmanaged',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['release.publish-reviewed-workflow', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let gitCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect() { gitCalls += 1; throw new Error('git should not be touched'); },
+    async prepareWorkingBranch() { gitCalls += 1; throw new Error('branch should not be prepared'); }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject unmanaged publication' });
+  await assert.rejects(instance.workspaceProject(created.id, configured), /requires a managed workspace/);
+  assert.equal(gitCalls, 0);
+});
+
 test('workflow placeholders block honestly instead of claiming unimplemented work completed', async () => {
   const instance = await engine();
   const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Improve safely' });
