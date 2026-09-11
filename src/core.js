@@ -546,6 +546,23 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   return plan;
 }
 
+function validateCompletedWorkflowEvidence(step) {
+  if (step.status !== WorkflowStepStatus.COMPLETED) return;
+  if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
+  if (step.type === 'placeholder') {
+    if (!step.evidence || step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
+    return;
+  }
+  if (step.type === 'checkpoint') {
+    if (!step.evidence || !Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    return;
+  }
+  if (step.type === 'command' || step.type === 'verification') {
+    const commands = step.evidence?.commands;
+    if (!Array.isArray(commands) || commands.length !== step.commands.length || commands.some((outcome, index) => outcome?.name !== step.commands[index] || outcome.ok !== true)) throw new Error(`Completed executable step requires successful command evidence: ${step.id}`);
+  }
+}
+
 export function validateWorkflowPlan(plan, knownProjects) {
   if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps) || !plan.steps.length) throw new Error('Workflow plan must contain steps');
   if (!workflowProfiles[plan.profile]) throw new Error('Workflow references an unknown profile');
@@ -567,6 +584,7 @@ export function validateWorkflowPlan(plan, knownProjects) {
     if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
     if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
     if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
+    validateCompletedWorkflowEvidence(step);
     ids.add(step.id);
   }
   for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
