@@ -53,7 +53,7 @@ test('orchestrator rejects a saved run after project capability policy changes',
 
 test('repository observation gate fails before GitHub inspection', async () => {
   const configured = project({
-    allow: ['project.bootstrap', 'project.verify', 'human.approval', 'code.implement', 'release.observe-ci', 'release.publish-pr'],
+    allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval', 'code.implement', 'release.observe-ci', 'release.publish-pr'],
     deny: []
   });
   let inspected = 0;
