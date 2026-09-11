@@ -878,6 +878,7 @@ test('implementation sensitive change blocks before verification', async () => {
   assert.equal(implementation.error, 'workflow_sensitive_change_requires_approval');
   assert.equal(implementation.evidence.changePolicy.classification, 'sensitive');
   assert.equal(verificationCalls, 0);
+  await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
 });
 
 test('implementation forbidden path and budget excess fail closed before verification', async () => {
