@@ -124,3 +124,28 @@ test('read-only skill executor fails closed on native Windows before constructin
   assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_win32');
   assert.equal(constructed, 0);
 });
+
+
+test('read-only skill executor redacts secrets from structured model output', async () => {
+  const secret = 'READONLY_SECRET_TOKEN_123456789';
+  class FakeCodex {
+    startThread() {
+      return {
+        id: 'readonly-secret-thread',
+        run: async () => ({
+          finalResponse: JSON.stringify({
+            inspectionEvidence: { summary: `Authorization: Bearer ${secret}` }
+          }),
+          usage: {}
+        })
+      };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({ PATH: '/safe/bin' }) });
+  const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const result = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  const persisted = JSON.stringify(result);
+  assert.equal(result.ok, true);
+  assert.equal(persisted.includes(secret), false);
+  assert.match(persisted, /\[REDACTED\]/);
+});
