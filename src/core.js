@@ -1480,11 +1480,24 @@ export class WorkflowEngine {
   async workspaceProject(id, project) {
     const plan = await this.get(id);
     const expected = this.workspaceManager.describe(project, plan.id);
+    const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
+    const publicationEnabled = plan.profile === 'app-improvement' && publicationCapability.available;
     if (plan.workspace) {
       validateWorkflowWorkspace(plan.workspace, project);
       if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
       if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
-      return projectAtWorkspace(project, plan.workspace.path);
+      const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
+      if (publicationEnabled) {
+        if (!plan.workspace.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) throw new Error('Workflow publication branch evidence is missing');
+        const publicationStep = plan.steps.find((step) => step.id === 'publication');
+        const publishedOrPublishing = publicationStep && [WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED].includes(publicationStep.status);
+        await this.localGit.assertRepositoryState(workspaceProject, {
+          branch: plan.workspace.workingBranch,
+          ...(publishedOrPublishing ? {} : { head: plan.workspace.baseHead }),
+          remote: plan.workspace.remote
+        });
+      }
+      return workspaceProject;
     }
     const remainingMs = this.remainingMs(plan);
     if (remainingMs <= 0) {
@@ -1511,8 +1524,8 @@ export class WorkflowEngine {
     }
     const allocatedProject = projectAtWorkspace(project, allocation.workspace);
     let branchEvidence = null;
-    const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
-    if (plan.profile === 'app-improvement' && publicationCapability.available) {
+    if (publicationEnabled) {
+      if (!allocation.managed) throw new Error('Reviewed workflow publication requires a managed workspace');
       const initial = await this.localGit.inspect(allocatedProject);
       branchEvidence = await this.localGit.prepareWorkingBranch(allocatedProject, plan.id, initial.initialHead);
     }
@@ -2010,7 +2023,7 @@ function validateWorkflowWorkspace(workspace, project) {
   }
   if (workspace.managed !== (project.workspaceStrategy === 'managed')) throw new Error('Workflow workspace strategy does not match the project');
   if (workspace.workingBranch !== undefined) {
-    if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch || typeof workspace.baseHead !== 'string' || !workspace.baseHead || typeof workspace.remote !== 'string' || !workspace.remote) throw new Error('Workflow publication branch evidence is invalid');
+    if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(workspace.baseHead ?? '') || typeof workspace.remote !== 'string' || !workspace.remote || !remoteMatchesProject(workspace.remote, project)) throw new Error('Workflow publication branch evidence is invalid');
     assertAllowedWorkingBranch(project, workspace.workingBranch);
   } else if (workspace.baseHead !== undefined || workspace.remote !== undefined) throw new Error('Workflow publication branch evidence is incomplete');
   projectAtWorkspace(project, workspace.path);
