@@ -3062,12 +3062,35 @@ export class GitHubAdapter {
     };
   }
 
+  async checkRuns(project, sha, { perPage = 100, maxPages = 10 } = {}) {
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs?per_page=${perPage}&page=${page}`));
+      const batch = data.check_runs ?? [];
+      collected.push(...batch);
+      const total = Number.isInteger(data.total_count) ? data.total_count : null;
+      if ((total !== null && collected.length >= total) || batch.length < perPage) return collected;
+    }
+    throw new Error('github_ci_check_runs_pagination_limit_exceeded');
+  }
+
+  async commitStatuses(project, sha, { perPage = 100, maxPages = 10 } = {}) {
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const batch = await this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/statuses?per_page=${perPage}&page=${page}`));
+      if (!Array.isArray(batch)) throw new Error('github_ci_statuses_response_invalid');
+      collected.push(...batch);
+      if (batch.length < perPage) return collected;
+    }
+    throw new Error('github_ci_statuses_pagination_limit_exceeded');
+  }
+
   async checks(project, sha) {
-    const [checkData, statusData] = await Promise.all([
-      this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/check-runs`)),
-      this.request(this.path(project, `/commits/${encodeURIComponent(sha)}/status`))
+    const [checkRuns, commitStatuses] = await Promise.all([
+      this.checkRuns(project, sha),
+      this.commitStatuses(project, sha)
     ]);
-    const checks = (checkData.check_runs ?? []).map((check) => ({
+    const checks = checkRuns.map((check) => ({
       name: check.name,
       status: check.status,
       conclusion: check.conclusion,
@@ -3075,7 +3098,7 @@ export class GitHubAdapter {
       completedAt: check.completed_at,
       detailsUrl: check.details_url
     }));
-    const statuses = (statusData.statuses ?? []).map((status) => ({
+    const statuses = commitStatuses.map((status) => ({
       context: status.context,
       state: status.state,
       description: status.description ?? null,
