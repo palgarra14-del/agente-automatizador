@@ -1509,7 +1509,14 @@ export class WorkflowEngine {
       }
       throw error;
     }
-    const workspace = workflowWorkspaceEvidence(project, allocation);
+    const allocatedProject = projectAtWorkspace(project, allocation.workspace);
+    let branchEvidence = null;
+    const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
+    if (plan.profile === 'app-improvement' && publicationCapability.available) {
+      const initial = await this.localGit.inspect(allocatedProject);
+      branchEvidence = await this.localGit.prepareWorkingBranch(allocatedProject, plan.id, initial.initialHead);
+    }
+    const workspace = workflowWorkspaceEvidence(project, allocation, branchEvidence);
     validateWorkflowWorkspace(workspace, project);
     if (workspace.managed) await assertSafePathChain(workspace.path);
     await this.update(id, (saved) => { saved.workspace = workspace; });
