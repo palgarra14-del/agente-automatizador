@@ -2789,12 +2789,15 @@ export class CodexSdkWorker extends CodingWorker {
   }
 }
 
-const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review']);
+const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review', 'website.plan']);
 
 export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }) {
   const clean = sanitizeCodingTask({ skill, goal, context });
   const reviewInstruction = skill === 'code.review'
     ? 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
+    : null;
+  const websiteInstruction = skill === 'website.plan'
+    ? 'Use only the supplied businessBrief and repository context. Do not use web research and do not invent testimonials, years in business, certifications, awards, clients, guarantees, prices, service areas, factual claims, or credentials that are absent from the brief. Put any fact needed for a professional result but not supplied into missingInputs. websitePlan must contain exactly: summary, pages, design, conversion, seo, implementation, missingInputs. pages items: slug,title,purpose,sections. design: direction,tone,colors,typography. conversion: primaryCta,secondaryCta. seo: primaryLocation,keywords. implementation: priorities,constraints.'
     : null;
   return [
     'You are a read-only analysis worker in a controlled engineering workflow.',
@@ -2804,9 +2807,58 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
     'Return exactly one JSON object and no Markdown, prose, or code fences.',
     `The JSON object must contain exactly these top-level keys: ${contract.outputs.join(', ')}.`,
     reviewInstruction,
+    websiteInstruction,
     'Keep evidence concise, factual, and grounded in files you actually inspected. Do not invent findings.',
     '', 'Structured skill request:', JSON.stringify(clean, null, 2)
   ].filter(Boolean).join('\n');
+}
+
+function normalizeWebsitePlan(value) {
+  assertObjectKeys(value, new Set(['summary', 'pages', 'design', 'conversion', 'seo', 'implementation', 'missingInputs']), 'websitePlan');
+  if (!Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 20) throw new Error('websitePlan.pages must contain between 1 and 20 items');
+  const seenSlugs = new Set();
+  const pages = value.pages.map((page, index) => {
+    assertObjectKeys(page, new Set(['slug', 'title', 'purpose', 'sections']), `websitePlan.pages[${index}]`);
+    const slug = boundedText(page.slug, `websitePlan.pages[${index}].slug`, { required: true, max: 120 });
+    if (!/^\/(?:[a-z0-9]+(?:-[a-z0-9]+)*\/?)?$/.test(slug)) throw new Error(`websitePlan.pages[${index}].slug is invalid`);
+    if (seenSlugs.has(slug)) throw new Error('websitePlan.pages contains duplicate slugs');
+    seenSlugs.add(slug);
+    return {
+      slug,
+      title: boundedText(page.title, `websitePlan.pages[${index}].title`, { required: true, max: 120 }),
+      purpose: boundedText(page.purpose, `websitePlan.pages[${index}].purpose`, { required: true, max: 500 }),
+      sections: boundedTextList(page.sections, `websitePlan.pages[${index}].sections`, { required: true, min: 1, max: 20, itemMax: 180 })
+    };
+  });
+  assertObjectKeys(value.design, new Set(['direction', 'tone', 'colors', 'typography']), 'websitePlan.design');
+  const colors = boundedTextList(value.design.colors ?? [], 'websitePlan.design.colors', { max: 8, itemMax: 7 });
+  for (const color of colors) if (!/^#[0-9a-fA-F]{6}$/.test(color)) throw new Error('websitePlan.design.colors must contain six-digit hex colors');
+  assertObjectKeys(value.conversion, new Set(['primaryCta', 'secondaryCta']), 'websitePlan.conversion');
+  assertObjectKeys(value.seo, new Set(['primaryLocation', 'keywords']), 'websitePlan.seo');
+  assertObjectKeys(value.implementation, new Set(['priorities', 'constraints']), 'websitePlan.implementation');
+  return safeJson({
+    summary: boundedText(value.summary, 'websitePlan.summary', { required: true, max: 1_200 }),
+    pages,
+    design: {
+      direction: boundedText(value.design.direction, 'websitePlan.design.direction', { required: true, max: 600 }),
+      tone: boundedText(value.design.tone, 'websitePlan.design.tone', { required: true, max: 160 }),
+      colors,
+      typography: boundedText(value.design.typography, 'websitePlan.design.typography', { required: true, max: 300 })
+    },
+    conversion: {
+      primaryCta: boundedText(value.conversion.primaryCta, 'websitePlan.conversion.primaryCta', { required: true, max: 160 }),
+      secondaryCta: boundedText(value.conversion.secondaryCta, 'websitePlan.conversion.secondaryCta', { max: 160 }) || null
+    },
+    seo: {
+      primaryLocation: boundedText(value.seo.primaryLocation, 'websitePlan.seo.primaryLocation', { max: 120 }) || null,
+      keywords: boundedTextList(value.seo.keywords ?? [], 'websitePlan.seo.keywords', { max: 30, itemMax: 120 })
+    },
+    implementation: {
+      priorities: boundedTextList(value.implementation.priorities, 'websitePlan.implementation.priorities', { required: true, min: 1, max: 30, itemMax: 240 }),
+      constraints: boundedTextList(value.implementation.constraints ?? [], 'websitePlan.implementation.constraints', { max: 30, itemMax: 300 })
+    },
+    missingInputs: boundedTextList(value.missingInputs ?? [], 'websitePlan.missingInputs', { max: 30, itemMax: 300 })
+  });
 }
 
 function validateReviewEvidence(reviewEvidence) {
@@ -2838,6 +2890,7 @@ function validateSkillOutput(contract, output, skillId = null) {
   for (const key of expected) if (output[key] === undefined || output[key] === null) throw new Error(`skill_output_missing:${key}`);
   const normalized = safeJson(output);
   if (skillId === 'code.review') normalized.reviewEvidence = validateReviewEvidence(normalized.reviewEvidence);
+  if (skillId === 'website.plan') normalized.websitePlan = normalizeWebsitePlan(normalized.websitePlan);
   return normalized;
 }
 
