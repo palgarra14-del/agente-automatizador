@@ -118,6 +118,55 @@ test('workflow model usage state is persisted and fails closed on tampering', ()
   assert.throws(() => validateWorkflowPlan(exceeded, new Map([[configured.id, configured]])), /calls exceeds maxCalls/);
 });
 
+test('workflow resume fails closed when the configured model-call budget changes', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Freeze workflow model budget' });
+  const changed = configFrom({
+    id: configured.id,
+    repository: configured.repository,
+    defaultBranch: configured.defaultBranch,
+    protectedBranches: configured.protectedBranches,
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: configured.budgets.maxModelCalls + 1 },
+    skills: configured.skills
+  });
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[changed.id, changed]])),
+    /workflow\.modelUsage\.maxCalls does not match the active project budget/
+  );
+});
+
+test('malformed SDK usage evidence never reduces a consumed workflow model call', async () => {
+  const configured = configFrom({
+    id: 'malformed-model-usage',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: 2 },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      return { ok: false, status: 'failed', usage: { input_tokens: -10, output_tokens: 'bad' }, outputBytes: 1, error: 'fixture failure' };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Do not trust malformed usage', budgets: { maxAttempts: 1 } });
+  const failed = await instance.run(created.id);
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.modelUsage.calls, 1);
+  assert.equal(failed.modelUsage.totalTokens, 0);
+  assert.equal(failed.modelUsage.unknownUsageCalls, 1);
+  assert.equal(failed.modelUsage.entries[0].usage, null);
+  assert.equal(failed.modelUsage.entries[0].status, 'failed');
+});
+
 test('workflow validation rejects duplicate ids, missing dependencies, cycles, and budgets', () => {
   const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Validate' });
   plan.steps[1].id = plan.steps[0].id;
