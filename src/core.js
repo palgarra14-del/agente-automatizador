@@ -948,6 +948,11 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
+      if (plan.profile === 'website-build') {
+        const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+        const design = plan.steps.find((candidate) => candidate.id === 'design');
+        if (!plan.inputFingerprint || step.evidence.businessBriefFingerprint !== plan.inputFingerprint || !requirements?.evidence?.websitePlanFingerprint || step.evidence.websitePlanFingerprint !== requirements.evidence.websitePlanFingerprint || design?.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint || step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('Completed website implementation is not bound to the approved brief and website plan');
+      }
     }
     if (step.skill === 'website.plan') {
       const websitePlan = normalizeWebsitePlan(step.evidence.result?.websitePlan);
@@ -1459,6 +1464,15 @@ export class WorkflowEngine {
         changeSet: changeSet ? safeJson(changeSet) : null,
         changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
         changePolicy: decision ? safeJson(decision) : null,
+        ...(saved.profile === 'website-build' ? (() => {
+          const requirements = saved.steps.find((candidate) => candidate.id === 'requirements');
+          const design = saved.steps.find((candidate) => candidate.id === 'design');
+          return {
+            businessBriefFingerprint: saved.inputFingerprint,
+            websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
+            approvedWebsitePlanFingerprint: design?.evidence?.approvedWebsitePlanFingerprint ?? null
+          };
+        })() : {}),
         error: repositoryIntegrityError ? clip(repositoryIntegrityError.message, 1_000) : null
       };
       step.evidence = baseEvidence;
