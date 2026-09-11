@@ -191,3 +191,12 @@ test('workspace preparation is an explicit workflow capability', () => {
   assert.equal(denied.available, false);
   assert.equal(denied.reason, 'skill_not_allowed');
 });
+
+
+test('pre-v0.7 workflow plans without registry fingerprints fail closed', () => {
+  const project = configuredProject();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project, goal: 'Legacy workflow state' });
+  delete plan.registryFingerprint;
+  delete plan.projectSkillPolicyFingerprint;
+  assert.throws(() => validateWorkflowPlan(plan, new Map([[project.id, project]])), /registry fingerprint/);
+});
