@@ -53,13 +53,15 @@ const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'buil
 const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth|cookie|session)/i;
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
+const packageManagerControlPathPattern = /(^|\/)(?:\.npmrc|\.pnpmfile\.cjs|pnpm-workspace\.yaml|\.yarnrc(?:\.yml)?)(?:$|\/)/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
 const dependencyControlPaths = Object.freeze(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json']);
 const defaultSensitivePathRoots = [...dependencyControlPaths, '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 const protectedIgnoredPathspecs = Object.freeze([
-  '.env', '.env.*', '*.pem', '*.key',
+  '.env', '.env.*', '*.pem', '*.key', '.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', '.yarnrc', '.yarnrc.yml',
   'secrets/**', 'credentials/**', 'creds/**',
   ':(glob)**/.env', ':(glob)**/.env.*', ':(glob)**/*.pem', ':(glob)**/*.key',
+  ':(glob)**/.npmrc', ':(glob)**/.pnpmfile.cjs', ':(glob)**/pnpm-workspace.yaml', ':(glob)**/.yarnrc', ':(glob)**/.yarnrc.yml',
   ':(glob)**/secrets/**', ':(glob)**/credentials/**', ':(glob)**/creds/**'
 ]);
 
@@ -160,7 +162,7 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
     return { ok: false, reason: 'forbidden_path:workspace_escape', paths: [], changedFiles: 0, diffLines: 0 };
   }
   const policy = project.changePolicy;
-  const forbidden = paths.find((path) => immutableForbiddenPathPattern.test(path) || pathMatchesAnyRoot(path, policy.forbiddenPaths));
+  const forbidden = paths.find((path) => immutableForbiddenPathPattern.test(path) || packageManagerControlPathPattern.test(path) || pathMatchesAnyRoot(path, policy.forbiddenPaths));
   const changeSetFingerprint = changeSet.changeSetFingerprint ?? fingerprintChangeSet(changeSet);
   if (forbidden) return { ok: false, reason: `forbidden_path:${forbidden}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
   const scopeForbidden = paths.find((path) => pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths));
