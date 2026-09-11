@@ -223,13 +223,15 @@ test('workflow global deadline is enforced before start, between steps, between 
   clock = 0;
   const commandTimeouts = [];
   const betweenCommands = await engine({ now: () => clock, runner: async (_project, name, options) => { calls += 1; commandTimeouts.push(options.timeoutMs); clock = 1_000; return { name, ok: false, stdout: '', stderr: '' }; } });
-  const commandPlan = await betweenCommands.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
-  await betweenCommands.update(commandPlan.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
+  const commandPlan = await betweenCommands.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
+  await betweenCommands.update(commandPlan.id, (plan) => {
+    for (const id of ['inspect-project', 'diagnose', 'plan-change', 'implementation', 'tests']) plan.steps.find((step) => step.id === id).status = WorkflowStepStatus.COMPLETED;
+  });
   const deadlineFailed = await betweenCommands.run(commandPlan.id);
   assert.equal(deadlineFailed.result.error, 'workflow_budget_deadline_exceeded');
   assert.equal(commandTimeouts.at(-1), 1_000);
   assert.equal(calls, 2);
-  assert.equal(deadlineFailed.steps.find((step) => step.id === 'validate-data').attempts, 1);
+  assert.equal(deadlineFailed.steps.find((step) => step.id === 'verification').attempts, 1);
 });
 
 test('crash and resume preserve a managed workspace and never repeat completed steps before approval', async () => {
@@ -275,7 +277,7 @@ test('a new LeadFinder-like workspace bootstraps once before its verification co
   assert.deepEqual(order, []);
   await instance.update(created.id, (plan) => { plan.steps.find((step) => step.id === 'inspect-data').status = WorkflowStepStatus.COMPLETED; });
   const completed = await instance.run(created.id);
-  assert.deepEqual(order.slice(0, 4), ['bootstrap:install', 'post-worker:test', 'post-worker:lint', 'post-worker:build']);
+  assert.deepEqual(order, ['bootstrap:install', 'post-worker:test']);
   assert.equal(order.filter((entry) => entry === 'bootstrap:install').length, 1);
   assert.equal(manager.prepared.length, 1);
   assert.equal(completed.bootstrap.status, 'completed');
@@ -464,4 +466,38 @@ test('bootstrap attempt budget prevents unlimited retry after repeated interrupt
   const failed = await instance.run(created.id);
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(failed.result.error, 'workflow_bootstrap_attempt_budget_exhausted');
+});
+
+
+test('verification steps use profile-specific command sets instead of repeating the full suite', () => {
+  const app = createWorkflowPlan({ profile: 'app-improvement', project: project(), goal: 'Map checks' });
+  assert.deepEqual(app.steps.find((step) => step.id === 'tests').commands, ['test']);
+  assert.deepEqual(app.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
+  const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks' });
+  assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint']);
+  assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, ['build']);
+});
+
+test('terminal workflows do not execute again', async () => {
+  let calls = 0;
+  const instance = await engine({ runner: async (_project, name) => { calls += 1; return { name, ok: true, stdout: '', stderr: '' }; } });
+  const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Stay terminal' });
+  await instance.update(created.id, (plan) => {
+    plan.status = WorkflowStepStatus.FAILED;
+    plan.result = { error: 'fixture_failure' };
+  });
+  const failed = await instance.run(created.id);
+  assert.equal(failed.result.error, 'fixture_failure');
+  assert.equal(calls, 0);
+});
+
+test('workflow state validation ties checkpoint pause state to awaiting approval', () => {
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: project(), goal: 'Validate pause state', nowMs: 100 });
+  for (const id of ['inspect-project', 'diagnose']) plan.steps.find((step) => step.id === id).status = WorkflowStepStatus.COMPLETED;
+  const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+  checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  assert.throws(() => validateWorkflowPlan(plan, new Map([['workflow-project', project()]])), /paused checkpoint/);
+  plan.pausedAt = 150;
+  assert.equal(validateWorkflowPlan(plan, new Map([['workflow-project', project()]])).ok, true);
 });
