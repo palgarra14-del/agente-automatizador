@@ -101,6 +101,23 @@ test('workflow profiles create validated deterministic plans', () => {
   }
 });
 
+test('workflow model usage state is persisted and fails closed on tampering', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Persist model budget' });
+  assert.equal(plan.modelUsage.maxCalls, configured.budgets.maxModelCalls);
+  assert.equal(plan.modelUsage.calls, 0);
+  const missing = structuredClone(plan);
+  delete missing.modelUsage;
+  assert.throws(() => validateWorkflowPlan(missing, new Map([[configured.id, configured]])), /workflow\.modelUsage is missing/);
+  const exceeded = structuredClone(plan);
+  exceeded.modelUsage.calls = exceeded.modelUsage.maxCalls + 1;
+  exceeded.modelUsage.entries = Array.from({ length: exceeded.modelUsage.calls }, (_, index) => ({
+    id: `model-call-${index + 1}`, status: 'started', surface: 'workflow', skill: 'code.inspect', stepId: 'inspect-project', specialist: 'code-inspector', attempt: 1,
+    startedAt: '2026-09-11T00:00:00.000Z', completedAt: null, usage: null
+  }));
+  assert.throws(() => validateWorkflowPlan(exceeded, new Map([[configured.id, configured]])), /calls exceeds maxCalls/);
+});
+
 test('workflow validation rejects duplicate ids, missing dependencies, cycles, and budgets', () => {
   const plan = createWorkflowPlan({ profile: 'data-analysis', project: project(), goal: 'Validate' });
   plan.steps[1].id = plan.steps[0].id;
@@ -748,6 +765,79 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.outputBytes, 220);
   assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
+});
+
+test('workflow model-call budget stops before invoking another specialist', async () => {
+  const configured = configFrom({
+    id: 'model-budget-workflow',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: 1 },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls += 1;
+      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 4 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture' } } };
+      return { ok: true, status: 'completed', usage: { input_tokens: 8, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Bound model calls' });
+  const failed = await instance.run(created.id);
+
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'workflow_model_call_budget_exhausted');
+  assert.equal(failed.result.stepId, 'diagnose');
+  assert.equal(calls, 1);
+  assert.equal(failed.modelUsage.calls, 1);
+  assert.equal(failed.modelUsage.maxCalls, 1);
+  assert.equal(failed.modelUsage.inputTokens, 10);
+  assert.equal(failed.modelUsage.outputTokens, 4);
+  assert.equal(failed.modelUsage.totalTokens, 14);
+  assert.equal(failed.modelUsage.entries[0].specialist, 'code-inspector');
+  assert.equal(failed.modelUsage.entries[0].status, 'completed');
+});
+
+test('workflow model usage is attributed across read-only specialists', async () => {
+  const configured = configFrom({
+    id: 'model-usage-workflow',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: 6 },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture' } } };
+      return { ok: true, status: 'completed', usage: { input_tokens: 7, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Attribute model usage' });
+  const waiting = await instance.run(created.id);
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.modelUsage.calls, 2);
+  assert.equal(waiting.modelUsage.inputTokens, 17);
+  assert.equal(waiting.modelUsage.outputTokens, 8);
+  assert.equal(waiting.modelUsage.totalTokens, 25);
+  assert.equal(waiting.modelUsage.unknownUsageCalls, 0);
+  assert.deepEqual(waiting.modelUsage.entries.map((entry) => [entry.skill, entry.specialist, entry.status]), [
+    ['code.inspect', 'code-inspector', 'completed'],
+    ['code.diagnose', 'diagnostician', 'completed']
+  ]);
 });
 
 test('read-only skill executor retries within workflow attempt budget and persists bounded failure evidence', async () => {
