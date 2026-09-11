@@ -836,7 +836,11 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
     if (step.skill === 'code.implement') {
       const repositoryState = step.evidence.repositoryState;
-      if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
+      const classification = step.evidence.changePolicy?.classification;
+      const sensitiveApproved = classification === 'sensitive' &&
+        Number.isFinite(Date.parse(step.evidence.sensitiveApproval?.approvedAt ?? '')) &&
+        step.evidence.sensitiveApproval?.changeSetFingerprint === step.evidence.changeSetFingerprint;
+      if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || !['normal', 'sensitive'].includes(classification) || (classification === 'sensitive' && !sensitiveApproved) || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
       if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
@@ -947,7 +951,19 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   const awaitingApproval = plan.steps.filter((step) => step.status === WorkflowStepStatus.AWAITING_APPROVAL);
   if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
   if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
-  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
+  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL) {
+    const waiting = awaitingApproval[0];
+    const sensitiveImplementation = awaitingApproval.length === 1 &&
+      plan.profile === 'app-improvement' &&
+      waiting?.id === 'implementation' &&
+      waiting.type === 'placeholder' &&
+      waiting.skill === 'code.implement' &&
+      waiting.error === 'workflow_sensitive_change_requires_approval' &&
+      waiting.evidence?.changePolicy?.classification === 'sensitive' &&
+      waiting.evidence?.changeSetFingerprint;
+    const checkpoint = awaitingApproval.length === 1 && waiting?.type === 'checkpoint';
+    if ((!checkpoint && !sensitiveImplementation) || !Number.isFinite(plan.pausedAt)) throw new Error('Awaiting approval workflow must have one paused checkpoint or fingerprint-bound sensitive implementation');
+  }
   if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
   if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
   if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt)) {
@@ -1344,10 +1360,11 @@ export class WorkflowEngine {
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id, reason: decision?.reason ?? 'unknown' };
       } else if (decision.classification === 'sensitive') {
-        step.status = WorkflowStepStatus.BLOCKED;
+        step.status = WorkflowStepStatus.AWAITING_APPROVAL;
         step.error = 'workflow_sensitive_change_requires_approval';
-        saved.status = WorkflowStepStatus.BLOCKED;
-        saved.result = { error: step.error, stepId: step.id, reason: decision.reason };
+        saved.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        saved.pausedAt ??= this.now();
+        saved.result = { error: step.error, stepId: step.id, reason: decision.reason, changeSetFingerprint: changeSet.changeSetFingerprint };
       } else {
         step.status = WorkflowStepStatus.COMPLETED;
         step.error = null;
@@ -1386,8 +1403,12 @@ export class WorkflowEngine {
     else if (changeSet.changeSetFingerprint !== implementation.evidence.changeSetFingerprint) error = 'workflow_change_set_changed_during_verification';
     else if (!decision?.ok) error = 'workflow_change_policy_rejected_during_verification';
     else if (decision.classification === 'sensitive') {
-      error = 'workflow_sensitive_change_during_verification';
-      blocked = true;
+      const approval = implementation.evidence.sensitiveApproval;
+      const approved = Number.isFinite(Date.parse(approval?.approvedAt ?? '')) && approval?.changeSetFingerprint === changeSet.changeSetFingerprint;
+      if (!approved) {
+        error = 'workflow_sensitive_change_during_verification';
+        blocked = true;
+      }
     }
     if (!error) return { ok: true, plan, changeSet, decision };
     const failed = await this.update(id, (saved) => {
