@@ -96,3 +96,42 @@ test('pull request publication gate fails before GitHub write', async () => {
   await assert.rejects(orchestrator.createPullRequest(run, configured), /capability_unavailable:release.publish-pr:skill_not_allowed/);
   assert.equal(writes, 0);
 });
+
+
+test('orchestrator lifecycle preflight rejects a missing downstream capability before execution', () => {
+  const configured = project({
+    allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval', 'repository.observe', 'repository.publish', 'release.observe-ci', 'release.publish-pr'],
+    deny: []
+  });
+  const orchestrator = new Orchestrator({ store: { mutate() {}, load() {} } });
+  assert.throws(() => orchestrator.assertOrchestratorCapabilities(configured), /capability_unavailable:code.implement:skill_not_allowed/);
+});
+
+test('dry run reports unavailable lifecycle capabilities without invoking the worker', async () => {
+  const configured = project({
+    allow: ['workspace.prepare', 'project.bootstrap', 'project.verify', 'human.approval', 'repository.observe', 'repository.publish', 'release.observe-ci', 'release.publish-pr'],
+    deny: []
+  });
+  let workerCalls = 0;
+  const github = {
+    async inspect() {
+      return {
+        provider: 'github',
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+        head: 'deadbeef',
+        branchProtection: { protected: true }
+      };
+    }
+  };
+  const worker = { async execute() { workerCalls += 1; return { status: 'completed' }; } };
+  const orchestrator = new Orchestrator({ store: await store(), github, worker });
+  const run = await orchestrator.run(configured, 'Inspect only', { dryRun: true });
+  assert.equal(run.status, RunStatus.COMPLETED);
+  assert.equal(workerCalls, 0);
+  assert.equal(run.results.capabilities.ok, false);
+  const implementation = run.results.capabilities.required.find((capability) => capability.id === 'code.implement');
+  assert.equal(implementation.available, false);
+  assert.equal(implementation.reason, 'skill_not_allowed');
+  assert.ok(run.evaluation.reasons.some((reason) => reason.includes('code.implement:skill_not_allowed')));
+});
