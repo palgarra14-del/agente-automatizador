@@ -1282,3 +1282,32 @@ test('Codex worker rejects project-local Codex control configuration before star
   assert.match(result.output, /worker_project_control_file_present:\.codex\/config\.toml/);
   assert.equal(constructed, 0);
 });
+
+
+test('git control fingerprint detects temporary ref tampering even when final HEAD is restored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-git-control-reflog-'));
+  assert.equal((await runProcess('git', ['init'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  await writeFile(join(root, 'fixture.txt'), 'one\n');
+  assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'first'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  const first = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+
+  await writeFile(join(root, 'fixture.txt'), 'two\n');
+  assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'second'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  const second = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+  const branchName = (await runProcess('git', ['branch', '--show-current'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+
+  const adapter = new LocalGitAdapter();
+  const configured = { workspace: root, budgets: { commandTimeoutMs: 5_000 } };
+  const before = await adapter.inspectRepositoryControlState(configured);
+
+  assert.equal((await runProcess('git', ['update-ref', `refs/heads/${branchName}`, first], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['update-ref', `refs/heads/${branchName}`, second], { cwd: root, timeoutMs: 5_000 })).ok, true);
+  assert.equal((await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim(), second);
+
+  const after = await adapter.inspectRepositoryControlState(configured);
+  assert.notEqual(after.fingerprint, before.fingerprint);
+  assert.ok(after.paths.some((path) => path === `refs/heads/${branchName}`));
+  assert.ok(after.paths.some((path) => path === `logs/refs/heads/${branchName}`));
+});
