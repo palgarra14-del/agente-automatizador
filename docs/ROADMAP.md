@@ -16,10 +16,14 @@ Registered repositories receive isolated managed workspaces, controlled bootstra
 
 Governed real engineering tasks add literal scope input, immutable forbidden-path enforcement, continuous policy evaluation after the worker and every validation command, fingerprint-bound sensitive approvals with stale-approval detection, final commit matching, per-project diff budgets, and a read-only doctor/preflight command. LeadFinder uses the strict 3-file / 200-line policy. The orchestrator still never merges pull requests or deploys production.
 
-## v0.5 — current
+## v0.5 — complete
 
-Safe project-command execution adds the provider boundary, a real Docker implementation with no automatic pull, strict `container-required` fail-safe behavior, explicit local fallback only, command-resource limits, a no-network post-worker policy, and doctor evidence for the active isolation contract. It does not create product changes, merge pull requests, deploy production, or invoke v0.6 work.
+Safe project-command execution adds the provider boundary, a real Docker implementation with no automatic pull, strict `container-required` fail-safe behavior, explicit local fallback only, command-resource limits, a no-network post-worker policy, and doctor evidence for the active isolation contract. It does not create product changes, merge pull requests, or deploy production.
+
+## v0.6 — current
+
+Deterministic persisted workflow plans add profile-based dependencies, Definition of Done, bounded retries/output/time, managed-workspace reuse, one-time bootstrap, crash-safe resume, and human checkpoints. Active execution budgets pause while waiting for checkpoint approval, workspace preparation is capped by the remaining budget, bootstrap attempts are bounded, and structural placeholders fail closed instead of claiming unimplemented work as complete. The workflow engine still does not execute research, design, implementation, or analysis placeholders; connecting those steps to reviewed executors is deferred to later versions.
 
 ## Deferred
 
-Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Do not start v0.5 from this branch.
+Project-specific business evaluators, richer worker-level thread resume, webhooks, dashboards, parallel workers, cloud state, and production integrations are deferred. Do not start v0.7 capabilities from the v0.6 hardening branch.
