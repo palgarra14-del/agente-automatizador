@@ -780,8 +780,10 @@ function changedChangeSet(paths, overrides = {}) {
 
 async function prepareImplementation(instance, workflowId) {
   await instance.update(workflowId, (plan) => {
-    completeStep(plan, 'inspect-project');
-    completeStep(plan, 'diagnose');
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture inspection', relevantPaths: ['src/core.js'] } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture diagnosis', cause: 'fixture cause' } };
     completeStep(plan, 'plan-change');
   });
 }
