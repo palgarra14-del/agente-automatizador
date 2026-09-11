@@ -3,16 +3,38 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
 
-async function engine({ runner, projects, workspaceManager, skillExecutor, now } = {}) {
+function emptyChangeSet() {
+  const base = { paths: [], changedFiles: 0, additions: 0, deletions: 0, diffLines: 0, changedBytes: 0, maxFileBytes: 0, sensitiveContent: false, contentFingerprint: '0'.repeat(64) };
+  return { ...base, changeSetFingerprint: fingerprintChangeSet(base) };
+}
+
+function stableLocalGit(overrides = {}) {
+  return {
+    async inspect(project) {
+      return { repository: project.workspace, remote: `https://github.com/${project.repository.owner}/${project.repository.name}.git`, currentBranch: project.defaultBranch, initialHead: 'deadbeef', status: '' };
+    },
+    async inspectChangeSet() { return emptyChangeSet(); },
+    async assertRepositoryState(project, expected = {}) {
+      const current = await this.inspect(project);
+      if (expected.branch && current.currentBranch !== expected.branch) throw new Error('Unexpected current branch');
+      if (expected.head && current.initialHead !== expected.head) throw new Error('Unexpected HEAD');
+      if (expected.remote && current.remote !== expected.remote) throw new Error('Unexpected origin remote');
+      return current;
+    },
+    ...overrides
+  };
+}
+
+async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, skillExecutor, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function completeStep(plan, id) {
@@ -26,7 +48,8 @@ function completeStep(plan, id) {
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
   };
-  if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: 'a'.repeat(64), changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' } };
+  else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
