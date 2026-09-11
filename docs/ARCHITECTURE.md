@@ -14,17 +14,17 @@ The evaluation requires successful worker completion, a governed diff, configure
 
 Each configured project receives a normalized skill allow/deny policy. Deny wins over allow. A project-policy fingerprint and registry fingerprint are persisted on both Orchestrator runs and workflow plans; resume fails closed if either changes. The Orchestrator performs a lifecycle preflight before real work and also enforces individual skill gates immediately before workspace preparation, bootstrap/check execution, coding, push/PR publication, CI observation, preview observation, and human approval. Workflow execution resolves the visible step skill plus infrastructure skills such as `workspace.prepare` and `project.bootstrap` before clone/install.
 
-The registry distinguishes `workflow` and `orchestrator` surfaces. Future capabilities can be declared without becoming executable: research, visual review, requirements, data analysis, and inspection currently have no reviewed execution surface and therefore resolve unavailable.
+The registry distinguishes `workflow` and `orchestrator` surfaces. v0.8 binds reviewed workflow executors for `code.inspect`, `code.diagnose`, and the app-improvement `code.implement` path. Future research, visual review, requirements, and data-analysis capabilities remain declared but unavailable until reviewed executors exist.
 
 ## v0.8 execution integration
 
 Execution leases are persisted on runs and workflows. A live owner rejects a second invocation before duplicate planner/worker/command work begins; an abandoned owner is recoverable only through the existing conservative process-identity check. Lease loss/tampering fails closed, and success/error paths release the matching lease.
 
-The first WorkflowEngine skill executors are deliberately split by authority. `CodexReadOnlySkillExecutor` handles `code.inspect` and `code.diagnose` with a read-only sandbox, no network/web search, strict JSON contracts, and an independent before/after Git repository + change-set comparison. Any persistent workspace, branch, HEAD, or remote change fails the step.
+The first WorkflowEngine skill executors are deliberately split by authority. `CodexReadOnlySkillExecutor` handles `code.inspect` and `code.diagnose` with a fail-closed read-only Codex permission profile, isolated HOME, no network/browser/plugins/project instructions, strict JSON contracts, and independent before/after integrity checks. Those checks bind repository identity, branch/HEAD/remote, working-tree fingerprint, protected ignored files, and Git control metadata (including refs/reflogs/hooks/info).
 
 `code.implement` reuses `CodexSdkWorker` rather than adding a second writer. The WorkflowEngine captures the clean starting repository state, runs the worker with only sanitized goal/evidence/scope, then reuses `LocalGitAdapter.inspectChangeSet` and `evaluateChangePolicy`. Forbidden paths, scope violations, and change-budget violations fail; sensitive changes block; a failed worker that left changes blocks rather than retrying. Only a completed worker plus a normal policy decision and bound change-set fingerprint can satisfy implementation evidence. Tests/typecheck/lint/build remain configured verification commands. WorkflowEngine never commits, pushes, creates PRs, merges, or deploys.
 
-Crash recovery records the pre-execution branch, HEAD, remote, workspace and change-set fingerprint. An interrupted worker may be retried only when repository/worktree state is still clean; observed changes or repository-state mutation become a non-approvable block so work is never silently applied twice.
+Crash recovery records the pre-execution branch, HEAD, remote, workspace, change-set fingerprint, protected ignored-file fingerprint, and Git-control fingerprint. An interrupted worker may be retried only when all governed state is still clean; observed changes or repository/control-state mutation become a non-approvable block so work is never silently applied twice.
 
 ## Adapters
 
