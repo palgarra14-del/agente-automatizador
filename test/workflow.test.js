@@ -952,6 +952,21 @@ test('app-improvement critic FAIL stops before deterministic verification', asyn
   assert.equal(verificationCalls, 0);
 });
 
+test('persisted critic PASS must retain structurally valid review evidence', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Validate persisted review' });
+  completeStep(plan, 'inspect-project');
+  completeStep(plan, 'diagnose');
+  completeStep(plan, 'plan-change');
+  completeStep(plan, 'implementation');
+  const review = completeStep(plan, 'review');
+  review.evidence.result.reviewEvidence = { verdict: 'PASS', summary: '', findings: [] };
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
+    /review_evidence_summary_invalid/
+  );
+});
+
 test('completed critic PASS cannot be replayed against a different implementation fingerprint', () => {
   const configured = project();
   const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Bind review evidence' });
