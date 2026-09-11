@@ -829,6 +829,15 @@ export class WorkflowEngine {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
       step.attempts += 1;
+      step.evidence = {
+        type: 'executor-start',
+        skill: step.skill,
+        registryFingerprint: saved.registryFingerprint,
+        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        workspacePath: workspaceProject.workspace,
+        repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
+        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint
+      };
       saved.status = WorkflowStepStatus.RUNNING;
     });
     const runningPlan = await this.get(id);
@@ -928,6 +937,15 @@ export class WorkflowEngine {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
       step.attempts += 1;
+      step.evidence = {
+        type: 'executor-start',
+        skill: step.skill,
+        registryFingerprint: saved.registryFingerprint,
+        projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
+        workspacePath: workspaceProject.workspace,
+        repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
+        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint
+      };
       saved.status = WorkflowStepStatus.RUNNING;
     });
     const runningPlan = await this.get(id);
