@@ -1103,6 +1103,8 @@ export class WorkflowEngine {
     try {
       const expectedRepositoryState = implementation.evidence.repositoryState;
       if (!expectedRepositoryState) throw new Error('implementation_repository_state_missing');
+      const repositoryControl = await this.localGit.inspectRepositoryControlState(workspaceProject);
+      if (repositoryControl.fingerprint !== implementation.evidence.repositoryControlFingerprint) throw new Error('repository_control_state_changed');
       await this.localGit.assertRepositoryState(workspaceProject, expectedRepositoryState);
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
       const protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
@@ -1210,8 +1212,10 @@ export class WorkflowEngine {
         let current = null;
         let changeSet = null;
         let protectedIgnored = null;
+        let repositoryControl = null;
         let integrityError = null;
         try {
+          repositoryControl = await this.localGit.inspectRepositoryControlState(workspaceProject);
           current = await this.localGit.inspect(workspaceProject);
           changeSet = await this.localGit.inspectChangeSet(workspaceProject);
           protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
@@ -1219,6 +1223,8 @@ export class WorkflowEngine {
           integrityError = error;
         }
         const repositoryChanged = integrityError ||
+          !repositoryControl ||
+          repositoryControl.fingerprint !== interruptedStep.evidence?.repositoryControlFingerprint ||
           !current ||
           current.currentBranch !== expected.branch ||
           current.initialHead !== expected.head ||
@@ -1239,6 +1245,7 @@ export class WorkflowEngine {
               changeSet: changeSet ? safeJson(changeSet) : null,
               changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
               protectedIgnoredFingerprint: protectedIgnored?.fingerprint ?? null,
+              repositoryControlFingerprint: repositoryControl?.fingerprint ?? null,
               error: integrityError ? clip(integrityError.message, 1_000) : null
             };
             saved.pausedAt = null;
