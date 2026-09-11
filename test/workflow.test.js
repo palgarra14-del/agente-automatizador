@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,12 +15,17 @@ function emptyChangeSet() {
   return { ...base, changeSetFingerprint: fingerprintChangeSet(base) };
 }
 
+function emptyProtectedIgnoredState() {
+  return { paths: [], fingerprint: createHash('sha256').update('[]').digest('hex') };
+}
+
 function stableLocalGit(overrides = {}) {
   return {
     async inspect(project) {
       return { repository: project.workspace, remote: `https://github.com/${project.repository.owner}/${project.repository.name}.git`, currentBranch: project.defaultBranch, initialHead: 'deadbeef', status: '' };
     },
     async inspectChangeSet() { return emptyChangeSet(); },
+    async inspectProtectedIgnoredState() { return emptyProtectedIgnoredState(); },
     async assertRepositoryState(project, expected = {}) {
       const current = await this.inspect(project);
       if (expected.branch && current.currentBranch !== expected.branch) throw new Error('Unexpected current branch');
@@ -48,7 +54,7 @@ function completeStep(plan, id) {
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
   };
-  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' } };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint };
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
@@ -949,7 +955,8 @@ test('interrupted implementation with observed changes cannot be silently retrie
       projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
       workspacePath: plan.workspace.path,
       repositoryState: { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` },
-      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint
     };
     plan.status = WorkflowStepStatus.RUNNING;
   });
