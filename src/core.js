@@ -2035,6 +2035,40 @@ export class LocalGitAdapter {
     return paths.map((path) => normalizeRepositoryPath(path, 'changed path'));
   }
 
+  async inspectProtectedIgnoredState(project) {
+    const result = await this.git(
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '--', ...protectedIgnoredPathspecs],
+      project,
+      { outputLimit: 64 * 1024 }
+    );
+    if (result.stdoutTruncated) throw new Error('protected_ignored_path_listing_too_large');
+    const paths = [...new Set(result.stdout.split(/\r?\n/).filter(Boolean).map((path) => normalizeRepositoryPath(path, 'protected ignored path')))].sort();
+    const entries = [];
+    for (const path of paths) {
+      const target = resolve(project.workspace, path);
+      if (!isWithin(resolve(project.workspace), target)) throw new Error(`Protected ignored path escaped workspace: ${path}`);
+      await assertSafePathChain(target);
+      let info;
+      try { info = await lstat(target); }
+      catch (error) {
+        if (error.code === 'ENOENT') continue;
+        throw error;
+      }
+      if (info.isSymbolicLink()) throw new Error(`Protected ignored path cannot be a symlink: ${path}`);
+      if (!info.isFile()) continue;
+      entries.push({
+        path,
+        size: Number(info.size),
+        mtimeMs: Math.trunc(Number(info.mtimeMs)),
+        ctimeMs: Math.trunc(Number(info.ctimeMs)),
+        mode: Number(info.mode),
+        ino: String(info.ino ?? '')
+      });
+    }
+    const fingerprint = createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+    return { paths: entries.map((entry) => entry.path), fingerprint };
+  }
+
   async inspectChangeSet(project) {
     const paths = await this.assertSafeChangedPaths(project);
     const trackedStats = (await this.git(['diff', 'HEAD', '--numstat'], project)).stdout.split(/\r?\n/).filter(Boolean);
