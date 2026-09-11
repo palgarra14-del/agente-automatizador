@@ -50,13 +50,19 @@ v0.10 remains a call-count governor rather than an exact monetary spend cap: SDK
 
 Interrupted Change Critic recovery is now fail-closed. If a process dies during `code.review`, repository/worktree/control-state changes are checked before any retry can occur; an observed mutation becomes a non-approvable block.
 
-## v0.11 — current
+## v0.11 — complete
 
 Reviewed Workflow Publication extends the app-improvement Definition of Done with a controlled review-only publication step. The workflow prepares its managed `agent/<workflowId>` branch before model execution, binds release-readiness approval to the exact reviewed change-set fingerprint, revalidates the unchanged default-branch base, commits the exact governed diff, pushes only the allowlisted review branch, creates and verifies a PR, waits for CI, and observes a required preview when configured.
 
 Publication is encapsulated behind one workflow-only `workflow-publication` authority. Low-level Git/GitHub/Vercel tools remain on the Orchestrator surface. Commit/push/PR phases persist before and after external writes; interrupted external-write state is never replayed automatically. CI/preview observation timeouts may resume without repeating writes. Merge, production deployment, domains, environment variables, secrets, and destructive/data actions remain unavailable to WorkflowEngine.
 
 Browser/research/data-analysis executors remain deferred.
+
+### Post-v0.11 audit
+
+A full post-merge review confirmed the publication path is bound to the reviewed change fingerprint, revalidates default-branch drift before commit, before PR creation, and after CI/preview, and exposes no merge or production-deploy method. No open publication defect is known after the review.
+
+Known hardening boundaries remain explicit rather than being treated as solved: Codex workers still rely on the reviewed SDK permission profile under the operator OS account, registered Docker images are currently referenced by mutable tags rather than enforced immutable identities, exact monetary spend cannot be guaranteed when SDK usage evidence is absent, and dependency-changing tasks still need a dedicated governed reinstall/reverification flow.
 
 ## Deferred
 
