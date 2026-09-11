@@ -83,20 +83,15 @@
       },
       "skills": {
         "allow": [
+          "workspace.prepare",
+          "project.bootstrap",
           "project.verify",
           "human.approval",
-          "code.inspect",
-          "code.implement",
-          "requirements.define",
-          "data.inspect",
-          "data.analyze",
-          "data.summarize",
-          "release.observe-ci",
-          "release.publish-pr",
-          "project.bootstrap",
           "repository.observe",
           "repository.publish",
-          "workspace.prepare"
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr"
         ],
         "deny": []
       }
@@ -189,21 +184,16 @@
       },
       "skills": {
         "allow": [
+          "workspace.prepare",
+          "project.bootstrap",
           "project.verify",
           "human.approval",
-          "code.inspect",
-          "code.implement",
-          "requirements.define",
-          "data.inspect",
-          "data.analyze",
-          "data.summarize",
-          "release.observe-ci",
-          "release.publish-pr",
-          "release.observe-preview",
-          "project.bootstrap",
           "repository.observe",
           "repository.publish",
-          "workspace.prepare"
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview"
         ],
         "deny": []
       }
@@ -296,21 +286,15 @@
       },
       "skills": {
         "allow": [
+          "workspace.prepare",
           "project.verify",
           "human.approval",
-          "code.inspect",
-          "code.implement",
-          "requirements.define",
-          "data.inspect",
-          "data.analyze",
-          "data.summarize",
-          "release.observe-ci",
-          "release.publish-pr",
-          "release.observe-preview",
-          "project.bootstrap",
           "repository.observe",
           "repository.publish",
-          "workspace.prepare"
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview"
         ],
         "deny": []
       }
