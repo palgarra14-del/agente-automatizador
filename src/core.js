@@ -1488,10 +1488,9 @@ export class WorkflowEngine {
       stage: 'dependency-refresh'
     });
     const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
-    let after = null;
     let integrityError = null;
     try {
-      after = await this.workspaceSnapshot(workspaceProject);
+      const after = await this.workspaceSnapshot(workspaceProject);
       if (!this.workspaceSnapshotUnchanged(before, after)) throw new Error('dependency_refresh_modified_governed_state');
     } catch (error) {
       integrityError = error;
@@ -2561,7 +2560,7 @@ export class DockerContainerExecution extends ExecutionProvider {
   async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
-    const { command, containerArgs, postWorker, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
+    const { command, containerArgs, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
     const networkPolicy = networkEnabled ? (stage === 'dependency-refresh' ? 'dependency-refresh-network-enabled' : 'bootstrap-network-enabled') : 'none';
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, stage, postWorkerNetwork: networkPolicy } };
     const startedAt = this.now();
