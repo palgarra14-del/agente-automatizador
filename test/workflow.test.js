@@ -2127,6 +2127,42 @@ test('approved dependency change runs exactly one frozen refresh and preserves t
   assert.equal(blockedAtReview.steps.find((step) => step.id === 'review').error, 'skill_not_allowed');
 });
 
+test('nested workspace manifests and lockfiles still require governed dependency refresh', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-nested-dependency-refresh-'));
+  const configured = managedProject('nested-dependency-refresh', root, {
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'project.dependencies.refresh', 'code.implement', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['apps/web/package.json', 'packages/ui/package-lock.json']);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const calls = [];
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    runner: async (_project, name, options) => {
+      calls.push({ name, options });
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Refresh nested workspace dependencies' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareApprovedDependencyChange(instance, created.id, changeSet, { remote });
+  const blockedAtReview = await instance.run(created.id);
+  const dependencyRefresh = blockedAtReview.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(dependencyRefresh.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(dependencyRefresh.evidence.required, true);
+  assert.deepEqual(dependencyRefresh.evidence.dependencyPaths, ['apps/web/package.json', 'packages/ui/package-lock.json']);
+  assert.deepEqual(calls.map((call) => call.name), ['dependencyRefresh']);
+});
+
 test('approved dependency change blocks safely when no frozen refresh command is configured', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-dependency-refresh-missing-'));
   const configured = managedProject('dependency-refresh-missing', root, {
