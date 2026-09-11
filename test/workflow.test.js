@@ -75,9 +75,9 @@ test('workflow placeholders block honestly instead of claiming unimplemented wor
   const current = await instance.run(created.id);
   const inspect = current.steps.find((step) => step.id === 'inspect-project');
   assert.equal(current.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(current.result.error, 'skill_not_allowed');
+  assert.equal(current.result.error, 'skill_not_bound_to_surface');
   assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(inspect.error, 'skill_not_allowed');
+  assert.equal(inspect.error, 'skill_not_bound_to_surface');
   assert.equal(evaluateDefinitionOfDone(current).ok, false);
   await assert.rejects(instance.approve(created.id, 'inspect-project'), /not awaiting human approval/);
 });
@@ -127,7 +127,7 @@ test('workflow resume blocks an interrupted executable step until a human approv
   const resumed = await instance.run(created.id);
   assert.equal(resumed.steps.find((step) => step.id === 'validate-data').status, WorkflowStepStatus.COMPLETED);
   assert.equal(resumed.status, WorkflowStepStatus.BLOCKED);
-  assert.equal(resumed.result.error, 'skill_not_allowed');
+  assert.equal(resumed.result.error, 'skill_not_bound_to_surface');
 });
 
 test('Definition of Done and malformed persisted workflow state are enforced', async () => {
