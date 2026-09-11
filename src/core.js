@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { URLSearchParams } from 'node:url';
@@ -984,7 +984,7 @@ export class WorkflowEngine {
     const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
     let repositoryIntegrityError = null;
     let changeSet = null;
-    let protectedIgnored = null;
+    let protectedIgnored;
     try {
       await this.localGit.assertRepositoryState(workspaceProject, { branch: before.branch, head: before.head, remote: before.remote });
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
@@ -2033,6 +2033,45 @@ export class LocalGitAdapter {
       await assertSafePathChain(target);
     }
     return paths.map((path) => normalizeRepositoryPath(path, 'changed path'));
+  }
+
+  async inspectRepositoryControlState(project) {
+    const gitDirectoryResult = await this.git(['rev-parse', '--absolute-git-dir'], project);
+    if (gitDirectoryResult.stdoutTruncated) throw new Error('git_directory_path_too_large');
+    const gitDirectory = resolve(gitDirectoryResult.stdout.trim());
+    if (!isWithin(resolve(project.workspace), gitDirectory)) throw new Error('Git control directory is outside the workspace');
+    await assertSafePathChain(gitDirectory);
+    const relativePaths = ['HEAD', 'config', 'config.worktree', 'packed-refs', 'info/exclude', 'info/attributes', 'objects/info/alternates'];
+    const hooksDirectory = resolve(gitDirectory, 'hooks');
+    try {
+      const hookEntries = await readdir(hooksDirectory, { withFileTypes: true });
+      for (const entry of hookEntries) {
+        if (entry.isSymbolicLink()) throw new Error(`Git hook cannot be a symlink: ${entry.name}`);
+        if (entry.isFile()) relativePaths.push(`hooks/${entry.name}`);
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const digest = createHash('sha256');
+    const paths = [];
+    for (const relativePath of [...new Set(relativePaths)].sort()) {
+      const target = resolve(gitDirectory, relativePath);
+      if (!isWithin(gitDirectory, target)) throw new Error('Git control path escaped the git directory');
+      await assertSafePathChain(target);
+      let info;
+      try { info = await lstat(target); }
+      catch (error) {
+        if (error.code === 'ENOENT') continue;
+        throw error;
+      }
+      if (info.isSymbolicLink()) throw new Error(`Git control path cannot be a symlink: ${relativePath}`);
+      if (!info.isFile()) continue;
+      paths.push(relativePath);
+      digest.update(relativePath).update('\0');
+      for await (const chunk of createReadStream(target)) digest.update(chunk);
+      digest.update('\0');
+    }
+    return { paths, fingerprint: digest.digest('hex') };
   }
 
   async inspectProtectedIgnoredState(project) {
