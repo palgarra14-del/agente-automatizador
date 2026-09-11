@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { defaultToolSkillRegistry } from './capabilities.js';
 
 const idPattern = /^[a-z][a-z0-9.-]*$/;
-const modes = new Set(['read-only', 'workspace-write', 'verification', 'human', 'reserved']);
+const modes = new Set(['read-only', 'workspace-write', 'verification', 'publication', 'human', 'reserved']);
 const modeSkillRisks = new Map([
   ['read-only', new Set(['workspace-read'])],
   ['workspace-write', new Set(['workspace-write'])],
   ['verification', new Set(['workspace-execution', 'network-workspace-execution'])],
+  ['publication', new Set(['external-write'])],
   ['human', new Set(['approval'])]
 ]);
 
@@ -105,6 +106,7 @@ export const defaultSpecialists = Object.freeze([
   { id: 'implementer', mode: 'workspace-write', skills: ['code.implement'], authority: 'workspace-write', executor: 'CodexSdkWorker', description: 'Makes one bounded governed implementation change.' },
   { id: 'change-critic', mode: 'read-only', skills: ['code.review'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor', description: 'Reviews the governed diff independently before verification.' },
   { id: 'verifier', mode: 'verification', skills: ['project.verify'], authority: 'configured-command-execution', executor: 'ProjectCommandRunner', description: 'Runs deterministic allowlisted project verification.' },
+  { id: 'release-manager', mode: 'publication', skills: ['release.publish-reviewed-workflow'], authority: 'external-write', executor: 'WorkflowPublicationBridge', description: 'Publishes a verified change for human review without merge or production deployment.' },
   { id: 'human-supervisor', mode: 'human', skills: ['human.approval'], authority: 'human-approval', executor: 'WorkflowApproval', description: 'Provides explicit human checkpoints.' },
   { id: 'researcher', mode: 'reserved', skills: ['research.web'], authority: 'unavailable', executor: null, description: 'Reserved for future reviewed web research.' },
   { id: 'business-analyst', mode: 'reserved', skills: ['business.analyze'], authority: 'unavailable', executor: null, description: 'Reserved for future business analysis.' },
