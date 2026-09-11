@@ -24,11 +24,17 @@ Safe project-command execution adds the provider boundary, a real Docker impleme
 
 Deterministic persisted workflow plans add profile-based dependencies, Definition of Done, bounded retries/output/time, managed-workspace reuse, one-time bootstrap, crash-safe resume, and human checkpoints. Active execution budgets pause while waiting for checkpoint approval, workspace preparation is capped by the remaining budget, bootstrap attempts are bounded, and structural placeholders fail closed instead of claiming unimplemented work as complete. The workflow engine still does not execute research, design, implementation, or analysis placeholders; connecting those steps to reviewed executors is deferred to later versions.
 
-## v0.7 — current
+## v0.7 — complete
 
 The Tool/Skill Registry makes capability availability explicit and fail-closed. Atomic tools expose reviewed bindings and execution surfaces; skills declare tool dependencies, risk, and versioned input/output contracts. Projects define explicit skill allow/deny policy, with deny taking precedence. Registry and project-policy fingerprints are persisted on runs/workflows so resume cannot silently gain capabilities after configuration changes. Existing Orchestrator actions are gated through the registry, while future research/browser/analysis/inspection capabilities remain registered but unavailable until reviewed executors are added.
 
 The v0.7 scope deliberately does not add browser automation, web research, a new LLM, autonomous specialist agents, or automatic merge/production actions.
+
+## v0.8 — current
+
+Execution Integration adds persistent execution leases and begins connecting reviewed workflow skills to real executors without bypassing the v0.7 registry. App-improvement now supports read-only `code.inspect` / `code.diagnose`, human plan approval, governed workspace-write `code.implement`, and configured verification. Read-only execution is independently checked for workspace mutations; implementation reuses the existing worker and v0.4/v0.5 change governance. Sensitive/forbidden/over-budget/partial/interrupted changes fail or block closed. WorkflowEngine still cannot commit, push, open PRs, merge, browse the web, or deploy.
+
+The remaining v0.8 work is hardening/review of this vertical slice; browser/research/data-analysis/specialist-agent capabilities remain deferred.
 
 ## Deferred
 
