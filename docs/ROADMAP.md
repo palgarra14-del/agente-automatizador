@@ -62,7 +62,15 @@ Browser/research/data-analysis executors remain deferred.
 
 A full post-merge review confirmed the publication path is bound to the reviewed change fingerprint, revalidates default-branch drift before commit, before PR creation, and after CI/preview, and exposes no merge or production-deploy method. No open publication defect is known after the review.
 
-Known hardening boundaries remain explicit rather than being treated as solved: Codex workers still rely on the reviewed SDK permission profile under the operator OS account, registered Docker images are currently referenced by mutable tags rather than enforced immutable identities, exact monetary spend cannot be guaranteed when SDK usage evidence is absent, and dependency-changing tasks still need a dedicated governed reinstall/reverification flow.
+Known hardening boundaries remain explicit rather than being treated as solved: Codex workers still rely on the reviewed SDK permission profile under the operator OS account, registered Docker images are currently referenced by mutable tags rather than enforced immutable identities, and exact monetary spend cannot be guaranteed when SDK usage evidence is absent.
+
+## v0.12 — complete
+
+Governed Sensitive & Dependency Changes closes the dependency-change dead end in `app-improvement`. A sensitive implementation now pauses for explicit human approval bound to the exact change-set fingerprint; approval re-measures branch/HEAD/remote, Git control state, protected ignored files, change policy, and the diff before it can complete. A stale or mutated workspace cannot reuse the approval and the coding worker is not rerun merely because approval was requested.
+
+If the approved diff changes a package manifest or lockfile, the deterministic `dependency-refresh` stage must complete before Change Critic. It never accepts a model-generated install command: configuration is limited to the exact frozen no-lifecycle-script npm/pnpm command, requires `container-required`, and enables network only for that stage. The workspace snapshot must be unchanged after the refresh and completion evidence must attest the real Docker provider/stage/network boundary. Package-manager control files such as `.npmrc`, `.pnpmfile.cjs`, `pnpm-workspace.yaml`, and Yarn rc files are immutable/protected so the worker cannot redirect the networked resolver. Nested workspace manifests and lockfiles are governed too.
+
+Projects without a reviewed lockfile/refresh command fail closed rather than improvising dependency installation. Normal changes execute a deterministic no-op dependency stage and gain no network authority. Merge and production deployment remain unavailable.
 
 ## Deferred
 
