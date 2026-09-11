@@ -1975,22 +1975,29 @@ function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
 }
 
 export class CodexSdkWorker extends CodingWorker {
-  constructor({ CodexClient = Codex, environment = workerEnvironment } = {}) {
+  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
     super();
-    Object.assign(this, { CodexClient, environment });
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform });
   }
 
   async execute(task, { workspace, timeoutMs }) {
+    const sourceEnvironment = this.environment();
+    const security = codexWorkerSecurityConfig({ writeAccess: true, pathValue: sourceEnvironment.PATH ?? '', platform: this.platform });
+    if (!security.supported) {
+      return { status: 'failed', summary: 'Codex SDK worker isolation is unavailable on this platform', timedOut: false, output: security.error, outputBytes: Buffer.byteLength(security.error) };
+    }
     const controller = new AbortController();
     let timedOut = false;
+    let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      const client = new this.CodexClient({ env: this.environment() });
+      await assertWorkerProjectControlSurface(workspace);
+      isolatedHome = await this.codexHomeFactory(sourceEnvironment);
+      const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
+      const client = new this.CodexClient({ env, configOverrides: security.configOverrides });
       const thread = client.startThread({
         workingDirectory: workspace,
-        sandboxMode: 'workspace-write',
         approvalPolicy: 'never',
-        networkAccessEnabled: false,
         webSearchMode: 'disabled'
       });
       const turn = await thread.run(buildWorkerPrompt(task), { signal: controller.signal });
@@ -2008,6 +2015,7 @@ export class CodexSdkWorker extends CodingWorker {
       return { status: 'failed', summary: 'Codex SDK did not complete the coding task', timedOut, output, outputBytes: Buffer.byteLength(String(error.message ?? '')) };
     } finally {
       clearTimeout(timer);
+      await isolatedHome?.cleanup();
     }
   }
 }
@@ -2038,25 +2046,32 @@ function validateSkillOutput(contract, output) {
 }
 
 export class CodexReadOnlySkillExecutor {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, maxOutputBytes = 16_384 } = {}) {
-    Object.assign(this, { CodexClient, environment, maxOutputBytes });
+  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform } = {}) {
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform });
   }
 
   supports(skillId) { return readOnlySkillIds.has(skillId); }
 
   async execute(request, { workspace, timeoutMs }) {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
+    const sourceEnvironment = this.environment();
+    const security = codexWorkerSecurityConfig({ writeAccess: false, pathValue: sourceEnvironment.PATH ?? '', platform: this.platform });
+    if (!security.supported) {
+      return { status: 'failed', ok: false, timedOut: false, outputBytes: 0, error: security.error };
+    }
     const controller = new AbortController();
     let timedOut = false;
     let outputBytes = 0;
+    let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      const client = new this.CodexClient({ env: this.environment() });
+      await assertWorkerProjectControlSurface(workspace);
+      isolatedHome = await this.codexHomeFactory(sourceEnvironment);
+      const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
+      const client = new this.CodexClient({ env, configOverrides: security.configOverrides });
       const thread = client.startThread({
         workingDirectory: workspace,
-        sandboxMode: 'read-only',
         approvalPolicy: 'never',
-        networkAccessEnabled: false,
         webSearchMode: 'disabled'
       });
       const turn = await thread.run(buildReadOnlySkillPrompt(request), { signal: controller.signal });
@@ -2082,6 +2097,7 @@ export class CodexReadOnlySkillExecutor {
       };
     } finally {
       clearTimeout(timer);
+      await isolatedHome?.cleanup();
     }
   }
 }
