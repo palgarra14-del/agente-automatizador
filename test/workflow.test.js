@@ -318,6 +318,32 @@ test('workflow dry-run reports executable steps without invoking the command exe
   assert.equal((await instance.get(created.id)).steps[0].status, WorkflowStepStatus.READY);
 });
 
+test('app-improvement dry-run discloses future reviewed publication without executing Git or external writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-dry-run-'));
+  const configured = managedProject('publication-dry-run', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  let gitCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect() { gitCalls += 1; throw new Error('dry-run must not touch git'); },
+    async prepareWorkingBranch() { gitCalls += 1; throw new Error('dry-run must not create a branch'); }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({ changeSet: changedChangeSet(['src/feature.js']) });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: new FakeWorkflowWorkspaceManager(), localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Show full reviewed workflow' });
+  const dryRun = await instance.run(created.id, { dryRun: true });
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(dryRun.plannedSteps.length, 9);
+  const publication = dryRun.plannedSteps.find((step) => step.id === 'publication');
+  assert.equal(publication.skill, 'release.publish-reviewed-workflow');
+  assert.equal(publication.specialist, 'release-manager');
+  assert.equal(publication.specialistAuthority, 'external-write');
+  assert.equal(publication.capability.available, true);
+  assert.deepEqual(dryRun.plannedExternalWrites, [{ id: 'publication', skill: 'release.publish-reviewed-workflow', specialist: 'release-manager' }]);
+  assert.equal(gitCalls, 0);
+  assert.deepEqual(publicationBridge.calls, []);
+});
+
 test('workflow limits retries and persists failure evidence', async () => {
   const instance = await engine({ runner: async (project, name) => ({ name, ok: false, exitCode: 1, stdout: '', stderr: `${project.id}:${name}` }) });
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Fail safely', budgets: { maxAttempts: 2 } });
