@@ -785,7 +785,7 @@ export function createWorkflowPlan({ profile, project, goal, scope = {}, now = (
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), specialist: workflowSpecialist(profile, id, specialistRegistry), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), specialistRegistryFingerprint: specialistRegistry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, scope: normalizeRunScope(scope), workspace: null, bootstrap: workflowBootstrap(project), executionLease: null, result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry, specialistRegistry);
   return plan;
 }
@@ -832,6 +832,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
   if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
+  if (project) validateModelUsageState(plan.modelUsage, project.budgets.maxModelCalls, 'workflow.modelUsage');
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
@@ -941,6 +942,34 @@ export class WorkflowEngine {
     });
   }
 
+  async reserveWorkflowModelCall(id, stepId) {
+    let callId = null;
+    const plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      if (saved.modelUsage.calls >= saved.modelUsage.maxCalls) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_model_call_budget_exhausted';
+        step.evidence = { type: 'model-budget', ...workflowEvidenceContext(saved, step), calls: saved.modelUsage.calls, maxCalls: saved.modelUsage.maxCalls };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+        return;
+      }
+      callId = reserveModelCall(saved.modelUsage, {
+        surface: 'workflow',
+        skill: step.skill,
+        stepId: step.id,
+        specialist: step.specialist,
+        attempt: step.attempts + 1
+      });
+    });
+    return { plan, callId };
+  }
+
+  async completeWorkflowModelCall(id, callId, usage, status) {
+    if (!callId) return this.get(id);
+    return this.update(id, (saved) => { completeModelCall(saved.modelUsage, callId, usage, status); });
+  }
+
   async workspaceSnapshot(project) {
     const repositoryControl = await this.localGit.inspectRepositoryControlState(project);
     const repository = await this.localGit.inspect(project);
@@ -997,6 +1026,9 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    const reservation = await this.reserveWorkflowModelCall(id, next.id);
+    if (!reservation.callId) return reservation.plan;
+    const modelCallId = reservation.callId;
     await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
@@ -1033,6 +1065,7 @@ export class WorkflowEngine {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
+    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, execution.ok ? 'completed' : 'failed');
     let after;
     let integrityError = null;
     try { after = await this.workspaceSnapshot(workspaceProject); }
@@ -1117,6 +1150,9 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    const reservation = await this.reserveWorkflowModelCall(id, next.id);
+    if (!reservation.callId) return reservation.plan;
+    const modelCallId = reservation.callId;
     await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
@@ -1147,6 +1183,7 @@ export class WorkflowEngine {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
+    await this.completeWorkflowModelCall(id, modelCallId, worker.usage, worker.status === 'completed' ? 'completed' : 'failed');
     const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
     let repositoryIntegrityError = null;
     let changeSet = null;
