@@ -132,3 +132,60 @@ test('concurrent orchestrator continuation is rejected before planner work is du
   assert.equal(plannerCalls, 1);
   assert.equal((await store.getRun(run.id)).executionLease, null);
 });
+
+
+test('workflow resume and approve are rejected while another workflow execution owns the lease', async () => {
+  const store = await temporaryStore();
+  const project = configuredProject('lease-resume-approve');
+  const projects = new Map([[project.id, project]]);
+  let enterCommand;
+  let releaseCommand;
+  const entered = new Promise((resolve) => { enterCommand = resolve; });
+  const gate = new Promise((resolve) => { releaseCommand = resolve; });
+  const engine = new WorkflowEngine({
+    store,
+    projects,
+    localGit: {
+      async inspect(configured) { return { repository: configured.workspace, remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`, currentBranch: configured.defaultBranch, initialHead: 'deadbeef', status: '' }; },
+      async inspectChangeSet() {
+        return { paths: [], changedFiles: 0, additions: 0, deletions: 0, diffLines: 0, changedBytes: 0, maxFileBytes: 0, sensitiveContent: false, contentFingerprint: '0'.repeat(64), changeSetFingerprint: '1'.repeat(64) };
+      },
+      async assertRepositoryState() { return true; }
+    },
+    commandRunner: async (_project, name) => {
+      enterCommand();
+      await gate;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await engine.create({ profile: 'data-analysis', projectId: project.id, goal: 'Own one lease' });
+  await engine.update(created.id, (plan) => { completePlaceholder(plan, 'inspect-data'); });
+  const first = engine.run(created.id);
+  await entered;
+  await assert.rejects(engine.resume(created.id), /workflow_execution_in_progress/);
+  await assert.rejects(engine.approve(created.id, 'inspect-data'), /workflow_execution_in_progress/);
+  releaseCommand();
+  await first;
+});
+
+test('tampered execution lease fails closed', async () => {
+  const store = await temporaryStore();
+  await store.mutate((data) => {
+    data.runs.one = { id: 'one', executionLease: { leaseId: '', kind: 'run', pid: 0, createdAt: 7 } };
+  });
+  await assert.rejects(store.claimExecutionLease('runs', 'one', 'run'), /run_execution_lease_invalid/);
+});
+
+test('lost execution lease is reported instead of silently succeeding', async () => {
+  const store = await temporaryStore();
+  await store.mutate((data) => { data.runs.one = { id: 'one', executionLease: null }; });
+  await assert.rejects(
+    store.withExecutionLease('runs', 'one', 'run', async () => {
+      await store.mutate((data) => {
+        data.runs.one.executionLease = { leaseId: 'replacement', kind: 'run', pid: process.pid, createdAt: new Date().toISOString(), ownerIdentity: null };
+      });
+      return 'should-not-succeed';
+    }),
+    /run_execution_lease_lost/
+  );
+});
