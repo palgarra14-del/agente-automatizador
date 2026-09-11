@@ -647,7 +647,9 @@ function validateCompletedWorkflowEvidence(plan, step) {
   if (step.type === 'placeholder') {
     if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
     if (step.skill === 'code.implement') {
+      const repositoryState = step.evidence.repositoryState;
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
+      if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
     }
     return;
@@ -988,6 +990,7 @@ export class WorkflowEngine {
         registryFingerprint: saved.registryFingerprint,
         projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
         workspacePath: workspaceProject.workspace,
+        repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workerEvidence: {
           status: worker.status,
           summary: clip(worker.summary, 1_000),
@@ -1068,6 +1071,9 @@ export class WorkflowEngine {
     let decision = null;
     let integrityError = null;
     try {
+      const expectedRepositoryState = implementation.evidence.repositoryState;
+      if (!expectedRepositoryState) throw new Error('implementation_repository_state_missing');
+      await this.localGit.assertRepositoryState(workspaceProject, expectedRepositoryState);
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
       decision = evaluateChangePolicy(project, changeSet, plan.scope);
     } catch (error) {
@@ -1328,7 +1334,7 @@ export class WorkflowEngine {
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'code.implement') {
+      if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
