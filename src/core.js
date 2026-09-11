@@ -482,6 +482,396 @@ export class JsonStore {
   async getRun(id) { return (await this.load()).runs[id]; }
 }
 
+export const WorkflowStepStatus = Object.freeze({
+  PENDING: 'pending', READY: 'ready', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', BLOCKED: 'blocked', SKIPPED: 'skipped', AWAITING_APPROVAL: 'awaiting_approval'
+});
+
+const workflowStepTypes = new Set(['placeholder', 'command', 'verification', 'checkpoint']);
+const workflowBootstrapStatuses = new Set(['pending', 'running', 'completed', 'failed', 'not_required']);
+const workflowPlanStatuses = new Set([
+  WorkflowStepStatus.PENDING, WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED,
+  WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL
+]);
+const workflowProfiles = Object.freeze({
+  'website-build': {
+    definitionOfDone: [{ id: 'implementationCompleted', steps: ['implementation'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
+    steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
+  },
+  'app-improvement': {
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
+  },
+  'data-analysis': {
+    definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
+    steps: [['inspect-data', 'placeholder'], ['validate-data', 'verification'], ['analysis', 'placeholder'], ['findings', 'placeholder'], ['output', 'placeholder'], ['validation', 'verification']]
+  }
+});
+
+function workflowBudget(input = {}) {
+  return {
+    maxSteps: positiveInteger(input.maxSteps, 20, 'workflow.maxSteps'),
+    maxAttempts: positiveInteger(input.maxAttempts, 2, 'workflow.maxAttempts'),
+    timeoutMs: positiveInteger(input.timeoutMs, 300_000, 'workflow.timeoutMs', 1_000),
+    maxOutputBytes: positiveInteger(input.maxOutputBytes, 64_000, 'workflow.maxOutputBytes', 1_024)
+  };
+}
+
+const workflowVerificationCommands = Object.freeze({
+  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint'], 'release-readiness': ['build'] }),
+  'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
+  'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
+});
+
+function workflowCommands(project, profile, stepId, type) {
+  if (type !== 'verification') return [];
+  const requested = workflowVerificationCommands[profile]?.[stepId] ?? [];
+  return requested.filter((name) => Object.hasOwn(project.commands ?? {}, name));
+}
+
+function workflowBootstrap(project) {
+  const required = project.workspaceStrategy === 'managed' && Object.hasOwn(project.commands ?? {}, 'install');
+  return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
+}
+
+export function createWorkflowPlan({ profile, project, goal, now = () => new Date().toISOString(), nowMs = Date.now(), budgets } = {}) {
+  const template = workflowProfiles[profile];
+  if (!template) throw new Error(`Unknown workflow profile: ${profile}`);
+  if (!project?.id) throw new Error('Workflow project is required');
+  if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
+  const budget = workflowBudget(budgets);
+  const steps = template.steps.map(([id, type], index) => ({ id, type, status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
+  if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
+  validateWorkflowPlan(plan, new Map([[project.id, project]]));
+  return plan;
+}
+
+function validateCompletedWorkflowEvidence(step) {
+  if (step.status !== WorkflowStepStatus.COMPLETED) return;
+  if (step.error !== null) throw new Error(`Completed workflow step cannot retain an error: ${step.id}`);
+  if (step.type === 'placeholder') {
+    if (!step.evidence || step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
+    return;
+  }
+  if (step.type === 'checkpoint') {
+    if (!step.evidence || !Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    return;
+  }
+  if (step.type === 'command' || step.type === 'verification') {
+    const commands = step.evidence?.commands;
+    if (!Array.isArray(commands) || commands.length !== step.commands.length || commands.some((outcome, index) => outcome?.name !== step.commands[index] || outcome.ok !== true)) throw new Error(`Completed executable step requires successful command evidence: ${step.id}`);
+  }
+}
+
+export function validateWorkflowPlan(plan, knownProjects) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps) || !plan.steps.length) throw new Error('Workflow plan must contain steps');
+  if (!workflowProfiles[plan.profile]) throw new Error('Workflow references an unknown profile');
+  if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
+  const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
+  if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
+  if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
+  if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
+  if (!Number.isInteger(plan.outputBytes) || plan.outputBytes < 0) throw new Error('Workflow outputBytes must be an integer >= 0');
+  if (!plan.budgets || typeof plan.budgets !== 'object' || ['maxSteps', 'maxAttempts', 'timeoutMs', 'maxOutputBytes'].some((key) => !Object.hasOwn(plan.budgets, key))) throw new Error('Workflow budgets are incomplete');
+  const budget = workflowBudget(plan.budgets);
+  if (plan.steps.length > budget.maxSteps) throw new Error('Workflow exceeds maxSteps budget');
+  const ids = new Set();
+  for (const step of plan.steps) {
+    if (!/^[a-z][a-z0-9-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('Workflow step ids must be unique');
+    if (!workflowStepTypes.has(step.type)) throw new Error(`Unknown workflow step type: ${step.type}`);
+    if (!Object.values(WorkflowStepStatus).includes(step.status)) throw new Error(`Workflow step has an invalid status: ${step.id}`);
+    if (!Number.isInteger(step.attempts) || step.attempts < 0 || step.attempts > budget.maxAttempts) throw new Error(`Workflow step attempts exceed the configured budget: ${step.id}`);
+    if (!Array.isArray(step.dependsOn)) throw new Error('Workflow dependencies must be an array');
+    if (!Array.isArray(step.commands)) throw new Error('Workflow commands must be an array');
+    if (project && step.commands.some((name) => typeof name !== 'string' || !Object.hasOwn(project.commands, name))) throw new Error(`Workflow command is not allowlisted: ${step.id}`);
+    validateCompletedWorkflowEvidence(step);
+    ids.add(step.id);
+  }
+  for (const step of plan.steps) for (const dependency of step.dependsOn) if (!ids.has(dependency)) throw new Error(`Workflow dependency does not exist: ${dependency}`);
+  const visiting = new Set();
+  const visited = new Set();
+  const byId = new Map(plan.steps.map((step) => [step.id, step]));
+  const visit = (id) => {
+    if (visiting.has(id)) throw new Error('Workflow dependencies contain a cycle');
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dependency of byId.get(id).dependsOn) visit(dependency);
+    visiting.delete(id); visited.add(id);
+  };
+  for (const id of ids) visit(id);
+  if (!Array.isArray(plan.definitionOfDone) || !plan.definitionOfDone.length) throw new Error('Workflow definitionOfDone must contain requirements');
+  const requirementIds = new Set();
+  for (const requirement of plan.definitionOfDone) {
+    if (!requirement || !/^[a-z][a-zA-Z0-9-]*$/.test(requirement.id ?? '') || requirementIds.has(requirement.id) || !Array.isArray(requirement.steps) || !requirement.steps.length) throw new Error('Workflow definitionOfDone is invalid');
+    for (const stepId of requirement.steps) if (!ids.has(stepId)) throw new Error(`Workflow definitionOfDone references an unknown step: ${stepId}`);
+    requirementIds.add(requirement.id);
+  }
+  const template = workflowProfiles[plan.profile];
+  if (plan.steps.length !== template.steps.length || plan.steps.some((step, index) => step.id !== template.steps[index][0] || step.type !== template.steps[index][1] || step.dependsOn.length !== (index ? 1 : 0) || (index && step.dependsOn[0] !== template.steps[index - 1][0]))) throw new Error('Workflow steps do not match the deterministic profile');
+  if (project && plan.steps.some((step) => JSON.stringify(step.commands) !== JSON.stringify(workflowCommands(project, plan.profile, step.id, step.type)))) throw new Error('Workflow commands do not match the project allowlist');
+  if (JSON.stringify(plan.definitionOfDone) !== JSON.stringify(template.definitionOfDone)) throw new Error('Workflow definitionOfDone does not match the deterministic profile');
+  const running = plan.steps.filter((step) => step.status === WorkflowStepStatus.RUNNING);
+  const awaitingApproval = plan.steps.filter((step) => step.status === WorkflowStepStatus.AWAITING_APPROVAL);
+  if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
+  if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
+  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
+  if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
+  if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
+  if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt) && plan.steps.filter((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval').length !== 1) throw new Error('Paused blocked workflow must represent one interrupted step');
+  if (plan.status === WorkflowStepStatus.COMPLETED && !evaluateDefinitionOfDone(plan).ok) throw new Error('Completed workflow must satisfy Definition of Done');
+  if (plan.status === WorkflowStepStatus.COMPLETED && plan.pausedAt !== null) throw new Error('Completed workflow cannot remain paused');
+  if (plan.workspace !== null && plan.workspace !== undefined) validateWorkflowWorkspace(plan.workspace, project);
+  if (plan.bootstrap?.attempts > budget.maxAttempts) throw new Error('Workflow bootstrap attempts exceed the configured budget');
+  validateWorkflowBootstrap(plan.bootstrap, plan.workspace, project);
+  return { ok: true, stepCount: plan.steps.length, budgets: budget };
+}
+
+export function evaluateDefinitionOfDone(plan) {
+  const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
+  const requirements = plan.definitionOfDone.map((requirement) => ({ id: requirement.id, ok: requirement.steps.every((step) => completed.has(step)) }));
+  return { ok: requirements.every((requirement) => requirement.ok), requirements };
+}
+
+export class WorkflowEngine {
+  constructor({ store, projects, workspaceManager = new WorkspaceManager(), commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+    if (!store || !projects) throw new Error('WorkflowEngine requires store and projects');
+    Object.assign(this, { store, projects, workspaceManager, commandRunner, now });
+  }
+
+  async create(input) {
+    const project = this.projects.get(input.projectId ?? input.project);
+    const plan = createWorkflowPlan({ ...input, project, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
+    await this.store.mutate((data) => { data.workflows ??= {}; data.workflows[plan.id] = plan; });
+    return plan;
+  }
+
+  async get(id) { return (await this.store.load()).workflows?.[id]; }
+  async list() { return Object.values((await this.store.load()).workflows ?? {}); }
+
+  async update(id, mutator) {
+    return this.store.mutate((data) => {
+      const plan = data.workflows?.[id];
+      if (!plan) throw new Error('Workflow not found');
+      mutator(plan); plan.updatedAt = new Date().toISOString(); return plan;
+    });
+  }
+
+  readySteps(plan) {
+    const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
+    return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
+  }
+
+  async approve(id, stepId) {
+    const approvedAt = this.now();
+    return this.update(id, (plan) => {
+      const step = plan.steps.find((candidate) => candidate.id === stepId);
+      const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
+      const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
+      if (!checkpointApproval && !interruptedApproval) throw new Error('Workflow step is not awaiting human approval');
+      if (Number.isFinite(plan.pausedAt)) plan.deadlineAt += Math.max(0, approvedAt - plan.pausedAt);
+      plan.pausedAt = null;
+      step.status = checkpointApproval ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.READY;
+      step.error = null;
+      step.evidence = { approvedAt: new Date(approvedAt).toISOString() };
+      plan.status = WorkflowStepStatus.PENDING;
+    });
+  }
+
+  async resume(id, options = {}) {
+    const pausedAt = this.now();
+    await this.update(id, (plan) => {
+      let interrupted = false;
+      for (const step of plan.steps) if (step.status === WorkflowStepStatus.RUNNING) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'interrupted_step_requires_human_approval';
+        interrupted = true;
+      }
+      if (plan.bootstrap?.status === 'running') {
+        plan.bootstrap.status = 'pending';
+        plan.bootstrap.error = 'interrupted_bootstrap_requires_retry';
+      }
+      if (interrupted || plan.status === WorkflowStepStatus.RUNNING) {
+        plan.status = WorkflowStepStatus.BLOCKED;
+        plan.pausedAt ??= pausedAt;
+      }
+    });
+    return this.run(id, options);
+  }
+
+  remainingMs(plan) { return plan.deadlineAt - this.now(); }
+
+  async failDeadline(id) {
+    return this.update(id, (saved) => {
+      if (saved.bootstrap?.status === 'running') { saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_budget_deadline_exceeded'; }
+      saved.status = WorkflowStepStatus.FAILED;
+      saved.result = { error: 'workflow_budget_deadline_exceeded' };
+    });
+  }
+
+  async workspaceProject(id, project) {
+    const plan = await this.get(id);
+    const expected = this.workspaceManager.describe(project, plan.id);
+    if (plan.workspace) {
+      validateWorkflowWorkspace(plan.workspace, project);
+      if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
+      if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
+      return projectAtWorkspace(project, plan.workspace.path);
+    }
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) {
+      await this.failDeadline(id);
+      throw new Error('workflow_budget_deadline_exceeded');
+    }
+    let allocation;
+    try {
+      allocation = await this.workspaceManager.prepare(project, plan.id, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs) });
+    } catch (error) {
+      if (this.remainingMs(await this.get(id)) <= 0) {
+        await this.failDeadline(id);
+        throw new Error('workflow_budget_deadline_exceeded', { cause: error });
+      }
+      if (error.code === 'WORKSPACE_CLONE_TIMEOUT') {
+        await this.update(id, (saved) => { saved.status = WorkflowStepStatus.FAILED; saved.result = { error: 'workspace_clone_timeout' }; });
+        throw error;
+      }
+      if (error.code === 'WORKSPACE_CLONE_FAILED') {
+        await this.update(id, (saved) => { saved.status = WorkflowStepStatus.FAILED; saved.result = { error: 'workspace_clone_failed' }; });
+        throw error;
+      }
+      throw error;
+    }
+    const workspace = workflowWorkspaceEvidence(project, allocation);
+    validateWorkflowWorkspace(workspace, project);
+    if (workspace.managed) await assertSafePathChain(workspace.path);
+    await this.update(id, (saved) => { saved.workspace = workspace; });
+    return projectAtWorkspace(project, workspace.path);
+  }
+
+  async bootstrapWorkspace(id, project, workspaceProject) {
+    let plan = await this.get(id);
+    const bootstrap = plan.bootstrap;
+    if (!bootstrap.required) return { ok: true, plan };
+    if (bootstrap.status === 'completed') {
+      if (bootstrap.workspacePath !== workspaceProject.workspace || bootstrap.projectId !== project.id) throw new Error('Workflow bootstrap does not match its workspace');
+      return { ok: true, plan };
+    }
+    if (bootstrap.status === 'running') throw new Error('Workflow bootstrap requires resume after interruption');
+    if (bootstrap.status === 'failed') return { ok: false, plan };
+    if (bootstrap.attempts >= plan.budgets.maxAttempts) {
+      plan = await this.update(id, (saved) => {
+        saved.bootstrap.status = 'failed';
+        saved.bootstrap.error = 'workflow_bootstrap_attempt_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: saved.bootstrap.error };
+      });
+      return { ok: false, plan };
+    }
+    if (this.remainingMs(plan) <= 0) return { ok: false, plan: await this.failDeadline(id) };
+    plan = await this.update(id, (saved) => {
+      saved.bootstrap.status = 'running';
+      saved.bootstrap.workspacePath = workspaceProject.workspace;
+      saved.bootstrap.projectId = project.id;
+      saved.bootstrap.attempts += 1;
+      saved.bootstrap.error = null;
+    });
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) return { ok: false, plan: await this.failDeadline(id) };
+    const outcome = await this.commandRunner(workspaceProject, 'install', { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'bootstrap' });
+    const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+    plan = await this.update(id, (saved) => {
+      saved.outputBytes += outputBytes;
+      saved.bootstrap.evidence = { name: 'install', ok: Boolean(outcome.ok), exitCode: outcome.exitCode ?? null, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: saved.bootstrap.error };
+      } else if (outcome.ok) {
+        saved.bootstrap.status = 'completed'; saved.bootstrap.completedAt = new Date().toISOString(); saved.bootstrap.error = null;
+      } else {
+        saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_bootstrap_failed'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: saved.bootstrap.error };
+      }
+    });
+    return { ok: plan.bootstrap.status === 'completed', plan };
+  }
+
+  async run(id, { dryRun = false } = {}) {
+    let plan = await this.get(id);
+    if (!plan) throw new Error('Workflow not found');
+    const project = this.projects.get(plan.projectId);
+    validateWorkflowPlan(plan, this.projects);
+    if (dryRun) return { ...plan, dryRun: true, plannedBootstrap: plan.bootstrap.required ? plan.bootstrap.command : null, plannedSteps: this.readySteps(plan).map((step) => ({ id: step.id, type: step.type, commands: step.commands })) };
+    if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+    if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
+    while (true) {
+      plan = await this.get(id);
+      validateWorkflowPlan(plan, this.projects);
+      if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
+      const next = this.readySteps(plan)[0];
+      if (!next) break;
+      if (next.type === 'placeholder') return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'capability_not_implemented';
+        step.evidence = { type: 'placeholder', executable: false };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+      if (next.type === 'checkpoint') return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        step.error = null;
+        saved.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        saved.pausedAt ??= this.now();
+      });
+      if ((next.type === 'command' || next.type === 'verification') && next.commands.length === 0) return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'verification_command_not_configured';
+        step.evidence = { type: next.type, executable: false };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+      if (next.type === 'command' || next.type === 'verification') {
+        const workspaceProject = await this.workspaceProject(id, project);
+        const bootstrap = await this.bootstrapWorkspace(id, project, workspaceProject);
+        if (!bootstrap.ok) return bootstrap.plan;
+        if (this.remainingMs(bootstrap.plan) <= 0) return this.failDeadline(id);
+      }
+      await this.update(id, (saved) => { const step = saved.steps.find((item) => item.id === next.id); step.status = WorkflowStepStatus.RUNNING; step.attempts += 1; saved.status = WorkflowStepStatus.RUNNING; });
+      let result = { ok: true, evidence: { type: next.type, completedAt: new Date().toISOString() } };
+      if (next.type === 'command' || next.type === 'verification') {
+        const workspaceProject = await this.workspaceProject(id, project);
+        const commands = next.commands;
+        const outcomes = [];
+        let stepOutputBytes = 0;
+        for (const name of commands) {
+          const remainingMs = this.remainingMs(plan);
+          if (remainingMs <= 0) { result = { ok: false, deadlineExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } }; break; }
+          const outcome = await this.commandRunner(workspaceProject, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'post-worker' });
+          outcomes.push(outcome);
+          stepOutputBytes += Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+          if ((plan.outputBytes ?? 0) + stepOutputBytes > plan.budgets.maxOutputBytes) {
+            result = { ok: false, outputBudgetExceeded: true, outputBytes: stepOutputBytes, evidence: { commands: outcomes } };
+            break;
+          }
+        }
+        if (!result.deadlineExceeded && !result.outputBudgetExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: stepOutputBytes, evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) } };
+        else result.evidence = { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) };
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = result.evidence;
+        saved.outputBytes = (saved.outputBytes ?? 0) + (result.outputBytes ?? 0);
+        if (result.deadlineExceeded) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_budget_deadline_exceeded'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else if (result.outputBudgetExceeded || saved.outputBytes > saved.budgets.maxOutputBytes) { step.status = WorkflowStepStatus.FAILED; step.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else if (result.ok) { step.status = WorkflowStepStatus.COMPLETED; step.error = null; saved.status = WorkflowStepStatus.PENDING; }
+        else if (step.attempts >= saved.budgets.maxAttempts) { step.status = WorkflowStepStatus.FAILED; step.error = 'step_attempt_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: step.error, stepId: step.id }; }
+        else { step.status = WorkflowStepStatus.READY; step.error = 'step_failed_retry_available'; saved.status = WorkflowStepStatus.PENDING; }
+      });
+      if (plan.status === WorkflowStepStatus.FAILED) return plan;
+    }
+    return this.update(id, (saved) => { saved.validation = evaluateDefinitionOfDone(saved); saved.status = saved.validation.ok ? WorkflowStepStatus.COMPLETED : WorkflowStepStatus.BLOCKED; saved.result = { definitionOfDone: saved.validation }; });
+  }
+}
+
 export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000 } = {}) {
   return new Promise((resolveResult) => {
     let stdout = '';
@@ -595,7 +985,7 @@ export class LocalSanitizedExecution extends ExecutionProvider {
 }
 
 export class DockerContainerExecution extends ExecutionProvider {
-  constructor({ processRunner = runProcess, dockerBinary = 'docker' } = {}) { super(); Object.assign(this, { processRunner, dockerBinary }); }
+  constructor({ processRunner = runProcess, dockerBinary = 'docker', now = () => Date.now() } = {}) { super(); Object.assign(this, { processRunner, dockerBinary, now }); }
 
   dockerClientOptions(timeoutMs = 5_000) {
     const environment = safeCommandEnvironment({ CI: 'true' });
@@ -603,16 +993,20 @@ export class DockerContainerExecution extends ExecutionProvider {
     return { timeoutMs, env: environment, inheritEnvironment: false, restrictEnvironment: true };
   }
 
-  async probe() {
-    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions());
+  async probe({ timeoutMs = 5_000 } = {}) {
+    const result = await this.processRunner(this.dockerBinary, ['version', '--format', '{{.Server.Version}}'], this.dockerClientOptions(timeoutMs));
     return result.ok ? { available: true, provider: 'container', technology: 'docker', version: result.stdout.trim() || 'available' } : { available: false, provider: 'container', technology: 'docker', reason: clip(result.stderr || result.stdout || 'Docker daemon is unavailable', 300) };
   }
 
-  async availability(project) {
+  async availability(project, { timeoutMs = 5_000 } = {}) {
     const execution = project.execution;
-    const probe = await this.probe();
+    const deadlineAt = this.now() + timeoutMs;
+    const remaining = () => Math.max(0, deadlineAt - this.now());
+    if (remaining() <= 0) return { available: false, provider: 'container', image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: 'execution_provider_preflight_timeout' };
+    const probe = await this.probe({ timeoutMs: remaining() });
     if (!probe.available) return { ...probe, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image) };
-    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions());
+    if (remaining() <= 0) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: 'execution_provider_preflight_timeout' };
+    const image = await this.processRunner(this.dockerBinary, ['image', 'inspect', execution.image], this.dockerClientOptions(remaining()));
     if (!image.ok) return { ...probe, available: false, image: execution.image, imageAvailable: false, imagePinned: imageIsPinned(execution.image), reason: `Container image is unavailable locally: ${execution.image}. The orchestrator never pulls images automatically.` };
     return { ...probe, image: execution.image, imageAvailable: true, imagePinned: imageIsPinned(execution.image), sandboxed: true, network: 'none after worker', filesystem: 'workspace bind mount only with read-only .git', secrets: 'no host credential or home mounts' };
   }
@@ -654,14 +1048,17 @@ export class DockerContainerExecution extends ExecutionProvider {
     return { command, containerArgs, postWorker };
   }
 
-  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
     const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
-    const available = await this.availability(project);
+    const startedAt = this.now();
+    const available = preflight ?? await this.availability(project, { timeoutMs });
     if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
-    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(timeoutMs), cwd: project.workspace });
+    const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
+    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled' } };
+    const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(remainingMs), cwd: project.workspace });
     let cleanup;
     if (result.timedOut) {
       const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
@@ -672,12 +1069,12 @@ export class DockerContainerExecution extends ExecutionProvider {
 }
 
 export class ProjectCommandRunner {
-  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution() } = {}) { Object.assign(this, { localExecution, containerExecution }); }
+  constructor({ localExecution = new LocalSanitizedExecution(), containerExecution = new DockerContainerExecution(), now = () => Date.now() } = {}) { Object.assign(this, { localExecution, containerExecution, now }); }
 
-  async availability(project) {
+  async availability(project, { timeoutMs = 5_000 } = {}) {
     const execution = project.execution;
     if (execution.provider === 'local-sanitized') return this.localExecution.availability(project);
-    const container = await this.containerExecution.availability(project);
+    const container = await this.containerExecution.availability(project, { timeoutMs });
     if (container.available) return container;
     if (execution.provider === 'container' && execution.fallbackProvider === 'local-sanitized') {
       return { ...(await this.localExecution.availability(project)), configuredProvider: 'container', fallbackFrom: 'container', containerReason: container.reason };
@@ -707,13 +1104,20 @@ export class ProjectCommandRunner {
   }
 
   async run(project, name, options = {}) {
-    const selected = await this.availability(project);
+    const timeoutMs = options.timeoutMs ?? project.budgets.commandTimeoutMs;
+    const startedAt = this.now();
+    const selected = await this.availability(project, { timeoutMs });
     if (!selected.available) {
       const { command } = commandInvocation(project, name);
       return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${selected.reason}`, execution: { provider: project.execution.provider, failSafe: true } };
     }
-    if (selected.provider === 'container') return this.containerExecution.execute(project, name, options);
-    return this.localExecution.execute(project, name, options);
+    const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
+    if (remainingMs <= 0) {
+      const { command } = commandInvocation(project, name);
+      return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: selected.provider, failSafe: true } };
+    }
+    if (selected.provider === 'container') return this.containerExecution.execute(project, name, { ...options, timeoutMs: remainingMs, preflight: selected });
+    return this.localExecution.execute(project, name, { ...options, timeoutMs: remainingMs });
   }
 }
 
@@ -756,6 +1160,42 @@ export function projectAtWorkspace(project, workspace) {
   return { ...project, workspace: resolvedWorkspace };
 }
 
+function workflowWorkspaceEvidence(project, allocation) {
+  return {
+    path: resolve(allocation.workspace),
+    managed: Boolean(allocation.managed),
+    projectId: project.id,
+    repository: { owner: project.repository.owner, name: project.repository.name },
+    initializedAt: new Date().toISOString(),
+    ...(allocation.remoteUrl ? { remoteUrl: allocation.remoteUrl } : {})
+  };
+}
+
+function validateWorkflowWorkspace(workspace, project) {
+  if (!project) throw new Error('Workflow workspace cannot be validated without a project');
+  if (!workspace || typeof workspace !== 'object' || typeof workspace.path !== 'string' || typeof workspace.managed !== 'boolean' || workspace.projectId !== project.id || !Number.isFinite(Date.parse(workspace.initializedAt)) || workspace.repository?.owner !== project.repository.owner || workspace.repository?.name !== project.repository.name) {
+    throw new Error('Workflow workspace evidence is invalid');
+  }
+  if (workspace.managed !== (project.workspaceStrategy === 'managed')) throw new Error('Workflow workspace strategy does not match the project');
+  projectAtWorkspace(project, workspace.path);
+}
+
+function validateWorkflowBootstrap(bootstrap, workspace, project) {
+  if (!project) {
+    if (!bootstrap || typeof bootstrap !== 'object' || !workflowBootstrapStatuses.has(bootstrap.status) || !Number.isInteger(bootstrap.attempts) || bootstrap.attempts < 0) throw new Error('Workflow bootstrap state is invalid');
+    return;
+  }
+  const expected = workflowBootstrap(project);
+  if (!bootstrap || typeof bootstrap !== 'object' || bootstrap.required !== expected.required || !workflowBootstrapStatuses.has(bootstrap.status) || bootstrap.command !== expected.command || !Number.isInteger(bootstrap.attempts) || bootstrap.attempts < 0) throw new Error('Workflow bootstrap state is invalid');
+  if (!expected.required) {
+    if (bootstrap.status !== 'not_required' || bootstrap.workspacePath !== null || bootstrap.projectId !== null || bootstrap.completedAt !== null) throw new Error('Workflow bootstrap must be not required for this project');
+    return;
+  }
+  if (bootstrap.status === 'not_required' || bootstrap.projectId !== project.id) throw new Error('Workflow bootstrap project is invalid');
+  if (bootstrap.workspacePath !== null && (!workspace || bootstrap.workspacePath !== workspace.path)) throw new Error('Workflow bootstrap does not match its workspace');
+  if (bootstrap.status === 'completed' && (!workspace || bootstrap.workspacePath !== workspace.path || !Number.isFinite(Date.parse(bootstrap.completedAt)) || !bootstrap.evidence || bootstrap.evidence.name !== 'install' || bootstrap.evidence.ok !== true)) throw new Error('Workflow bootstrap completion evidence is invalid');
+}
+
 export class WorkspaceManager {
   constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
 
@@ -764,21 +1204,42 @@ export class WorkspaceManager {
     return { ...managedWorkspacePath(project, runId), managed: true, retained: true };
   }
 
-  async prepare(project, runId) {
+  async prepare(project, runId, { timeoutMs = project.budgets.commandTimeoutMs } = {}) {
     const details = this.describe(project, runId);
     if (!details.managed) return details;
     await assertSafePathChain(details.workspace);
-    if (existsSync(details.workspace)) throw new Error(`Managed workspace already exists: ${details.workspace}`);
     await mkdir(details.projectDirectory, { recursive: true });
-    await assertSafePathChain(details.workspace);
     const remoteUrl = `https://github.com/${project.repository.owner}/${project.repository.name}.git`;
-    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', remoteUrl, details.workspace], {
-      cwd: details.projectDirectory,
-      timeoutMs: project.budgets.commandTimeoutMs
-    });
-    if (!clone.ok || clone.timedOut) throw new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+    if (existsSync(details.workspace)) {
+      await assertSafePathChain(details.workspace);
+      const root = await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--show-toplevel'], { cwd: details.projectDirectory, timeoutMs });
+      const remote = root.ok ? await this.processRunner('git', ['-C', details.workspace, 'remote', 'get-url', 'origin'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      const head = root.ok && remote.ok ? await this.processRunner('git', ['-C', details.workspace, 'rev-parse', '--verify', 'HEAD^{commit}'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      const currentBranch = head.ok ? await this.processRunner('git', ['-C', details.workspace, 'branch', '--show-current'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      const status = currentBranch.ok ? await this.processRunner('git', ['-C', details.workspace, 'status', '--porcelain'], { cwd: details.projectDirectory, timeoutMs }) : { ok: false };
+      if (root.ok && remote.ok && head.ok && currentBranch.ok && status.ok && resolve(root.stdout.trim()) === resolve(details.workspace) && remoteMatchesProject(remote.stdout.trim(), project) && currentBranch.stdout.trim() === project.defaultBranch && status.stdout.trim() === '') {
+        return { ...details, remoteUrl, clone: { ok: true, reused: true, durationMs: 0, exitCode: 0 } };
+      }
+      const failedWorkspace = `${details.workspace}.failed-${randomUUID().slice(0, 8)}`;
+      await rename(details.workspace, failedWorkspace);
+    }
     await assertSafePathChain(details.workspace);
-    return { ...details, remoteUrl, clone: { ok: true, durationMs: clone.durationMs, exitCode: clone.exitCode } };
+    const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--branch', project.defaultBranch, remoteUrl, details.workspace], {
+      cwd: details.projectDirectory,
+      timeoutMs
+    });
+    if (clone.timedOut) {
+      const error = new Error('workspace_clone_timeout');
+      error.code = 'WORKSPACE_CLONE_TIMEOUT';
+      throw error;
+    }
+    if (!clone.ok) {
+      const error = new Error(`workspace_clone_failed: ${clip(clone.stderr || clone.stdout)}`);
+      error.code = 'WORKSPACE_CLONE_FAILED';
+      throw error;
+    }
+    await assertSafePathChain(details.workspace);
+    return { ...details, remoteUrl, clone: { ok: true, reused: false, durationMs: clone.durationMs, exitCode: clone.exitCode } };
   }
 }
 

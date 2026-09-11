@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, doctor, formatDoctor, loadProjects, maskSecrets, report } from './core.js';
+import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, report } from './core.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -13,6 +13,7 @@ const command = args[0];
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
+const workflows = new WorkflowEngine({ store, projects });
 
 try {
   if (command === 'run') {
@@ -43,6 +44,25 @@ try {
   } else if (command === 'approve' || command === 'reject') {
     await orchestrator.decideApproval(args[1], command === 'approve');
     console.log(`${command}d ${args[1]}`);
+  } else if (command === 'workflow') {
+    const action = args[1];
+    if (action === 'create') {
+      const project = projects.get(take('--project'));
+      if (!project) throw new Error('Unknown --project');
+      console.log(JSON.stringify(await workflows.create({ profile: args[2], projectId: project.id, goal: take('--goal') ?? 'Untitled workflow' }), null, 2));
+    } else if (action === 'run') {
+      console.log(JSON.stringify(await workflows.run(args[2], { dryRun: has('--dry-run') }), null, 2));
+    } else if (action === 'status') {
+      const workflow = await workflows.get(args[2]);
+      if (!workflow) throw new Error('Workflow not found');
+      console.log(JSON.stringify(workflow, null, 2));
+    } else if (action === 'resume') {
+      console.log(JSON.stringify(await workflows.resume(args[2], { dryRun: has('--dry-run') }), null, 2));
+    } else if (action === 'approve') {
+      console.log(JSON.stringify(await workflows.approve(args[2], args[3]), null, 2));
+    } else if (action === 'list') {
+      console.log(JSON.stringify(await workflows.list(), null, 2));
+    } else throw new Error('Usage: agent workflow create <website-build|app-improvement|data-analysis> --project <id> --goal "..." | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
     console.log('Usage: agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }

@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.5
+# Engineering Orchestrator — v0.6
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -31,6 +31,24 @@ node src/cli.js resume <runId>
 ```
 
 Add `--dry-run` to persist the plan and a zero-write simulation. It does not create a workspace or clone, create or switch branches, invoke the worker or checks, commit, push, create a PR, query Vercel, or write to GitHub.
+
+## Workflows and plans
+
+v0.6 adds deterministic, persisted workflow plans. A workflow associates a registered project and goal with a profile, ordered dependency steps, bounded retries/budget, evidence, human checkpoints, and a Definition of Done. It does not yet use an LLM, browser, web research, or external executor.
+
+```bash
+node src/cli.js workflow create website-build --project self --goal "Create a professional company website"
+node src/cli.js workflow run <workflowId> --dry-run
+node src/cli.js workflow status <workflowId>
+node src/cli.js workflow run <workflowId>
+node src/cli.js workflow approve <workflowId> design
+node src/cli.js workflow resume <workflowId>
+node src/cli.js workflow list
+```
+
+The available profiles are `website-build`, `app-improvement`, and `data-analysis`. Verification steps use profile-specific subsets of the registered command allowlist rather than rerunning every check at every verification point. For a managed project, the workflow prepares one project-and-workflow-specific managed workspace and persists its repository/workspace evidence for safe reuse on resume. A recovered workspace is reused only when it is a clean checkout of the configured repository on the configured base branch; an incomplete or mismatched clone is retained under a `.failed-*` sibling and replaced by a fresh controlled clone. If that registered project has an allowlisted `install` command, the clean managed workspace bootstraps it once through the existing bootstrap execution stage before its first verification command. Successful bootstrap evidence is bound to that workspace and is reused on resume; interrupted bootstrap is never assumed successful. Persisted workflow state is fail-closed: profile shape, command names, workspace allocation, bootstrap evidence, budgets, dependencies, pause state, and Definition of Done must still match the registered project before a command can run. Placeholders are structural and block as `capability_not_implemented` until a future reviewed executor exists. Only real checkpoints and crash-interrupted executable steps can accept human approval.
+
+The workflow timeout is an active-execution budget, not a per-command allowance: it is checked before workspace preparation, each step, retry, bootstrap, and command, and command/clone timeouts are capped to the time remaining. Human checkpoint wait time is paused and added back when the checkpoint is approved. Placeholder steps are structural and fail closed as `capability_not_implemented`; they can no longer make a workflow appear complete without a real executor. Definition of Done is strict: only a `completed` required step satisfies it; `skipped` never does. A workflow dry run remains non-mutating for the project: it does not prepare/clone a workspace or execute a command, but reports a planned `install` bootstrap when applicable.
 
 The project commands, protected branches, branch pattern, approvals, change policy, execution provider, and budgets live in `config/projects.json`. `agent doctor --project <id>` reports GitHub connectivity, Codex SDK availability, the configured workspace and commands, Vercel configuration/token presence, branch protection, and execution isolation availability without printing credentials. Use `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` for local validation.
 

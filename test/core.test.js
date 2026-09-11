@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -354,7 +354,7 @@ test('v0.5 container execution mounts workspace read-write and nested git metada
   assert.equal(container.options.env.HOME, undefined);
   assert.equal(container.options.inheritEnvironment, false);
   assert.equal(container.options.restrictEnvironment, true);
-  assert.equal(container.options.timeoutMs, configured.budgets.commandTimeoutMs);
+  assert.ok(container.options.timeoutMs > 0 && container.options.timeoutMs <= configured.budgets.commandTimeoutMs);
 });
 
 test('v0.5 force-removes a named container after a timed out project command', async () => {
@@ -661,9 +661,47 @@ test('managed workspaces are isolated under the configured root and clone only t
   const manager = new WorkspaceManager({ processRunner: async (binary, args, options) => { calls.push({ binary, args, options }); return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' }; } });
   const allocation = await manager.prepare(configured, 'agent-20260910-abcdef12');
   assert.match(allocation.workspace, /leadfinder[\\/]agent-20260910-abcdef12$/);
-  assert.deepEqual(calls[0].args.slice(0, 4), ['clone', '--origin', 'origin', 'https://github.com/owner/leadfinder.git']);
+  assert.deepEqual(calls[0].args.slice(0, 6), ['clone', '--origin', 'origin', '--branch', 'main', 'https://github.com/owner/leadfinder.git']);
   assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
   assert.throws(() => managedWorkspacePath(configured, '../other-project'));
+});
+
+test('managed workspace prepare reuses a valid interrupted clone and quarantines a partial clone', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-workspace-recovery-'));
+  const configured = configFrom({
+    id: 'leadfinder', repository: { owner: 'owner', name: 'leadfinder' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { test: 'node --version' }, acceptance: { require: ['test'] }
+  }, join(root, 'host', 'config'));
+  const runId = 'agent-20260911-recovery1';
+  const details = managedWorkspacePath(configured, runId);
+  await mkdir(details.workspace, { recursive: true });
+  let cloneCalls = 0;
+  const valid = new WorkspaceManager({ processRunner: async (_binary, args) => {
+    if (args[0] === '-C' && args[2] === 'rev-parse' && args[3] === '--show-toplevel') return { ok: true, exitCode: 0, stdout: details.workspace, stderr: '' };
+    if (args[0] === '-C' && args[2] === 'remote') return { ok: true, exitCode: 0, stdout: 'https://github.com/owner/leadfinder.git', stderr: '' };
+    if (args[0] === '-C' && args[2] === 'rev-parse' && args[3] === '--verify') return { ok: true, exitCode: 0, stdout: 'deadbeef', stderr: '' };
+    if (args[0] === '-C' && args[2] === 'branch') return { ok: true, exitCode: 0, stdout: 'main', stderr: '' };
+    if (args[0] === '-C' && args[2] === 'status') return { ok: true, exitCode: 0, stdout: '', stderr: '' };
+    if (args[0] === 'clone') { cloneCalls += 1; return { ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected git command: ${args.join(' ')}`);
+  } });
+  const reused = await valid.prepare(configured, runId);
+  assert.equal(reused.clone.reused, true);
+  assert.equal(cloneCalls, 0);
+
+  const partialRunId = 'agent-20260911-recovery2';
+  const partialDetails = managedWorkspacePath(configured, partialRunId);
+  await mkdir(partialDetails.workspace, { recursive: true });
+  const partial = new WorkspaceManager({ processRunner: async (_binary, args) => {
+    if (args[0] === '-C') return { ok: false, exitCode: 128, stdout: '', stderr: 'not a complete repository' };
+    if (args[0] === 'clone') { cloneCalls += 1; return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' }; }
+    throw new Error(`Unexpected git command: ${args.join(' ')}`);
+  } });
+  const recovered = await partial.prepare(configured, partialRunId);
+  assert.equal(recovered.clone.reused, false);
+  assert.equal(cloneCalls, 1);
+  const entries = await readdir(partialDetails.projectDirectory);
+  assert.ok(entries.some((name) => name.startsWith(`${partialRunId}.failed-`)));
 });
 
 test('a managed-root symlink fails before clone or any workspace write', async (t) => {
@@ -1071,4 +1109,32 @@ test('deterministic evaluator fails incomplete engineering evidence', () => {
   assert.equal(evaluate({ worker: { ok: true } }).decision, 'FAIL');
   assert.equal(evaluate({ worker: { ok: true } }, { retryable: true }).decision, 'NEEDS_RETRY');
   assert.equal(evaluate({ ci: { state: 'pending' } }).decision, 'WAITING');
+});
+
+
+test('project command runner counts Docker preflight once inside the command timeout budget', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-preflight-budget-'));
+  await mkdir(join(root, '.git'), { recursive: true });
+  const configured = configFrom({
+    id: 'budgeted', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    commands: { test: 'node --version' }, execution: { provider: 'container-required', image: 'node:22-bookworm-slim' },
+    budgets: { commandTimeoutMs: 1_000 }
+  }, root);
+  let clock = 0;
+  const calls = [];
+  const processRunner = async (_binary, args, options) => {
+    calls.push({ args, timeoutMs: options.timeoutMs });
+    if (args[0] === 'version') { clock += 300; return { ok: true, exitCode: 0, stdout: '27.0', stderr: '' }; }
+    if (args[0] === 'image') { clock += 300; return { ok: true, exitCode: 0, stdout: 'image', stderr: '' }; }
+    if (args[0] === 'run') return { ok: true, exitCode: 0, stdout: 'PASS', stderr: '', durationMs: 1 };
+    throw new Error(`Unexpected Docker command: ${args.join(' ')}`);
+  };
+  const containerExecution = new DockerContainerExecution({ processRunner, now: () => clock });
+  const runner = new ProjectCommandRunner({ containerExecution, now: () => clock });
+  const result = await runner.run(configured, 'test', { timeoutMs: 1_000 });
+  assert.equal(result.ok, true);
+  assert.equal(calls.filter(({ args }) => args[0] === 'version').length, 1);
+  assert.equal(calls.filter(({ args }) => args[0] === 'image').length, 1);
+  assert.equal(calls.filter(({ args }) => args[0] === 'run').length, 1);
+  assert.equal(calls.find(({ args }) => args[0] === 'run').timeoutMs, 400);
 });
