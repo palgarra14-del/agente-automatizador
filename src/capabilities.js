@@ -43,37 +43,50 @@ function normalizeSkill(skill, tools) {
 }
 
 export class ToolSkillRegistry {
+  #tools = new Map();
+  #skills = new Map();
+
   constructor({ tools = [], skills = [] } = {}) {
-    this.tools = new Map();
     for (const input of tools) {
       const tool = normalizeTool(input);
-      if (this.tools.has(tool.id)) throw new Error(`Duplicate tool id: ${tool.id}`);
-      this.tools.set(tool.id, tool);
+      if (this.#tools.has(tool.id)) throw new Error(`Duplicate tool id: ${tool.id}`);
+      this.#tools.set(tool.id, tool);
     }
-    this.skills = new Map();
     for (const input of skills) {
-      const skill = normalizeSkill(input, this.tools);
-      if (this.skills.has(skill.id)) throw new Error(`Duplicate skill id: ${skill.id}`);
-      this.skills.set(skill.id, skill);
+      const skill = normalizeSkill(input, this.#tools);
+      if (this.#skills.has(skill.id)) throw new Error(`Duplicate skill id: ${skill.id}`);
+      this.#skills.set(skill.id, skill);
     }
-    this.fingerprint = fingerprint(this.snapshot());
+    this.fingerprint = fingerprint(this.contractSnapshot());
+    Object.freeze(this);
   }
 
   snapshot() {
     return {
-      tools: [...this.tools.values()].sort((a, b) => a.id.localeCompare(b.id)),
-      skills: [...this.skills.values()].sort((a, b) => a.id.localeCompare(b.id))
+      tools: [...this.#tools.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      skills: [...this.#skills.values()].sort((a, b) => a.id.localeCompare(b.id))
     };
   }
 
-  getTool(id) { return this.tools.get(id); }
-  getSkill(id) { return this.skills.get(id); }
+  contractSnapshot() {
+    return {
+      tools: [...this.#tools.values()]
+        .map(({ id, kind, binding, surfaces, risk }) => ({ id, kind, binding, surfaces, risk }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      skills: [...this.#skills.values()]
+        .map(({ id, requiresTools, surfaces, risk }) => ({ id, requiresTools, surfaces, risk }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+    };
+  }
+
+  getTool(id) { return this.#tools.get(id); }
+  getSkill(id) { return this.#skills.get(id); }
 
   validateProjectPolicy(policy = {}) {
     const allow = policy.allow ?? defaultProjectSkillAllow;
-    if (!Array.isArray(allow) || allow.some((id) => typeof id !== 'string' || !this.skills.has(id))) throw new Error('Project skill allowlist contains an unknown skill');
+    if (!Array.isArray(allow) || allow.some((id) => typeof id !== 'string' || !this.#skills.has(id))) throw new Error('Project skill allowlist contains an unknown skill');
     const deny = policy.deny ?? [];
-    if (!Array.isArray(deny) || deny.some((id) => typeof id !== 'string' || !this.skills.has(id))) throw new Error('Project skill denylist contains an unknown skill');
+    if (!Array.isArray(deny) || deny.some((id) => typeof id !== 'string' || !this.#skills.has(id))) throw new Error('Project skill denylist contains an unknown skill');
     if (allow.some((id) => deny.includes(id))) throw new Error('Project skill cannot be both allowed and denied');
     return Object.freeze({ allow: Object.freeze([...new Set(allow)].sort()), deny: Object.freeze([...new Set(deny)].sort()) });
   }
@@ -84,12 +97,12 @@ export class ToolSkillRegistry {
 
   resolve(project, skillId, { surface = 'workflow' } = {}) {
     if (!['workflow', 'orchestrator'].includes(surface)) throw new Error('Unknown capability surface');
-    const skill = this.skills.get(skillId);
+    const skill = this.#skills.get(skillId);
     if (!skill) return { id: skillId, exists: false, allowed: false, available: false, surface, reason: 'unknown_skill', tools: [] };
     const policy = project?.skills ?? this.validateProjectPolicy();
     const allowed = policy.allow.includes(skillId) && !policy.deny.includes(skillId);
     const tools = skill.requiresTools.map((toolId) => {
-      const tool = this.tools.get(toolId);
+      const tool = this.#tools.get(toolId);
       const surfaceBound = tool.bound && tool.surfaces.includes(surface);
       return { id: tool.id, bound: tool.bound, surfaceBound, binding: tool.binding, kind: tool.kind, risk: tool.risk };
     });
@@ -109,7 +122,7 @@ export class ToolSkillRegistry {
       projectPolicyFingerprint: this.policyFingerprint(project?.skills ?? {}),
       projectId: project?.id ?? null,
       surface,
-      skills: [...this.skills.keys()].sort().map((id) => this.resolve(project, id, { surface }))
+      skills: [...this.#skills.keys()].sort().map((id) => this.resolve(project, id, { surface }))
     };
   }
 }
