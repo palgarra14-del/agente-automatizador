@@ -187,12 +187,7 @@ export const defaultProjectSkillAllow = Object.freeze([
   'human.approval',
   'repository.observe',
   'repository.publish',
-  'code.inspect',
   'code.implement',
-  'requirements.define',
-  'data.inspect',
-  'data.analyze',
-  'data.summarize',
   'release.observe-ci',
   'release.publish-pr',
   'release.observe-preview'
