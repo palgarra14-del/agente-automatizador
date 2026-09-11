@@ -562,8 +562,8 @@ const workflowProfiles = Object.freeze({
     steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
   },
   'app-improvement': {
-    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
-    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint']]
   },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
@@ -608,6 +608,7 @@ const workflowStepSkills = Object.freeze({
     diagnose: 'code.diagnose',
     'plan-change': 'human.approval',
     implementation: 'code.implement',
+    review: 'code.review',
     tests: 'project.verify',
     verification: 'project.verify',
     'release-readiness': 'human.approval'
@@ -638,6 +639,7 @@ const workflowStepSpecialists = Object.freeze({
     diagnose: 'diagnostician',
     'plan-change': 'human-supervisor',
     implementation: 'implementer',
+    review: 'change-critic',
     tests: 'verifier',
     verification: 'verifier',
     'release-readiness': 'human-supervisor'
@@ -2060,7 +2062,7 @@ export class CodexSdkWorker extends CodingWorker {
   }
 }
 
-const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose']);
+const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review']);
 
 export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }) {
   const clean = sanitizeCodingTask({ skill, goal, context });
