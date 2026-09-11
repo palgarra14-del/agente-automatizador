@@ -33,8 +33,10 @@ function completePlaceholder(plan, id) {
     ok: true,
     completedAt: '2026-09-11T00:00:00.000Z',
     skill: step.skill,
+    specialist: step.specialist,
     registryFingerprint: plan.registryFingerprint,
-    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint
   };
 }
 

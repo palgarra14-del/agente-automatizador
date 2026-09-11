@@ -56,10 +56,16 @@ function completeStep(plan, id) {
   const completedAt = '2026-09-11T00:00:00.000Z';
   const capability = {
     skill: step.skill,
+    specialist: step.specialist,
     registryFingerprint: plan.registryFingerprint,
-    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint
   };
-  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint, repositoryControlFingerprint: emptyRepositoryControlState().fingerprint };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSet: emptyChangeSet(), changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' }, protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint, repositoryControlFingerprint: emptyRepositoryControlState().fingerprint };
+  else if (step.type === 'placeholder' && step.skill === 'code.review') {
+    const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+    step.evidence = { ...capability, type: 'executor', ok: true, completedAt, result: { reviewEvidence: { verdict: 'PASS', summary: 'fixture review passed', findings: [] } }, reviewedChangeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null };
+  }
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
@@ -128,6 +134,10 @@ test('workflow dry-run reports executable steps without invoking the command exe
   const dryRun = await instance.run(created.id, { dryRun: true });
   assert.equal(dryRun.dryRun, true);
   assert.equal(calls, 0);
+  assert.equal(dryRun.specialistRegistryFingerprint.length, 64);
+  assert.equal(dryRun.plannedSteps[0].specialist, 'data-inspector');
+  assert.equal(dryRun.plannedSteps[0].specialistMode, 'reserved');
+  assert.equal(dryRun.plannedSteps[0].specialistAuthority, 'unavailable');
   assert.equal((await instance.get(created.id)).steps[0].status, WorkflowStepStatus.READY);
 });
 
@@ -276,7 +286,7 @@ test('workflow global deadline is enforced before start, between steps, between 
   const betweenCommands = await engine({ now: () => clock, runner: async (_project, name, options) => { calls += 1; commandTimeouts.push(options.timeoutMs); clock = 1_000; return { name, ok: false, stdout: '', stderr: '' }; } });
   const commandPlan = await betweenCommands.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Between commands', budgets: { timeoutMs: 1_000, maxAttempts: 2 } });
   await betweenCommands.update(commandPlan.id, (plan) => {
-    for (const id of ['inspect-project', 'diagnose', 'plan-change', 'implementation', 'tests']) completeStep(plan, id);
+    for (const id of ['inspect-project', 'diagnose', 'plan-change', 'implementation', 'review', 'tests']) completeStep(plan, id);
   });
   const deadlineFailed = await betweenCommands.run(commandPlan.id);
   assert.equal(deadlineFailed.result.error, 'workflow_budget_deadline_exceeded');
@@ -834,7 +844,7 @@ test('read-only workflow step fails closed if workspace changes despite read-onl
   assert.notEqual(step.evidence.workspaceBeforeFingerprint, step.evidence.workspaceAfterFingerprint);
 });
 
-test('app-improvement implementation completes only after normal governed change evidence and verification', async () => {
+test('app-improvement implementation completes only after critic PASS and normal governed verification', async () => {
   let changeCalls = 0;
   const normalChange = changedChangeSet(['src/feature.js'], { additions: 3, diffLines: 3, changedBytes: 96 });
   const localGit = stableLocalGit({
@@ -854,20 +864,178 @@ test('app-improvement implementation completes only after normal governed change
       return { status: 'completed', summary: 'implemented', codexThreadId: 'write-thread', output: 'done', outputBytes: 4 };
     }
   };
-  const instance = await engine({ localGit, codingWorker });
-  const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Implement safely' });
+  let reviewCalls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute(request) {
+      reviewCalls += 1;
+      assert.equal(request.skill, 'code.review');
+      assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, normalChange.changeSetFingerprint);
+      assert.deepEqual(request.context.priorEvidence.implementation.changeSet.paths, ['src/feature.js']);
+      return { ok: true, status: 'completed', outputBytes: 16, result: { reviewEvidence: { verdict: 'PASS', summary: 'change is safe', findings: [] } } };
+    }
+  };
+  const configured = configFrom({
+    id: 'review-happy-path',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, codingWorker, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Implement safely' });
   await prepareImplementation(instance, created.id);
   const result = await instance.run(created.id);
   const implementation = result.steps.find((step) => step.id === 'implementation');
+  const review = result.steps.find((step) => step.id === 'review');
   assert.equal(implementation.status, WorkflowStepStatus.COMPLETED);
   assert.equal(implementation.evidence.ok, true);
   assert.equal(implementation.evidence.workerEvidence.status, 'completed');
   assert.equal(implementation.evidence.changePolicy.classification, 'normal');
   assert.equal(implementation.evidence.changeSetFingerprint, normalChange.changeSetFingerprint);
+  assert.equal(review.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(review.evidence.result.reviewEvidence.verdict, 'PASS');
+  assert.equal(review.evidence.reviewedChangeSetFingerprint, normalChange.changeSetFingerprint);
+  assert.equal(reviewCalls, 1);
   assert.equal(result.steps.find((step) => step.id === 'tests').status, WorkflowStepStatus.COMPLETED);
   assert.equal(result.steps.find((step) => step.id === 'verification').status, WorkflowStepStatus.COMPLETED);
   assert.equal(result.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(result.status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
+test('app-improvement critic FAIL stops before deterministic verification', async () => {
+  let changeCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js']);
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    }
+  });
+  const configured = configFrom({
+    id: 'review-fail-path',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const codingWorker = { async execute() { return { status: 'completed', summary: 'implemented', output: '', outputBytes: 0 }; } };
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 18, result: { reviewEvidence: { verdict: 'FAIL', summary: 'regression found', findings: [{ severity: 'high', message: 'unsafe regression', path: 'src/feature.js' }] } } };
+    }
+  };
+  let verificationCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    codingWorker,
+    skillExecutor,
+    runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject flawed change' });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const review = failed.steps.find((step) => step.id === 'review');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.error, 'workflow_change_review_failed');
+  assert.equal(review.evidence.reviewedChangeSetFingerprint, normalChange.changeSetFingerprint);
+  assert.equal(failed.result.reviewEvidence.verdict, 'FAIL');
+  assert.equal(verificationCalls, 0);
+});
+
+test('persisted critic PASS must retain structurally valid review evidence', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Validate persisted review' });
+  completeStep(plan, 'inspect-project');
+  completeStep(plan, 'diagnose');
+  completeStep(plan, 'plan-change');
+  completeStep(plan, 'implementation');
+  const review = completeStep(plan, 'review');
+  review.evidence.result.reviewEvidence = { verdict: 'PASS', summary: '', findings: [] };
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
+    /review_evidence_summary_invalid/
+  );
+});
+
+test('completed critic PASS cannot be replayed against a different implementation fingerprint', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Bind review evidence' });
+  completeStep(plan, 'inspect-project');
+  completeStep(plan, 'diagnose');
+  completeStep(plan, 'plan-change');
+  const implementation = completeStep(plan, 'implementation');
+  completeStep(plan, 'review');
+  implementation.evidence.changeSetFingerprint = 'f'.repeat(64);
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
+    /Completed change review is not bound to the governed implementation/
+  );
+});
+
+test('change critic that mutates the workspace is rejected even if it returns PASS', async () => {
+  const governed = changedChangeSet(['src/feature.js']);
+  const mutated = changedChangeSet(['src/feature.js', 'src/reviewer-side-effect.js']);
+  let changeCalls = 0;
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? governed : mutated;
+    }
+  });
+  const configured = configFrom({
+    id: 'review-workspace-integrity',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.review', 'project.verify', 'human.approval', 'code.implement'], deny: [] }
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute() {
+      return { ok: true, status: 'completed', outputBytes: 12, result: { reviewEvidence: { verdict: 'PASS', summary: 'claimed safe', findings: [] } } };
+    }
+  };
+  let verificationCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    skillExecutor,
+    runner: async (_project, name) => { verificationCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject critic side effects' });
+  const workspaceProject = await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.workspacePath = workspaceProject.workspace;
+  });
+  const failed = await instance.run(created.id);
+  const review = failed.steps.find((step) => step.id === 'review');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.error, 'read_only_skill_modified_workspace');
+  assert.equal(review.evidence.ok, false);
+  assert.equal(review.evidence.reviewedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(verificationCalls, 0);
 });
 
 test('implementation sensitive change blocks before verification', async () => {
@@ -1087,6 +1255,7 @@ test('verification command that mutates governed implementation diff fails close
     implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
     implementation.evidence.changeSet = governed;
     implementation.evidence.workspacePath = workspaceProject.workspace;
+    completeStep(plan, 'review');
   });
   const failed = await instance.run(created.id);
   const testsStep = failed.steps.find((step) => step.id === 'tests');
@@ -1135,6 +1304,7 @@ test('verification command that changes repository state fails closed even when 
     implementation.evidence.changeSet = governed;
     implementation.evidence.workspacePath = workspaceProject.workspace;
     implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+    completeStep(plan, 'review');
   });
   const failed = await instance.run(created.id);
   const testsStep = failed.steps.find((step) => step.id === 'tests');
