@@ -2789,6 +2789,8 @@ export class Orchestrator {
     if (!run.registryFingerprint || !run.projectSkillPolicyFingerprint) throw new Error('run_capability_context_missing');
     if (run.registryFingerprint !== this.registry.fingerprint) throw new Error('run_capability_registry_changed');
     if (run.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {})) throw new Error('run_project_skill_policy_changed');
+    if (run.budgets?.maxModelCalls !== project.budgets.maxModelCalls) throw new Error('run_model_budget_changed');
+    validateModelUsageState(run.modelUsage, project.budgets.maxModelCalls, 'run.modelUsage');
   }
 
   requiredSkills(project) {
@@ -2813,7 +2815,7 @@ export class Orchestrator {
   async create(project, goal, dryRun = false, scope = {}) {
     const id = `agent-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomUUID().slice(0, 8)}`;
     const createdAt = new Date().toISOString();
-    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), executionLease: null, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
+    const run = { id, projectId: project.id, projectName: project.displayName ?? project.id, goal: maskSecrets(goal), status: RunStatus.CREATED, createdAt, updatedAt: createdAt, dryRun, scope: normalizeRunScope(scope), budgets: project.budgets, modelUsage: createModelUsageState(project.budgets.maxModelCalls), deadlineAt: Date.now() + project.budgets.maxRuntimeMinutes * 60_000, registryFingerprint: this.registry.fingerprint, projectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {}), executionLease: null, workerAttempts: 0, approvals: [], results: {}, checkHistory: [] };
     await this.store.mutate((data) => { data.runs[id] = run; });
     await this.event(id, 'orchestrator', 'run.created', { dryRun });
     return run;
@@ -3060,6 +3062,23 @@ export class Orchestrator {
     return this.pollCi(run, project);
   }
 
+  async reserveRunModelCall(run, context) {
+    let callId = null;
+    const updated = await this.updateRun(run.id, (saved) => {
+      if (saved.modelUsage.calls >= saved.modelUsage.maxCalls) {
+        saved.budgetExhausted = 'maxModelCalls';
+        return;
+      }
+      callId = reserveModelCall(saved.modelUsage, { surface: 'orchestrator', ...context });
+    });
+    return { run: updated, callId };
+  }
+
+  async completeRunModelCall(runId, callId, usage, status) {
+    if (!callId) return this.store.getRun(runId);
+    return this.updateRun(runId, (saved) => { completeModelCall(saved.modelUsage, callId, usage, status); });
+  }
+
   async executeAttempt(run, project) {
     this.assertDeadline(run);
     this.requireSkill(project, 'code.implement');
@@ -3076,7 +3095,11 @@ export class Orchestrator {
       branch: run.workingBranch,
       previousFailure: run.lastWorkerFailure
     };
+    const reservation = await this.reserveRunModelCall(run, { skill: 'code.implement', attempt: run.workerAttempts + 1 });
+    if (!reservation.callId) return this.fail(run.id, 'model_call_budget_exhausted');
+    run = reservation.run;
     const workerResult = await this.worker.execute(task, { workspace: project.workspace, timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, Math.max(1_000, run.deadlineAt - Date.now())) });
+    await this.completeRunModelCall(run.id, reservation.callId, workerResult.usage, workerResult.status === 'completed' ? 'completed' : 'failed');
     run = await this.updateRun(run.id, (saved) => { saved.workerAttempts += 1; saved.results.worker = { ok: workerResult.status === 'completed', ...safeJson(workerResult) }; });
     await this.event(run.id, 'worker', 'coding_task.completed', { status: workerResult.status, attempt: run.workerAttempts });
     if (workerResult.status !== 'completed') return this.retryOrFail(run, workerResult.output || 'worker failed');
