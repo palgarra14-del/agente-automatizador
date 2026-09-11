@@ -53,6 +53,12 @@ const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCAL
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
 const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
+const protectedIgnoredPathspecs = Object.freeze([
+  '.env', '.env.*', '*.pem', '*.key',
+  'secrets/**', 'credentials/**', 'creds/**',
+  ':(glob)**/.env', ':(glob)**/.env.*', ':(glob)**/*.pem', ':(glob)**/*.key',
+  ':(glob)**/secrets/**', ':(glob)**/credentials/**', ':(glob)**/creds/**'
+]);
 
 export function imageIsPinned(image) {
   return typeof image === 'string' && /@sha256:[a-f0-9]{64}$/i.test(image);
@@ -650,6 +656,7 @@ function validateCompletedWorkflowEvidence(plan, step) {
       const repositoryState = step.evidence.repositoryState;
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
       if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
+      if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
     }
     return;
@@ -782,13 +789,15 @@ export class WorkflowEngine {
   async workspaceSnapshot(project) {
     const repository = await this.localGit.inspect(project);
     const changeSet = await this.localGit.inspectChangeSet(project);
+    const protectedIgnored = await this.localGit.inspectProtectedIgnoredState(project);
     return {
       repository: repository.repository,
       remote: repository.remote,
       branch: repository.currentBranch,
       head: repository.initialHead,
       status: repository.status,
-      changeSet
+      changeSet,
+      protectedIgnored
     };
   }
 
@@ -797,7 +806,8 @@ export class WorkflowEngine {
       before.remote === after.remote &&
       before.branch === after.branch &&
       before.head === after.head &&
-      before.changeSet.changeSetFingerprint === after.changeSet.changeSetFingerprint;
+      before.changeSet.changeSetFingerprint === after.changeSet.changeSetFingerprint &&
+      before.protectedIgnored.fingerprint === after.protectedIgnored.fingerprint;
   }
 
   completedContext(plan) {
@@ -840,7 +850,8 @@ export class WorkflowEngine {
         projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
-        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint
+        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
+        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint
       };
       saved.status = WorkflowStepStatus.RUNNING;
     });
@@ -880,6 +891,8 @@ export class WorkflowEngine {
         codexThreadId: execution.codexThreadId ?? null,
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
+        protectedIgnoredBeforeFingerprint: before.protectedIgnored.fingerprint,
+        protectedIgnoredAfterFingerprint: after?.protectedIgnored?.fingerprint ?? null,
         error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
@@ -948,7 +961,8 @@ export class WorkflowEngine {
         projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
-        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint
+        workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
+        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint
       };
       saved.status = WorkflowStepStatus.RUNNING;
     });
@@ -970,9 +984,12 @@ export class WorkflowEngine {
     const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
     let repositoryIntegrityError = null;
     let changeSet = null;
+    let protectedIgnored = null;
     try {
       await this.localGit.assertRepositoryState(workspaceProject, { branch: before.branch, head: before.head, remote: before.remote });
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+      protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
+      if (protectedIgnored.fingerprint !== before.protectedIgnored.fingerprint) throw new Error('protected_ignored_state_changed');
     } catch (error) {
       repositoryIntegrityError = error;
     }
@@ -991,6 +1008,7 @@ export class WorkflowEngine {
         projectSkillPolicyFingerprint: saved.projectSkillPolicyFingerprint,
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
+        protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
         workerEvidence: {
           status: worker.status,
           summary: clip(worker.summary, 1_000),
@@ -1075,6 +1093,8 @@ export class WorkflowEngine {
       if (!expectedRepositoryState) throw new Error('implementation_repository_state_missing');
       await this.localGit.assertRepositoryState(workspaceProject, expectedRepositoryState);
       changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+      const protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
+      if (protectedIgnored.fingerprint !== implementation.evidence.protectedIgnoredFingerprint) throw new Error('protected_ignored_state_changed');
       decision = evaluateChangePolicy(project, changeSet, plan.scope);
     } catch (error) {
       integrityError = error;
@@ -1177,10 +1197,12 @@ export class WorkflowEngine {
         const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
         let current = null;
         let changeSet = null;
+        let protectedIgnored = null;
         let integrityError = null;
         try {
           current = await this.localGit.inspect(workspaceProject);
           changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+          protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
         } catch (error) {
           integrityError = error;
         }
@@ -1189,7 +1211,9 @@ export class WorkflowEngine {
           current.currentBranch !== expected.branch ||
           current.initialHead !== expected.head ||
           current.remote !== expected.remote;
-        const filesChanged = Boolean(changeSet?.paths?.length);
+        const filesChanged = Boolean(changeSet?.paths?.length) ||
+          !protectedIgnored ||
+          protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
         if (repositoryChanged || filesChanged) {
           await this.update(id, (saved) => {
             const step = saved.steps.find((item) => item.id === interruptedStep.id);
@@ -1202,6 +1226,7 @@ export class WorkflowEngine {
               observedRepositoryState: current ? { branch: current.currentBranch, head: current.initialHead, remote: current.remote } : null,
               changeSet: changeSet ? safeJson(changeSet) : null,
               changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
+              protectedIgnoredFingerprint: protectedIgnored?.fingerprint ?? null,
               error: integrityError ? clip(integrityError.message, 1_000) : null
             };
             saved.pausedAt = null;
