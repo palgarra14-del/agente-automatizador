@@ -107,6 +107,8 @@ export const defaultSpecialists = Object.freeze([
   { id: 'change-critic', mode: 'read-only', skills: ['code.review'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor', description: 'Reviews the governed diff independently before verification.' },
   { id: 'verifier', mode: 'verification', skills: ['project.verify'], authority: 'configured-command-execution', executor: 'ProjectCommandRunner', description: 'Runs deterministic allowlisted project verification.' },
   { id: 'release-manager', mode: 'publication', skills: ['release.publish-reviewed-workflow'], authority: 'external-write', executor: 'WorkflowPublicationBridge', description: 'Publishes a verified change for human review without merge or production deployment.' },
+  { id: 'business-intake-validator', mode: 'read-only', skills: ['website.intake'], authority: 'validated-user-input-read', executor: 'BusinessIntakeValidator', description: 'Validates structured business facts without model execution.' },
+  { id: 'website-planner', mode: 'read-only', skills: ['website.specify'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor', description: 'Turns validated business facts into a bounded structural website specification.' },
   { id: 'human-supervisor', mode: 'human', skills: ['human.approval'], authority: 'human-approval', executor: 'WorkflowApproval', description: 'Provides explicit human checkpoints.' },
   { id: 'researcher', mode: 'reserved', skills: ['research.web'], authority: 'unavailable', executor: null, description: 'Reserved for future reviewed web research.' },
   { id: 'business-analyst', mode: 'reserved', skills: ['business.analyze'], authority: 'unavailable', executor: null, description: 'Reserved for future business analysis.' },
