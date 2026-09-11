@@ -48,7 +48,7 @@ function completeStep(plan, id) {
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
   };
-  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: 'a'.repeat(64), changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' } };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' } };
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
