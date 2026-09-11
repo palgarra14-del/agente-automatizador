@@ -123,3 +123,28 @@ test('workflow validation fails closed when project skill policy changes after p
   assert.notEqual(defaultToolSkillRegistry.policyFingerprint(project.skills), defaultToolSkillRegistry.policyFingerprint(changedProject.skills));
   assert.throws(() => validateWorkflowPlan(plan, new Map([[changedProject.id, changedProject]])), /project skill policy fingerprint/);
 });
+
+
+test('registry fingerprint ignores descriptions but changes on executable contract changes', () => {
+  const described = new ToolSkillRegistry({
+    tools: defaultTools.map((tool) => ({ ...tool, description: `changed: ${tool.description}` })),
+    skills: defaultSkills.map((skill) => ({ ...skill, description: `changed: ${skill.description}` }))
+  });
+  assert.equal(described.fingerprint, defaultToolSkillRegistry.fingerprint);
+
+  const rebound = new ToolSkillRegistry({
+    tools: defaultTools.map((tool) => tool.id === 'project-command' ? { ...tool, binding: 'DifferentRunner' } : tool),
+    skills: defaultSkills
+  });
+  assert.notEqual(rebound.fingerprint, defaultToolSkillRegistry.fingerprint);
+});
+
+test('registry internals cannot be mutated through public properties', () => {
+  const registry = new ToolSkillRegistry({ tools: defaultTools, skills: defaultSkills });
+  assert.equal(Object.isFrozen(registry), true);
+  assert.equal(Object.hasOwn(registry, 'tools'), false);
+  assert.equal(Object.hasOwn(registry, 'skills'), false);
+  const original = registry.fingerprint;
+  assert.throws(() => { registry.fingerprint = 'tampered'; }, TypeError);
+  assert.equal(registry.fingerprint, original);
+});
