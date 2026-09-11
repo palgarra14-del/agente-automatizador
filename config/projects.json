@@ -92,7 +92,10 @@
           "data.analyze",
           "data.summarize",
           "release.observe-ci",
-          "release.publish-pr"
+          "release.publish-pr",
+          "project.bootstrap",
+          "repository.observe",
+          "repository.publish"
         ],
         "deny": []
       }
@@ -195,7 +198,10 @@
           "data.summarize",
           "release.observe-ci",
           "release.publish-pr",
-          "release.observe-preview"
+          "release.observe-preview",
+          "project.bootstrap",
+          "repository.observe",
+          "repository.publish"
         ],
         "deny": []
       }
@@ -298,7 +304,10 @@
           "data.summarize",
           "release.observe-ci",
           "release.publish-pr",
-          "release.observe-preview"
+          "release.observe-preview",
+          "project.bootstrap",
+          "repository.observe",
+          "repository.publish"
         ],
         "deny": []
       }
