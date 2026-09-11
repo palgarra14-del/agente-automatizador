@@ -48,7 +48,7 @@ function completeStep(plan, id) {
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint
   };
-  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' } };
+  if (step.type === 'placeholder' && step.skill === 'code.implement') step.evidence = { ...capability, type: 'executor', ok: true, completedAt, changeSetFingerprint: emptyChangeSet().changeSetFingerprint, changePolicy: { ok: true, classification: 'normal' }, workerEvidence: { status: 'completed' }, repositoryState: { branch: 'main', head: 'deadbeef', remote: 'https://github.com/owner/repo.git' } };
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
   else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
@@ -1081,5 +1081,52 @@ test('verification command that mutates governed implementation diff fails close
   assert.equal(testsStep.error, 'workflow_change_set_changed_during_verification');
   assert.equal(testsStep.evidence.expectedChangeSetFingerprint, governed.changeSetFingerprint);
   assert.equal(testsStep.evidence.observedChangeSetFingerprint, mutated.changeSetFingerprint);
+  assert.equal(commandCalls, 1);
+});
+
+
+test('verification command that changes repository state fails closed even when the diff fingerprint is unchanged', async () => {
+  const governed = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  let commandCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect(project) {
+      return {
+        repository: project.workspace,
+        remote: `https://github.com/${project.repository.owner}/${project.repository.name}.git`,
+        currentBranch: commandCalls === 0 ? project.defaultBranch : 'unexpected-branch',
+        initialHead: 'deadbeef',
+        status: ''
+      };
+    },
+    async inspectChangeSet() { return governed; }
+  });
+  const configured = project();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    runner: async (_project, name) => {
+      commandCalls += 1;
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Guard repository identity' });
+  const workspaceProject = await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    const inspect = completeStep(plan, 'inspect-project');
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    const diagnose = completeStep(plan, 'diagnose');
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.workspacePath = workspaceProject.workspace;
+    implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+  });
+  const failed = await instance.run(created.id);
+  const testsStep = failed.steps.find((step) => step.id === 'tests');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(testsStep.error, 'workflow_change_set_integrity_failed_during_verification');
+  assert.match(testsStep.evidence.error, /Unexpected current branch/);
   assert.equal(commandCalls, 1);
 });
