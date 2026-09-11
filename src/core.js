@@ -580,7 +580,7 @@ export function createWorkflowPlan({ profile, project, goal, now = () => new Dat
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
   if (!Number.isFinite(nowMs)) throw new Error('Workflow clock must return a finite timestamp');
-  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
+  const plan = { id: `workflow-${randomUUID()}`, goal: maskSecrets(goal), projectId: project.id, profile, registryFingerprint: registry.fingerprint, projectSkillPolicyFingerprint: registry.policyFingerprint(project.skills ?? {}), createdAt: now(), updatedAt: now(), status: WorkflowStepStatus.PENDING, steps, definitionOfDone: template.definitionOfDone, budgets: budget, deadlineAt: nowMs + budget.timeoutMs, pausedAt: null, outputBytes: 0, workspace: null, bootstrap: workflowBootstrap(project), result: null, validation: null, dryRun: false };
   validateWorkflowPlan(plan, new Map([[project.id, project]]), registry);
   return plan;
 }
@@ -608,6 +608,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (plan.registryFingerprint !== registry.fingerprint) throw new Error('Workflow capability registry fingerprint does not match the active registry');
   if (!knownProjects?.has(plan.projectId)) throw new Error('Workflow references an unknown project');
   const project = knownProjects instanceof Map ? knownProjects.get(plan.projectId) : null;
+  if (project && plan.projectSkillPolicyFingerprint !== registry.policyFingerprint(project.skills ?? {})) throw new Error('Workflow project skill policy fingerprint does not match the active project policy');
   if (!workflowPlanStatuses.has(plan.status)) throw new Error('Workflow has an invalid status');
   if (!Number.isFinite(plan.deadlineAt)) throw new Error('Workflow deadlineAt must be a finite number');
   if (plan.pausedAt !== null && plan.pausedAt !== undefined && (!Number.isFinite(plan.pausedAt) || plan.pausedAt < Math.max(0, plan.deadlineAt - plan.budgets?.timeoutMs) || plan.pausedAt > plan.deadlineAt)) throw new Error('Workflow pausedAt must be null or a valid active-budget pause timestamp');
