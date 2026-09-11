@@ -956,6 +956,12 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
     visiting.delete(id); visited.add(id);
   };
   for (const id of ids) visit(id);
+  for (const step of plan.steps) {
+    if (step.status === WorkflowStepStatus.PENDING) continue;
+    for (const dependencyId of step.dependsOn) {
+      if (byId.get(dependencyId)?.status !== WorkflowStepStatus.COMPLETED) throw new Error(`Workflow step advanced before dependency completed: ${step.id} -> ${dependencyId}`);
+    }
+  }
   if (!Array.isArray(plan.definitionOfDone) || !plan.definitionOfDone.length) throw new Error('Workflow definitionOfDone must contain requirements');
   const requirementIds = new Set();
   for (const requirement of plan.definitionOfDone) {
