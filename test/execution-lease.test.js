@@ -3,7 +3,8 @@ import test from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { JsonStore, Orchestrator, RunStatus, WorkflowEngine, WorkflowStepStatus, configFrom, defaultToolSkillRegistry } from '../src/core.js';
+import { JsonStore, Orchestrator, RunStatus, WorkflowEngine, WorkflowStepStatus, configFrom } from '../src/core.js';
+import { defaultToolSkillRegistry } from '../src/capabilities.js';
 
 async function temporaryStore() {
   return new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-execution-lease-')), 'state.json'));
