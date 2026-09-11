@@ -16,9 +16,20 @@ Each configured project receives a normalized skill allow/deny policy. Deny wins
 
 The registry distinguishes `workflow` and `orchestrator` surfaces. Future capabilities can be declared without becoming executable: research, visual review, requirements, data analysis, and inspection currently have no reviewed execution surface and therefore resolve unavailable.
 
+## v0.8 execution integration
+
+Execution leases are persisted on runs and workflows. A live owner rejects a second invocation before duplicate planner/worker/command work begins; an abandoned owner is recoverable only through the existing conservative process-identity check. Lease loss/tampering fails closed, and success/error paths release the matching lease.
+
+The first WorkflowEngine skill executors are deliberately split by authority. `CodexReadOnlySkillExecutor` handles `code.inspect` and `code.diagnose` with a read-only sandbox, no network/web search, strict JSON contracts, and an independent before/after Git repository + change-set comparison. Any persistent workspace, branch, HEAD, or remote change fails the step.
+
+`code.implement` reuses `CodexSdkWorker` rather than adding a second writer. The WorkflowEngine captures the clean starting repository state, runs the worker with only sanitized goal/evidence/scope, then reuses `LocalGitAdapter.inspectChangeSet` and `evaluateChangePolicy`. Forbidden paths, scope violations, and change-budget violations fail; sensitive changes block; a failed worker that left changes blocks rather than retrying. Only a completed worker plus a normal policy decision and bound change-set fingerprint can satisfy implementation evidence. Tests/typecheck/lint/build remain configured verification commands. WorkflowEngine never commits, pushes, creates PRs, merges, or deploys.
+
+Crash recovery records the pre-execution branch, HEAD, remote, workspace and change-set fingerprint. An interrupted worker may be retried only when repository/worktree state is still clean; observed changes or repository-state mutation become a non-approvable block so work is never silently applied twice.
+
 ## Adapters
 
-- `CodexSdkWorker`: real coding implementation through the official `@openai/codex-sdk`.
+- `CodexSdkWorker`: real workspace-write coding implementation through the official `@openai/codex-sdk`.
+- `CodexReadOnlySkillExecutor`: workflow-only read-only inspection/diagnosis with strict JSON output and no network/web search.
 - `LocalGitAdapter`: explicit local Git operations only; no LLM-generated Git command strings.
 - `GitHubAdapter`: authenticated repository/branch reads, PR creation, and check-run polling.
 - `ToolSkillRegistry`: immutable deterministic registry of tool bindings, skill contracts, project policy, surface availability, and fingerprints.
@@ -51,4 +62,4 @@ Supported meaningful states are `working`, `testing`, `pushing`, `waiting_ci`, `
 
 `agent doctor --project <id>` has no write path. It reads the configured project and attempts the existing GitHub inspection, reporting connectivity and default-branch protection as `YES`, `NO`, or `UNKNOWN`; it also reports Codex SDK availability, workspace root, configured commands, Vercel configuration, whether `VERCEL_TOKEN` is present, configured/selected execution provider, Docker availability, post-worker network policy, and host fallback without revealing any value.
 
-`agent run` accepts repeated `--allowed-path` and `--forbidden-path` flags. Each value is one literal repository-relative root, persisted with the run and included in the worker task. It is not an instruction DSL; after worker completion the controlled Git adapter evaluates actual changed paths and cannot be bypassed by the task text.
+`agent run` and `agent workflow create` accept repeated `--allowed-path` and `--forbidden-path` flags. Each value is one literal repository-relative root, persisted with the run and included in the worker task. It is not an instruction DSL; after worker completion the controlled Git adapter evaluates actual changed paths and cannot be bypassed by the task text.
