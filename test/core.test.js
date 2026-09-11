@@ -18,6 +18,7 @@ import {
   WorkspaceManager,
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
+  codexWorkerSecurityConfig,
   configFrom,
   doctor,
   evaluate,
@@ -519,8 +520,8 @@ test('project command environment permits literal non-secret values only', () =>
   }));
 });
 
-test('worker prompt redacts secrets and Codex SDK receives constrained thread options', async () => {
-  let invocation = {};
+test('worker prompt redacts secrets and Codex SDK receives isolated permission-profile configuration', async () => {
+  const invocation = {};
   class FakeCodex {
     constructor(options) { invocation.clientOptions = options; }
 
@@ -536,13 +537,46 @@ test('worker prompt redacts secrets and Codex SDK receives constrained thread op
       };
     }
   }
-  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, environment: () => ({ PATH: '/safe/bin' }) });
+  let cleaned = false;
+  const worker = new CodexSdkWorker({
+    CodexClient: FakeCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_HOME: '/real/codex-home', HOME: '/real/home' }),
+    codexHomeFactory: async (sourceEnvironment) => {
+      invocation.sourceEnvironment = sourceEnvironment;
+      return { path: '/isolated/codex-home', cleanup: async () => { cleaned = true; } };
+    },
+    platform: 'linux'
+  });
   const result = await worker.execute({ objective: 'update fixture', token: 'ghp_hiddenToken', nested: { password: 'hidden' } }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(result.status, 'completed');
   assert.equal(invocation.clientOptions.env.PATH, '/safe/bin');
+  assert.equal(invocation.clientOptions.env.CODEX_HOME, '/isolated/codex-home');
+  assert.equal(invocation.clientOptions.env.HOME, '/isolated/codex-home');
+  assert.notEqual(invocation.clientOptions.env.CODEX_HOME, invocation.sourceEnvironment.CODEX_HOME);
+  assert.equal(cleaned, true);
   assert.deepEqual(invocation.threadOptions, {
-    workingDirectory: '/safe/workspace', sandboxMode: 'workspace-write', approvalPolicy: 'never', networkAccessEnabled: false, webSearchMode: 'disabled'
+    workingDirectory: '/safe/workspace', approvalPolicy: 'never', webSearchMode: 'disabled'
   });
+  const overrides = invocation.clientOptions.configOverrides;
+  for (const required of [
+    'default_permissions="agent-workflow"',
+    'permissions.agent-workflow.network.enabled=false',
+    'allow_login_shell=false',
+    'shell_environment_policy.inherit="none"',
+    'project_doc_max_bytes=0',
+    'skills.include_instructions=false',
+    'skills.bundled.enabled=false',
+    'features.apps=false',
+    'features.plugins=false',
+    'features.browser_use=false',
+    'features.computer_use=false',
+    'agents.enabled=false',
+    'history.persistence="none"',
+    'ephemeral=true'
+  ]) assert.ok(overrides.includes(required), required);
+  assert.ok(overrides.some((entry) => entry.includes('":root"="deny"') && entry.includes('"."="write"') && entry.includes('".git"="read"')));
+  assert.equal(Object.hasOwn(invocation.threadOptions, 'sandboxMode'), false);
+  assert.equal(Object.hasOwn(invocation.threadOptions, 'networkAccessEnabled'), false);
   assert.equal(invocation.prompt.includes('ghp_hiddenToken'), false);
   assert.equal(invocation.prompt.includes('hidden'), false);
   assert.equal(buildWorkerPrompt({ authorization: 'Bearer abcdef123456' }).includes('abcdef123456'), false);
@@ -1208,4 +1242,43 @@ test('LocalGitAdapter fingerprints git control files without exposing their cont
   assert.notEqual(after.fingerprint, before.fingerprint);
   assert.equal(JSON.stringify(after).includes('private-cache'), false);
   assert.equal(JSON.stringify(after).includes('changed by fixture'), false);
+});
+
+
+test('Codex worker permission profile is fail-closed on native Windows', async () => {
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
+  const result = await worker.execute({ objective: 'fixture' }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.output, 'codex_worker_read_isolation_unverified_on_win32');
+  assert.equal(constructed, 0);
+});
+
+test('Codex worker security config denies root reads and selects only requested workspace authority', () => {
+  const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux' });
+  const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin' });
+  assert.equal(write.supported, true);
+  assert.equal(read.supported, true);
+  const writeProfile = write.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  const readProfile = read.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  assert.match(writeProfile, /":root"="deny"/);
+  assert.match(writeProfile, /":minimal"="read"/);
+  assert.match(writeProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
+  assert.match(readProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
+  assert.ok(write.configOverrides.includes('shell_environment_policy.set.PATH="/bin:/usr/bin"'));
+  assert.equal(codexWorkerSecurityConfig({ platform: 'win32' }).supported, false);
+});
+
+test('Codex worker rejects project-local Codex control configuration before starting the SDK', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-worker-project-config-'));
+  await mkdir(join(workspace, '.codex'), { recursive: true });
+  await writeFile(join(workspace, '.codex', 'config.toml'), '[features]\napps = true\n');
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'linux', environment: () => ({ PATH: '/safe/bin' }) });
+  const result = await worker.execute({ objective: 'fixture' }, { workspace, timeoutMs: 100 });
+  assert.equal(result.status, 'failed');
+  assert.match(result.output, /worker_project_control_file_present:\.codex\/config\.toml/);
+  assert.equal(constructed, 0);
 });
