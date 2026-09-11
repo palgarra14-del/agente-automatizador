@@ -245,6 +245,8 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.vercelToken, 'NO');
   assert.equal(result.branchProtection, 'NO');
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
+  assert.match(formatDoctor(result), /CAPABILITY REGISTRY\n[0-9a-f]{12}/);
+  assert.match(formatDoctor(result), /ORCHESTRATOR SKILLS AVAILABLE/);
   assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
 });
 
@@ -626,6 +628,27 @@ test('dry-run persists a complete simulation without invoking worker, git writes
   assert.equal(commandCalls, 0);
   assert.equal(github.pullRequests, 0);
   assert.equal(run.results.worker.simulated, true);
+});
+
+test('report exposes capability fingerprints and preflight outcome without raw policy data', () => {
+  const rendered = report({
+    id: 'capability-report',
+    projectId: 'fixture',
+    projectName: 'Fixture',
+    goal: 'safe goal',
+    status: 'created',
+    dryRun: true,
+    registryFingerprint: 'a'.repeat(64),
+    projectSkillPolicyFingerprint: 'b'.repeat(64),
+    results: { capabilities: { ok: false } },
+    budgets: { maxWorkerAttempts: 1 },
+    workerAttempts: 0,
+    approvals: []
+  });
+  assert.match(rendered, /CAPABILITY REGISTRY\na{12}/);
+  assert.match(rendered, /PROJECT SKILL POLICY\nb{12}/);
+  assert.match(rendered, /CAPABILITY PREFLIGHT\nFAIL/);
+  assert.doesNotMatch(rendered, /a{64}|b{64}/);
 });
 
 test('GitHub inspection reports default-branch protection without changing repository settings', async () => {
