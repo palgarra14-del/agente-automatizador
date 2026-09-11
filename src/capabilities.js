@@ -118,7 +118,8 @@ export const defaultTools = Object.freeze([
   { id: 'project-command', kind: 'executor', binding: 'ProjectCommandRunner', surfaces: ['workflow', 'orchestrator'], risk: 'workspace-execution', description: 'Runs project-allowlisted commands through the configured execution provider.' },
   { id: 'coding-worker', kind: 'executor', binding: 'CodingWorker', surfaces: ['orchestrator'], risk: 'workspace-write', description: 'Performs governed coding work inside a prepared workspace.' },
   { id: 'github-observe', kind: 'observer', binding: 'GitHubAdapter', surfaces: ['orchestrator'], risk: 'external-read', description: 'Observes repository, pull request, and CI state.' },
-  { id: 'github-publish', kind: 'publisher', binding: 'GitHubAdapter', surfaces: ['orchestrator'], risk: 'external-write', description: 'Creates governed branches, pushes, and pull requests.' },
+  { id: 'git-publish', kind: 'publisher', binding: 'LocalGitAdapter', surfaces: ['orchestrator'], risk: 'external-write', description: 'Pushes a governed commit to the configured review branch.' },
+  { id: 'github-publish', kind: 'publisher', binding: 'GitHubAdapter', surfaces: ['orchestrator'], risk: 'external-write', description: 'Creates governed pull requests.' },
   { id: 'vercel-observe', kind: 'observer', binding: 'VercelDeploymentProvider', surfaces: ['orchestrator'], risk: 'external-read', description: 'Observes preview deployment readiness.' },
   { id: 'human-approval', kind: 'human', binding: 'WorkflowApproval', surfaces: ['workflow', 'orchestrator'], risk: 'approval', description: 'Requires an explicit human decision.' },
   { id: 'web-research', kind: 'research', binding: null, surfaces: [], risk: 'network-read', description: 'Reserved for future reviewed web research integration.' },
@@ -129,20 +130,20 @@ export const defaultSkills = Object.freeze([
   { id: 'project.bootstrap', requiresTools: ['project-command'], surfaces: ['orchestrator'], risk: 'network-workspace-execution', description: 'Run the allowlisted project bootstrap/install command.' },
   { id: 'project.verify', requiresTools: ['project-command'], surfaces: ['workflow', 'orchestrator'], risk: 'workspace-execution', description: 'Run bounded project verification commands.' },
   { id: 'repository.observe', requiresTools: ['github-observe'], surfaces: ['orchestrator'], risk: 'external-read', description: 'Inspect registered repository state.' },
-  { id: 'repository.publish', requiresTools: ['github-publish'], surfaces: ['orchestrator'], risk: 'external-write', description: 'Push governed commits to the configured review branch.' },
+  { id: 'repository.publish', requiresTools: ['git-publish'], surfaces: ['orchestrator'], risk: 'external-write', description: 'Push governed commits to the configured review branch.' },
   { id: 'human.approval', requiresTools: ['human-approval'], surfaces: ['workflow', 'orchestrator'], risk: 'approval', description: 'Pause until explicit human approval.' },
-  { id: 'code.inspect', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-read', description: 'Inspect a codebase using the governed coding-worker path.' },
+  { id: 'code.inspect', requiresTools: ['coding-worker'], surfaces: [], risk: 'workspace-read', description: 'Reserved for a future dedicated code-inspection execution path.' },
   { id: 'code.implement', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-write', description: 'Implement a bounded code change using the governed coding-worker path.' },
   { id: 'release.observe-ci', requiresTools: ['github-observe'], surfaces: ['orchestrator'], risk: 'external-read', description: 'Observe CI/check status.' },
   { id: 'release.publish-pr', requiresTools: ['github-publish'], surfaces: ['orchestrator'], risk: 'external-write', description: 'Publish a governed pull request.' },
   { id: 'release.observe-preview', requiresTools: ['vercel-observe'], surfaces: ['orchestrator'], risk: 'external-read', description: 'Observe a preview deployment.' },
   { id: 'research.web', requiresTools: ['web-research'], surfaces: [], risk: 'network-read', description: 'Research public web sources.' },
   { id: 'business.analyze', requiresTools: ['web-research'], surfaces: [], risk: 'network-read', description: 'Analyze a business using reviewed research evidence.' },
-  { id: 'requirements.define', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-read', description: 'Turn inspected context into bounded implementation requirements.' },
+  { id: 'requirements.define', requiresTools: ['coding-worker'], surfaces: [], risk: 'workspace-read', description: 'Reserved for a future reviewed requirements executor.' },
   { id: 'visual.review', requiresTools: ['browser-visual'], surfaces: [], risk: 'network-read', description: 'Review rendered output with a browser/visual tool.' },
-  { id: 'data.inspect', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-read', description: 'Inspect data/code context with a governed worker.' },
-  { id: 'data.analyze', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-read', description: 'Perform bounded analysis with a governed worker.' },
-  { id: 'data.summarize', requiresTools: ['coding-worker'], surfaces: ['orchestrator'], risk: 'workspace-read', description: 'Produce a bounded analysis output.' }
+  { id: 'data.inspect', requiresTools: ['coding-worker'], surfaces: [], risk: 'workspace-read', description: 'Reserved for a future reviewed data-inspection executor.' },
+  { id: 'data.analyze', requiresTools: ['coding-worker'], surfaces: [], risk: 'workspace-read', description: 'Reserved for a future reviewed data-analysis executor.' },
+  { id: 'data.summarize', requiresTools: ['coding-worker'], surfaces: [], risk: 'workspace-read', description: 'Reserved for a future reviewed data-output executor.' }
 ]);
 
 export const defaultToolSkillRegistry = new ToolSkillRegistry({ tools: defaultTools, skills: defaultSkills });
