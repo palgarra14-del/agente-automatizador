@@ -704,7 +704,7 @@ export class WorkflowEngine {
     const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
     plan = await this.update(id, (saved) => {
       saved.outputBytes += outputBytes;
-      saved.bootstrap.evidence = { name: 'install', ok: Boolean(outcome.ok), exitCode: outcome.exitCode ?? null, stdout: clip(outcome.stdout, 1_000), stderr: clip(outcome.stderr, 1_000) };
+      saved.bootstrap.evidence = { name: 'install', ok: Boolean(outcome.ok), exitCode: outcome.exitCode ?? null, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
         saved.bootstrap.status = 'failed'; saved.bootstrap.error = 'workflow_output_budget_exhausted'; saved.status = WorkflowStepStatus.FAILED; saved.result = { error: saved.bootstrap.error };
       } else if (outcome.ok) {
@@ -747,7 +747,7 @@ export class WorkflowEngine {
           if (remainingMs <= 0) { result = { ok: false, deadlineExceeded: true, evidence: { commands: outcomes } }; break; }
           outcomes.push(await this.commandRunner(workspaceProject, name, { timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs), stage: 'post-worker' }));
         }
-        if (!result.deadlineExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: outcomes.reduce((total, outcome) => total + Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? ''))), 0), evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(outcome.stdout, 1_000), stderr: clip(outcome.stderr, 1_000) })) } };
+        if (!result.deadlineExceeded) result = { ok: outcomes.every((outcome) => outcome.ok), outputBytes: outcomes.reduce((total, outcome) => total + Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? ''))), 0), evidence: { commands: outcomes.map((outcome) => ({ name: outcome.name, ok: outcome.ok, exitCode: outcome.exitCode, stdout: clip(maskSecrets(outcome.stdout), 1_000), stderr: clip(maskSecrets(outcome.stderr), 1_000) })) } };
       }
       plan = await this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);

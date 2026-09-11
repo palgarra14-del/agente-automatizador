@@ -367,3 +367,27 @@ test('an interrupted bootstrap is never treated as completed and is retried only
   assert.equal(calls.filter((name) => name === 'install').length, 1);
   assert.equal(manager.prepared.length, 1);
 });
+
+test('workflow persists only bounded masked bootstrap and verification output while budgeting real bytes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-masked-output-'));
+  const leadfinder = managedProject('leadfinder', root, { commands: { install: 'pnpm install --frozen-lockfile', test: 'pnpm test' } });
+  const bootstrapSecret = 'SUPER_SECRET_TOKEN_123456789';
+  const verificationSecret = 'VERIFICATION_SECRET_TOKEN_987654321';
+  const largeBootstrapOutput = `Authorization: Bearer ${bootstrapSecret}\n${'x'.repeat(2_000)}`;
+  const instance = await engine({ projects: new Map([[leadfinder.id, leadfinder]]), workspaceManager: new FakeWorkflowWorkspaceManager(), runner: async (_project, name) => ({
+    name, ok: true, exitCode: 0,
+    stdout: name === 'install' ? largeBootstrapOutput : '',
+    stderr: name === 'test' ? `Authorization: Bearer ${verificationSecret}` : ''
+  }) });
+  const created = await instance.create({ profile: 'data-analysis', projectId: leadfinder.id, goal: 'Mask workflow output', budgets: { maxOutputBytes: 8_000 } });
+  const completed = await instance.run(created.id);
+  const persisted = JSON.stringify(await instance.get(created.id));
+  const bootstrapEvidence = completed.bootstrap.evidence;
+  const verificationEvidence = completed.steps.find((step) => step.id === 'validate-data').evidence.commands.find((command) => command.name === 'test');
+  assert.equal(persisted.includes(bootstrapSecret), false);
+  assert.equal(persisted.includes(verificationSecret), false);
+  assert.match(bootstrapEvidence.stdout, /\[REDACTED\]/);
+  assert.match(verificationEvidence.stderr, /\[REDACTED\]/);
+  assert.ok(bootstrapEvidence.stdout.length <= 1_000);
+  assert.ok(completed.outputBytes >= Buffer.byteLength(largeBootstrapOutput));
+});
