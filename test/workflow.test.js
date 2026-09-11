@@ -9,10 +9,10 @@ function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
 
-async function engine({ runner, projects, workspaceManager, now } = {}) {
+async function engine({ runner, projects, workspaceManager, skillExecutor, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, skillExecutor, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function completeStep(plan, id) {
@@ -661,4 +661,80 @@ test('stale capability context blocks workflow approval and resume before mutati
   assert.equal(afterResume.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.RUNNING);
   assert.equal(afterResume.status, WorkflowStepStatus.RUNNING);
   assert.notEqual(afterResume.projectSkillPolicyFingerprint, originalPolicyFingerprint);
+});
+
+
+test('app-improvement executes read-only inspection and diagnosis in one run before the human checkpoint', async () => {
+  const configured = configFrom({
+    id: 'readonly-app',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: {
+      allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'],
+      deny: []
+    }
+  });
+  const calls = [];
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls.push(request);
+      if (request.skill === 'code.inspect') {
+        return { ok: true, status: 'completed', outputBytes: 120, codexThreadId: 'inspect-thread', result: { inspectionEvidence: { summary: 'inspected', relevantPaths: ['src/core.js'] } } };
+      }
+      return { ok: true, status: 'completed', outputBytes: 100, codexThreadId: 'diagnose-thread', result: { diagnosis: { summary: 'diagnosed', cause: 'fixture' } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Improve one app behavior' });
+  const waiting = await instance.run(created.id);
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'diagnose').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].contract.outputs, ['inspectionEvidence']);
+  assert.deepEqual(calls[1].contract.outputs, ['diagnosis']);
+  assert.equal(calls[1].context.priorEvidence['inspect-project'].inspectionEvidence.summary, 'inspected');
+  assert.equal(waiting.outputBytes, 220);
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
+  assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
+});
+
+test('read-only skill executor retries within workflow attempt budget and persists bounded failure evidence', async () => {
+  const configured = configFrom({
+    id: 'readonly-retry',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      calls += 1;
+      return { ok: false, status: 'failed', outputBytes: 25, error: 'invalid structured output from fixture' };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Retry inspection', budgets: { maxAttempts: 2 } });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.attempts, 2);
+  assert.equal(step.error, 'skill_executor_attempt_budget_exhausted');
+  assert.equal(calls, 2);
+  assert.equal(failed.outputBytes, 50);
+  assert.equal(step.evidence.error, 'invalid structured output from fixture');
 });
