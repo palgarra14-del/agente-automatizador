@@ -338,6 +338,27 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
       throw new Error('issue queue terminal notification is invalid');
     }
   }
+  if (typeof record.author !== 'string' || !record.author.trim()) throw new Error('issue queue record author is invalid');
+  if (!Number.isFinite(Date.parse(record.createdAt ?? '')) || !Number.isFinite(Date.parse(record.updatedAt ?? ''))) throw new Error('issue queue record timestamps are invalid');
+  const terminal = ['completed', 'failed', 'blocked', 'rejected'].includes(record.status);
+  if (record.status === 'initializing' && (record.workflowId !== null || record.pendingApproval !== null)) throw new Error('initializing issue queue state is inconsistent');
+  if (record.status === 'awaiting_start_approval' &&
+      (!record.workflowId || record.pendingApproval?.kind !== 'start' || record.pendingApproval.stepId !== 'start' ||
+       record.startApprovalFingerprint !== record.pendingApproval.fingerprint)) {
+    throw new Error('awaiting_start_approval state is inconsistent');
+  }
+  if (record.status === 'awaiting_workflow_approval' &&
+      (!record.workflowId || record.pendingApproval?.kind !== 'workflow-step')) {
+    throw new Error('awaiting_workflow_approval state is inconsistent');
+  }
+  if (record.status === 'running' && (!record.workflowId || record.pendingApproval !== null)) throw new Error('running issue queue state is inconsistent');
+  if (terminal && record.pendingApproval !== null) throw new Error('terminal issue queue state cannot retain pending approval');
+  const approvalCommentPresent = record.startApprovalCommentId !== null && record.startApprovalCommentId !== undefined;
+  const approvalActorPresent = record.startApprovedBy !== null && record.startApprovedBy !== undefined;
+  if (approvalCommentPresent !== approvalActorPresent ||
+      (approvalCommentPresent && (!Number.isInteger(record.startApprovalCommentId) || record.startApprovalCommentId < 1 || typeof record.startApprovedBy !== 'string' || !record.startApprovedBy.trim()))) {
+    throw new Error('issue queue start approval evidence is invalid');
+  }
   return true;
 }
 
