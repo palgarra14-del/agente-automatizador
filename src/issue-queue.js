@@ -633,7 +633,14 @@ export class SupervisedIssueQueue {
   async persistPendingWorkflowApproval(issue, key, record, workflow) {
     const step = workflow.steps.find((candidate) => stepNeedsHumanApproval(candidate));
     if (!step) throw new Error('workflow reports human approval is needed without an approvable step');
-    const token = workflowApprovalFingerprint({ requestFingerprint: record.requestFingerprint, workflow, stepId: step.id });
+    const token = workflowApprovalFingerprint({
+      requestFingerprint: record.requestFingerprint,
+      issueBodyFingerprint: record.issueBodyFingerprint,
+      projectFingerprint: record.projectFingerprint,
+      controlPlaneFingerprint: record.controlPlaneFingerprint,
+      workflow,
+      stepId: step.id
+    });
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
     const next = {
       ...record,
@@ -647,6 +654,9 @@ export class SupervisedIssueQueue {
       await this.post(issue.number, [
         `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
         `Current workflow status: \`${workflow.status}\`.`,
+        '',
+        'Evidence bound to this approval fingerprint:',
+        `\`\`\`json\n${approvalEvidenceSummary(workflow, step.id)}\n\`\`\``,
         '',
         'Approve exactly this persisted state with:',
         `\`${approvalInstruction(token)}\``,
@@ -700,6 +710,13 @@ export class SupervisedIssueQueue {
     if (!currentRequest.ok) return this.blockRequestRevalidation(issue, key, record, currentRequest.reason);
     issue = currentRequest.issue;
     parsed = currentRequest.parsed;
+    const activeProject = this.projects.get(record.request?.projectId);
+    if (!activeProject || projectExecutionFingerprint(activeProject) !== record.projectFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'project_config_changed');
+    }
+    if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
+    }
     if (record.status === 'initializing') {
       let abandoned;
       try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
@@ -717,7 +734,13 @@ export class SupervisedIssueQueue {
       return next;
     }
     try {
-      validateIssueQueueRecord(record, { issue });
+      validateIssueQueueRecord(record, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectExecutionFingerprint(activeProject),
+        controlPlaneFingerprint: this.controlPlaneFingerprint()
+      });
     } catch (error) {
       const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null };
       await this.saveRecord(key, next);
@@ -727,7 +750,7 @@ export class SupervisedIssueQueue {
 
     if (record.pendingApproval) {
       const { decision, highestCommentId, instructionPresent } = await this.findDecision(issue.number, record);
-      if (highestCommentId > (record.lastProcessedCommentId ?? 0)) {
+      if (!decision && highestCommentId > (record.lastProcessedCommentId ?? 0)) {
         record = await this.saveRecord(key, { ...record, lastProcessedCommentId: highestCommentId, updatedAt: this.now() });
       }
       if (!decision) {
@@ -750,8 +773,27 @@ export class SupervisedIssueQueue {
       }
       if (record.pendingApproval.kind === 'start') {
         const workflow = await this.workflowEngine.get(record.workflowId);
+        if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+          return next;
+        }
+        if (!this.workflowIsPristine(workflow)) {
+          const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent start approval cannot be applied because the workflow is no longer pristine. Manual inspection is required.');
+          return next;
+        }
         const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
-        const expected = startApprovalFingerprint({ requestFingerprint: record.requestFingerprint, workflow, dryRun });
+        const expected = startApprovalFingerprint({
+          requestFingerprint: record.requestFingerprint,
+          issueBodyFingerprint: record.issueBodyFingerprint,
+          projectFingerprint: record.projectFingerprint,
+          controlPlaneFingerprint: record.controlPlaneFingerprint,
+          workflow,
+          dryRun
+        });
         if (expected !== record.pendingApproval.fingerprint) {
           const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null };
           await this.saveRecord(key, next);
@@ -761,20 +803,35 @@ export class SupervisedIssueQueue {
         const currentBeforeExecution = await this.revalidateCurrentRequest(issue, record);
         if (!currentBeforeExecution.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeExecution.reason);
         issue = currentBeforeExecution.issue;
+        const latestDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
+        if (latestDecision?.decision === 'reject') {
+          const next = { ...record, status: 'rejected', reason: `rejected_by:${latestDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, `Agent request rejected by \`${latestDecision.actor}\` before execution. No further execution will occur.`);
+          return next;
+        }
+        if (latestDecision?.decision !== 'approve') return record;
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
           pendingApproval: null,
           startApprovalFingerprint: expected,
-          startApprovalCommentId: decision.commentId,
-          startApprovedBy: decision.actor,
+          startApprovalCommentId: latestDecision.commentId,
+          startApprovedBy: latestDecision.actor,
+          lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, latestDecision.commentId),
           updatedAt: this.now()
         });
-        const result = await this.workflowEngine.run(record.workflowId);
+        const result = await this.workflowEngine.run(record.workflowId, { refreshPristineDeadline: true });
         return this.settleWorkflow(issue, key, record, result);
       }
       if (record.pendingApproval.kind === 'workflow-step') {
         const workflow = await this.workflowEngine.get(record.workflowId);
+        if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+          return next;
+        }
         const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
         if (!stepNeedsHumanApproval(targetStep)) {
           const proof = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
