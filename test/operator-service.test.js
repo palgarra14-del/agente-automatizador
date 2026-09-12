@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lstat, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,6 +44,10 @@ test('GitHub token resolution prefers environment and otherwise delegates withou
   });
   assert.equal(fromGh, 'gho_runtime_secret');
   assert.equal(calls, 1);
+  await assert.rejects(
+    resolveGitHubToken({ environment: { GITHUB_TOKEN: 'two tokens' } }),
+    /one bounded token/
+  );
 });
 
 test('service installation is atomic, stores no token, and enables the user service', async () => {
@@ -84,7 +88,8 @@ test('service installation rejects symlink targets and rolls back failed activat
   const serviceDir = join(home, '.config', 'systemd', 'user');
   const serviceFile = join(serviceDir, 'engineering-orchestrator.service');
   try {
-    await import('node:fs/promises').then(({ mkdir, writeFile }) => mkdir(serviceDir, { recursive: true }).then(() => writeFile(join(home, 'target'), 'x')));
+    await mkdir(serviceDir, { recursive: true });
+    await writeFile(join(home, 'target'), 'x');
     await symlink(join(home, 'target'), serviceFile);
     await assert.rejects(
       installOperatorService({
