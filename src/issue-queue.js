@@ -345,6 +345,16 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
     }
     if (record.pendingApproval) throw new Error('issue queue cannot have pending and active approval simultaneously');
   }
+  if (record.terminalNotification !== null && record.terminalNotification !== undefined) {
+    const notification = record.terminalNotification;
+    if (!['completed', 'failed', 'blocked', 'rejected'].includes(record.status) ||
+        typeof notification.body !== 'string' || !notification.body || notification.body.length > 12_000 ||
+        !Number.isInteger(notification.attempts) || notification.attempts < 0 ||
+        (notification.commentId !== null && notification.commentId !== undefined && (!Number.isInteger(notification.commentId) || notification.commentId < 1)) ||
+        (notification.sentAt !== null && notification.sentAt !== undefined && !Number.isFinite(Date.parse(notification.sentAt)))) {
+      throw new Error('issue queue terminal notification is invalid');
+    }
+  }
   return true;
 }
 
@@ -488,6 +498,45 @@ export class SupervisedIssueQueue {
     return this.channel.comment(number, text);
   }
 
+  async deliverTerminalNotification(issue, key, record) {
+    validateIssueQueueRecord(record);
+    const notification = record.terminalNotification;
+    if (!notification || notification.sentAt) return record;
+    const comments = await this.channel.comments(issue.number);
+    const existing = comments.find((comment) =>
+      Number.isInteger(comment.id) &&
+      typeof comment.body === 'string' &&
+      comment.body === notification.body &&
+      this.authorized(comment.user?.login)
+    );
+    const posted = existing ? { id: existing.id } : await this.post(issue.number, notification.body);
+    const next = {
+      ...record,
+      terminalNotification: {
+        ...notification,
+        attempts: notification.attempts + 1,
+        commentId: posted.id ?? null,
+        sentAt: this.now()
+      },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return next;
+  }
+
+  async finalizeTerminal(issue, key, record, text) {
+    const body = maskSecrets(String(text)).slice(0, 12_000);
+    const next = {
+      ...record,
+      pendingApproval: null,
+      activeApproval: null,
+      terminalNotification: { body, attempts: 0, commentId: null, sentAt: null },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return this.deliverTerminalNotification(issue, key, next);
+  }
+
   async revalidateCurrentRequest(issue, record) {
     const current = await this.channel.issue(issue.number);
     if (!current || current.state !== 'open' || current.pull_request ||
@@ -508,10 +557,8 @@ export class SupervisedIssueQueue {
   }
 
   async blockRequestRevalidation(issue, key, record, reason) {
-    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null };
-    await this.saveRecord(key, next);
-    await this.post(issue.number, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
-    return next;
+    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null, activeApproval: null, initializationLease: null };
+    return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
   }
 
   async initializeIssue(issue, parsed) {
@@ -529,9 +576,7 @@ export class SupervisedIssueQueue {
         status: 'rejected', reason: 'unknown_project', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
         startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null, lastProcessedCommentId: 0
       };
-      await this.saveRecord(this.requestKey(issue), rejected);
-      await this.post(issue.number, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
-      return rejected;
+      return this.finalizeTerminal(issue, this.requestKey(issue), rejected, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
     }
     let workflow;
     let dryRun;
@@ -554,9 +599,7 @@ export class SupervisedIssueQueue {
         pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null,
         lastProcessedCommentId: 0
       };
-      await this.saveRecord(this.requestKey(issue), blocked);
-      await this.post(issue.number, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
-      return blocked;
+      return this.finalizeTerminal(issue, this.requestKey(issue), blocked, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
     }
     const binding = workflowBindingFingerprint(workflow);
     const token = startApprovalFingerprint({
@@ -726,21 +769,17 @@ export class SupervisedIssueQueue {
     if (workflow.status === WorkflowStepStatus.COMPLETED) {
       const published = publicationSummary(workflow);
       const next = { ...record, status: 'completed', reason: null, updatedAt: this.now(), pendingApproval: null, activeApproval: null, publication: published };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, [
+      return this.finalizeTerminal(issue, key, next, [
         'Agent workflow completed its Definition of Done.',
         published?.pullRequest ? `Pull request: ${published.pullRequest}` : 'Pull request: not recorded',
         published?.previewUrl ? `Preview: ${published.previewUrl}` : 'Preview: not recorded',
         'No merge or production deployment was performed by the issue queue.'
       ].join('\n'));
-      return next;
     }
     if (workflow.status === WorkflowStepStatus.FAILED || workflow.status === WorkflowStepStatus.BLOCKED) {
       const reason = maskSecrets(workflow.result?.error ?? workflow.status);
       const next = { ...record, status: workflow.status, reason, updatedAt: this.now(), pendingApproval: null, activeApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`. No automatic merge/production action was attempted.`);
-      return next;
+      return this.finalizeTerminal(issue, key, next, `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`. No automatic merge/production action was attempted.`);
     }
     const next = { ...record, status: 'running', reason: null, updatedAt: this.now(), pendingApproval: null };
     await this.saveRecord(key, next);
@@ -1091,6 +1130,21 @@ export class SupervisedIssueQueue {
   }
 
   async tick() {
+    let notificationError = null;
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) ||
+          !['completed', 'failed', 'blocked', 'rejected'].includes(record.status) ||
+          !record.terminalNotification ||
+          record.terminalNotification.sentAt) continue;
+      try {
+        const issue = await this.channel.issue(record.issueNumber);
+        return await this.deliverTerminalNotification(issue ?? { number: record.issueNumber }, key, record);
+      } catch (error) {
+        notificationError ??= error;
+      }
+    }
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
@@ -1099,6 +1153,7 @@ export class SupervisedIssueQueue {
       const result = await this.processIssue(issue);
       if (result) return result;
     }
+    if (notificationError) throw notificationError;
     return null;
   }
 }
