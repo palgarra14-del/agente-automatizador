@@ -1373,9 +1373,9 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
     async execute(request) {
       calls.push(request);
       if (request.skill === 'code.inspect') {
-        return { ok: true, status: 'completed', outputBytes: 120, codexThreadId: 'inspect-thread', result: { inspectionEvidence: { summary: 'inspected', relevantPaths: ['src/core.js'] } } };
+        return { ok: true, status: 'completed', outputBytes: 120, codexThreadId: 'inspect-thread', result: { inspectionEvidence: { summary: 'inspected', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
       }
-      return { ok: true, status: 'completed', outputBytes: 100, codexThreadId: 'diagnose-thread', result: { diagnosis: { summary: 'diagnosed', cause: 'fixture' } } };
+      return { ok: true, status: 'completed', outputBytes: 100, codexThreadId: 'diagnose-thread', result: { diagnosis: { summary: 'diagnosed', cause: 'fixture', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
@@ -1412,8 +1412,8 @@ test('workflow model-call budget stops before invoking another specialist', asyn
     supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
     async execute(request) {
       calls += 1;
-      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 4 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture' } } };
-      return { ok: true, status: 'completed', usage: { input_tokens: 8, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture' } } };
+      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 4 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
+      return { ok: true, status: 'completed', usage: { input_tokens: 8, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture', cause: 'fixture cause', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
@@ -1448,8 +1448,8 @@ test('workflow model usage is attributed across read-only specialists', async ()
   const skillExecutor = {
     supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
     async execute(request) {
-      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture' } } };
-      return { ok: true, status: 'completed', usage: { input_tokens: 7, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture' } } };
+      if (request.skill === 'code.inspect') return { ok: true, status: 'completed', usage: { input_tokens: 10, output_tokens: 5 }, outputBytes: 10, result: { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
+      return { ok: true, status: 'completed', usage: { input_tokens: 7, output_tokens: 3 }, outputBytes: 10, result: { diagnosis: { summary: 'fixture', cause: 'fixture cause', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
@@ -2511,7 +2511,7 @@ test('read-only workflow step fails closed if workspace changes despite read-onl
   const skillExecutor = {
     supports: (skill) => skill === 'code.inspect',
     async execute() {
-      return { ok: true, status: 'completed', outputBytes: 20, result: { inspectionEvidence: { summary: 'fixture' } } };
+      return { ok: true, status: 'completed', outputBytes: 20, result: { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
@@ -2749,9 +2749,9 @@ test('change critic that mutates the workspace is rejected even if it returns PA
   const workspaceProject = await instance.workspaceProject(created.id, configured);
   await instance.update(created.id, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
-    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } };
     const diagnose = completeStep(plan, 'diagnose');
-    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture', cause: 'fixture cause', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } };
     completeStep(plan, 'plan-change');
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSet = governed;
@@ -3308,9 +3308,9 @@ test('verification command that mutates governed implementation diff fails close
   const workspaceProject = await instance.workspaceProject(created.id, configured);
   await instance.update(created.id, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
-    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } };
     const diagnose = completeStep(plan, 'diagnose');
-    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture', cause: 'fixture cause', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } };
     completeStep(plan, 'plan-change');
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
@@ -3357,9 +3357,9 @@ test('verification command that changes repository state fails closed even when 
   const workspaceProject = await instance.workspaceProject(created.id, configured);
   await instance.update(created.id, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
-    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture' } };
+    inspect.evidence.result = { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } };
     const diagnose = completeStep(plan, 'diagnose');
-    diagnose.evidence.result = { diagnosis: { summary: 'fixture' } };
+    diagnose.evidence.result = { diagnosis: { summary: 'fixture', cause: 'fixture cause', relevantPaths: ['src/core.js'], recommendedChange: 'fixture change', risks: [] } };
     completeStep(plan, 'plan-change');
     const implementation = completeStep(plan, 'implementation');
     implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
@@ -3401,7 +3401,7 @@ test('read-only workflow detects ignored protected-file mutation even when norma
   const skillExecutor = {
     supports: (skill) => skill === 'code.inspect',
     async execute() {
-      return { ok: true, status: 'completed', outputBytes: 12, result: { inspectionEvidence: { summary: 'fixture' } } };
+      return { ok: true, status: 'completed', outputBytes: 12, result: { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
@@ -3463,7 +3463,7 @@ test('read-only workflow detects git control-state mutation even when worktree d
   const skillExecutor = {
     supports: (skill) => skill === 'code.inspect',
     async execute() {
-      return { ok: true, status: 'completed', outputBytes: 8, result: { inspectionEvidence: { summary: 'fixture' } } };
+      return { ok: true, status: 'completed', outputBytes: 8, result: { inspectionEvidence: { summary: 'fixture', relevantPaths: ['src/core.js'], findings: ['fixture finding'] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
