@@ -4,18 +4,21 @@ import test from 'node:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext } from '../src/core.js';
+import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext, collectReadOnlyReviewDiff } from '../src/core.js';
 import { defaultToolSkillRegistry } from '../src/capabilities.js';
 
-function repositoryContextFixture(entries = [{ path: 'src/core.js', content: 'export const fixture = true;\n' }]) {
+function repositoryContextFixture(entries = [{ path: 'src/core.js', content: 'export const fixture = true;\n' }], reviewDiff = null) {
   const files = entries.map(({ path, content }) => ({
     path,
     content,
     bytes: Buffer.byteLength(content),
     sha256: createHash('sha256').update(content).digest('hex')
   }));
-  const fingerprint = createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex');
-  return { version: 1, files, fingerprint };
+  const fileMetadata = files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes }));
+  const fingerprint = reviewDiff
+    ? createHash('sha256').update(JSON.stringify({ files: fileMetadata, reviewDiff: { sha256: reviewDiff.sha256, bytes: reviewDiff.bytes } })).digest('hex')
+    : createHash('sha256').update(JSON.stringify(fileMetadata)).digest('hex');
+  return { version: 1, files, ...(reviewDiff ? { reviewDiff } : {}), fingerprint };
 }
 
 test('read-only skill executor uses a read-only offline Codex thread and validates strict JSON', async () => {
@@ -203,6 +206,129 @@ test('orchestrator-supplied repository context removes filesystem discovery from
   }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(invented.ok, false);
   assert.match(invented.error, /inspection_references_unsupplied_path/);
+});
+
+test('bounded review diff is supplied by the orchestrator and fingerprint changes fail closed', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-review-context-'));
+  try {
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'core.js'), 'export const fixture = 2;\n');
+    let diffText = 'diff --git a/src/core.js b/src/core.js\n-old\n+new\n';
+    const contextProcessRunner = async (_command, args) => {
+      if (args[0] === 'ls-files') {
+        return { exitCode: 0, timedOut: false, stdout: 'src/core.js\n', stderr: '', stdoutTruncated: false, stderrTruncated: false };
+      }
+      if (args[0] === 'diff') {
+        return {
+          exitCode: 0,
+          timedOut: false,
+          stdout: diffText,
+          stderr: '',
+          stdoutBytes: Buffer.byteLength(diffText),
+          stdoutDigest: createHash('sha256').update(diffText).digest('hex'),
+          stdoutTruncated: false,
+          stderrTruncated: false
+        };
+      }
+      throw new Error('unexpected command');
+    };
+    const project = { changePolicy: { forbiddenPaths: [] }, budgets: { commandTimeoutMs: 1_000 } };
+    const executor = new CodexReadOnlySkillExecutor({ contextProcessRunner });
+    const context = await executor.prepareContext({
+      skill: 'code.review',
+      project,
+      scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] }
+    }, { workspace, timeoutMs: 500 });
+
+    assert.equal(context.files[0].path, 'src/core.js');
+    assert.equal(context.reviewDiff.content, diffText);
+    assert.match(context.reviewDiff.sha256, /^[a-f0-9]{64}$/);
+    assert.match(context.fingerprint, /^[a-f0-9]{64}$/);
+
+    const directDiff = await collectReadOnlyReviewDiff({
+      workspace,
+      scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] },
+      processRunner: contextProcessRunner,
+      timeoutMs: 500
+    });
+    assert.equal(directDiff.sha256, context.reviewDiff.sha256);
+
+    await executor.revalidateContext(context, {
+      workspace,
+      project,
+      scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] },
+      timeoutMs: 500
+    });
+
+    diffText = 'diff --git a/src/core.js b/src/core.js\n-old\n+different\n';
+    await assert.rejects(
+      executor.revalidateContext(context, {
+        workspace,
+        project,
+        scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] },
+        timeoutMs: 500
+      }),
+      /repository_context_changed_during_analysis/
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('review specialist uses supplied diff without filesystem discovery and cannot cite unsupplied paths', async () => {
+  const diffContent = 'diff --git a/src/core.js b/src/core.js\n-old\n+new\n';
+  const reviewDiff = {
+    content: diffContent,
+    bytes: Buffer.byteLength(diffContent),
+    sha256: createHash('sha256').update(diffContent).digest('hex')
+  };
+  const context = repositoryContextFixture(undefined, reviewDiff);
+  let response = JSON.stringify({
+    reviewEvidence: {
+      verdict: 'PASS',
+      summary: 'Supplied diff is consistent with the goal.',
+      findings: []
+    }
+  });
+  let prompt = '';
+  class FakeCodex {
+    startThread() {
+      return {
+        id: 'review-context-thread',
+        run: async (value) => {
+          prompt = value;
+          return { finalResponse: response, usage: {} };
+        }
+      };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const contract = defaultToolSkillRegistry.getSkill('code.review').contract;
+  const passed = await executor.execute({
+    skill: 'code.review',
+    goal: 'Review supplied diff',
+    contract,
+    context: { repositoryContext: context }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(passed.ok, true);
+  assert.match(prompt, /repositoryContext\.reviewDiff as the trusted bounded Git diff/);
+  assert.match(prompt, /Do not invoke shell, filesystem, git, browser, network, or discovery tools/);
+
+  response = JSON.stringify({
+    reviewEvidence: {
+      verdict: 'FAIL',
+      summary: 'Invented path.',
+      findings: [{ severity: 'high', message: 'Unsupported finding.', path: 'src/not-supplied.js' }]
+    }
+  });
+  const invented = await executor.execute({
+    skill: 'code.review',
+    goal: 'Review supplied diff',
+    contract,
+    context: { repositoryContext: context }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(invented.ok, false);
+  assert.match(invented.error, /review_references_unsupplied_path/);
 });
 
 test('read-only skill prompt redacts sensitive request fields', () => {
