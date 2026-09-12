@@ -453,7 +453,11 @@ export class SupervisedIssueQueue {
   async findDecision(issueNumber, record) {
     const comments = await this.channel.comments(issueNumber);
     const instruction = record.pendingApproval?.fingerprint ? approvalInstruction(record.pendingApproval.fingerprint) : null;
-    const instructionPresent = Boolean(instruction && comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(instruction)));
+    const instructionPresent = Boolean(instruction && comments.some((comment) =>
+      typeof comment.body === 'string' &&
+      this.authorized(comment.user?.login) &&
+      comment.body.includes(instruction)
+    ));
     const eligible = comments
       .filter((comment) => Number.isInteger(comment.id) && comment.id > (record.lastProcessedCommentId ?? 0))
       .sort((a, b) => a.id - b.id);
