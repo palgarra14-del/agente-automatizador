@@ -233,6 +233,27 @@ test('workflow profiles create validated deterministic plans', () => {
   }
 });
 
+test('website-build refuses to start unless test, typecheck, lint, and build are all configured', () => {
+  const configured = configFrom({
+    id: 'website-missing-build',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version' },
+    execution: { provider: 'local-sanitized' }
+  });
+  assert.throws(
+    () => createWorkflowPlan({
+      profile: 'website-build',
+      project: configured,
+      goal: 'Do not silently skip build',
+      input: { businessBrief: businessBrief() }
+    }),
+    /website-build requires configured quality commands: build/
+  );
+});
+
 test('website planner fails cleanly when SEO location is not supplied by the business brief', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-context-invalid-'));
   const configured = managedProject('website-context-invalid', root, {
@@ -2316,6 +2337,65 @@ test('website-build dependency change requires one fingerprint approval and one 
   assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
 });
 
+test('website-build cannot reach visual approval without a usable READY preview URL', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-preview-required-'));
+  const configured = managedProject('website-preview-required', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/app/page.js']);
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  let implemented = false;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId) {
+      branch = `agent/${runId}`;
+      return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead };
+    },
+    async inspectChangeSet() { return implemented ? governed : emptyChangeSet(); }
+  });
+  const skillExecutor = {
+    supports: (skill) => ['website.plan', 'code.review'].includes(skill),
+    async execute(request) {
+      if (request.skill === 'website.plan') return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
+      return { ok: true, status: 'completed', outputBytes: 1, result: { reviewEvidence: { verdict: 'PASS', summary: 'reviewed', findings: [] } } };
+    }
+  };
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead,
+    commitHead,
+    changeSet: governed,
+    preview: { provider: 'none', state: 'NOT_REQUIRED', ok: true, durationMs: 0 },
+    onCommit: (nextHead) => { head = nextHead; }
+  });
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    skillExecutor,
+    codingWorker: { async execute() { implemented = true; return { status: 'completed', summary: 'implemented', output: '', outputBytes: 0 }; } },
+    publicationBridge
+  });
+  const created = await instance.create({ profile: 'website-build', projectId: configured.id, goal: 'Require preview before visual review', input: { businessBrief: businessBrief() } });
+  await instance.run(created.id);
+  await instance.approve(created.id, 'design');
+  let waiting = await instance.run(created.id);
+  assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  await instance.approve(created.id, 'release-readiness');
+
+  const failed = await instance.run(created.id);
+  const publication = failed.steps.find((step) => step.id === 'publication');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(publication.status, WorkflowStepStatus.FAILED);
+  assert.equal(publication.error, 'workflow_publication_preview_not_configured');
+  assert.equal(failed.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
+  await assert.rejects(instance.approve(created.id, 'visual-verification'), /not awaiting human approval/);
+});
+
 test('website-build critic FAIL stops before quality and visual approval', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-critic-fail-'));
   const configured = managedProject('website-critic-fail', root, {
@@ -2632,7 +2712,7 @@ test('change critic that mutates the workspace is rejected even if it returns PA
   const localGit = stableLocalGit({
     async inspectChangeSet() {
       changeCalls += 1;
-      return changeCalls === 1 ? governed : mutated;
+      return changeCalls <= 2 ? governed : mutated;
     }
   });
   const configured = configFrom({
