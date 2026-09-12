@@ -76,7 +76,7 @@ export function normalizeIssueRequest(value) {
     version: 1,
     projectId: boundedString(value.projectId, 'agent request projectId', { required: true, max: 80 }),
     profile: 'app-improvement',
-    goal: boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 }),
+    goal: maskSecrets(boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 })),
     scope: {
       allowedPaths: pathList(scope.allowedPaths, 'agent request scope.allowedPaths'),
       forbiddenPaths: pathList(scope.forbiddenPaths, 'agent request scope.forbiddenPaths')
