@@ -1,8 +1,33 @@
 import { createHash } from 'node:crypto';
-import { maskSecrets, WorkflowStepStatus } from './core.js';
+import { maskSecrets, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
 
 export const ISSUE_REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
+
+export function normalizeIssueQueueConfig(value) {
+  assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs']), 'issue queue config');
+  if (value.version !== 1) throw new Error('issue queue config version must be 1');
+  assertObjectKeys(value.repository, new Set(['owner', 'name']), 'issue queue config repository');
+  const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 });
+  const name = boundedString(value.repository.name, 'issue queue repository name', { required: true, max: 100 });
+  if (!Array.isArray(value.allowedActors) || value.allowedActors.length < 1 || value.allowedActors.length > 20) throw new Error('issue queue allowedActors must contain between 1 and 20 logins');
+  const allowedActors = [...new Set(value.allowedActors.map((actor, index) => boundedString(actor, `issue queue allowedActors[${index}]`, { required: true, max: 80 }).toLowerCase()))].sort();
+  const pollIntervalMs = value.pollIntervalMs ?? 15_000;
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000 || pollIntervalMs > 300_000) throw new Error('issue queue pollIntervalMs must be between 1000 and 300000');
+  return { version: 1, repository: { owner, name }, allowedActors, pollIntervalMs };
+}
+
+export async function loadIssueQueueConfig(file) {
+  let parsed;
+  try {
+    const content = await readBoundedRegularFile(file, { maxBytes: 16 * 1024, label: 'Issue queue config' });
+    parsed = JSON.parse(content.toString('utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`Invalid issue queue config JSON: ${error.message}`, { cause: error });
+    throw error;
+  }
+  return normalizeIssueQueueConfig(parsed);
+}
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
