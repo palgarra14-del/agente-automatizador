@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.13
+# Engineering Orchestrator — v0.14
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -14,6 +14,17 @@ A CLI-first, policy-governed engineering loop for registered repositories. It tu
 ## Quick start
 
 Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
+
+v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/approval channel; the agent process and Codex authentication stay local. Start with `agent inbox once` while validating the setup, then `agent inbox watch` for a persistent operator.
+
+```bash
+node src/cli.js inbox once
+node src/cli.js inbox status
+# after validation:
+node src/cli.js inbox watch
+```
+
+Issue requests use the exact `<!-- agent-request:v1 -->` marker followed by strict JSON. v0.14 accepts only `app-improvement`, requires at least one explicit bounded `scope.allowedPaths` entry, and never treats an issue as authorization to execute. The first action is always a zero-write workflow dry-run. Real execution requires an exact allowlisted GitHub comment `/agent approve <fingerprint>`; every later WorkflowEngine checkpoint/sensitive approval receives a new state-bound fingerprint.
 
 Prepare LeadFinder's declared local toolchain explicitly before any real run; the Agent itself does not build it:
 
@@ -71,6 +82,14 @@ The project commands, protected branches, branch pattern, approvals, capability 
 A website brief is local JSON only, bounded to 64 KiB at the CLI and normalized into an exact versioned schema. Unknown fields, path escapes, malformed colors, and unbounded lists are rejected. Declared logo/photo paths must already exist inside the managed workspace as regular non-symlink files; they are size-bounded, SHA-256 fingerprinted before planning, and revalidated before implementation. The planner is offline/read-only and is instructed not to invent testimonials, awards, credentials, prices, guarantees, service areas, clients, or other unsupported business facts. Unsupported facts belong in `missingInputs`; the SEO primary location is deterministically restricted to locations supplied by the brief.
 
 Design approval binds to the exact website-plan fingerprint. Implementation binds to the brief, plan, approval, and asset fingerprint, then reuses v0.12 sensitive/dependency governance. Business-specific claims are constrained at planner, implementer, and independent critic boundaries; supplied context is treated as untrusted data rather than authority. Declared assets are hashed through stable validated file handles and are revalidated after Codex. Deterministic quality requires all four configured commands: test, typecheck, lint, and build. Release-readiness approval permits review publication; CI and an exact READY non-production preview with URL must then exist before the human visual checkpoint can approve that commit/URL. v0.13 deliberately does **not** claim browser-based visual QA, Lighthouse automation, web research, automatic merge, or production deployment.
+
+## Supervised issue-queue boundary
+
+v0.14 adds a local operator loop for dogfooding the agent against projects such as Callflow without manually implementing the target change. The queue polls one configured private GitHub repository, accepts requests only from explicit allowlisted actors, normalizes and fingerprints the issue body, creates the normal WorkflowEngine plan, and posts a dry-run summary. GitHub comments are approval evidence; local queue state alone cannot authorize a pristine workflow.
+
+The queue is deliberately serial and fail-closed. New issues are atomically reserved before workflow creation so two watchers cannot create duplicate workflows. Interrupted initialization blocks instead of retrying invisibly. Issue edits invalidate the accepted request fingerprint. Approval comments must consist exactly of `/agent approve <64-hex>` or `/agent reject <64-hex>`. A stale workflow/checkpoint fingerprint is rejected. Existing WorkflowEngine execution leases remain authoritative once a workflow exists. CI/preview observation timeouts may resume because those phases are read-only; uncertain commit/push/PR phases retain the existing non-replay rule.
+
+The queue does not add a merge handler, production deployment, secret writes, arbitrary commands, web research, or extra Codex authority. `GITHUB_TOKEN` remains in the local orchestrator/issue-channel process and is excluded from Codex worker environments. The first Callflow dogfood should therefore be: structured issue → dry-run review → fingerprint approval → agent-owned implementation/review/tests/PR/preview, with no manual Callflow edit used as a substitute.
 
 ## Guarantees and boundaries
 

@@ -2,34 +2,41 @@
 
 ## Decision
 
-The real worker uses the official TypeScript package `@openai/codex-sdk`, not UI automation, browser control, Playwright, or an invented API. The SDK is the preferred integration for an application that starts, resumes, and controls local Codex threads; it is a Node 18+ server-side library. It wraps the local Codex runtime and exchanges structured events. The SDK documentation also supports workspace sandboxing and persistent thread IDs.
+The real model workers use the official `@openai/codex-sdk`; there is no UI/browser automation around Codex. WorkflowEngine separates a workspace-write coding worker from read-only analysis/critic workers, while deterministic orchestration owns Git, commands, approvals, publication and budgets.
 
-The lower-level `codex exec` interface remains an official non-interactive option, but it is not the application integration in v0.2. The SDK provides the required thread lifecycle and structured result directly, so it takes precedence here.
+## Execution boundary
 
-## Execution
+`CodexSdkWorker` and `CodexReadOnlySkillExecutor` start SDK threads in the already validated workflow workspace with `approvalPolicy: never` and web search disabled. Security is supplied through the reviewed SDK permission profile rather than a caller-selected sandbox flag:
 
-`CodexSdkWorker` calls `startThread` with:
+- filesystem root denied; only the workflow workspace is exposed, write for the coding worker and read for analysis/critic workers; `.git` is read-only;
+- network disabled;
+- login shell disabled and environment inheritance removed except an explicit PATH/CI set;
+- project instructions, skills, plugins/apps/connectors/browser/computer-use/hooks/multi-agent/memory features disabled;
+- ephemeral/no-history operation;
+- project `.codex/config.toml` / `.codex/requirements.toml` controls are rejected before the worker starts.
 
-- `workingDirectory`: the workspace pre-validated by the Orchestrator;
-- `sandboxMode: workspace-write`;
-- `approvalPolicy: never` only inside that sandbox, for non-interactive coding work;
-- network and web search disabled.
+The orchestrator independently snapshots repository identity, Git control state, protected ignored files and the governed diff before/after model execution. A worker cannot make its own result authoritative.
 
-The worker receives a redacted `CodingTask`. It returns a final response, usage data, and the SDK thread ID; the orchestrator masks and persists these fields. The worker timeout is enforced with `AbortSignal`. A failure or timeout is a worker failure and consumes the bounded retry budget.
+## Authentication and secrets
 
-## Authentication
+Workers use saved local Codex authentication copied into a private temporary isolated Codex home. The implementation deliberately does not inject `CODEX_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN` or `VERCEL_TOKEN` into the worker. GitHub/Vercel credentials remain in separate orchestrator adapters.
 
-This implementation uses the saved authentication of the local Codex installation. It deliberately does not inject or propagate `CODEX_API_KEY` to the worker process. `GITHUB_TOKEN` is used separately by `GitHubAdapter` and is deliberately removed from the worker environment. For CI, use separate jobs/credentials for untrusted checkout code and privileged GitHub writes.
+v0.14 does not move Codex authentication to GitHub Actions. The supervised issue queue is only a remote control/approval channel; the actual agent/Codex process remains local.
 
-## Limits
+## Model-call limits
 
-The worker is limited by `commandTimeoutMs`-derived worker timeout, `maxRuntimeMinutes`, and `maxWorkerAttempts`. Project checks come only from project configuration. No model-call counter is claimed because the deterministic planner does not make model calls. The default JSON state store is single-writer.
+Every registered run/workflow has a persisted `maxModelCalls` ceiling (currently six for registered projects). A call is reserved before invocation and remains consumed after interruption/retry. SDK token usage is recorded when available; missing usage is marked unknown. This is a hard call-count governor, not an exact monetary-spend guarantee.
 
-## Why this is safe enough for v0.2
+The structured website happy path normally uses three calls (planner, implementer, critic). App-improvement normally uses inspection, diagnosis, implementer and critic calls subject to the same ceiling.
 
-The Orchestrator creates and verifies the branch, validates history and changed paths, runs checks, commits, pushes, creates the PR, observes CI, and refuses merge. The SDK worker cannot override those controls. The worker's network is disabled and its sandbox prevents writing outside the workspace. This does not replace human review: every generated PR remains unmerged.
+## Publication ownership
 
-## References
+Codex never chooses commits, pushes, pull requests, CI policy, preview observation, merge or production actions. Controlled code revalidates the exact reviewed fingerprint before review-only publication. WorkflowEngine has no merge/production handler.
 
-- [Codex SDK — official OpenAI documentation](https://learn.chatgpt.com/docs/codex-sdk)
-- [Codex non-interactive mode — official OpenAI documentation](https://learn.chatgpt.com/docs/non-interactive-mode)
+## Platform boundary
+
+The current worker isolation profile is verified for Linux and macOS. Native Windows worker execution fails closed; a Windows operator should use a supported Linux environment such as WSL2 rather than weakening the boundary.
+
+## Remaining hardening
+
+The worker still runs under the operator OS account even though SDK filesystem/network capabilities are restricted. A dedicated low-privilege OS/container/VM boundary for the coding worker remains a future defense-in-depth improvement. Exact spend enforcement is also deferred until trustworthy usage/pricing evidence can support it.

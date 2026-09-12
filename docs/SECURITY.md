@@ -36,6 +36,16 @@ Declared website assets are not trusted merely because the brief names them. Bef
 
 Human design approval is tied to the plan fingerprint. Release-readiness approval is tied to the independently reviewed implementation fingerprint and authorizes review-only publication, not merge or production. For website builds, publication must produce successful CI and a usable READY non-production preview for the exact commit. Human visual approval occurs only afterward and is bound simultaneously to the implementation fingerprint, published commit SHA, and exact preview URL. A modified persisted approval cannot authorize a different plan, diff, commit, or preview. Visual review remains human in v0.13; no browser automation is silently implied.
 
+## Supervised issue-channel boundary
+
+GitHub issues/comments are untrusted remote input until normalized and authorized. The queue accepts one strict request schema, caps request/config sizes, rejects unknown fields and repository-root/unbounded scopes, and permits only registered project IDs plus the existing `app-improvement` profile. The issue author and every approval author must match an explicit login allowlist. Approval syntax is exact, so quoted status text or embedded instructions cannot self-approve.
+
+An issue request is not execution authority. The queue first creates only a WorkflowEngine dry-run and posts its fingerprint. A pristine workflow may run only while a matching current GitHub approval comment exists for that exact dry-run fingerprint. Subsequent checkpoint/sensitive approvals are newly fingerprinted against persisted workflow state. Editing the issue invalidates the request; stale approvals fail closed. Local request state is validated and cannot by itself manufacture the initial approval.
+
+Issue initialization is atomically single-owner through the private JSON-store lock plus a process-identity lease. A second watcher cannot create a second workflow, and abandoned initialization blocks rather than retrying. Once a workflow exists, the WorkflowEngine execution lease remains the duplicate-execution boundary. The watcher may retry transport/API failures, but deterministic initialization failures are persisted as blocked; only CI/preview observation timeouts inherit the existing safe read-only resume path.
+
+The issue adapter needs `GITHUB_TOKEN` in the local orchestrator process to read/write issues. That token is never copied to the Codex worker environment or structured coding task. Status comments omit goals/secrets and expose only bounded workflow/approval/publication facts. The issue queue adds no merge, production deployment, arbitrary repository selection, arbitrary command execution, or secret-management path.
+
 ## Governed dependency-refresh boundary
 
 Network access after the coding worker is exceptional, not general. `project.dependencies.refresh` is workflow-only and has a dedicated `dependency-manager` authority. It is evaluated only when the approved implementation changes a root or nested package manifest/lockfile. Normal changes complete the stage as a no-op before capability resolution, so they do not acquire network authority.
