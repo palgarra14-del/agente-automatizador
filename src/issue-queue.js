@@ -62,7 +62,9 @@ function pathList(value, label) {
   return [...new Set(value.map((item, index) => {
     const path = boundedString(item, `${label}[${index}]`, { required: true, max: 240 }).replaceAll('\\', '/');
     if (path.startsWith('/') || path.includes('..') || /[\r\n\0]/.test(path)) throw new Error(`${label}[${index}] is not a safe repository-relative path`);
-    return path.replace(/^\.\//, '').replace(/\/$/, '');
+    const normalized = path.replace(/^\.\//, '').replace(/\/$/, '');
+    if (!normalized || normalized === '.') throw new Error(`${label}[${index}] must identify a bounded repository path, not the repository root`);
+    return normalized;
   }))].sort();
 }
 
@@ -70,15 +72,18 @@ export function normalizeIssueRequest(value) {
   assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'scope']), 'agent request');
   if (value.version !== 1) throw new Error('agent request version must be 1');
   if (value.profile !== 'app-improvement') throw new Error('issue queue currently supports only app-improvement');
-  const scope = value.scope ?? {};
+  if (!value.scope || typeof value.scope !== 'object' || Array.isArray(value.scope)) throw new Error('agent request scope is required');
+  const scope = value.scope;
   assertObjectKeys(scope, new Set(['allowedPaths', 'forbiddenPaths']), 'agent request scope');
+  const allowedPaths = pathList(scope.allowedPaths, 'agent request scope.allowedPaths');
+  if (allowedPaths.length < 1) throw new Error('agent request scope.allowedPaths must contain at least one bounded path');
   return {
     version: 1,
     projectId: boundedString(value.projectId, 'agent request projectId', { required: true, max: 80 }),
     profile: 'app-improvement',
     goal: maskSecrets(boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 })),
     scope: {
-      allowedPaths: pathList(scope.allowedPaths, 'agent request scope.allowedPaths'),
+      allowedPaths,
       forbiddenPaths: pathList(scope.forbiddenPaths, 'agent request scope.forbiddenPaths')
     }
   };
