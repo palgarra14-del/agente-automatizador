@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { lstat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, report } from './core.js';
+import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 
@@ -26,12 +25,14 @@ async function loadWorkflowInput(profile) {
   }
   if (!briefPath) throw new Error('website-build requires --brief <business-brief.json>');
   const target = resolve(briefPath);
-  const info = await lstat(target);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error('Business brief must be a regular non-symlink file');
-  if (info.size > 64 * 1024) throw new Error('Business brief exceeds 64 KiB');
   let parsed;
-  try { parsed = JSON.parse(await readFile(target, 'utf8')); }
-  catch (error) { throw new Error(`Invalid business brief JSON: ${error.message}`, { cause: error }); }
+  try {
+    const content = await readBoundedRegularFile(target, { maxBytes: 64 * 1024, label: 'Business brief' });
+    parsed = JSON.parse(content.toString('utf8'));
+  } catch (error) {
+    if (/^Business brief (?:must|exceeds|changed)/.test(error.message)) throw error;
+    throw new Error(`Invalid business brief JSON: ${error.message}`, { cause: error });
+  }
   return { businessBrief: parsed };
 }
 
