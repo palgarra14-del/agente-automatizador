@@ -228,6 +228,49 @@ export function workflowApprovalFingerprint({ requestFingerprint, issueBodyFinge
   });
 }
 
+function compactMaskedJson(value, maxBytes = 6_000) {
+  let serialized;
+  try { serialized = JSON.stringify(canonical(value), null, 2); }
+  catch { serialized = '"[UNSERIALIZABLE]"'; }
+  const masked = maskSecrets(serialized);
+  return Buffer.from(masked, 'utf8').subarray(0, maxBytes).toString('utf8');
+}
+
+function approvalEvidenceSummary(workflow, step) {
+  if (workflow.profile !== 'app-improvement') return null;
+  if (step.id === 'plan-change') {
+    return compactMaskedJson({
+      inspection: workflow.steps.find((candidate) => candidate.id === 'inspect-project')?.evidence?.result ?? null,
+      diagnosis: workflow.steps.find((candidate) => candidate.id === 'diagnose')?.evidence?.result ?? null
+    });
+  }
+  if (step.id === 'implementation' && step.error === 'workflow_sensitive_change_requires_approval') {
+    return compactMaskedJson({
+      classification: step.evidence?.changePolicy?.classification ?? null,
+      reason: step.evidence?.changePolicy?.reason ?? null,
+      paths: step.evidence?.changePolicy?.paths ?? step.evidence?.changeSet?.paths ?? [],
+      changeSetFingerprint: step.evidence?.changeSetFingerprint ?? null
+    });
+  }
+  if (step.id === 'release-readiness') {
+    const implementation = workflow.steps.find((candidate) => candidate.id === 'implementation');
+    const review = workflow.steps.find((candidate) => candidate.id === 'review');
+    const tests = workflow.steps.find((candidate) => candidate.id === 'tests');
+    const verification = workflow.steps.find((candidate) => candidate.id === 'verification');
+    return compactMaskedJson({
+      changedPaths: implementation?.evidence?.changeSet?.paths ?? [],
+      changeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null,
+      review: review?.evidence?.result ?? null,
+      tests: { status: tests?.status ?? null, error: tests?.error ?? null },
+      verification: { status: verification?.status ?? null, error: verification?.error ?? null }
+    });
+  }
+  if (step.error === 'interrupted_step_requires_human_approval') {
+    return compactMaskedJson({ interruptedStep: step.id, skill: step.skill, error: step.error });
+  }
+  return null;
+}
+
 function approvalInstruction(token) {
   return `/agent approve ${token}`;
 }
