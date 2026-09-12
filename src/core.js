@@ -1014,10 +1014,11 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
     }
     if (step.skill === 'website.plan') {
+      const normalizedPlan = normalizeWebsitePlan(step.evidence.result?.websitePlan);
       if (
+        JSON.stringify(step.evidence.result.websitePlan) !== JSON.stringify(normalizedPlan) ||
         step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
-        !step.evidence.result?.websitePlan ||
-        step.evidence.websitePlanFingerprint !== evidenceFingerprint(step.evidence.result.websitePlan) ||
+        step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
         !step.evidence.assetEvidence ||
         step.evidence.assetEvidenceFingerprint !== evidenceFingerprint(step.evidence.assetEvidence.assets ?? []) ||
         step.evidence.assetEvidenceFingerprint !== step.evidence.assetEvidence.fingerprint
