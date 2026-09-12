@@ -54,11 +54,15 @@ function validatedToken(value) {
 }
 
 async function rawGhToken({ spawnImpl = spawn, environment = process.env, timeoutMs = 10_000 } = {}) {
+  const childEnvironment = {};
+  for (const key of ['HOME', 'PATH', 'XDG_CONFIG_HOME', 'LANG', 'LC_ALL']) {
+    if (environment[key] !== undefined) childEnvironment[key] = environment[key];
+  }
   return new Promise((resolveToken, reject) => {
     const child = spawnImpl('gh', ['auth', 'token'], {
       shell: false,
       windowsHide: true,
-      env: Object.fromEntries(['HOME', 'PATH', 'XDG_CONFIG_HOME', 'LANG', 'LC_ALL'].flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]))
+      env: childEnvironment
     });
     let stdout = '';
     let stdoutBytes = 0;
