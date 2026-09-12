@@ -2061,6 +2061,91 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(typeof publicationBridge.deployProduction, 'undefined');
 });
 
+test('website-build dependency change requires one fingerprint approval and one frozen refresh before critic', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-build-dependency-'));
+  const configured = managedProject('website-dependency', root, {
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'container-required', image: 'node:test' },
+    toolchain: { command: 'npm' },
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'project.dependencies.refresh', 'code.review', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const sensitive = changedChangeSet(['package.json', 'package-lock.json', 'src/app/page.js']);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let implemented = false;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: 'main', initialHead: 'deadbeef', status: '' }; },
+    async inspectChangeSet() { return implemented ? sensitive : emptyChangeSet(); }
+  });
+  const skillExecutor = {
+    supports: (skill) => ['website.plan', 'code.review'].includes(skill),
+    async execute(request) {
+      if (request.skill === 'website.plan') return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
+      assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, sensitive.changeSetFingerprint);
+      return { ok: true, status: 'completed', outputBytes: 1, result: { reviewEvidence: { verdict: 'PASS', summary: 'dependency change reviewed', findings: [] } } };
+    }
+  };
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      implemented = true;
+      return { status: 'completed', summary: 'website plus dependency implemented', output: '', outputBytes: 0 };
+    }
+  };
+  const commandCalls = [];
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    skillExecutor,
+    codingWorker,
+    runner: async (_project, name, options) => {
+      commandCalls.push({ name, stage: options?.stage });
+      if (name === 'dependencyRefresh') {
+        return {
+          name, ok: true, exitCode: 0, stdout: '', stderr: '',
+          execution: { provider: 'container', stage: 'dependency-refresh', postWorkerNetwork: 'dependency-refresh-network-enabled' }
+        };
+      }
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+
+  const created = await instance.create({ profile: 'website-build', projectId: configured.id, goal: 'Build website with approved dependency', input: { businessBrief: businessBrief() } });
+  await instance.run(created.id);
+  await instance.approve(created.id, 'design');
+
+  let waiting = await instance.run(created.id);
+  const implementation = waiting.steps.find((step) => step.id === 'implementation');
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(implementation.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(implementation.evidence.changePolicy.classification, 'sensitive');
+  assert.equal(workerCalls, 1);
+  assert.equal(commandCalls.length, 0);
+  assert.equal(waiting.modelUsage.calls, 2);
+
+  waiting = await instance.approve(created.id, 'implementation');
+  assert.equal(waiting.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(workerCalls, 1);
+
+  waiting = await instance.run(created.id);
+  const refresh = waiting.steps.find((step) => step.id === 'dependency-refresh');
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(refresh.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(refresh.evidence.required, true);
+  assert.equal(refresh.evidence.command.name, 'dependencyRefresh');
+  assert.equal(refresh.evidence.execution.provider, 'container');
+  assert.equal(refresh.evidence.execution.stage, 'dependency-refresh');
+  assert.equal(refresh.evidence.execution.postWorkerNetwork, 'dependency-refresh-network-enabled');
+  assert.equal(commandCalls.filter((call) => call.name === 'dependencyRefresh').length, 1);
+  assert.deepEqual(commandCalls.filter((call) => call.name !== 'dependencyRefresh').map((call) => call.name), ['test', 'typecheck', 'lint', 'build']);
+  assert.equal(workerCalls, 1);
+  assert.equal(waiting.modelUsage.calls, 3);
+  assert.equal(waiting.steps.find((step) => step.id === 'review').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
 test('website-build critic FAIL stops before quality and visual approval', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-critic-fail-'));
   const configured = managedProject('website-critic-fail', root, {
