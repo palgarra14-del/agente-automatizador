@@ -232,7 +232,10 @@ function compactMaskedJson(value, maxBytes = 6_000) {
   let serialized;
   try { serialized = JSON.stringify(canonical(value), null, 2); }
   catch { serialized = '"[UNSERIALIZABLE]"'; }
-  const masked = maskSecrets(serialized);
+  const masked = maskSecrets(serialized)
+    .replaceAll('`', "'")
+    .replace(/\\/agent/gi, '[agent-command]')
+    .replaceAll('@', '＠');
   return Buffer.from(masked, 'utf8').subarray(0, maxBytes).toString('utf8');
 }
 
