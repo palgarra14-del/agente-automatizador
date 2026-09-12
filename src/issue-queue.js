@@ -325,6 +325,16 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
   if (record.pendingApproval !== null && record.pendingApproval !== undefined) {
     if (!['start', 'workflow-step'].includes(record.pendingApproval.kind) || typeof record.pendingApproval.stepId !== 'string' || !/^[a-f0-9]{64}$/.test(record.pendingApproval.fingerprint ?? '')) throw new Error('issue queue pending approval is invalid');
   }
+  if (record.terminalNotification !== null && record.terminalNotification !== undefined) {
+    const notification = record.terminalNotification;
+    if (!['completed', 'failed', 'blocked', 'rejected'].includes(record.status) ||
+        typeof notification.body !== 'string' || !notification.body || notification.body.length > 12_000 ||
+        !Number.isInteger(notification.attempts) || notification.attempts < 0 ||
+        (notification.commentId !== null && notification.commentId !== undefined && (!Number.isInteger(notification.commentId) || notification.commentId < 1)) ||
+        (notification.sentAt !== null && notification.sentAt !== undefined && !Number.isFinite(Date.parse(notification.sentAt)))) {
+      throw new Error('issue queue terminal notification is invalid');
+    }
+  }
   return true;
 }
 
