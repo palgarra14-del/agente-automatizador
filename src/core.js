@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { URLSearchParams } from 'node:url';
+import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
@@ -222,8 +223,13 @@ const readOnlyRepositoryContextDefaults = Object.freeze({
   maxManifestBytes: 64 * 1024
 });
 
-function repositoryContextFingerprint(files) {
-  return createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex');
+function repositoryContextFingerprint(files, reviewDiff = null) {
+  const fileMetadata = files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes }));
+  if (!reviewDiff) return createHash('sha256').update(JSON.stringify(fileMetadata)).digest('hex');
+  return createHash('sha256').update(JSON.stringify({
+    files: fileMetadata,
+    reviewDiff: { sha256: reviewDiff.sha256, bytes: reviewDiff.bytes }
+  })).digest('hex');
 }
 
 function repositoryContextPathSet(context = {}) {
@@ -245,7 +251,23 @@ function repositoryContextPathSet(context = {}) {
     metadata.push({ path, sha256: file.sha256.toLowerCase(), bytes: file.bytes });
   }
   if (!paths.size) throw new Error('repository_context_empty');
-  if (repositoryContext.fingerprint !== repositoryContextFingerprint(metadata)) throw new Error('repository_context_fingerprint_invalid');
+  let reviewDiff = null;
+  if (repositoryContext.reviewDiff !== undefined && repositoryContext.reviewDiff !== null) {
+    if (
+      !repositoryContext.reviewDiff ||
+      typeof repositoryContext.reviewDiff !== 'object' ||
+      Array.isArray(repositoryContext.reviewDiff) ||
+      !/^[a-f0-9]{64}$/i.test(repositoryContext.reviewDiff.sha256 ?? '') ||
+      !Number.isInteger(repositoryContext.reviewDiff.bytes) ||
+      repositoryContext.reviewDiff.bytes < 0 ||
+      typeof repositoryContext.reviewDiff.content !== 'string'
+    ) throw new Error('repository_context_review_diff_invalid');
+    reviewDiff = {
+      sha256: repositoryContext.reviewDiff.sha256.toLowerCase(),
+      bytes: repositoryContext.reviewDiff.bytes
+    };
+  }
+  if (repositoryContext.fingerprint !== repositoryContextFingerprint(metadata, reviewDiff)) throw new Error('repository_context_fingerprint_invalid');
   return paths;
 }
 
@@ -319,6 +341,32 @@ export async function collectReadOnlyRepositoryContext({
     version: 1,
     files,
     fingerprint: repositoryContextFingerprint(files)
+  };
+}
+
+export async function collectReadOnlyReviewDiff({
+  workspace,
+  scope = {},
+  processRunner = runProcess,
+  timeoutMs = 30_000,
+  maxBytes = 128 * 1024
+} = {}) {
+  if (typeof workspace !== 'string' || !workspace) throw new Error('review_diff_requires_workspace');
+  const normalizedScope = normalizeRunScope(scope);
+  if (!normalizedScope.allowedPaths.length) return null;
+  const boundedMaxBytes = positiveInteger(maxBytes, 128 * 1024, 'review diff maxBytes');
+  const result = await processRunner(
+    'git',
+    ['diff', 'HEAD', '--no-ext-diff', '--no-color', '--', ...normalizedScope.allowedPaths],
+    { cwd: resolve(workspace), timeoutMs, outputLimit: boundedMaxBytes, captureOutputDigest: true }
+  );
+  if (result.timedOut || result.exitCode !== 0) throw new Error('repository_context_review_diff_failed');
+  if (result.stdoutTruncated) throw new Error('repository_context_review_diff_too_large');
+  const content = String(result.stdout ?? '');
+  return {
+    sha256: result.stdoutDigest ?? createHash('sha256').update(content).digest('hex'),
+    bytes: Number(result.stdoutBytes ?? Buffer.byteLength(content)),
+    content
   };
 }
 
@@ -1713,15 +1761,20 @@ export class WorkflowEngine {
     }
     let repositoryContextValidationError = null;
     if (repositoryContext && typeof this.skillExecutor.revalidateContext === 'function') {
-      try {
-        await this.skillExecutor.revalidateContext(repositoryContext, {
-          workspace: workspaceProject.workspace,
-          project,
-          scope: runningPlan.scope,
-          timeoutMs: Math.min(project.budgets.commandTimeoutMs, Math.max(1_000, this.remainingMs(runningPlan)))
-        });
-      } catch (error) {
-        repositoryContextValidationError = error;
+      const contextRevalidationRemainingMs = this.remainingMs(runningPlan);
+      if (contextRevalidationRemainingMs <= 0) {
+        repositoryContextValidationError = new Error('workflow_deadline_exceeded_before_repository_context_revalidation');
+      } else {
+        try {
+          await this.skillExecutor.revalidateContext(repositoryContext, {
+            workspace: workspaceProject.workspace,
+            project,
+            scope: runningPlan.scope,
+            timeoutMs: Math.min(project.budgets.commandTimeoutMs, contextRevalidationRemainingMs)
+          });
+        } catch (error) {
+          repositoryContextValidationError = error;
+        }
       }
     }
     const executionOk = execution.ok === true && !skillOutputValidationError && !repositoryContextValidationError;
@@ -3729,7 +3782,9 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
     ? 'Use the validated inspect-project evidence supplied in priorEvidence. For diagnosis return exactly: {"summary":"non-empty string","cause":"non-empty grounded cause","relevantPaths":["repository-relative path", "..."],"recommendedChange":"non-empty minimal change description","risks":["bounded risk or regression concern", "..."]}. relevantPaths must contain at least one path and every path must already appear in inspect-project.inspectionEvidence.relevantPaths. If the inspection evidence is insufficient, do not guess: return relevantPaths:[] so validation fails closed.'
     : null;
   const reviewInstruction = skill === 'code.review'
-    ? 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
+    ? clean?.context?.repositoryContext?.reviewDiff
+      ? 'Review repositoryContext.reviewDiff as the trusted bounded Git diff for tracked edits, and use repositoryContext.files as the trusted current contents for all supplied paths including any untracked additions. Compare that evidence against the goal, prior implementation evidence, and surrounding supplied code. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
+      : 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
     ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; or if it uses business-specific assets outside the verified asset evidence.'
@@ -3884,8 +3939,8 @@ function validateSkillOutput(contract, output, skillId = null, context = {}) {
 }
 
 export class CodexReadOnlySkillExecutor {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform } = {}) {
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform });
+  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform, contextProcessRunner = runProcess } = {}) {
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform, contextProcessRunner });
   }
 
   supports(skillId) { return readOnlySkillIds.has(skillId); }
@@ -3894,12 +3949,49 @@ export class CodexReadOnlySkillExecutor {
     if (!['code.inspect', 'code.diagnose', 'code.review'].includes(skill)) return null;
     const normalizedScope = normalizeRunScope(scope ?? {});
     if (!normalizedScope.allowedPaths.length) return null;
-    return collectReadOnlyRepositoryContext({ workspace, project, scope: normalizedScope, timeoutMs });
+    const context = await collectReadOnlyRepositoryContext({
+      workspace,
+      project,
+      scope: normalizedScope,
+      timeoutMs,
+      processRunner: this.contextProcessRunner
+    });
+    if (skill !== 'code.review' || !context) return context;
+    const reviewDiff = await collectReadOnlyReviewDiff({
+      workspace,
+      scope: normalizedScope,
+      timeoutMs,
+      processRunner: this.contextProcessRunner
+    });
+    return {
+      ...context,
+      reviewDiff,
+      fingerprint: repositoryContextFingerprint(context.files, reviewDiff)
+    };
   }
 
   async revalidateContext(expected, { workspace, project, scope, timeoutMs }) {
     if (!expected) return null;
-    const current = await collectReadOnlyRepositoryContext({ workspace, project, scope, timeoutMs });
+    let current = await collectReadOnlyRepositoryContext({
+      workspace,
+      project,
+      scope,
+      timeoutMs,
+      processRunner: this.contextProcessRunner
+    });
+    if (expected.reviewDiff) {
+      const reviewDiff = await collectReadOnlyReviewDiff({
+        workspace,
+        scope,
+        timeoutMs,
+        processRunner: this.contextProcessRunner
+      });
+      current = {
+        ...current,
+        reviewDiff,
+        fingerprint: repositoryContextFingerprint(current.files, reviewDiff)
+      };
+    }
     if (!current || current.fingerprint !== expected.fingerprint) throw new Error('repository_context_changed_during_analysis');
     return current;
   }
