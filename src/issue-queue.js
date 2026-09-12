@@ -236,11 +236,13 @@ function publicationSummary(workflow) {
 }
 
 export class GitHubIssueChannel {
-  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository } = {}) {
+  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 30_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
+    if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 || requestTimeoutMs > 120_000) throw new Error('issue channel requestTimeoutMs must be between 1000 and 120000');
     this.token = token;
     this.fetch = fetchImpl;
     this.repository = { owner: repository.owner, name: repository.name };
+    this.requestTimeoutMs = requestTimeoutMs;
   }
 
   headers() {
