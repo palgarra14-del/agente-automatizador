@@ -73,6 +73,7 @@ class FakeWorkflowEngine {
     this.runCalls = [];
     this.approveCalls = [];
     this.resumeCalls = [];
+    this.deadlineResetCalls = [];
     this.realRunResult = null;
     this.resumeResult = null;
   }
@@ -83,6 +84,11 @@ class FakeWorkflowEngine {
   }
 
   async get() { return clone(this.plan); }
+
+  async resetPristineDeadline(id) {
+    this.deadlineResetCalls.push(id);
+    return clone(this.plan);
+  }
 
   async run(_id, options = {}) {
     this.runCalls.push(clone(options));
@@ -250,7 +256,7 @@ test('exact issue-body fingerprint invalidates formatting-only and masked-secret
 test('issue queue config is strict and normalizes actor identity', () => {
   assert.deepEqual(normalizeIssueQueueConfig({
     version: 1,
-    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    repository: { owner: 'Palgarra14-Del', name: 'Agente-Automatizador' },
     allowedActors: ['Palgarra14-Del', 'palgarra14-del'],
     pollIntervalMs: 15_000
   }), {
@@ -348,6 +354,7 @@ test('pending approval survives a transient workflow lookup failure after its co
   assert.equal(getCalls >= 2, true);
   assert.notEqual(retried.status, 'awaiting_start_approval');
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
+  assert.equal(workflowEngine.deadlineResetCalls.length, 1);
 });
 
 test('issue edits invalidate accepted request fingerprint before any real execution', async () => {
@@ -463,6 +470,8 @@ test('authorized approvals drive workflow checkpoints without bypassing Workflow
   assert.equal(record.status, 'awaiting_workflow_approval');
   assert.equal(record.pendingApproval.stepId, 'plan-change');
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
+  assert.match(channel.posted.at(-1).body, /Evidence bound to this approval fingerprint/);
+  assert.match(channel.posted.at(-1).body, /"ok": true/);
   const checkpointToken = record.pendingApproval.fingerprint;
 
   const completed = clone(awaitingPlan);
@@ -554,6 +563,25 @@ test('a rejection arriving between checkpoint decision read and approval prevent
   const rejected = await queue.tick();
   assert.equal(rejected.status, 'rejected');
   assert.equal(workflowEngine.approveCalls.length, 0);
+});
+
+test('approval evidence summaries are secret-redacted before posting to GitHub', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { note: 'Authorization: Bearer supersecretvalue123' } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 87, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  const body = channel.posted.at(-1).body;
+  assert.equal(body.includes('supersecretvalue123'), false);
+  assert.match(body, /REDACTED/);
 });
 
 test('terminal requests return their transition once and do not starve newer queue work', async () => {
