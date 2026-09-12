@@ -666,9 +666,11 @@ export class SupervisedIssueQueue {
     };
     await this.saveRecord(key, next);
     if (!already) {
+      const reviewSummary = approvalEvidenceSummary(workflow, step);
       await this.post(issue.number, [
         `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
         `Current workflow status: \`${workflow.status}\`.`,
+        ...(reviewSummary ? ['', 'Evidence bound to this approval fingerprint:', '```json', reviewSummary, '```'] : []),
         '',
         'Approve exactly this persisted state with:',
         `\`${approvalInstruction(token)}\``,
