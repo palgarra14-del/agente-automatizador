@@ -35,6 +35,7 @@ function requestBody(overrides = {}) {
 function workflowPlan() {
   return {
     id: 'workflow-fixture',
+    goal: 'Improve one bounded Callflow behavior',
     projectId: 'callflow',
     profile: 'app-improvement',
     inputFingerprint: null,
@@ -438,6 +439,18 @@ test('control-plane actor drift blocks an active request instead of granting ret
   const blocked = await queue.tick();
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.reason, 'control_plane_changed');
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
+});
+
+test('cross-workflow substitution is blocked before an approved start can execute', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const record = await queue.tick();
+  workflowEngine.plan.id = 'substituted-workflow';
+  channel.addUserComment(issue.number, { id: 76, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'workflow_binding_mismatch');
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
 });
 
