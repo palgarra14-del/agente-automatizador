@@ -474,6 +474,42 @@ export class SupervisedIssueQueue {
     return this.channel.comment(number, text);
   }
 
+  async deliverTerminalNotification(issue, key, record) {
+    const notification = record.terminalNotification;
+    if (!notification || notification.sentAt) return record;
+    const comments = await this.channel.comments(issue.number);
+    const existing = comments.find((comment) =>
+      Number.isInteger(comment.id) &&
+      typeof comment.body === 'string' &&
+      comment.body === notification.body &&
+      this.authorized(comment.user?.login)
+    );
+    const posted = existing ? { id: existing.id } : await this.post(issue.number, notification.body);
+    const next = {
+      ...record,
+      terminalNotification: {
+        ...notification,
+        attempts: (notification.attempts ?? 0) + 1,
+        commentId: posted.id ?? null,
+        sentAt: this.now()
+      },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return next;
+  }
+
+  async finalizeTerminal(issue, key, record, text) {
+    const body = maskSecrets(String(text)).slice(0, 12_000);
+    const next = {
+      ...record,
+      terminalNotification: { body, attempts: 0, commentId: null, sentAt: null },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return this.deliverTerminalNotification(issue, key, next);
+  }
+
   async revalidateCurrentRequest(issue, record) {
     const current = await this.channel.issue(issue.number);
     if (!current || current.state !== 'open' || current.pull_request ||
@@ -1047,6 +1083,18 @@ export class SupervisedIssueQueue {
   }
 
   async tick() {
+    let notificationError = null;
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) || !['completed', 'failed', 'blocked', 'rejected'].includes(record.status) || !record.terminalNotification || record.terminalNotification.sentAt) continue;
+      try {
+        const issue = await this.channel.issue(record.issueNumber);
+        return await this.deliverTerminalNotification(issue ?? { number: record.issueNumber }, key, record);
+      } catch (error) {
+        notificationError ??= error;
+      }
+    }
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
@@ -1055,6 +1103,7 @@ export class SupervisedIssueQueue {
       const result = await this.processIssue(issue);
       if (result) return result;
     }
+    if (notificationError) throw notificationError;
     return null;
   }
 }
