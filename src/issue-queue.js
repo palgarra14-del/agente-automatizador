@@ -469,7 +469,6 @@ export class SupervisedIssueQueue {
       if (!parsed || !this.authorized(comment.user?.login)) continue;
       if (parsed.approvalFingerprint !== record.pendingApproval?.fingerprint) continue;
       decision = { ...parsed, commentId: comment.id, actor: comment.user.login };
-      break;
     }
     return { decision, highestCommentId: highest, instructionPresent };
   }
