@@ -13,7 +13,8 @@ import {
   parseApprovalComment,
   parseIssueRequestBody,
   startApprovalFingerprint,
-  workflowApprovalFingerprint
+  workflowApprovalFingerprint,
+  watchIssueQueue
 } from '../src/issue-queue.js';
 
 function requestBody(overrides = {}) {
@@ -373,6 +374,51 @@ test('safe CI/preview observation timeouts resume without creating a human appro
   assert.equal(result.status, 'completed');
   assert.equal(workflowEngine.resumeCalls.length, 1);
   assert.equal(workflowEngine.approveCalls.length, 0);
+});
+
+test('workflow initialization failure is persisted as blocked and is not retried forever', async () => {
+  const { queue, channel, workflowEngine } = await queueFixture();
+  let createCalls = 0;
+  workflowEngine.create = async () => {
+    createCalls += 1;
+    throw new Error('fixture initialization failure');
+  };
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'workflow_initialization_failed');
+  assert.equal(createCalls, 1);
+  assert.match(channel.posted.at(-1).body, /No real execution was authorized/);
+
+  const later = await queue.tick();
+  assert.equal(later, null);
+  assert.equal(createCalls, 1);
+});
+
+test('watcher survives a transient queue error and processes a later tick', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const observed = [];
+  const errors = [];
+  const queue = {
+    async tick() {
+      calls += 1;
+      if (calls === 1) throw new Error('transient github failure');
+      controller.abort();
+      return { status: 'awaiting_start_approval', issueNumber: 41 };
+    }
+  };
+
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+    onTick: (record) => observed.push(record),
+    onError: (error) => errors.push(error.message)
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(errors, ['transient github failure']);
+  assert.deepEqual(observed, [{ status: 'awaiting_start_approval', issueNumber: 41 }]);
 });
 
 test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment writes', async () => {
