@@ -1036,7 +1036,7 @@ test('verification steps use profile-specific command sets instead of repeating 
   const app = createWorkflowPlan({ profile: 'app-improvement', project: project(), goal: 'Map checks' });
   assert.deepEqual(app.steps.find((step) => step.id === 'tests').commands, ['test']);
   assert.deepEqual(app.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
-  const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks' });
+  const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks', input: { businessBrief: businessBrief() } });
   assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint', 'build']);
   assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, []);
 });
