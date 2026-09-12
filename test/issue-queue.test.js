@@ -4,6 +4,8 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonStore, WorkflowStepStatus } from '../src/core.js';
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
 import {
   GitHubIssueChannel,
   ISSUE_REQUEST_MARKER,
@@ -52,7 +54,7 @@ function workflowPlan() {
 
 function dryRun(plan) {
   return {
-    ...structuredClone(plan),
+    ...clone(plan),
     dryRun: true,
     plannedSteps: [
       { id: 'inspect-project', type: 'placeholder', skill: 'code.inspect', specialist: 'code-inspector', specialistAuthority: 'workspace-read', commands: [] },
@@ -75,20 +77,20 @@ class FakeWorkflowEngine {
   }
 
   async create(input) {
-    this.createCalls.push(structuredClone(input));
-    return structuredClone(this.plan);
+    this.createCalls.push(clone(input));
+    return clone(this.plan);
   }
 
-  async get() { return structuredClone(this.plan); }
+  async get() { return clone(this.plan); }
 
   async run(_id, options = {}) {
-    this.runCalls.push(structuredClone(options));
+    this.runCalls.push(clone(options));
     if (options.dryRun) return dryRun(this.plan);
     if (this.realRunResult) {
-      this.plan = structuredClone(this.realRunResult);
-      return structuredClone(this.plan);
+      this.plan = clone(this.realRunResult);
+      return clone(this.plan);
     }
-    return structuredClone(this.plan);
+    return clone(this.plan);
   }
 
   async approve(_id, stepId) {
@@ -100,13 +102,13 @@ class FakeWorkflowEngine {
       step.evidence = { approvedAt: '2026-09-12T00:00:00.000Z' };
     }
     this.plan.status = WorkflowStepStatus.PENDING;
-    return structuredClone(this.plan);
+    return clone(this.plan);
   }
 
   async resume() {
     this.resumeCalls.push(true);
-    if (this.resumeResult) this.plan = structuredClone(this.resumeResult);
-    return structuredClone(this.plan);
+    if (this.resumeResult) this.plan = clone(this.resumeResult);
+    return clone(this.plan);
   }
 }
 
@@ -119,8 +121,8 @@ class FakeChannel {
     this.nextCommentId = 100;
   }
 
-  async openIssues() { return structuredClone(this.issues); }
-  async comments(number) { return structuredClone(this.commentsByIssue.get(number) ?? []); }
+  async openIssues() { return clone(this.issues); }
+  async comments(number) { return clone(this.commentsByIssue.get(number) ?? []); }
 
   async comment(number, body) {
     const entry = { id: this.nextCommentId++, number, body };
@@ -249,7 +251,7 @@ test('authorized approvals drive workflow checkpoints without bypassing Workflow
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
   const checkpointToken = record.pendingApproval.fingerprint;
 
-  const completed = structuredClone(awaitingPlan);
+  const completed = clone(awaitingPlan);
   completed.status = WorkflowStepStatus.COMPLETED;
   completed.steps[1].status = WorkflowStepStatus.COMPLETED;
   completed.steps[1].evidence = { approvedAt: '2026-09-12T00:00:00.000Z' };
@@ -354,7 +356,7 @@ test('safe CI/preview observation timeouts resume without creating a human appro
   timedOut.steps[2].error = 'workflow_publication_ci_timeout';
   workflowEngine.plan = timedOut;
 
-  const completed = structuredClone(timedOut);
+  const completed = clone(timedOut);
   completed.status = WorkflowStepStatus.COMPLETED;
   completed.steps[2].status = WorkflowStepStatus.COMPLETED;
   completed.steps[2].error = null;
