@@ -1144,3 +1144,73 @@ test('registered Callflow can execute every deterministic app-improvement verifi
   assert.deepEqual(plan.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
   assert.ok(['test', 'typecheck', 'lint', 'build', 'ci', 'deployment'].every((name) => callflow.acceptance.require.includes(name)));
 });
+
+
+test('rejection after checkpoint persistence but before continuation prevents the next workflow run', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { basis: 'approved' } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 300, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  const token = record.pendingApproval.fingerprint;
+
+  const originalApprove = workflowEngine.approve.bind(workflowEngine);
+  workflowEngine.approve = async (...args) => {
+    const result = await originalApprove(...args);
+    channel.addUserComment(issue.number, { id: 302, login: 'palgarra14-del', body: `/agent reject ${token}` });
+    return result;
+  };
+
+  channel.addUserComment(issue.number, { id: 301, login: 'palgarra14-del', body: `/agent approve ${token}` });
+  const rejected = await queue.tick();
+
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(workflowEngine.approveCalls.length, 1);
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
+});
+
+test('checkpoint approval proof survives a crash and a later rejection stops recovery before replay', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { basis: 'stable' } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 400, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+  const token = record.pendingApproval.fingerprint;
+
+  const originalRun = workflowEngine.run.bind(workflowEngine);
+  let continuationAttempts = 0;
+  workflowEngine.run = async (id, options = {}) => {
+    if (!options.dryRun && workflowEngine.plan.steps[1].status === WorkflowStepStatus.COMPLETED) {
+      continuationAttempts += 1;
+      if (continuationAttempts === 1) throw new Error('fixture crash after checkpoint queue persistence');
+    }
+    return originalRun(id, options);
+  };
+
+  channel.addUserComment(issue.number, { id: 401, login: 'palgarra14-del', body: `/agent approve ${token}` });
+  await assert.rejects(() => queue.tick(), /fixture crash after checkpoint/);
+  const afterCrash = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(afterCrash.status, 'running');
+  assert.equal(afterCrash.activeApproval.fingerprint, token);
+
+  channel.addUserComment(issue.number, { id: 402, login: 'palgarra14-del', body: `/agent reject ${token}` });
+  const rejected = await queue.tick();
+
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(continuationAttempts, 1);
+});
