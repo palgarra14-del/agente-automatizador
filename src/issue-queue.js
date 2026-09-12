@@ -910,9 +910,18 @@ export class SupervisedIssueQueue {
                 status: 'running',
                 reason: 'workflow_approval_already_applied',
                 pendingApproval: null,
+                activeApproval: {
+                  kind: 'workflow-step',
+                  stepId: targetStep.id,
+                  fingerprint: record.pendingApproval.fingerprint,
+                  commentId: proof.commentId,
+                  actor: proof.actor
+                },
                 lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, proof.commentId),
                 updatedAt: this.now()
               });
+              const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
+              if (!recoveredApproval.ok) return recoveredApproval.record;
               const result = await this.workflowEngine.run(record.workflowId);
               return this.settleWorkflow(issue, key, record, result);
             }
@@ -1034,6 +1043,8 @@ export class SupervisedIssueQueue {
           lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, proof.commentId),
           updatedAt: this.now()
         });
+        const recoveredStart = await this.revalidateActiveApproval(issue, key, record);
+        if (!recoveredStart.ok) return recoveredStart.record;
       }
       const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
       return this.settleWorkflow(issue, key, record, result);
