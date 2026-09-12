@@ -159,6 +159,9 @@ test('issue request protocol is strict, bounded, canonical, and redacts accident
   assert.match(parsed.requestFingerprint, /^[a-f0-9]{64}$/);
 
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'website-build', goal: 'x' }), /only app-improvement/);
+  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x' }), /scope is required/);
+  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: [] } }), /at least one bounded path/);
+  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: ['.'] } }), /not the repository root/);
   assert.throws(() => parseIssueRequestBody(`${ISSUE_REQUEST_MARKER}\n{"version":1,"projectId":"callflow","profile":"app-improvement","goal":"x","extra":true}`), /unknown field/);
   assert.throws(() => parseIssueRequestBody(`prefix\n${requestBody()}`), /marker must be the first/);
   assert.throws(() => parseIssueRequestBody(`${requestBody()}\n${ISSUE_REQUEST_MARKER}\n{}`), /exactly one request marker/);
