@@ -1953,6 +1953,201 @@ test('reviewed publication fails if default branch advances while CI or preview 
   assert.equal(publication.evidence.pullRequest.number, 42);
 });
 
+test('website-build runs brief to reviewed PR-ready publication with three bounded model calls', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-build-e2e-'));
+  const configured = managedProject('website-e2e', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const brief = businessBrief();
+  const websitePlan = websitePlanFixture();
+  const governed = changedChangeSet(['src/app/page.js', 'src/app/servicios/page.js', 'src/app/contacto/page.js'], { additions: 120, diffLines: 120, changedBytes: 6_000 });
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  let implemented = false;
+
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId, expectedBaseHead) {
+      assert.equal(expectedBaseHead, baseHead);
+      branch = `agent/${runId}`;
+      return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead };
+    },
+    async inspectChangeSet() { return implemented ? governed : emptyChangeSet(); }
+  });
+
+  const skillCalls = [];
+  const skillExecutor = {
+    supports: (skill) => ['website.plan', 'code.review'].includes(skill),
+    async execute(request) {
+      skillCalls.push(request.skill);
+      if (request.skill === 'website.plan') {
+        assert.equal(request.context.businessBrief.businessName, brief.businessName);
+        assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
+        assert.deepEqual(request.context.assetEvidence.assets, []);
+        return { ok: true, status: 'completed', usage: { input_tokens: 50, output_tokens: 30 }, outputBytes: 50, result: { websitePlan } };
+      }
+      assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, governed.changeSetFingerprint);
+      return { ok: true, status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, outputBytes: 30, result: { reviewEvidence: { verdict: 'PASS', summary: 'No blocking issue.', findings: [] } } };
+    }
+  };
+
+  const codingWorker = {
+    async execute(task) {
+      assert.equal(task.websiteBuild.businessBrief.businessName, brief.businessName);
+      assert.deepEqual(task.websiteBuild.websitePlan, websitePlan);
+      assert.equal(task.websiteBuild.approvedWebsitePlanFingerprint, task.websiteBuild.websitePlanFingerprint);
+      assert.equal(task.websiteBuild.assetEvidence.assets.length, 0);
+      implemented = true;
+      return { status: 'completed', summary: 'website implemented', output: 'done', outputBytes: 4, usage: { input_tokens: 100, output_tokens: 60 } };
+    }
+  };
+
+  const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead, commitHead, changeSet: governed, onCommit: (nextHead) => { head = nextHead; } });
+  const commandCalls = [];
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit,
+    skillExecutor,
+    codingWorker,
+    publicationBridge,
+    runner: async (_project, name) => { commandCalls.push(name); return { name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' }; }
+  });
+
+  const created = await instance.create({ profile: 'website-build', projectId: configured.id, goal: 'Crear web profesional', input: { businessBrief: brief } });
+  let waiting = await instance.run(created.id);
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  const requirements = waiting.steps.find((step) => step.id === 'requirements');
+  assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
+  assert.deepEqual(requirements.evidence.result.websitePlan, websitePlan);
+  assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(waiting.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.modelUsage.calls, 1);
+
+  waiting = await instance.approve(created.id, 'design');
+  assert.equal(waiting.steps.find((step) => step.id === 'design').evidence.approvedWebsitePlanFingerprint, requirements.evidence.websitePlanFingerprint);
+
+  waiting = await instance.run(created.id);
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'implementation').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'dependency-refresh').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'dependency-refresh').evidence.required, false);
+  assert.equal(waiting.steps.find((step) => step.id === 'review').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'quality').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.deepEqual(commandCalls, ['test', 'typecheck', 'lint', 'build']);
+  assert.equal(waiting.modelUsage.calls, 3);
+  assert.deepEqual(skillCalls, ['website.plan', 'code.review']);
+
+  await instance.approve(created.id, 'visual-verification');
+  waiting = await instance.run(created.id);
+  assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  await instance.approve(created.id, 'release-readiness');
+
+  const completed = await instance.run(created.id);
+  assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
+  const publication = completed.steps.find((step) => step.id === 'publication');
+  assert.equal(publication.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(publication.evidence.commit.committedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(publication.evidence.pullRequest.headSha, commitHead);
+  assert.equal(completed.steps.find((step) => step.id === 'visual-verification').evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(completed.steps.find((step) => step.id === 'release-readiness').evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(completed.modelUsage.calls, 3);
+  assert.equal(typeof publicationBridge.merge, 'undefined');
+  assert.equal(typeof publicationBridge.deployProduction, 'undefined');
+});
+
+test('website-build critic FAIL stops before quality and visual approval', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-build-critic-fail-'));
+  const configured = managedProject('website-critic-fail', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/app/page.js']);
+  const baseHead = 'a'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let implemented = false;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: baseHead, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return implemented ? governed : emptyChangeSet(); }
+  });
+  const skillExecutor = {
+    supports: (skill) => ['website.plan', 'code.review'].includes(skill),
+    async execute(request) {
+      if (request.skill === 'website.plan') return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
+      return { ok: true, status: 'completed', outputBytes: 1, result: { reviewEvidence: { verdict: 'FAIL', summary: 'Blocking accessibility regression.', findings: [{ severity: 'high', message: 'Missing accessible navigation.', path: 'src/app/page.js' }] } } };
+    }
+  };
+  let commandCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, skillExecutor,
+    codingWorker: { async execute() { implemented = true; return { status: 'completed', summary: 'implemented', output: '', outputBytes: 0 }; } },
+    publicationBridge: new FakeWorkflowPublicationBridge({ baseHead, changeSet: governed }),
+    runner: async (_project, name) => { commandCalls += 1; return { name, ok: true, exitCode: 0, stdout: '', stderr: '' }; }
+  });
+  const created = await instance.create({ profile: 'website-build', projectId: configured.id, goal: 'Build safely', input: { businessBrief: businessBrief() } });
+  await instance.run(created.id);
+  await instance.approve(created.id, 'design');
+  const failed = await instance.run(created.id);
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.steps.find((step) => step.id === 'review').error, 'workflow_change_review_failed');
+  assert.equal(failed.steps.find((step) => step.id === 'quality').status, WorkflowStepStatus.PENDING);
+  assert.equal(failed.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
+  assert.equal(commandCalls, 0);
+});
+
+test('website-build quality fails closed if verified diff changes after critic PASS', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-build-quality-drift-'));
+  const configured = managedProject('website-quality-drift', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/app/page.js']);
+  const mutated = changedChangeSet(['src/app/page.js', 'src/app/unapproved.js']);
+  const baseHead = 'a'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let state = 'clean';
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: baseHead, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return state === 'clean' ? emptyChangeSet() : state === 'governed' ? governed : mutated; }
+  });
+  const skillExecutor = {
+    supports: (skill) => ['website.plan', 'code.review'].includes(skill),
+    async execute(request) {
+      if (request.skill === 'website.plan') return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
+      return { ok: true, status: 'completed', outputBytes: 1, result: { reviewEvidence: { verdict: 'PASS', summary: 'pass', findings: [] } } };
+    }
+  };
+  let commandCalls = 0;
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, skillExecutor,
+    codingWorker: { async execute() { state = 'governed'; return { status: 'completed', summary: 'implemented', output: '', outputBytes: 0 }; } },
+    publicationBridge: new FakeWorkflowPublicationBridge({ baseHead, changeSet: governed }),
+    runner: async (_project, name) => {
+      commandCalls += 1;
+      if (commandCalls === 1) state = 'mutated';
+      return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const created = await instance.create({ profile: 'website-build', projectId: configured.id, goal: 'Detect quality drift', input: { businessBrief: businessBrief() } });
+  await instance.run(created.id);
+  await instance.approve(created.id, 'design');
+  const failed = await instance.run(created.id);
+  const quality = failed.steps.find((step) => step.id === 'quality');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(quality.error, 'workflow_change_set_changed_during_verification');
+  assert.equal(commandCalls, 1);
+  assert.equal(failed.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
+});
+
 test('read-only workflow step fails closed if workspace changes despite read-only sandbox', async () => {
   const configured = configFrom({
     id: 'readonly-integrity',
