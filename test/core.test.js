@@ -1531,29 +1531,26 @@ test('Codex worker permission profile remains fail-closed on unknown platforms',
   assert.equal(constructed, 0);
 });
 
-test('Codex worker security config denies root reads and preserves restrictive authority on Windows', () => {
+test('Codex worker security config denies root reads on verified platforms and blocks native Windows', () => {
   const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux' });
   const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin' });
   const windowsRead = codexWorkerSecurityConfig({ writeAccess: false, pathValue: 'C:\\safe', platform: 'win32' });
   const windowsWrite = codexWorkerSecurityConfig({ writeAccess: true, pathValue: 'C:\\safe', platform: 'win32' });
   assert.equal(write.supported, true);
   assert.equal(read.supported, true);
-  assert.equal(windowsRead.supported, true);
-  assert.equal(windowsWrite.supported, true);
+  assert.equal(windowsRead.supported, false);
+  assert.equal(windowsWrite.supported, false);
+  assert.equal(windowsRead.error, 'codex_worker_native_windows_isolation_unverified_use_wsl');
+  assert.equal(windowsWrite.error, 'codex_worker_native_windows_isolation_unverified_use_wsl');
   const writeProfile = write.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
   const readProfile = read.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
-  const windowsReadProfile = windowsRead.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
-  const windowsWriteProfile = windowsWrite.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
   assert.match(writeProfile, /":root"="deny"/);
   assert.match(writeProfile, /":minimal"="read"/);
   assert.match(writeProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
   assert.match(readProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
-  assert.match(windowsReadProfile, /":root"="deny"/);
-  assert.match(windowsReadProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
-  assert.match(windowsWriteProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
   assert.ok(write.configOverrides.includes('shell_environment_policy.set.PATH="/bin:/usr/bin"'));
-  assert.ok(windowsRead.configOverrides.includes('permissions.agent-workflow.network.enabled=false'));
-  assert.ok(windowsWrite.configOverrides.includes('approval_policy="never"'));
+  assert.equal(windowsRead.configOverrides.length, 0);
+  assert.equal(windowsWrite.configOverrides.length, 0);
   assert.equal(codexWorkerSecurityConfig({ platform: 'freebsd' }).supported, false);
 });
 
