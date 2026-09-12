@@ -253,6 +253,18 @@ test('unauthorized or malformed comments cannot start real execution', async () 
   assert.equal(workflowEngine.runCalls.length, 1);
 });
 
+test('latest exact human decision wins when approve and reject both exist before polling', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const record = await queue.tick();
+  channel.addUserComment(issue.number, { id: 7, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  channel.addUserComment(issue.number, { id: 8, login: 'palgarra14-del', body: `/agent reject ${record.pendingApproval.fingerprint}` });
+
+  const rejected = await queue.tick();
+  assert.equal(rejected.status, 'rejected');
+  assert.match(rejected.reason, /^rejected_by:/);
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
+});
+
 test('issue edits invalidate accepted request fingerprint before any real execution', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   await queue.tick();
