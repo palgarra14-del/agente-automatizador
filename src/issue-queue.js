@@ -613,6 +613,28 @@ export class SupervisedIssueQueue {
       }
       if (record.pendingApproval.kind === 'workflow-step') {
         const workflow = await this.workflowEngine.get(record.workflowId);
+        const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
+        if (!stepNeedsHumanApproval(targetStep)) {
+          const proof = await this.historicalApproval(issue.number, record.pendingApproval.fingerprint);
+          if (proof && targetStep?.status === WorkflowStepStatus.COMPLETED) {
+            const currentBeforeRecovery = await this.revalidateCurrentRequest(issue, record);
+            if (!currentBeforeRecovery.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecovery.reason);
+            issue = currentBeforeRecovery.issue;
+            record = await this.saveRecord(key, {
+              ...record,
+              status: 'running',
+              reason: 'workflow_approval_already_applied',
+              pendingApproval: null,
+              updatedAt: this.now()
+            });
+            const result = await this.workflowEngine.run(record.workflowId);
+            return this.settleWorkflow(issue, key, record, result);
+          }
+          const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent workflow approval state diverged from the pending queue checkpoint. Manual inspection is required; the approval will not be replayed.');
+          return next;
+        }
         const expected = workflowApprovalFingerprint({ requestFingerprint: record.requestFingerprint, workflow, stepId: record.pendingApproval.stepId });
         if (expected !== record.pendingApproval.fingerprint) {
           const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null };
