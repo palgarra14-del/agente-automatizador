@@ -473,18 +473,18 @@ export class SupervisedIssueQueue {
   async processExisting(issue, parsed, record) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
-    try {
-      validateIssueQueueRecord(record, { issue, requestFingerprint: parsed.requestFingerprint });
-    } catch (error) {
-      const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
-      return next;
-    }
     if (parsed.requestFingerprint !== record.requestFingerprint) {
       const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null };
       await this.saveRecord(key, next);
       await this.post(issue.number, 'Agent request blocked: the issue body changed after the request fingerprint was accepted. Create a new request instead of editing an approved one.');
+      return next;
+    }
+    try {
+      validateIssueQueueRecord(record, { issue });
+    } catch (error) {
+      const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      await this.post(issue.number, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
       return next;
     }
 
