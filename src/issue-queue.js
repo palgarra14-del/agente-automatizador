@@ -1006,7 +1006,7 @@ export class SupervisedIssueQueue {
               : targetStep?.evidence?.sensitiveApproval?.approvedDependencyEvidenceFingerprint ?? targetStep?.evidence?.approvedDependencyEvidenceFingerprint;
             let currentDependencyFingerprint = null;
             try { currentDependencyFingerprint = targetStep ? humanApprovalDependencyFingerprint(workflow, targetStep.id) : null; }
-            catch { currentDependencyFingerprint = null; }
+            catch {}
             const appliedState = targetStep?.status === WorkflowStepStatus.COMPLETED || targetStep?.status === WorkflowStepStatus.READY;
             if (appliedState &&
                 externalFingerprint === record.pendingApproval.fingerprint &&
