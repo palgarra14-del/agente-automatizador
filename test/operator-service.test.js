@@ -104,6 +104,20 @@ test('service installation rejects symlink targets and rolls back failed activat
     );
     await rm(serviceFile, { force: true });
 
+    const repositoryLink = join(home, 'repository-link');
+    await symlink(repositoryRoot, repositoryLink, 'dir');
+    await assert.rejects(
+      installOperatorService({
+        repositoryRoot: repositoryLink,
+        nodePath: '/usr/bin/node',
+        home,
+        platform: 'linux',
+        processRunner: async () => ({ exitCode: 0, timedOut: false, stdout: '', stderr: '' }),
+        tokenResolver: async () => 'token'
+      }),
+      /repositoryRoot must not traverse symlinks/
+    );
+
     const calls = [];
     await assert.rejects(
       installOperatorService({
