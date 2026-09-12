@@ -47,6 +47,12 @@ export function buildOperatorServiceUnit({ repositoryRoot, nodePath = process.ex
   ].join('\n');
 }
 
+function validatedToken(value) {
+  const token = typeof value === 'string' ? value.trim() : '';
+  if (!token || Buffer.byteLength(token, 'utf8') > 16 * 1024 || /\s/.test(token)) throw new Error('GitHub authentication did not return one bounded token');
+  return token;
+}
+
 async function rawGhToken({ spawnImpl = spawn, environment = process.env, timeoutMs = 10_000 } = {}) {
   return new Promise((resolveToken, reject) => {
     const child = spawnImpl('gh', ['auth', 'token'], {
@@ -55,6 +61,7 @@ async function rawGhToken({ spawnImpl = spawn, environment = process.env, timeou
       env: Object.fromEntries(['HOME', 'PATH', 'XDG_CONFIG_HOME', 'LANG', 'LC_ALL'].flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]]))
     });
     let stdout = '';
+    let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
     const finish = (error, token = null) => {
@@ -69,22 +76,22 @@ async function rawGhToken({ spawnImpl = spawn, environment = process.env, timeou
       finish(new Error('gh auth token timed out'));
     }, timeoutMs);
     child.stdout.on('data', (chunk) => {
-      if (Buffer.byteLength(stdout) < 16 * 1024) stdout += chunk.toString('utf8');
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= 16 * 1024) stdout += chunk.toString('utf8');
     });
     child.stderr.on('data', (chunk) => { stderrBytes += chunk.length; });
     child.on('error', () => finish(new Error('gh is unavailable for GitHub authentication')));
     child.on('close', (code) => {
-      const token = stdout.trim();
-      if (code !== 0 || !token || /\s/.test(token)) return finish(new Error(`gh auth token failed${stderrBytes ? ' with diagnostic output' : ''}`));
-      finish(null, token);
+      if (code !== 0 || stdoutBytes > 16 * 1024) return finish(new Error(`gh auth token failed${stderrBytes ? ' with diagnostic output' : ''}`));
+      try { finish(null, validatedToken(stdout)); }
+      catch (error) { finish(error); }
     });
   });
 }
 
 export async function resolveGitHubToken({ environment = process.env, tokenReader = rawGhToken } = {}) {
-  const configured = environment.GITHUB_TOKEN?.trim();
-  if (configured) return configured;
-  return tokenReader({ environment });
+  if (environment.GITHUB_TOKEN !== undefined) return validatedToken(environment.GITHUB_TOKEN);
+  return validatedToken(await tokenReader({ environment }));
 }
 
 async function runSystemctl(args, { processRunner } = {}) {
@@ -115,7 +122,7 @@ export async function installOperatorService({
   const root = safeServicePath(resolve(repositoryRoot ?? '.'), 'repositoryRoot');
   const serviceDir = safeServicePath(join(home, '.config', 'systemd', 'user'), 'serviceDir');
   const serviceFile = safeServicePath(join(serviceDir, SERVICE_NAME), 'serviceFile');
-  await tokenResolver();
+  validatedToken(await tokenResolver());
   await mkdir(serviceDir, { recursive: true, mode: 0o700 });
   await assertWritableServiceTarget(serviceFile);
   const unit = buildOperatorServiceUnit({ repositoryRoot: root, nodePath });
