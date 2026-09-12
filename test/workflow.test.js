@@ -1468,6 +1468,54 @@ test('workflow model usage is attributed across read-only specialists', async ()
   ]);
 });
 
+test('workflow rejects superficially successful but ungrounded inspect evidence before any human checkpoint', async () => {
+  const configured = configFrom({
+    id: 'ungrounded-readonly',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls += 1;
+      if (request.skill !== 'code.inspect') throw new Error('diagnose must not run after ungrounded inspection');
+      return {
+        ok: true,
+        status: 'completed',
+        outputBytes: 20,
+        result: {
+          inspectionEvidence: {
+            status: 'blocked',
+            filesInspected: [],
+            findings: [],
+            limitations: ['repository listing blocked'],
+            goalAssessment: 'unable to inspect'
+          }
+        }
+      };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Ground inspection', budgets: { maxAttempts: 2 } });
+  const failed = await instance.run(created.id);
+  const inspect = failed.steps.find((step) => step.id === 'inspect-project');
+  const checkpoint = failed.steps.find((step) => step.id === 'plan-change');
+
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'skill_executor_attempt_budget_exhausted');
+  assert.equal(failed.result.stepId, 'inspect-project');
+  assert.equal(inspect.attempts, 2);
+  assert.match(inspect.evidence.error, /inspectionEvidence contains unknown fields/);
+  assert.notEqual(checkpoint.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(calls, 2);
+});
+
 test('read-only skill executor retries within workflow attempt budget and persists bounded failure evidence', async () => {
   const configured = configFrom({
     id: 'readonly-retry',
