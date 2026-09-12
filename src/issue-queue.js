@@ -1199,7 +1199,11 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
         resolveSleep();
       };
       timer = setTimeout(finish, pollIntervalMs);
-      signal?.addEventListener?.('abort', finish, { once: true });
+      if (signal) {
+        if (signal.aborted) return finish();
+        signal.addEventListener?.('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      }
     });
   }
 }
