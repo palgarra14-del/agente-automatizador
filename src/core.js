@@ -1015,7 +1015,9 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     }
     if (step.skill === 'website.plan') {
       const normalizedPlan = normalizeWebsitePlan(step.evidence.result?.websitePlan);
+      const primaryLocationInvalid = normalizedPlan.seo.primaryLocation && !plan.input.businessBrief.locations.includes(normalizedPlan.seo.primaryLocation);
       if (
+        primaryLocationInvalid ||
         JSON.stringify(step.evidence.result.websitePlan) !== JSON.stringify(normalizedPlan) ||
         step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
         step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
