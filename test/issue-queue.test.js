@@ -474,7 +474,7 @@ test('authorized approvals drive workflow checkpoints without bypassing Workflow
   const awaitingPlan = workflowPlan();
   awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
   awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
-  awaitingPlan.steps[0].evidence = { ok: true };
+  awaitingPlan.steps[0].evidence = { result: { ok: true } };
   awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
   workflowEngine.realRunResult = awaitingPlan;
 
@@ -701,7 +701,7 @@ test('stale start approval is blocked if persisted workflow planning context cha
   channel.addUserComment(issue.number, { id: 20, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
   const blocked = await queue.tick();
   assert.equal(blocked.status, 'blocked');
-  assert.equal(blocked.reason, 'start_approval_stale');
+  assert.equal(blocked.reason, 'workflow_binding_mismatch');
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
 });
 
