@@ -3499,3 +3499,18 @@ test('implementation fails if git control state changes even when normal diff is
   assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
   assert.match(implementation.evidence.error, /repository_control_state_changed/);
 });
+
+test('initial external approval wait can reset a pristine workflow runtime budget exactly once state is still pristine', async () => {
+  let now = 1_000_000;
+  const workflowEngine = await engine({ now: () => now });
+  const created = await workflowEngine.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'bounded change' });
+  const originalDeadline = created.deadlineAt;
+  now = originalDeadline + 60_000;
+
+  const reset = await workflowEngine.resetPristineDeadline(created.id);
+  assert.equal(reset.deadlineAt, now + reset.budgets.timeoutMs);
+  assert.equal(reset.status, WorkflowStepStatus.PENDING);
+
+  await workflowEngine.update(created.id, (saved) => { saved.outputBytes = 1; });
+  await assert.rejects(() => workflowEngine.resetPristineDeadline(created.id), /workflow_not_pristine_for_start_deadline_reset/);
+});
