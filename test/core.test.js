@@ -667,6 +667,33 @@ test('worker prompt redacts secrets and Codex SDK receives isolated permission-p
   assert.equal(buildWorkerPrompt({ authorization: 'Bearer abcdef123456' }).includes('abcdef123456'), false);
 });
 
+test('website coding prompt forbids fabricated business claims and preserves brief restrictions', () => {
+  const prompt = buildWorkerPrompt({
+    objective: 'Create a professional local website',
+    websiteBuild: {
+      businessBrief: {
+        businessName: 'Fontanería Ejemplo',
+        facts: ['Atención en Madrid'],
+        contentRestrictions: ['No afirmar servicio 24 horas']
+      },
+      websitePlan: { missingInputs: ['Años de experiencia', 'Precios'] },
+      assetEvidence: { assets: [{ path: 'public/logo.png', sha256: 'a'.repeat(64) }] }
+    }
+  });
+  for (const required of [
+    'complete authoritative source of business facts',
+    'Do not invent or imply testimonials',
+    'prices',
+    'guarantees',
+    'certifications',
+    'opening hours',
+    'websitePlan.missingInputs',
+    'contentRestrictions',
+    'verified asset paths'
+  ]) assert.ok(prompt.includes(required), required);
+  assert.ok(prompt.includes('No afirmar servicio 24 horas'));
+});
+
 test('default worker environment excludes GitHub, Vercel, and OpenAI credentials', async () => {
   let clientEnvironment;
   class FakeCodex {
