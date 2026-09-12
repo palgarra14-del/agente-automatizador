@@ -14,7 +14,7 @@ The evaluation requires successful worker completion, a governed diff, configure
 
 Each configured project receives a normalized skill allow/deny policy. Deny wins over allow. A project-policy fingerprint and registry fingerprint are persisted on both Orchestrator runs and workflow plans; resume fails closed if either changes. The Orchestrator performs a lifecycle preflight before real work and also enforces individual skill gates immediately before workspace preparation, bootstrap/check execution, coding, push/PR publication, CI observation, preview observation, and human approval. Workflow execution resolves the visible step skill plus infrastructure skills such as `workspace.prepare` and `project.bootstrap` before clone/install.
 
-The registry distinguishes `workflow` and `orchestrator` surfaces. v0.8 binds reviewed workflow executors for `code.inspect`, `code.diagnose`, and the app-improvement `code.implement` path. Future research, visual review, requirements, and data-analysis capabilities remain declared but unavailable until reviewed executors exist.
+The registry distinguishes `workflow` and `orchestrator` surfaces. Reviewed WorkflowEngine executors now cover `code.inspect`, `code.diagnose`, governed `code.implement`, independent `code.review`, and v0.13's read-only `website.plan`. Web research, automatic visual review, and data-analysis model execution remain unavailable until reviewed executors exist.
 
 ## v0.8 execution integration
 
@@ -57,6 +57,16 @@ The app-improvement graph is now `inspect → diagnose → plan approval → imp
 Dependency manifests and lockfiles are recognized at the repository root and in nested workspace paths. Approved dependency metadata triggers `project.dependencies.refresh`, owned by the dedicated `dependency-manager` specialist. The configured command is validated twice—at config load and immediately before execution—and may only be `npm ci --ignore-scripts` or `pnpm install --frozen-lockfile --ignore-scripts` for the configured toolchain. The stage requires `container-required`; local-sanitized execution is denied.
 
 Docker network access remains denied for ordinary post-worker commands. The only post-worker network exception is the explicit `dependency-refresh` stage, and only the `dependencyRefresh` command may enter it. Completion persists and validates observed execution evidence (`provider=container`, `stage=dependency-refresh`, explicit refresh-network label). The before/after workspace snapshots must be identical, covering repository identity, branch/HEAD, Git controls, governed diff fingerprint, and protected ignored files. Package-manager control files (`.npmrc`, `.pnpmfile.cjs`, `pnpm-workspace.yaml`, Yarn rc files) are immutable/protected so a model cannot redirect registry or resolver behavior before this networked stage. No lifecycle scripts are allowed.
+
+## v0.13 structured website-build boundary
+
+`website-build` is a registered-project workflow, not an arbitrary repository generator. Creation requires normalized `input.businessBrief`; the plan persists the normalized brief plus a SHA-256 fingerprint and fails closed if either is later changed. The CLI accepts the brief only from a regular non-symlink JSON file up to 64 KiB.
+
+Before `website.plan`, declared logo/photo paths are resolved inside the managed workspace, checked through the safe path chain, required to be regular non-symlink files, bounded to 20 MiB each / 200 MiB total, streamed through SHA-256, and persisted as asset evidence. This happens before model-call reservation. The read-only planner runs with web search disabled and receives the brief, its fingerprint, verified asset evidence, and repository context. Its strict plan schema covers pages, design, conversion, SEO, implementation constraints, and missing inputs. Unsupported primary SEO locations fail context validation rather than becoming persisted plan state.
+
+The website graph is `requirements → design approval → implementation → dependency refresh → change critic → quality → human visual approval → release approval → publication`. Design approval stores the exact website-plan fingerprint. Before implementation the engine re-hashes assets and blocks if they changed; the coding task receives the business brief, approved plan, and bound fingerprints. Completion evidence is validated against the same brief/plan/assets. Sensitive package changes reuse v0.12 approval and frozen refresh without rerunning the coding worker.
+
+The critic must PASS the exact implementation diff before quality commands run. Quality is test/typecheck/lint/build and continuous change-set governance rejects any command-induced drift. The visual checkpoint and release checkpoint each bind to the reviewed change-set fingerprint. Publication reuses v0.11 commit/push/PR/CI/preview and still exposes no merge or production method. v0.13 deliberately leaves browser-based visual inspection to a later reviewed capability; human visual approval is not represented as automated visual QA.
 
 ## Adapters
 
