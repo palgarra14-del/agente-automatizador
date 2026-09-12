@@ -631,8 +631,10 @@ export class SupervisedIssueQueue {
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      const existing = await this.getRecord(this.requestKey(issue));
+      if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
       const result = await this.processIssue(issue);
-      if (result && !['completed', 'failed', 'blocked', 'rejected'].includes(result.status)) return result;
+      if (result) return result;
     }
     return null;
   }
