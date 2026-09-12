@@ -8,8 +8,8 @@ export function normalizeIssueQueueConfig(value) {
   assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs']), 'issue queue config');
   if (value.version !== 1) throw new Error('issue queue config version must be 1');
   assertObjectKeys(value.repository, new Set(['owner', 'name']), 'issue queue config repository');
-  const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 });
-  const name = boundedString(value.repository.name, 'issue queue repository name', { required: true, max: 100 });
+  const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 }).toLowerCase();
+  const name = boundedString(value.repository.name, 'issue queue repository name', { required: true, max: 100 }).toLowerCase();
   if (!Array.isArray(value.allowedActors) || value.allowedActors.length < 1 || value.allowedActors.length > 20) throw new Error('issue queue allowedActors must contain between 1 and 20 logins');
   const allowedActors = [...new Set(value.allowedActors.map((actor, index) => boundedString(actor, `issue queue allowedActors[${index}]`, { required: true, max: 80 }).toLowerCase()))].sort();
   const pollIntervalMs = value.pollIntervalMs ?? 15_000;
@@ -303,7 +303,10 @@ export class GitHubIssueChannel {
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 || requestTimeoutMs > 120_000) throw new Error('issue channel requestTimeoutMs must be between 1000 and 120000');
     this.token = token;
     this.fetch = fetchImpl;
-    this.repository = { owner: repository.owner, name: repository.name };
+    this.repository = {
+      owner: boundedString(repository.owner, 'issue channel repository owner', { required: true, max: 100 }).toLowerCase(),
+      name: boundedString(repository.name, 'issue channel repository name', { required: true, max: 100 }).toLowerCase()
+    };
     this.requestTimeoutMs = requestTimeoutMs;
   }
 
