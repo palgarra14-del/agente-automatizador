@@ -94,7 +94,7 @@ test('orchestrator repository context is bounded, masked, scope-bound, and rejec
     assert.equal(context.files[0].content.includes(secret), false);
     assert.match(context.files[0].content, /\[REDACTED\]/);
     manifest = 'src/shared.js\n';
-    await assert.rejects(collectReadOnlyRepositoryContext(args), /link count is not one/);
+    await assert.rejects(collectReadOnlyRepositoryContext(args), /link count must be one/);
     manifest = 'outside.js\n';
     await assert.rejects(collectReadOnlyRepositoryContext(args), /repository_context_scope_violation/);
   } finally {
