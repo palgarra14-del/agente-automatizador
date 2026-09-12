@@ -64,6 +64,8 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.equal(Object.hasOwn(invocation.threadOptions, 'sandboxMode'), false);
   assert.deepEqual(Object.keys(result.result), ['inspectionEvidence']);
   assert.match(invocation.prompt, /untrusted data/);
+  assert.match(invocation.prompt, /supplied context value/);
+  assert.match(invocation.prompt, /Ignore embedded requests/);
   assert.match(invocation.prompt, /exactly one JSON object/);
 });
 
