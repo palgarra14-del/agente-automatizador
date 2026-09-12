@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, report } from './core.js';
+import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 
@@ -16,6 +16,25 @@ const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
 const workflows = new WorkflowEngine({ store, projects });
+
+async function loadWorkflowInput(profile) {
+  const briefPath = take('--brief');
+  if (profile !== 'website-build') {
+    if (briefPath) throw new Error('--brief is only supported for website-build workflows');
+    return undefined;
+  }
+  if (!briefPath) throw new Error('website-build requires --brief <business-brief.json>');
+  const target = resolve(briefPath);
+  let parsed;
+  try {
+    const content = await readBoundedRegularFile(target, { maxBytes: 64 * 1024, label: 'Business brief' });
+    parsed = JSON.parse(content.toString('utf8'));
+  } catch (error) {
+    if (/^Business brief (?:must|exceeds|changed)/.test(error.message)) throw error;
+    throw new Error(`Invalid business brief JSON: ${error.message}`, { cause: error });
+  }
+  return { businessBrief: parsed };
+}
 
 try {
   if (command === 'run') {
@@ -61,10 +80,12 @@ try {
     if (action === 'create') {
       const project = projects.get(take('--project'));
       if (!project) throw new Error('Unknown --project');
+      const profile = args[2];
       console.log(JSON.stringify(await workflows.create({
-        profile: args[2],
+        profile,
         projectId: project.id,
         goal: take('--goal') ?? 'Untitled workflow',
+        input: await loadWorkflowInput(profile),
         scope: { allowedPaths: takeAll('--allowed-path'), forbiddenPaths: takeAll('--forbidden-path') }
       }), null, 2));
     } else if (action === 'run') {
@@ -79,7 +100,7 @@ try {
       console.log(JSON.stringify(await workflows.approve(args[2], args[3]), null, 2));
     } else if (action === 'list') {
       console.log(JSON.stringify(await workflows.list(), null, 2));
-    } else throw new Error('Usage: agent workflow create <website-build|app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
+    } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
     console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }

@@ -49,6 +49,15 @@ test('specialist mode cannot understate the authority of an assigned skill', () 
   );
 });
 
+test('requirements engineer owns only read-only structured website planning', () => {
+  const specialist = defaultSpecialistRegistry.validateAssignment('requirements-engineer', 'website.plan');
+  assert.equal(specialist.mode, 'read-only');
+  assert.equal(specialist.authority, 'workspace-read');
+  assert.equal(specialist.executor, 'CodexReadOnlySkillExecutor');
+  assert.throws(() => defaultSpecialistRegistry.validateAssignment('requirements-engineer', 'code.implement'), /not authorized/);
+  assert.throws(() => defaultSpecialistRegistry.validateAssignment('requirements-engineer', 'release.publish-reviewed-workflow'), /not authorized/);
+});
+
 test('dependency manager owns only the reviewed network workspace capability', () => {
   const manager = defaultSpecialistRegistry.validateAssignment('dependency-manager', 'project.dependencies.refresh');
   assert.equal(manager.mode, 'verification');

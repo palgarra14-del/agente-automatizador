@@ -26,6 +26,16 @@ Specialist identity is evidence, not a permission source. Project skill policy r
 
 Model-use accounting is also fail-closed. Saved runs/workflows must contain a model ledger whose maximum matches the active project configuration. Calls are reserved before execution; retries consume additional reservations; exceeding the cap stops before another model-backed executor runs. Reported token counts are evidence only and are never trusted to reduce the call count.
 
+## Structured website input and planning boundary
+
+`website-build` accepts business data only through a bounded structured brief. Unknown fields, excessive lengths/counts, repository path escapes, and malformed brand colors are rejected before execution. The CLI reads the brief through a stable regular-file handle with size/identity/version checks rather than a separate check-then-read path. The normalized brief and its fingerprint are persisted as workflow evidence. Secret-shaped keys/values still pass through structured redaction, and all supplied brief/plan/evidence text is explicitly treated as untrusted data by model prompts.
+
+Declared website assets are not trusted merely because the brief names them. Before the planner consumes a model call, each asset must resolve inside the managed workspace without a symlink chain, be a regular file, remain within size budgets, and receive a SHA-256 fingerprint. Assets are re-read before implementation; any substitution after design approval blocks before the coding worker starts.
+
+`website.plan` uses the same isolated read-only Codex boundary as other analysis skills, with network/web search disabled. The prompt forbids unsupported testimonials, credentials, awards, guarantees, pricing, clients, service areas, and similar claims, while the output schema requires a `missingInputs` channel. Deterministic context validation additionally prevents the planner from selecting a primary SEO location absent from the supplied business locations. The requirements specialist has read-only authority only and cannot implement or publish.
+
+Human design approval is tied to the plan fingerprint. Release-readiness approval is tied to the independently reviewed implementation fingerprint and authorizes review-only publication, not merge or production. For website builds, publication must produce successful CI and a usable READY non-production preview for the exact commit. Human visual approval occurs only afterward and is bound simultaneously to the implementation fingerprint, published commit SHA, and exact preview URL. A modified persisted approval cannot authorize a different plan, diff, commit, or preview. Visual review remains human in v0.13; no browser automation is silently implied.
+
 ## Governed dependency-refresh boundary
 
 Network access after the coding worker is exceptional, not general. `project.dependencies.refresh` is workflow-only and has a dedicated `dependency-manager` authority. It is evaluated only when the approved implementation changes a root or nested package manifest/lockfile. Normal changes complete the stage as a no-op before capability resolution, so they do not acquire network authority.
@@ -42,7 +52,7 @@ Publication requires a managed workspace and an `agent/<workflowId>` branch crea
 
 The external-write sequence is persisted around each irreversible phase. If execution is interrupted while commit, push, or PR creation may have occurred, state becomes uncertain and cannot be approved/retried automatically. Only CI/preview observations are safe to resume; they do not repeat commit/push/PR and first revalidate the remote branch and PR against the recorded commit SHA.
 
-A completed publication requires exact commit-path/fingerprint evidence, remote-branch SHA equality, an open PR with exact head/base identity, successful CI, and—when required by project acceptance—a READY preview for that same non-production commit/branch. Publication completion never implies merge or production deployment.
+A completed publication requires exact commit-path/fingerprint evidence, remote-branch SHA equality, an open PR with exact head/base identity, and successful CI. Website builds additionally require a READY preview with a non-empty URL for that same non-production commit/branch regardless of looser project acceptance settings; without it the visual checkpoint is unreachable. Publication completion never implies merge or production deployment.
 
 ## Git and paths
 

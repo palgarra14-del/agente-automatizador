@@ -81,6 +81,17 @@ test('capability resolution distinguishes policy, binding, and execution surface
   assert.equal(research.reason, 'skill_not_allowed');
 });
 
+test('website planning is workflow-only read authority and does not grant implementation or publication', () => {
+  const configured = configuredProject({ skills: { allow: ['website.plan'], deny: [] } });
+  const capability = defaultToolSkillRegistry.resolve(configured, 'website.plan', { surface: 'workflow' });
+  assert.equal(capability.available, true);
+  assert.equal(capability.risk, 'workspace-read');
+  assert.deepEqual(capability.tools.map((tool) => tool.id), ['analysis-worker']);
+  assert.equal(defaultToolSkillRegistry.resolve(configured, 'website.plan', { surface: 'orchestrator' }).available, false);
+  assert.equal(defaultToolSkillRegistry.resolve(configured, 'code.implement', { surface: 'workflow' }).available, false);
+  assert.equal(defaultToolSkillRegistry.resolve(configured, 'release.publish-reviewed-workflow', { surface: 'workflow' }).available, false);
+});
+
 test('dependency refresh capability is workflow-only and keeps network authority explicit', () => {
   const project = configuredProject({
     commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },

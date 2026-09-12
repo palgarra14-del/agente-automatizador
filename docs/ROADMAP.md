@@ -56,7 +56,7 @@ Reviewed Workflow Publication extends the app-improvement Definition of Done wit
 
 Publication is encapsulated behind one workflow-only `workflow-publication` authority. Low-level Git/GitHub/Vercel tools remain on the Orchestrator surface. Commit/push/PR phases persist before and after external writes; interrupted external-write state is never replayed automatically. CI/preview observation timeouts may resume without repeating writes. Merge, production deployment, domains, environment variables, secrets, and destructive/data actions remain unavailable to WorkflowEngine.
 
-Browser/research/data-analysis executors remain deferred.
+Browser/research/data-analysis executors remain deferred; v0.13 activates only the offline structured website-planning executor.
 
 ### Post-v0.11 audit
 
@@ -71,6 +71,14 @@ Governed Sensitive & Dependency Changes closes the dependency-change dead end in
 If the approved diff changes a package manifest or lockfile, the deterministic `dependency-refresh` stage must complete before Change Critic. It never accepts a model-generated install command: configuration is limited to the exact frozen no-lifecycle-script npm/pnpm command, requires `container-required`, and enables network only for that stage. The workspace snapshot must be unchanged after the refresh and completion evidence must attest the real Docker provider/stage/network boundary. Package-manager control files such as `.npmrc`, `.pnpmfile.cjs`, `pnpm-workspace.yaml`, and Yarn rc files are immutable/protected so the worker cannot redirect the networked resolver. Nested workspace manifests and lockfiles are governed too.
 
 Projects without a reviewed lockfile/refresh command fail closed rather than improvising dependency installation. Normal changes execute a deterministic no-op dependency stage and gain no network authority. Merge and production deployment remain unavailable.
+
+## v0.13 — in progress
+
+Structured Website Build turns the previously structural `website-build` profile into a governed executable path for explicitly registered website repositories. The workflow accepts a strict local business brief through a bounded stable file-handle read, fingerprints it, verifies and hashes declared repository-local assets through stable validated handles, and invokes an offline read-only `website.plan` specialist. The planner has a strict output schema and anti-fabrication contract; its SEO primary location must come from the supplied business locations. Design approval is bound to the exact plan fingerprint. The coding worker revalidates brief/plan/approval/assets, treats supplied business data as untrusted context, and must not invent unsupported claims; assets are checked again after the worker.
+
+After implementation, website builds reuse the v0.12 dependency-refresh boundary and an independent Change Critic that receives the authoritative brief/plan/asset evidence and must review the exact current diff. All four deterministic quality commands—test, typecheck, lint, build—are mandatory. A fingerprint-bound release-readiness checkpoint permits v0.11 review publication; successful CI and a usable READY non-production preview for the exact commit are mandatory for website builds. The human visual checkpoint comes last and is bound to the reviewed change-set fingerprint, published commit SHA, and exact preview URL. A normal happy path uses three model calls: website planner, implementer, and critic.
+
+This version intentionally does **not** add web research, browser/computer-use visual inspection, Lighthouse automation, automatic merge, production deployment, domains, environment-variable mutation, or secret writes. It is a governed website factory core, not yet the final hands-off website factory.
 
 ## Deferred
 
