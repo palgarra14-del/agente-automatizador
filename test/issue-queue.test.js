@@ -624,6 +624,35 @@ test('applied workflow approval recovers after a crash without replaying approva
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 2);
 });
 
+test('checkpoint crash recovery fails closed if dependency evidence changed after the approved pre-state', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { basis: 'approved-original' } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 90, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+  const checkpointToken = record.pendingApproval.fingerprint;
+
+  channel.addUserComment(issue.number, { id: 91, login: 'palgarra14-del', body: `/agent approve ${checkpointToken}` });
+  const forgedAfterCrash = clone(awaitingPlan);
+  forgedAfterCrash.status = WorkflowStepStatus.PENDING;
+  forgedAfterCrash.steps[0].evidence = { result: { basis: 'tampered-after-approval' } };
+  forgedAfterCrash.steps[1].status = WorkflowStepStatus.COMPLETED;
+  forgedAfterCrash.steps[1].evidence = { approvedAt: '2026-09-12T00:00:00.000Z' };
+  workflowEngine.plan = forgedAfterCrash;
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'workflow_approval_recovery_mismatch');
+  assert.equal(workflowEngine.approveCalls.length, 0);
+});
+
 test('interrupted workflow steps require a new fingerprinted human approval after daemon restart', async () => {
   const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
   const { parsed, fields } = persistedRequestFields(queue, issue, project);
@@ -712,6 +741,41 @@ test('concurrent watchers atomically reserve a new issue and create only one wor
   const persisted = await queue.getRecord(queue.requestKey(issue));
   assert.equal(persisted.status, 'awaiting_start_approval');
   assert.equal(persisted.initializationLease, null);
+});
+
+test('malformed initialization lease is validated before liveness probing and blocks cleanly', async () => {
+  const { queue, store, issue, project } = await queueFixture();
+  const { parsed, fields } = persistedRequestFields(queue, issue, project);
+  const key = queue.requestKey(issue);
+  store.lockOwnerIsAbandoned = async () => { throw new Error('liveness probe must not run for malformed metadata'); };
+  await store.mutate((data) => {
+    data.requests = {
+      [key]: {
+        version: 1,
+        issueNumber: issue.number,
+        issueId: issue.id,
+        author: 'palgarra14-del',
+        ...fields,
+        request: parsed.request,
+        workflowId: null,
+        status: 'initializing',
+        reason: null,
+        createdAt: '2026-09-12T00:00:00.000Z',
+        updatedAt: '2026-09-12T00:00:00.000Z',
+        pendingApproval: null,
+        startApprovalFingerprint: null,
+        startApprovalCommentId: null,
+        startApprovedBy: null,
+        initializationLease: { leaseId: '', pid: 'bad', createdAt: 'invalid', ownerIdentity: null },
+        lastProcessedCommentId: 0
+      }
+    };
+  });
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'queue_state_invalid');
+  assert.equal(blocked.initializationLease, null);
 });
 
 test('abandoned initialization lease blocks instead of automatically creating a duplicate workflow', async () => {
