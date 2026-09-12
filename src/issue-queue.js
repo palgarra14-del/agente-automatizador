@@ -448,7 +448,7 @@ export class SupervisedIssueQueue {
   }
 
   async blockRequestRevalidation(issue, key, record, reason) {
-    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null };
+    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null, initializationLease: null };
     await this.saveRecord(key, next);
     await this.post(issue.number, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
     return next;
@@ -578,6 +578,26 @@ export class SupervisedIssueQueue {
     return workflow.steps.every((step, index) => index === 0 ? step.status === WorkflowStepStatus.READY : step.status === WorkflowStepStatus.PENDING);
   }
 
+  completedCheckpointMatchesPendingApproval(record, workflow, stepId) {
+    const target = workflow.steps.find((candidate) => candidate.id === stepId);
+    if (!target || target.type !== 'checkpoint' || target.status !== WorkflowStepStatus.COMPLETED || !target.evidence?.approvedAt) return false;
+    const reconstructed = JSON.parse(JSON.stringify(workflow));
+    const reconstructedTarget = reconstructed.steps.find((candidate) => candidate.id === stepId);
+    reconstructed.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    reconstructedTarget.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    reconstructedTarget.error = null;
+    reconstructedTarget.evidence = null;
+    const expected = workflowApprovalFingerprint({
+      requestFingerprint: record.requestFingerprint,
+      issueBodyFingerprint: record.issueBodyFingerprint,
+      projectFingerprint: record.projectFingerprint,
+      controlPlaneFingerprint: record.controlPlaneFingerprint,
+      workflow: reconstructed,
+      stepId
+    });
+    return expected === record.pendingApproval?.fingerprint;
+  }
+
   async persistPendingWorkflowApproval(issue, key, record, workflow) {
     const step = workflow.steps.find((candidate) => stepNeedsHumanApproval(candidate));
     if (!step) throw new Error('workflow reports human approval is needed without an approvable step');
@@ -662,22 +682,6 @@ export class SupervisedIssueQueue {
     if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
       return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
     }
-    if (record.status === 'initializing') {
-      let abandoned;
-      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
-      catch { return record; }
-      if (!abandoned) return record;
-      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
-      return next;
-    }
-    if (parsed.requestFingerprint !== record.requestFingerprint) {
-      const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent request blocked: the issue body changed after the request fingerprint was accepted. Create a new request instead of editing an approved one.');
-      return next;
-    }
     try {
       validateIssueQueueRecord(record, {
         issue,
@@ -687,9 +691,19 @@ export class SupervisedIssueQueue {
         controlPlaneFingerprint: this.controlPlaneFingerprint()
       });
     } catch (error) {
-      const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null };
+      const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null, initializationLease: null };
       await this.saveRecord(key, next);
       await this.post(issue.number, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
+      return next;
+    }
+    if (record.status === 'initializing') {
+      let abandoned;
+      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
+      catch { return record; }
+      if (!abandoned) return record;
+      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      await this.post(issue.number, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
       return next;
     }
 
@@ -774,6 +788,12 @@ export class SupervisedIssueQueue {
             return next;
           }
           if (proof?.decision === 'approve' && targetStep?.status === WorkflowStepStatus.COMPLETED) {
+            if (!this.completedCheckpointMatchesPendingApproval(record, workflow, record.pendingApproval.stepId)) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_recovery_mismatch', updatedAt: this.now(), pendingApproval: null };
+              await this.saveRecord(key, next);
+              await this.post(issue.number, 'Agent checkpoint recovery could not prove that the completed step matches the exact approved pre-state. Manual inspection is required.');
+              return next;
+            }
             const currentBeforeRecovery = await this.revalidateCurrentRequest(issue, record);
             if (!currentBeforeRecovery.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecovery.reason);
             issue = currentBeforeRecovery.issue;
