@@ -1258,6 +1258,35 @@ export class WorkflowEngine {
       before.protectedIgnored.fingerprint === after.protectedIgnored.fingerprint;
   }
 
+  async websiteAssetEvidence(project, businessBrief) {
+    const root = resolve(project.workspace);
+    const declared = [...new Set([businessBrief?.assets?.logoPath, ...(businessBrief?.assets?.photoPaths ?? [])].filter(Boolean))].sort();
+    const maxAssetBytes = 20 * 1024 * 1024;
+    const maxTotalBytes = 200 * 1024 * 1024;
+    let totalBytes = 0;
+    const assets = [];
+    for (const path of declared) {
+      const normalized = normalizeRepositoryPath(path, 'business asset path');
+      const target = resolve(root, normalized);
+      if (!isWithin(root, target)) throw new Error(`Business asset escaped workspace: ${normalized}`);
+      await assertSafePathChain(target);
+      let info;
+      try { info = await lstat(target); }
+      catch (error) {
+        if (error.code === 'ENOENT') throw new Error(`Business asset does not exist: ${normalized}`);
+        throw error;
+      }
+      if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Business asset must be a regular file: ${normalized}`);
+      if (info.size > maxAssetBytes) throw new Error(`Business asset exceeds 20 MiB: ${normalized}`);
+      totalBytes += Number(info.size);
+      if (totalBytes > maxTotalBytes) throw new Error('Business assets exceed 200 MiB total');
+      const hash = createHash('sha256');
+      for await (const chunk of createReadStream(target)) hash.update(chunk);
+      assets.push({ path: normalized, size: Number(info.size), sha256: hash.digest('hex') });
+    }
+    return { assets, totalBytes, fingerprint: evidenceFingerprint(assets) };
+  }
+
   completedContext(plan) {
     const context = {};
     for (const step of plan.steps) {
