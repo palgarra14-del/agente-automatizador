@@ -605,6 +605,7 @@ test('failed workflow terminal notification includes safe step diagnostics witho
   const record = await queue.tick();
   const failed = workflowPlan();
   failed.status = WorkflowStepStatus.FAILED;
+  failed.budgets = { maxAttempts: 2 };
   failed.result = { error: 'skill_executor_attempt_budget_exhausted', stepId: 'inspect-project' };
   failed.steps[0].status = WorkflowStepStatus.FAILED;
   failed.steps[0].attempts = 2;
