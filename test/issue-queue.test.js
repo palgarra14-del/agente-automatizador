@@ -358,7 +358,7 @@ test('issue edits invalidate accepted request fingerprint before any real execut
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.reason, 'request_body_changed');
   assert.equal(workflowEngine.runCalls.length, 1);
-  assert.match(channel.posted.at(-1).body, /no longer matches the accepted request/i);
+  assert.match(channel.posted.at(-1).body, /accepted request\/control context changed|can no longer be verified exactly/i);
 });
 
 test('formatting-only issue edits invalidate an already prepared approval', async () => {
