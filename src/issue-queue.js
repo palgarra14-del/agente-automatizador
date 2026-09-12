@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { maskSecrets, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
 
 export const ISSUE_REQUEST_MARKER = '<!-- agent-request:v1 -->';
@@ -196,7 +196,7 @@ function compactDryRun(dryRun) {
   };
 }
 
-const requestStatuses = new Set(['awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
+const requestStatuses = new Set(['initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
 
 export function validateIssueQueueRecord(record, { issue, requestFingerprint } = {}) {
   if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== 1) throw new Error('issue queue record version is invalid');
@@ -213,6 +213,10 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint } =
   }
   if (record.workflowId !== null && (typeof record.workflowId !== 'string' || !record.workflowId.trim())) throw new Error('issue queue record workflowId is invalid');
   if (record.startApprovalFingerprint !== null && record.startApprovalFingerprint !== undefined && !/^[a-f0-9]{64}$/.test(record.startApprovalFingerprint)) throw new Error('issue queue start approval fingerprint is invalid');
+  if (record.status === 'initializing') {
+    const lease = record.initializationLease;
+    if (!lease || typeof lease.leaseId !== 'string' || !lease.leaseId || !Number.isInteger(lease.pid) || lease.pid <= 0 || !Number.isFinite(Date.parse(lease.createdAt ?? ''))) throw new Error('issue queue initialization lease is invalid');
+  } else if (record.initializationLease !== null && record.initializationLease !== undefined) throw new Error('settled issue queue record cannot retain initialization lease');
   if (record.pendingApproval !== null && record.pendingApproval !== undefined) {
     if (!['start', 'workflow-step'].includes(record.pendingApproval.kind) || typeof record.pendingApproval.stepId !== 'string' || !/^[a-f0-9]{64}$/.test(record.pendingApproval.fingerprint ?? '')) throw new Error('issue queue pending approval is invalid');
   }
@@ -322,6 +326,26 @@ export class SupervisedIssueQueue {
     });
   }
 
+  async claimInitialization(issue, parsed) {
+    const key = this.requestKey(issue);
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      if (data.requests[key]) return { claimed: false, record: data.requests[key] };
+      const now = this.now();
+      const record = {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
+        requestFingerprint: parsed.requestFingerprint, request: parsed.request, workflowId: null,
+        status: 'initializing', reason: null, createdAt: now, updatedAt: now, pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null,
+        initializationLease: { leaseId: randomUUID(), pid: process.pid, createdAt: now, ownerIdentity },
+        lastProcessedCommentId: 0
+      };
+      data.requests[key] = record;
+      return { claimed: true, record };
+    });
+  }
+
   authorized(login) {
     return typeof login === 'string' && this.allowedActors.has(login.toLowerCase());
   }
@@ -332,13 +356,15 @@ export class SupervisedIssueQueue {
 
   async initializeIssue(issue, parsed) {
     if (!this.authorized(issue.user?.login)) return null;
+    const claim = await this.claimInitialization(issue, parsed);
+    if (!claim.claimed) return claim.record;
     if (!this.projects.has(parsed.request.projectId)) {
       await this.post(issue.number, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
       return this.saveRecord(this.requestKey(issue), {
         version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
         requestFingerprint: parsed.requestFingerprint, request: parsed.request, workflowId: null,
         status: 'rejected', reason: 'unknown_project', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
-        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, lastProcessedCommentId: 0
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null, lastProcessedCommentId: 0
       });
     }
     let workflow;
@@ -356,7 +382,7 @@ export class SupervisedIssueQueue {
         version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
         requestFingerprint: parsed.requestFingerprint, request: parsed.request, workflowId: workflow?.id ?? null,
         status: 'blocked', reason: 'workflow_initialization_failed', createdAt: this.now(), updatedAt: this.now(),
-        pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null,
+        pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null,
         lastProcessedCommentId: 0
       };
       await this.saveRecord(this.requestKey(issue), blocked);
@@ -371,7 +397,7 @@ export class SupervisedIssueQueue {
       pendingApproval: { kind: 'start', stepId: 'start', fingerprint: token },
       startApprovalFingerprint: token,
       startApprovalCommentId: null,
-      startApprovedBy: null,
+      startApprovedBy: null, initializationLease: null,
       lastProcessedCommentId: 0
     };
     await this.saveRecord(this.requestKey(issue), record);
@@ -493,6 +519,16 @@ export class SupervisedIssueQueue {
   async processExisting(issue, parsed, record) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
+    if (record.status === 'initializing') {
+      let abandoned = false;
+      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
+      catch { abandoned = false; }
+      if (!abandoned) return record;
+      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      await this.post(issue.number, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
+      return next;
+    }
     if (parsed.requestFingerprint !== record.requestFingerprint) {
       const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null };
       await this.saveRecord(key, next);
@@ -622,7 +658,7 @@ export class SupervisedIssueQueue {
           version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
           requestFingerprint: null, request: null, workflowId: null, status: 'rejected',
           reason: 'invalid_request', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
-          startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, lastProcessedCommentId: 0
+          startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null, lastProcessedCommentId: 0
         });
       }
       return null;
