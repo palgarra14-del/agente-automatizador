@@ -922,6 +922,7 @@ test('abandoned initialization lease blocks instead of automatically creating a 
         ...fields,
         request: parsed.request,
         workflowId: null,
+        workflowBindingFingerprint: null,
         status: 'initializing',
         reason: null,
         createdAt: '2026-09-12T00:00:00.000Z',
