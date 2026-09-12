@@ -588,6 +588,11 @@ test('watcher survives a transient queue error and processes a later tick', asyn
 });
 
 test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment writes', async () => {
+  assert.throws(() => new GitHubIssueChannel({
+    token: 'x',
+    repository: { owner: 'x', name: 'y' },
+    requestTimeoutMs: 500
+  }), /requestTimeoutMs/);
   const calls = [];
   const responses = [
     [{ id: 1, number: 1, state: 'open' }],
