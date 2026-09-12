@@ -72,13 +72,21 @@ If the approved diff changes a package manifest or lockfile, the deterministic `
 
 Projects without a reviewed lockfile/refresh command fail closed rather than improvising dependency installation. Normal changes execute a deterministic no-op dependency stage and gain no network authority. Merge and production deployment remain unavailable.
 
-## v0.13 — in progress
+## v0.13 — complete
 
 Structured Website Build turns the previously structural `website-build` profile into a governed executable path for explicitly registered website repositories. The workflow accepts a strict local business brief through a bounded stable file-handle read, fingerprints it, verifies and hashes declared repository-local assets through stable validated handles, and invokes an offline read-only `website.plan` specialist. The planner has a strict output schema and anti-fabrication contract; its SEO primary location must come from the supplied business locations. Design approval is bound to the exact plan fingerprint. The coding worker revalidates brief/plan/approval/assets, treats supplied business data as untrusted context, and must not invent unsupported claims; assets are checked again after the worker.
 
 After implementation, website builds reuse the v0.12 dependency-refresh boundary and an independent Change Critic that receives the authoritative brief/plan/asset evidence and must review the exact current diff. All four deterministic quality commands—test, typecheck, lint, build—are mandatory. A fingerprint-bound release-readiness checkpoint permits v0.11 review publication; successful CI and a usable READY non-production preview for the exact commit are mandatory for website builds. The human visual checkpoint comes last and is bound to the reviewed change-set fingerprint, published commit SHA, and exact preview URL. A normal happy path uses three model calls: website planner, implementer, and critic.
 
 This version intentionally does **not** add web research, browser/computer-use visual inspection, Lighthouse automation, automatic merge, production deployment, domains, environment-variable mutation, or secret writes. It is a governed website factory core, not yet the final hands-off website factory.
+
+## v0.14 — complete
+
+Supervised Issue Queue makes the local agent operable from a narrow GitHub control channel without moving Codex authentication into GitHub Actions. A strict allowlisted `app-improvement` issue produces a zero-write dry-run first. Exact GitHub approval comments are fingerprint-bound to the request/dry-run and to every later WorkflowEngine checkpoint. Remote requests require explicit bounded allowed paths.
+
+The queue is crash/concurrency aware: new issues are atomically reserved, abandoned initialization blocks, existing workflows retain execution leases, issue edits/stale approvals fail closed, deterministic initialization failures are not retried forever, and transient GitHub errors do not kill the watcher. Read-only CI/preview observation timeouts can resume under the existing publication rules; commit/push/PR uncertainty cannot be replayed. The queue exposes no merge or production capability.
+
+This creates the operational path for the first genuine Callflow dogfood: the agent—not ChatGPT/manual edits—should inspect, plan, implement, independently critique, verify and publish one bounded Callflow improvement under supervision. Automatic browser QA, unattended merge/production, parallel remote workers and broader request profiles remain deferred.
 
 ## Deferred
 
