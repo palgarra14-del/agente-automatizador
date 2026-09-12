@@ -1630,6 +1630,7 @@ export class WorkflowEngine {
     await this.completeWorkflowModelCall(id, modelCallId, worker.usage, worker.status === 'completed' ? 'completed' : 'failed');
     const outputBytes = Number(worker.outputBytes ?? Buffer.byteLength(String(worker.output ?? '')));
     let repositoryIntegrityError = null;
+    let websiteAssetIntegrityError = null;
     let changeSet = null;
     let protectedIgnored;
     let repositoryControl;
@@ -1642,6 +1643,14 @@ export class WorkflowEngine {
       if (protectedIgnored.fingerprint !== before.protectedIgnored.fingerprint) throw new Error('protected_ignored_state_changed');
     } catch (error) {
       repositoryIntegrityError = error;
+    }
+    if (!repositoryIntegrityError && websiteBuildContext) {
+      try {
+        const afterAssets = await this.websiteAssetEvidence(workspaceProject, runningPlan.input.businessBrief);
+        if (afterAssets.fingerprint !== websiteBuildContext.assetEvidence.fingerprint) throw new Error('website_assets_modified_during_implementation');
+      } catch (error) {
+        websiteAssetIntegrityError = error;
+      }
     }
     const workerCompleted = worker.status === 'completed';
     const hasChanges = Boolean(changeSet?.paths?.length);
@@ -1674,7 +1683,11 @@ export class WorkflowEngine {
         changeSet: changeSet ? safeJson(changeSet) : null,
         changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
         changePolicy: decision ? safeJson(decision) : null,
-        error: repositoryIntegrityError ? clip(repositoryIntegrityError.message, 1_000) : null
+        error: repositoryIntegrityError
+          ? clip(repositoryIntegrityError.message, 1_000)
+          : websiteAssetIntegrityError
+            ? clip(websiteAssetIntegrityError.message, 1_000)
+            : null
       };
       step.evidence = baseEvidence;
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
@@ -1685,6 +1698,11 @@ export class WorkflowEngine {
       } else if (repositoryIntegrityError) {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_implementation_repository_state_changed';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (websiteAssetIntegrityError) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'website_assets_modified_during_implementation';
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
       } else if (!workerCompleted && hasChanges) {
