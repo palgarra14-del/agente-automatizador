@@ -4,11 +4,50 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
+
+function businessBrief(overrides = {}) {
+  return {
+    version: 1,
+    businessName: 'Fontanería Ejemplo',
+    category: 'Fontanería',
+    summary: 'Servicio profesional de fontanería para hogares y negocios.',
+    locations: ['Madrid'],
+    services: [
+      { name: 'Reparación de fugas', description: 'Diagnóstico y reparación de fugas.' },
+      { name: 'Desatascos', description: 'Desatascos domésticos y comerciales.' }
+    ],
+    contact: { phone: '600 000 000', whatsapp: '34600000000', email: 'hola@example.test', address: 'Calle Ejemplo 1' },
+    brand: { tone: 'profesional y cercano', primaryColor: '#123456', secondaryColor: '#abcdef' },
+    website: { language: 'es', primaryGoal: 'contacto por WhatsApp', requiredPages: ['home', 'servicios', 'contacto'], requiredFeatures: ['CTA WhatsApp'] },
+    facts: ['Atención con cita previa.'],
+    contentRestrictions: ['No inventar reseñas ni años de experiencia.'],
+    assets: {},
+    ...overrides
+  };
+}
+
+function websitePlanFixture(overrides = {}) {
+  return {
+    summary: 'Web profesional local orientada a conversión.',
+    pages: [
+      { slug: '/', title: 'Inicio', purpose: 'Presentar negocio y CTA principal.', sections: ['Hero', 'Servicios', 'Confianza', 'Contacto'] },
+      { slug: '/servicios', title: 'Servicios', purpose: 'Explicar los servicios facilitados.', sections: ['Listado', 'Proceso', 'CTA'] },
+      { slug: '/contacto', title: 'Contacto', purpose: 'Facilitar contacto directo.', sections: ['Datos de contacto', 'CTA WhatsApp'] }
+    ],
+    design: { direction: 'Limpia, profesional y local.', tone: 'Profesional y cercano', colors: ['#123456', '#abcdef'], typography: 'Sans-serif legible y moderna.' },
+    conversion: { primaryCta: 'Contactar por WhatsApp', secondaryCta: 'Llamar ahora' },
+    seo: { primaryLocation: 'Madrid', keywords: ['fontanería Madrid', 'reparación de fugas'] },
+    implementation: { priorities: ['Mobile first', 'CTAs visibles', 'Accesibilidad'], constraints: ['No inventar hechos del negocio'] },
+    missingInputs: [],
+    ...overrides
+  };
+}
+
 
 function emptyChangeSet() {
   const base = { paths: [], changedFiles: 0, additions: 0, deletions: 0, diffLines: 0, changedBytes: 0, maxFileBytes: 0, sensitiveContent: false, contentFingerprint: '0'.repeat(64) };
@@ -148,10 +187,47 @@ class FakeWorkflowPublicationBridge {
 }
 
 
+test('business brief normalization is bounded, deterministic, and safe for website workflows', () => {
+  const normalized = normalizeBusinessBrief({
+    businessName: '  Fontanería Ejemplo  ',
+    category: 'Fontanería',
+    locations: [' Madrid '],
+    services: ['Fugas'],
+    contact: {},
+    brand: {},
+    website: {},
+    facts: ['Authorization: Bearer top-secret-token-value'],
+    assets: {}
+  });
+  assert.equal(normalized.businessName, 'Fontanería Ejemplo');
+  assert.deepEqual(normalized.services, [{ name: 'Fugas', description: null }]);
+  assert.equal(normalized.website.language, 'es');
+  assert.equal(normalized.facts[0].includes('top-secret-token-value'), false);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], unknown: true }), /unknown fields/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: [], services: ['S'] }), /locations must contain between 1 and 12 items/);
+  assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], assets: { logoPath: '../secret.txt' } }), /relative path/);
+});
+
+test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'website-build', project: configured, goal: 'Build business website', input: { businessBrief: businessBrief() } });
+  assert.match(plan.inputFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
+  const tampered = JSON.parse(JSON.stringify(plan));
+  tampered.input.businessBrief.businessName = 'Otro negocio';
+  assert.throws(() => validateWorkflowPlan(tampered, new Map([[configured.id, configured]])), /input fingerprint does not match/);
+});
+
 test('workflow profiles create validated deterministic plans', () => {
   for (const profile of ['website-build', 'app-improvement', 'data-analysis']) {
-    const plan = createWorkflowPlan({ profile, project: project(), goal: `Exercise ${profile}` });
-    assert.equal(validateWorkflowPlan(plan, new Set(['workflow-project'])).ok, true);
+    const configured = project();
+    const plan = createWorkflowPlan({
+      profile,
+      project: configured,
+      goal: `Exercise ${profile}`,
+      ...(profile === 'website-build' ? { input: { businessBrief: businessBrief() } } : {})
+    });
+    assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
     assert.ok(plan.steps.length > 3);
     assert.ok(plan.definitionOfDone.length > 0);
   }
@@ -851,8 +927,8 @@ test('verification steps use profile-specific command sets instead of repeating 
   assert.deepEqual(app.steps.find((step) => step.id === 'tests').commands, ['test']);
   assert.deepEqual(app.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
   const website = createWorkflowPlan({ profile: 'website-build', project: project(), goal: 'Map checks' });
-  assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint']);
-  assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, ['build']);
+  assert.deepEqual(website.steps.find((step) => step.id === 'quality').commands, ['test', 'typecheck', 'lint', 'build']);
+  assert.deepEqual(website.steps.find((step) => step.id === 'release-readiness').commands, []);
 });
 
 test('terminal workflows do not execute again', async () => {
