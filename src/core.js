@@ -1014,10 +1014,8 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
     }
     if (step.skill === 'website.plan') {
-      const normalizedPlan = normalizeWebsitePlan(step.evidence.result?.websitePlan);
-      const primaryLocationInvalid = normalizedPlan.seo.primaryLocation && !plan.input.businessBrief.locations.includes(normalizedPlan.seo.primaryLocation);
+      const normalizedPlan = validateWebsitePlanContext(step.evidence.result?.websitePlan, plan.input.businessBrief);
       if (
-        primaryLocationInvalid ||
         JSON.stringify(step.evidence.result.websitePlan) !== JSON.stringify(normalizedPlan) ||
         step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
         step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
@@ -1417,7 +1415,12 @@ export class WorkflowEngine {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
-    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, execution.ok ? 'completed' : 'failed');
+    let websitePlanContextError = null;
+    if (execution.ok && runningStep.skill === 'website.plan') {
+      try { validateWebsitePlanContext(execution.result.websitePlan, runningPlan.input.businessBrief); }
+      catch (error) { websitePlanContextError = error; }
+    }
+    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, execution.ok && !websitePlanContextError ? 'completed' : 'failed');
     let after;
     let integrityError = null;
     try { after = await this.workspaceSnapshot(workspaceProject); }
@@ -1428,10 +1431,10 @@ export class WorkflowEngine {
       saved.outputBytes += Number(execution.outputBytes ?? 0);
       step.evidence = {
         type: 'executor',
-        ok: execution.ok === true && !integrityChanged,
-        completedAt: execution.ok && !integrityChanged ? new Date().toISOString() : null,
+        ok: execution.ok === true && !integrityChanged && !websitePlanContextError,
+        completedAt: execution.ok && !integrityChanged && !websitePlanContextError ? new Date().toISOString() : null,
         ...workflowEvidenceContext(saved, step),
-        result: execution.ok && !integrityChanged ? execution.result : null,
+        result: execution.ok && !integrityChanged && !websitePlanContextError ? execution.result : null,
         codexThreadId: execution.codexThreadId ?? null,
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
@@ -1440,13 +1443,19 @@ export class WorkflowEngine {
         repositoryControlBeforeFingerprint: before.repositoryControl.fingerprint,
         repositoryControlAfterFingerprint: after?.repositoryControl?.fingerprint ?? null,
         reviewedChangeSetFingerprint,
-        ...(step.skill === 'website.plan' && execution.ok && !integrityChanged ? {
+        ...(step.skill === 'website.plan' && execution.ok && !integrityChanged && !websitePlanContextError ? {
           businessBriefFingerprint: runningPlan.inputFingerprint,
           assetEvidence: safeJson(websiteAssetEvidence),
           assetEvidenceFingerprint: websiteAssetEvidence.fingerprint,
           websitePlanFingerprint: evidenceFingerprint(execution.result.websitePlan)
         } : {}),
-        error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
+        error: integrityError
+          ? clip(integrityError.message, 1_000)
+          : integrityChanged
+            ? 'read_only_skill_modified_workspace'
+            : websitePlanContextError
+              ? clip(websitePlanContextError.message, 1_000)
+              : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
         step.status = WorkflowStepStatus.FAILED;
@@ -1458,6 +1467,11 @@ export class WorkflowEngine {
         step.error = integrityError ? 'read_only_workspace_integrity_failed' : 'read_only_skill_modified_workspace';
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id };
+      } else if (websitePlanContextError) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'website_plan_context_invalid';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id, detail: clip(websitePlanContextError.message, 1_000) };
       } else if (execution.ok && step.skill === 'code.review' && reviewEvidenceVerdict(execution.result) !== 'PASS') {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_change_review_failed';
@@ -3369,6 +3383,14 @@ function normalizeWebsitePlan(value) {
     },
     missingInputs: boundedTextList(value.missingInputs ?? [], 'websitePlan.missingInputs', { max: 30, itemMax: 300 })
   });
+}
+
+function validateWebsitePlanContext(websitePlan, businessBrief) {
+  const normalized = normalizeWebsitePlan(websitePlan);
+  if (normalized.seo.primaryLocation && !businessBrief.locations.includes(normalized.seo.primaryLocation)) {
+    throw new Error('website_plan_primary_location_not_supplied_by_brief');
+  }
+  return normalized;
 }
 
 function validateReviewEvidence(reviewEvidence) {
