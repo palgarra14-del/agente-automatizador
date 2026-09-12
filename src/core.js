@@ -982,6 +982,19 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
+      if (plan.profile === 'website-build') {
+        const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+        const design = plan.steps.find((candidate) => candidate.id === 'design');
+        if (
+          requirements?.status !== WorkflowStepStatus.COMPLETED ||
+          design?.status !== WorkflowStepStatus.COMPLETED ||
+          step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
+          step.evidence.websitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
+          step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
+          design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
+          step.evidence.assetEvidenceFingerprint !== requirements.evidence?.assetEvidenceFingerprint
+        ) throw new Error('Completed website implementation is not bound to the approved website plan and assets');
+      }
     }
     if (step.skill === 'project.dependencies.refresh') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -1492,6 +1505,65 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    let websiteBuildContext = null;
+    if ((await this.get(id)).profile === 'website-build') {
+      const websitePlanState = await this.get(id);
+      const requirements = websitePlanState.steps.find((step) => step.id === 'requirements');
+      const design = websitePlanState.steps.find((step) => step.id === 'design');
+      if (
+        requirements?.status !== WorkflowStepStatus.COMPLETED ||
+        design?.status !== WorkflowStepStatus.COMPLETED ||
+        !requirements.evidence?.result?.websitePlan ||
+        !requirements.evidence?.websitePlanFingerprint ||
+        design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint ||
+        requirements.evidence?.businessBriefFingerprint !== websitePlanState.inputFingerprint
+      ) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = 'website_implementation_prerequisites_invalid';
+          step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+      let observedAssets;
+      try { observedAssets = await this.websiteAssetEvidence(workspaceProject, websitePlanState.input.businessBrief); }
+      catch (error) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = 'website_asset_revalidation_failed';
+          step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+      if (observedAssets.fingerprint !== requirements.evidence.assetEvidenceFingerprint) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'website_assets_changed_after_plan';
+          step.evidence = {
+            type: 'governance',
+            ok: false,
+            ...workflowEvidenceContext(saved, step),
+            expectedAssetEvidenceFingerprint: requirements.evidence.assetEvidenceFingerprint,
+            observedAssetEvidenceFingerprint: observedAssets.fingerprint
+          };
+          saved.status = WorkflowStepStatus.BLOCKED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+      websiteBuildContext = {
+        businessBrief: websitePlanState.input.businessBrief,
+        businessBriefFingerprint: websitePlanState.inputFingerprint,
+        websitePlan: requirements.evidence.result.websitePlan,
+        websitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
+        approvedWebsitePlanFingerprint: design.evidence.approvedWebsitePlanFingerprint,
+        assetEvidence: observedAssets
+      };
+    }
     const reservation = await this.reserveWorkflowModelCall(id, next.id);
     if (!reservation.callId) return reservation.plan;
     const modelCallId = reservation.callId;
@@ -1520,7 +1592,8 @@ export class WorkflowEngine {
       scope: runningPlan.scope,
       inspectionEvidence: context['inspect-project'] ?? null,
       diagnosis: context.diagnose ?? null,
-      approvedPlanChange: context['plan-change'] ?? null
+      approvedPlanChange: context['plan-change'] ?? null,
+      ...(runningPlan.profile === 'website-build' ? { websiteBuild: websiteBuildContext } : {})
     }, {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
@@ -1556,6 +1629,12 @@ export class WorkflowEngine {
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
         repositoryControlFingerprint: before.repositoryControl.fingerprint,
+        ...(runningPlan.profile === 'website-build' ? {
+          businessBriefFingerprint: websiteBuildContext.businessBriefFingerprint,
+          websitePlanFingerprint: websiteBuildContext.websitePlanFingerprint,
+          approvedWebsitePlanFingerprint: websiteBuildContext.approvedWebsitePlanFingerprint,
+          assetEvidenceFingerprint: websiteBuildContext.assetEvidence.fingerprint
+        } : {}),
         workerEvidence: {
           status: worker.status,
           summary: clip(worker.summary, 1_000),
