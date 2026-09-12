@@ -939,6 +939,24 @@ test('watch loop removes abort listeners after ordinary poll sleeps', async () =
   assert.equal(signal.listeners.size, 0);
 });
 
+test('watch loop notices an abort that races with listener registration', async () => {
+  let calls = 0;
+  const signal = {
+    aborted: false,
+    listener: null,
+    addEventListener(_type, listener) {
+      this.listener = listener;
+      this.aborted = true;
+    },
+    removeEventListener() { this.listener = null; }
+  };
+  const queue = { async tick() { calls += 1; return null; } };
+
+  await watchIssueQueue(queue, { pollIntervalMs: 300_000, signal });
+  assert.equal(calls, 1);
+  assert.equal(signal.listener, null);
+});
+
 test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment writes', async () => {
   assert.throws(() => new GitHubIssueChannel({
     token: 'x',
