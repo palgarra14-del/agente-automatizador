@@ -231,6 +231,8 @@ test('v0.4 change policy marks package, workflow, and security/auth changes as s
   const governed = project();
   for (const changeSet of [
     { paths: ['package.json'], changedFiles: 1, diffLines: 1 },
+    { paths: ['apps/web/package.json'], changedFiles: 1, diffLines: 1 },
+    { paths: ['packages/ui/pnpm-lock.yaml'], changedFiles: 1, diffLines: 1 },
     { paths: ['.github/workflows/verify.yml'], changedFiles: 1, diffLines: 1 },
     { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1, sensitiveContent: true }
   ]) assert.equal(evaluateChangePolicy(governed, changeSet).classification, 'sensitive');
@@ -333,6 +335,83 @@ test('v0.5 validates explicit execution providers and configures registered proj
   assert.equal(imageIsPinned(configured.get('leadfinder').execution.image), false);
   assert.throws(() => project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim', fallbackProvider: 'local-sanitized' } }), /cannot use a host fallback/);
   assert.throws(() => project({ execution: { provider: 'container', image: 'node:22-bookworm-slim', user: 'root' } }), /numeric uid:gid/);
+});
+
+test('v0.12 dependency refresh configuration is exact, frozen, script-disabled, and container-required', () => {
+  const npm = project({
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }
+  });
+  assert.equal(npm.commands.dependencyRefresh, 'npm ci --ignore-scripts');
+
+  const pnpm = project({
+    commands: { dependencyRefresh: 'pnpm install --frozen-lockfile --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'pnpm', version: '11.19.0' },
+    execution: { provider: 'container-required', image: 'agent-node22-pnpm11:local' }
+  });
+  assert.equal(pnpm.commands.dependencyRefresh, 'pnpm install --frozen-lockfile --ignore-scripts');
+
+  assert.throws(() => project({
+    commands: { dependencyRefresh: 'npm install lodash', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }
+  }), /exact frozen no-lifecycle-script command/);
+
+  assert.throws(() => project({
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'local-sanitized' }
+  }), /requires container-required/);
+});
+
+test('v0.12 dependency refresh is the only post-worker container stage allowed to use network', () => {
+  const configured = project({
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }
+  });
+  const execution = new DockerContainerExecution();
+  const gitMetadata = join(configured.workspace, '.git');
+
+  const verification = execution.commandArguments(configured, 'test', { stage: 'post-worker', containerName: 'agent-test', gitMetadata });
+  assert.equal(verification.containerArgs[verification.containerArgs.indexOf('--network') + 1], 'none');
+  assert.equal(verification.networkEnabled, false);
+
+  const dependencyRefresh = execution.commandArguments(configured, 'dependencyRefresh', { stage: 'dependency-refresh', containerName: 'agent-deps', gitMetadata });
+  assert.equal(dependencyRefresh.containerArgs.includes('--network'), false);
+  assert.equal(dependencyRefresh.networkEnabled, true);
+  assert.equal(dependencyRefresh.stage, 'dependency-refresh');
+  assert.deepEqual(dependencyRefresh.containerArgs.slice(-4), ['node:22-bookworm-slim', 'npm', 'ci', '--ignore-scripts']);
+
+  assert.throws(
+    () => execution.commandArguments(configured, 'test', { stage: 'dependency-refresh', containerName: 'agent-bypass', gitMetadata }),
+    /only allows dependencyRefresh/
+  );
+  assert.throws(
+    () => execution.commandArguments(configured, 'dependencyRefresh', { stage: 'unknown', containerName: 'agent-bypass', gitMetadata }),
+    /Unknown execution stage/
+  );
+});
+
+test('v0.12 project command runner refuses dependency refresh if provider or frozen command is tampered after configuration', async () => {
+  const configured = project({
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }
+  });
+  const runner = new ProjectCommandRunner({
+    containerExecution: { availability: async () => ({ available: true, provider: 'container', sandboxed: true }), probe: async () => ({ available: true }), execute: async () => ({ ok: true, execution: { provider: 'container' } }) },
+    localExecution: { availability: async () => ({ available: true, provider: 'local-sanitized' }), execute: async () => ({ ok: true, execution: { provider: 'local-sanitized' } }) }
+  });
+
+  const wrongProvider = { ...configured, execution: { ...configured.execution, provider: 'local-sanitized' } };
+  await assert.rejects(runner.run(wrongProvider, 'dependencyRefresh', { stage: 'dependency-refresh' }), /requires container-required/);
+
+  const wrongCommand = { ...configured, commands: { ...configured.commands, dependencyRefresh: 'npm ci' } };
+  await assert.rejects(runner.run(wrongCommand, 'dependencyRefresh', { stage: 'dependency-refresh' }), /no longer matches the frozen policy/);
+
+  await assert.rejects(runner.run(configured, 'test', { stage: 'dependency-refresh' }), /only allows dependencyRefresh/);
 });
 
 test('v0.5 container execution mounts workspace read-write and nested git metadata read-only with no other host mounts', async () => {

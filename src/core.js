@@ -53,12 +53,16 @@ const allowedAcceptance = new Set(['install', 'test', 'typecheck', 'lint', 'buil
 const commandEnvironmentForbiddenPattern = /(token|secret|password|key|credential|auth|cookie|session)/i;
 const systemEnvironmentNames = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ProgramFiles', 'PNPM_HOME', 'COREPACK_HOME', 'PATHEXT'];
 const immutableForbiddenPathPattern = /(^|\/)(?:\.git|\.env(?:\..*)?|secrets?|credentials?|creds?)(?:\/|$)|\.(?:pem|key)$/i;
+const packageManagerControlPathPattern = /(^|\/)(?:\.npmrc|\.pnpmfile\.cjs|pnpm-workspace\.yaml|\.yarnrc(?:\.yml)?)(?:$|\/)/i;
 const sensitiveContentPattern = /\b(?:auth(?:entication|orization)?|security|password|token|secret|credential)\b/i;
-const defaultSensitivePathRoots = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json', '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
+const dependencyControlPaths = Object.freeze(['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'npm-shrinkwrap.json']);
+const dependencyControlPathPattern = /(^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|npm-shrinkwrap\.json)$/i;
+const defaultSensitivePathRoots = [...dependencyControlPaths, '.github/workflows', 'scripts', 'vercel.json', 'Dockerfile', 'deploy', 'deployment'];
 const protectedIgnoredPathspecs = Object.freeze([
-  '.env', '.env.*', '*.pem', '*.key',
+  '.env', '.env.*', '*.pem', '*.key', '.npmrc', '.pnpmfile.cjs', 'pnpm-workspace.yaml', '.yarnrc', '.yarnrc.yml',
   'secrets/**', 'credentials/**', 'creds/**',
   ':(glob)**/.env', ':(glob)**/.env.*', ':(glob)**/*.pem', ':(glob)**/*.key',
+  ':(glob)**/.npmrc', ':(glob)**/.pnpmfile.cjs', ':(glob)**/pnpm-workspace.yaml', ':(glob)**/.yarnrc', ':(glob)**/.yarnrc.yml',
   ':(glob)**/secrets/**', ':(glob)**/credentials/**', ':(glob)**/creds/**'
 ]);
 
@@ -125,6 +129,16 @@ export function normalizeRunScope(scope = {}) {
   };
 }
 
+function dependencyChangedPaths(changeSet = {}) {
+  return [...new Set((changeSet.paths ?? []).map((path) => String(path).replaceAll('\\', '/')).filter((path) => dependencyControlPathPattern.test(path)))].sort();
+}
+
+function expectedDependencyRefreshCommand(toolchain) {
+  if (toolchain.command === 'npm') return 'npm ci --ignore-scripts';
+  if (toolchain.command === 'pnpm') return 'pnpm install --frozen-lockfile --ignore-scripts';
+  return null;
+}
+
 function changePolicyFrom(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('changePolicy must be an object');
   const budgets = input.budgets ?? {};
@@ -149,7 +163,7 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
     return { ok: false, reason: 'forbidden_path:workspace_escape', paths: [], changedFiles: 0, diffLines: 0 };
   }
   const policy = project.changePolicy;
-  const forbidden = paths.find((path) => immutableForbiddenPathPattern.test(path) || pathMatchesAnyRoot(path, policy.forbiddenPaths));
+  const forbidden = paths.find((path) => immutableForbiddenPathPattern.test(path) || packageManagerControlPathPattern.test(path) || pathMatchesAnyRoot(path, policy.forbiddenPaths));
   const changeSetFingerprint = changeSet.changeSetFingerprint ?? fingerprintChangeSet(changeSet);
   if (forbidden) return { ok: false, reason: `forbidden_path:${forbidden}`, paths, changedFiles: paths.length, diffLines: changeSet.diffLines ?? 0, changeSetFingerprint };
   const scopeForbidden = paths.find((path) => pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths));
@@ -168,7 +182,7 @@ export function evaluateChangePolicy(project, changeSet, scope = {}) {
   ) {
     return { ok: false, reason: 'change_budget_exceeded', paths, changedFiles, diffLines, changedBytes, maxFileBytes, budgets: policy.budgets, changeSetFingerprint };
   }
-  const sensitivePath = paths.find((path) => pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
+  const sensitivePath = paths.find((path) => dependencyControlPathPattern.test(path) || pathMatchesAnyRoot(path, policy.sensitivePaths) || path.split('/').at(-1).startsWith('Dockerfile'));
   const sensitive = Boolean(sensitivePath || changeSet.sensitiveContent);
   return { ok: true, classification: sensitive ? 'sensitive' : 'normal', reason: sensitive ? `sensitive_change:${sensitivePath ?? 'security_or_auth_content'}` : 'normal_change', paths, changedFiles, diffLines, budgets: policy.budgets, scope: normalizedScope, changeSetFingerprint };
 }
@@ -416,6 +430,11 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
   const changePolicy = changePolicyFrom(input.changePolicy);
   const execution = executionFrom(input.execution);
   const toolchain = toolchainFrom(input.toolchain);
+  if (Object.hasOwn(input.commands, 'dependencyRefresh')) {
+    const expected = expectedDependencyRefreshCommand(toolchain);
+    if (!expected || input.commands.dependencyRefresh !== expected) throw new Error('dependencyRefresh must be the exact frozen no-lifecycle-script command for the configured toolchain');
+    if (execution.provider !== 'container-required') throw new Error('dependencyRefresh requires container-required execution');
+  }
   const skills = registry.validateProjectPolicy(input.skills ?? {});
   const budgets = input.budgets ?? {};
   const project = {
@@ -654,8 +673,8 @@ const workflowProfiles = Object.freeze({
     steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
   },
   'app-improvement': {
-    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
-    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
@@ -700,6 +719,7 @@ const workflowStepSkills = Object.freeze({
     diagnose: 'code.diagnose',
     'plan-change': 'human.approval',
     implementation: 'code.implement',
+    'dependency-refresh': 'project.dependencies.refresh',
     review: 'code.review',
     tests: 'project.verify',
     verification: 'project.verify',
@@ -732,6 +752,7 @@ const workflowStepSpecialists = Object.freeze({
     diagnose: 'diagnostician',
     'plan-change': 'human-supervisor',
     implementation: 'implementer',
+    'dependency-refresh': 'dependency-manager',
     review: 'change-critic',
     tests: 'verifier',
     verification: 'verifier',
@@ -818,11 +839,32 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     if (step.evidence.type !== 'executor' || step.evidence.ok !== true || !Number.isFinite(Date.parse(step.evidence.completedAt))) throw new Error(`Completed placeholder step requires executor evidence: ${step.id}`);
     if (step.skill === 'code.implement') {
       const repositoryState = step.evidence.repositoryState;
-      if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || step.evidence.changePolicy?.classification !== 'normal' || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
+      const classification = step.evidence.changePolicy?.classification;
+      const sensitiveApproved = classification === 'sensitive' &&
+        Number.isFinite(Date.parse(step.evidence.sensitiveApproval?.approvedAt ?? '')) &&
+        step.evidence.sensitiveApproval?.changeSetFingerprint === step.evidence.changeSetFingerprint;
+      if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || !['normal', 'sensitive'].includes(classification) || (classification === 'sensitive' && !sensitiveApproved) || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
       if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.repositoryControlFingerprint ?? '')) throw new Error(`Completed implementation step requires repository control-state evidence: ${step.id}`);
       if (plan.workspace?.path && step.evidence.workspacePath !== plan.workspace.path) throw new Error(`Completed implementation step workspace evidence does not match: ${step.id}`);
+    }
+    if (step.skill === 'project.dependencies.refresh') {
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const expectedFingerprint = implementation?.evidence?.changeSetFingerprint;
+      const expectedDependencyPaths = dependencyChangedPaths(implementation?.evidence?.changeSet ?? {});
+      if (!expectedFingerprint || step.evidence.changeSetFingerprint !== expectedFingerprint || JSON.stringify(step.evidence.dependencyPaths ?? []) !== JSON.stringify(expectedDependencyPaths)) throw new Error('Completed dependency refresh is not bound to the governed implementation');
+      if (expectedDependencyPaths.length) {
+        if (
+          step.evidence.required !== true ||
+          step.evidence.command?.name !== 'dependencyRefresh' ||
+          step.evidence.command?.ok !== true ||
+          step.evidence.execution?.provider !== 'container' ||
+          step.evidence.execution?.stage !== 'dependency-refresh' ||
+          step.evidence.execution?.postWorkerNetwork !== 'dependency-refresh-network-enabled' ||
+          step.evidence.lifecycleScripts !== 'disabled'
+        ) throw new Error('Completed dependency refresh requires successful frozen container evidence');
+      } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
     }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -935,7 +977,27 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   const awaitingApproval = plan.steps.filter((step) => step.status === WorkflowStepStatus.AWAITING_APPROVAL);
   if (running.length && plan.status !== WorkflowStepStatus.RUNNING) throw new Error('Running workflow step requires a running workflow');
   if (plan.status === WorkflowStepStatus.RUNNING && running.length !== 1) throw new Error('Running workflow must have exactly one running step');
-  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL && (awaitingApproval.length !== 1 || awaitingApproval[0].type !== 'checkpoint' || !Number.isFinite(plan.pausedAt))) throw new Error('Awaiting approval workflow must have one paused checkpoint');
+  if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL) {
+    const waiting = awaitingApproval[0];
+    const sensitiveImplementation = awaitingApproval.length === 1 &&
+      plan.profile === 'app-improvement' &&
+      waiting?.id === 'implementation' &&
+      waiting.type === 'placeholder' &&
+      waiting.skill === 'code.implement' &&
+      waiting.error === 'workflow_sensitive_change_requires_approval' &&
+      waiting.evidence?.type === 'executor' &&
+      waiting.evidence?.workerEvidence?.status === 'completed' &&
+      waiting.evidence?.changePolicy?.ok === true &&
+      waiting.evidence?.changePolicy?.classification === 'sensitive' &&
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.changeSetFingerprint ?? '') &&
+      typeof waiting.evidence?.repositoryState?.branch === 'string' &&
+      typeof waiting.evidence?.repositoryState?.head === 'string' &&
+      typeof waiting.evidence?.repositoryState?.remote === 'string' &&
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.protectedIgnoredFingerprint ?? '') &&
+      /^[a-f0-9]{64}$/i.test(waiting.evidence?.repositoryControlFingerprint ?? '');
+    const checkpoint = awaitingApproval.length === 1 && waiting?.type === 'checkpoint';
+    if ((!checkpoint && !sensitiveImplementation) || !Number.isFinite(plan.pausedAt)) throw new Error('Awaiting approval workflow must have one paused checkpoint or fingerprint-bound sensitive implementation');
+  }
   if (plan.status !== WorkflowStepStatus.AWAITING_APPROVAL && awaitingApproval.length) throw new Error('Awaiting approval step requires an awaiting approval workflow');
   if (Number.isFinite(plan.pausedAt) && ![WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) throw new Error('Workflow pause timestamp is invalid for its status');
   if (plan.status === WorkflowStepStatus.BLOCKED && Number.isFinite(plan.pausedAt)) {
@@ -1115,6 +1177,7 @@ export class WorkflowEngine {
     const reviewedImplementation = runningStep.skill === 'code.review'
       ? runningPlan.steps.find((item) => item.id === 'implementation')
       : null;
+    if (reviewedImplementation && !Object.hasOwn(priorEvidence, 'implementation')) priorEvidence.implementation = workflowDependencyEvidence(reviewedImplementation);
     const reviewedChangeSetFingerprint = reviewedImplementation?.evidence?.changeSetFingerprint ?? null;
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
@@ -1332,10 +1395,11 @@ export class WorkflowEngine {
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id, reason: decision?.reason ?? 'unknown' };
       } else if (decision.classification === 'sensitive') {
-        step.status = WorkflowStepStatus.BLOCKED;
+        step.status = WorkflowStepStatus.AWAITING_APPROVAL;
         step.error = 'workflow_sensitive_change_requires_approval';
-        saved.status = WorkflowStepStatus.BLOCKED;
-        saved.result = { error: step.error, stepId: step.id, reason: decision.reason };
+        saved.status = WorkflowStepStatus.AWAITING_APPROVAL;
+        saved.pausedAt ??= this.now();
+        saved.result = { error: step.error, stepId: step.id, reason: decision.reason, changeSetFingerprint: changeSet.changeSetFingerprint };
       } else {
         step.status = WorkflowStepStatus.COMPLETED;
         step.error = null;
@@ -1343,6 +1407,166 @@ export class WorkflowEngine {
         step.evidence.completedAt = new Date().toISOString();
         saved.status = WorkflowStepStatus.PENDING;
       }
+    });
+  }
+
+  async executeDependencyRefreshWorkflowStep(id, project, next) {
+    let plan = await this.get(id);
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    if (plan.profile !== 'app-improvement' || implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_prerequisites_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    const dependencyPaths = dependencyChangedPaths(implementation.evidence.changeSet ?? {});
+    if (!dependencyPaths.length) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.attempts += 1;
+        step.evidence = {
+          type: 'executor',
+          ok: true,
+          completedAt: new Date().toISOString(),
+          ...workflowEvidenceContext(saved, step),
+          required: false,
+          dependencyPaths: [],
+          changeSetFingerprint: implementation.evidence.changeSetFingerprint
+        };
+        saved.status = WorkflowStepStatus.PENDING;
+      });
+    }
+    if (implementation.evidence.changePolicy?.classification !== 'sensitive' ||
+        implementation.evidence.sensitiveApproval?.changeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+        !Number.isFinite(Date.parse(implementation.evidence.sensitiveApproval?.approvedAt ?? ''))) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_dependency_refresh_requires_sensitive_approval';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths, changeSetFingerprint: implementation.evidence.changeSetFingerprint };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (!Object.hasOwn(project.commands ?? {}, 'dependencyRefresh')) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'workflow_dependency_refresh_not_configured';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths, changeSetFingerprint: implementation.evidence.changeSetFingerprint };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    if (project.execution.provider !== 'container-required') {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_requires_container';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), dependencyPaths };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    const governed = await this.guardImplementationChangeSet(id, project, next.id, 'before-dependency-refresh');
+    if (!governed.ok) return governed.plan;
+    const workspaceProject = await this.workspaceProject(id, project);
+    let before;
+    try { before = await this.workspaceSnapshot(workspaceProject); }
+    catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_workspace_integrity_failed';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      step.error = null;
+      step.evidence = {
+        type: 'executor-start',
+        ...workflowEvidenceContext(saved, step),
+        required: true,
+        dependencyPaths,
+        changeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        workspacePath: workspaceProject.workspace
+      };
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    const remainingMs = this.remainingMs(plan);
+    if (remainingMs <= 0) return this.failDeadline(id);
+    const outcome = await this.commandRunner(workspaceProject, 'dependencyRefresh', {
+      timeoutMs: Math.min(project.budgets.commandTimeoutMs, remainingMs),
+      stage: 'dependency-refresh'
+    });
+    const outputBytes = Number(outcome.stdoutBytes ?? Buffer.byteLength(String(outcome.stdout ?? ''))) + Number(outcome.stderrBytes ?? Buffer.byteLength(String(outcome.stderr ?? '')));
+    let integrityError = null;
+    try {
+      const after = await this.workspaceSnapshot(workspaceProject);
+      if (!this.workspaceSnapshotUnchanged(before, after)) throw new Error('dependency_refresh_modified_governed_state');
+    } catch (error) {
+      integrityError = error;
+    }
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += outputBytes;
+      step.evidence = {
+        type: 'executor',
+        ok: false,
+        completedAt: null,
+        ...workflowEvidenceContext(saved, step),
+        required: true,
+        dependencyPaths,
+        changeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        execution: outcome.execution ? safeJson(outcome.execution) : null,
+        lifecycleScripts: 'disabled',
+        command: {
+          name: 'dependencyRefresh',
+          ok: Boolean(outcome.ok),
+          exitCode: outcome.exitCode ?? null,
+          stdout: clip(maskSecrets(outcome.stdout), 1_000),
+          stderr: clip(maskSecrets(outcome.stderr), 1_000)
+        },
+        error: integrityError ? clip(integrityError.message, 1_000) : null
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+      } else if (integrityError) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_modified_governed_state';
+      } else if (outcome.ok && (
+        outcome.execution?.provider !== 'container' ||
+        outcome.execution?.stage !== 'dependency-refresh' ||
+        outcome.execution?.postWorkerNetwork !== 'dependency-refresh-network-enabled'
+      )) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_execution_boundary_invalid';
+      } else if (outcome.ok) {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.evidence.ok = true;
+        step.evidence.completedAt = new Date().toISOString();
+      } else if (step.attempts >= saved.budgets.maxAttempts) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_dependency_refresh_attempt_budget_exhausted';
+      } else {
+        step.status = WorkflowStepStatus.READY;
+        step.error = 'workflow_dependency_refresh_retry_available';
+      }
+      saved.status = step.status === WorkflowStepStatus.COMPLETED || step.status === WorkflowStepStatus.READY ? WorkflowStepStatus.PENDING : WorkflowStepStatus.FAILED;
+      if (saved.status === WorkflowStepStatus.FAILED) saved.result = { error: step.error, stepId: step.id };
     });
   }
 
@@ -1374,8 +1598,12 @@ export class WorkflowEngine {
     else if (changeSet.changeSetFingerprint !== implementation.evidence.changeSetFingerprint) error = 'workflow_change_set_changed_during_verification';
     else if (!decision?.ok) error = 'workflow_change_policy_rejected_during_verification';
     else if (decision.classification === 'sensitive') {
-      error = 'workflow_sensitive_change_during_verification';
-      blocked = true;
+      const approval = implementation.evidence.sensitiveApproval;
+      const approved = Number.isFinite(Date.parse(approval?.approvedAt ?? '')) && approval?.changeSetFingerprint === changeSet.changeSetFingerprint;
+      if (!approved) {
+        error = 'workflow_sensitive_change_during_verification';
+        blocked = true;
+      }
     }
     if (!error) return { ok: true, plan, changeSet, decision };
     const failed = await this.update(id, (saved) => {
@@ -1709,11 +1937,75 @@ export class WorkflowEngine {
 
   async approveUnlocked(id, stepId) {
     const approvedAt = this.now();
+    const current = await this.get(id);
+    validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
+    const project = this.projects.get(current.projectId);
+    const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
+    if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
+    const currentStep = current.steps.find((candidate) => candidate.id === stepId);
+    const sensitiveImplementationApproval = current.profile === 'app-improvement' &&
+      currentStep?.id === 'implementation' &&
+      currentStep.status === WorkflowStepStatus.AWAITING_APPROVAL &&
+      currentStep.skill === 'code.implement' &&
+      currentStep.error === 'workflow_sensitive_change_requires_approval';
+
+    if (sensitiveImplementationApproval) {
+      const workspaceProject = await this.workspaceProject(id, project);
+      let snapshot = null;
+      let decision = null;
+      let integrityError = null;
+      try {
+        snapshot = await this.workspaceSnapshot(workspaceProject);
+        const expected = currentStep.evidence?.repositoryState;
+        if (!expected || snapshot.branch !== expected.branch || snapshot.head !== expected.head || snapshot.remote !== expected.remote) throw new Error('repository_state_changed');
+        if (snapshot.repositoryControl.fingerprint !== currentStep.evidence?.repositoryControlFingerprint) throw new Error('repository_control_state_changed');
+        if (snapshot.protectedIgnored.fingerprint !== currentStep.evidence?.protectedIgnoredFingerprint) throw new Error('protected_ignored_state_changed');
+        decision = evaluateChangePolicy(project, snapshot.changeSet, current.scope);
+        if (!decision.ok || decision.classification !== 'sensitive' || snapshot.changeSet.changeSetFingerprint !== currentStep.evidence?.changeSetFingerprint) throw new Error('approved_change_set_changed');
+      } catch (error) {
+        integrityError = error;
+      }
+      if (integrityError) {
+        return this.update(id, (plan) => {
+          const step = plan.steps.find((candidate) => candidate.id === stepId);
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'workflow_sensitive_approval_stale';
+          step.evidence = {
+            ...step.evidence,
+            approvalCheck: {
+              ok: false,
+              observedChangeSetFingerprint: snapshot?.changeSet?.changeSetFingerprint ?? null,
+              observedPolicy: decision ? safeJson(decision) : null,
+              error: clip(integrityError.message, 1_000)
+            }
+          };
+          plan.status = WorkflowStepStatus.BLOCKED;
+          plan.pausedAt = null;
+          plan.result = { error: step.error, stepId: step.id };
+        });
+      }
+      return this.update(id, (plan) => {
+        const step = plan.steps.find((candidate) => candidate.id === stepId);
+        if (Number.isFinite(plan.pausedAt)) plan.deadlineAt += Math.max(0, approvedAt - plan.pausedAt);
+        plan.pausedAt = null;
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        step.evidence = {
+          ...step.evidence,
+          ok: true,
+          completedAt: new Date(approvedAt).toISOString(),
+          sensitiveApproval: {
+            approvedAt: new Date(approvedAt).toISOString(),
+            changeSetFingerprint: step.evidence.changeSetFingerprint
+          }
+        };
+        plan.status = WorkflowStepStatus.PENDING;
+        plan.result = null;
+      });
+    }
+
     return this.update(id, (plan) => {
       validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
-      const project = this.projects.get(plan.projectId);
-      const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
-      if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
       const step = plan.steps.find((candidate) => candidate.id === stepId);
       const checkpointApproval = step?.status === WorkflowStepStatus.AWAITING_APPROVAL && step.type === 'checkpoint';
       const interruptedApproval = step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval';
@@ -2003,6 +2295,14 @@ export class WorkflowEngine {
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
+      if (next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+        const implementation = plan.steps.find((step) => step.id === 'implementation');
+        if (dependencyChangedPaths(implementation?.evidence?.changeSet ?? {}).length === 0) {
+          plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
+          if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+          continue;
+        }
+      }
       const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
       if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder' && this.skillExecutor.supports(next.skill)) {
@@ -2012,6 +2312,11 @@ export class WorkflowEngine {
       }
       if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+        plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
@@ -2201,7 +2506,8 @@ export class LocalSanitizedExecution extends ExecutionProvider {
     return { available: true, provider: 'local-sanitized', sandboxed: false, network: 'host-controlled', filesystem: 'host-workspace', secrets: 'sanitized-environment-only', reason: 'Explicit local-sanitized provider; this is not container isolation.' };
   }
 
-  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false } = {}) {
+  async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker' } = {}) {
+    if (stage === 'dependency-refresh') return { name, command: project.commands[name] ?? null, ok: false, exitCode: null, stdout: '', stderr: 'dependency_refresh_requires_container_required', execution: { provider: 'local-sanitized', sandboxed: false, network: 'denied-by-policy' } };
     const { command, binary, args } = commandInvocation(project, name, { hostRuntime: true });
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'local-sanitized', sandboxed: false } };
     const result = await this.processRunner(binary, args, {
@@ -2251,10 +2557,13 @@ export class DockerContainerExecution extends ExecutionProvider {
   }
 
   commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git') } = {}) {
+    if (!['bootstrap', 'post-worker', 'dependency-refresh'].includes(stage)) throw new Error('Unknown execution stage');
+    if (stage === 'dependency-refresh' && name !== 'dependencyRefresh') throw new Error('Dependency refresh stage only allows dependencyRefresh');
     const execution = project.execution;
     const { command, binary, args } = commandInvocation(project, name);
     const workspace = resolve(project.workspace);
-    const postWorker = stage !== 'bootstrap';
+    const postWorker = stage === 'post-worker';
+    const networkEnabled = stage === 'bootstrap' || stage === 'dependency-refresh';
     const containerArgs = [
       'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
       '--workdir', '/workspace',
@@ -2273,28 +2582,29 @@ export class DockerContainerExecution extends ExecutionProvider {
       '--env', 'npm_config_cache=/tmp/npm-cache'
     ];
     for (const [key, value] of Object.entries(project.commandEnvironment)) containerArgs.push('--env', `${key}=${value}`);
-    if (postWorker) containerArgs.push('--network', 'none');
+    if (!networkEnabled) containerArgs.push('--network', 'none');
     containerArgs.push(execution.image, binary, ...args);
-    return { command, containerArgs, postWorker };
+    return { command, containerArgs, postWorker, stage, networkEnabled };
   }
 
   async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
-    const { command, containerArgs, postWorker } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
-    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap' } };
+    const { command, containerArgs, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
+    const networkPolicy = networkEnabled ? (stage === 'dependency-refresh' ? 'dependency-refresh-network-enabled' : 'bootstrap-network-enabled') : 'none';
+    if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, stage, postWorkerNetwork: networkPolicy } };
     const startedAt = this.now();
     const available = preflight ?? await this.availability(project, { timeoutMs });
-    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, postWorkerNetwork: postWorker ? 'none-required' : 'bootstrap' } };
+    if (!available.available) return { name, command, ok: false, exitCode: null, stdout: '', stderr: `execution_provider_unavailable: ${available.reason}`, execution: { provider: 'container', sandboxed: false, stage, postWorkerNetwork: networkPolicy } };
     const remainingMs = Math.max(0, timeoutMs - (this.now() - startedAt));
-    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled' } };
+    if (remainingMs <= 0) return { name, command, ok: false, exitCode: null, timedOut: true, stdout: '', stderr: 'execution_budget_exhausted_during_provider_preflight', execution: { provider: 'container', sandboxed: true, stage, postWorkerNetwork: networkPolicy } };
     const result = await this.processRunner(this.dockerBinary, containerArgs, { ...this.dockerClientOptions(remainingMs), cwd: project.workspace });
     let cleanup;
     if (result.timedOut) {
       const removed = await this.processRunner(this.dockerBinary, ['rm', '--force', containerName], this.dockerClientOptions(5_000));
       cleanup = { attempted: true, ok: Boolean(removed.ok), containerName };
     }
-    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, postWorkerNetwork: postWorker ? 'none' : 'bootstrap-network-enabled', filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
+    return { name, command, ...result, ...(cleanup ? { cleanup } : {}), execution: { provider: 'container', technology: 'docker', sandboxed: true, stage, postWorkerNetwork: networkPolicy, filesystem: 'workspace-bind-only', secrets: 'no-home-ssh-or-docker-socket-mounts' } };
   }
 }
 
@@ -2334,6 +2644,13 @@ export class ProjectCommandRunner {
   }
 
   async run(project, name, options = {}) {
+    const stage = options.stage ?? 'post-worker';
+    if (!['bootstrap', 'post-worker', 'dependency-refresh'].includes(stage)) throw new Error('Unknown execution stage');
+    if (stage === 'dependency-refresh') {
+      if (name !== 'dependencyRefresh') throw new Error('Dependency refresh stage only allows dependencyRefresh');
+      if (project.execution.provider !== 'container-required') throw new Error('Dependency refresh requires container-required execution');
+      if (project.commands.dependencyRefresh !== expectedDependencyRefreshCommand(project.toolchain)) throw new Error('Dependency refresh command no longer matches the frozen policy');
+    }
     const timeoutMs = options.timeoutMs ?? project.budgets.commandTimeoutMs;
     const startedAt = this.now();
     const selected = await this.availability(project, { timeoutMs });

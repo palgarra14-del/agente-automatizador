@@ -49,6 +49,14 @@ test('specialist mode cannot understate the authority of an assigned skill', () 
   );
 });
 
+test('dependency manager owns only the reviewed network workspace capability', () => {
+  const manager = defaultSpecialistRegistry.validateAssignment('dependency-manager', 'project.dependencies.refresh');
+  assert.equal(manager.mode, 'verification');
+  assert.equal(manager.authority, 'network-workspace-execution');
+  assert.equal(manager.executor, 'ProjectCommandRunner');
+  assert.throws(() => defaultSpecialistRegistry.validateAssignment('dependency-manager', 'project.verify'), /not authorized/);
+});
+
 test('specialist assignment is explicit and fail-closed', () => {
   const inspector = defaultSpecialistRegistry.validateAssignment('code-inspector', 'code.inspect');
   assert.equal(inspector.mode, 'read-only');

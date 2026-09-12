@@ -81,6 +81,20 @@ test('capability resolution distinguishes policy, binding, and execution surface
   assert.equal(research.reason, 'skill_not_allowed');
 });
 
+test('dependency refresh capability is workflow-only and keeps network authority explicit', () => {
+  const project = configuredProject({
+    commands: { dependencyRefresh: 'npm ci --ignore-scripts', test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    toolchain: { command: 'npm' },
+    execution: { provider: 'container-required', image: 'node:22-bookworm-slim' },
+    skills: { allow: ['project.dependencies.refresh'], deny: [] }
+  });
+  const capability = defaultToolSkillRegistry.resolve(project, 'project.dependencies.refresh', { surface: 'workflow' });
+  assert.equal(capability.available, true);
+  assert.equal(capability.risk, 'network-workspace-execution');
+  assert.deepEqual(capability.tools.map((tool) => tool.id), ['project-command']);
+  assert.equal(defaultToolSkillRegistry.resolve(project, 'project.dependencies.refresh', { surface: 'orchestrator' }).available, false);
+});
+
 test('reviewed workflow publication is encapsulated behind one workflow authority', () => {
   const publicationProject = configuredProject({
     skills: { allow: ['release.publish-reviewed-workflow', 'human.approval', 'project.verify'], deny: [] }
