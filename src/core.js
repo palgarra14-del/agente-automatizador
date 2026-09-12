@@ -1540,41 +1540,48 @@ export class WorkflowEngine {
     const reviewedChangeSetFingerprint = reviewedImplementation?.evidence?.changeSetFingerprint ?? null;
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
+    const skillContext = {
+      projectId: project.id,
+      priorEvidence,
+      ...(runningStep.skill === 'website.plan' ? {
+        businessBrief: runningPlan.input.businessBrief,
+        businessBriefFingerprint: runningPlan.inputFingerprint,
+        assetEvidence: websiteAssetEvidence
+      } : {}),
+      ...(runningStep.skill === 'code.review' && runningPlan.profile === 'website-build' ? (() => {
+        const requirements = runningPlan.steps.find((step) => step.id === 'requirements');
+        return {
+          websiteReview: {
+            businessBrief: runningPlan.input.businessBrief,
+            businessBriefFingerprint: runningPlan.inputFingerprint,
+            websitePlan: requirements?.evidence?.result?.websitePlan ?? null,
+            websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
+            assetEvidence: requirements?.evidence?.assetEvidence ?? null
+          }
+        };
+      })() : {})
+    };
     const execution = await this.skillExecutor.execute({
       skill: runningStep.skill,
       goal: runningPlan.goal,
       contract: skillResolution.contract,
-      context: {
-        projectId: project.id,
-        priorEvidence,
-        ...(runningStep.skill === 'website.plan' ? {
-          businessBrief: runningPlan.input.businessBrief,
-          businessBriefFingerprint: runningPlan.inputFingerprint,
-          assetEvidence: websiteAssetEvidence
-        } : {}),
-        ...(runningStep.skill === 'code.review' && runningPlan.profile === 'website-build' ? (() => {
-          const requirements = runningPlan.steps.find((step) => step.id === 'requirements');
-          return {
-            websiteReview: {
-              businessBrief: runningPlan.input.businessBrief,
-              businessBriefFingerprint: runningPlan.inputFingerprint,
-              websitePlan: requirements?.evidence?.result?.websitePlan ?? null,
-              websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
-              assetEvidence: requirements?.evidence?.assetEvidence ?? null
-            }
-          };
-        })() : {})
-      }
+      context: skillContext
     }, {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
     });
+    let skillOutputValidationError = null;
+    if (execution.ok) {
+      try { execution.result = validateSkillOutput(skillResolution.contract, execution.result, runningStep.skill, skillContext); }
+      catch (error) { skillOutputValidationError = error; }
+    }
+    const executionOk = execution.ok === true && !skillOutputValidationError;
     let websitePlanContextError = null;
-    if (execution.ok && runningStep.skill === 'website.plan') {
+    if (executionOk && runningStep.skill === 'website.plan') {
       try { validateWebsitePlanContext(execution.result.websitePlan, runningPlan.input.businessBrief); }
       catch (error) { websitePlanContextError = error; }
     }
-    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, execution.ok && !websitePlanContextError ? 'completed' : 'failed');
+    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, executionOk && !websitePlanContextError ? 'completed' : 'failed');
     let after;
     let integrityError = null;
     try { after = await this.workspaceSnapshot(workspaceProject); }
@@ -1585,10 +1592,10 @@ export class WorkflowEngine {
       saved.outputBytes += Number(execution.outputBytes ?? 0);
       step.evidence = {
         type: 'executor',
-        ok: execution.ok === true && !integrityChanged && !websitePlanContextError,
-        completedAt: execution.ok && !integrityChanged && !websitePlanContextError ? new Date().toISOString() : null,
+        ok: executionOk && !integrityChanged && !websitePlanContextError,
+        completedAt: executionOk && !integrityChanged && !websitePlanContextError ? new Date().toISOString() : null,
         ...workflowEvidenceContext(saved, step),
-        result: execution.ok && !integrityChanged && !websitePlanContextError ? execution.result : null,
+        result: executionOk && !integrityChanged && !websitePlanContextError ? execution.result : null,
         codexThreadId: execution.codexThreadId ?? null,
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
@@ -1597,7 +1604,7 @@ export class WorkflowEngine {
         repositoryControlBeforeFingerprint: before.repositoryControl.fingerprint,
         repositoryControlAfterFingerprint: after?.repositoryControl?.fingerprint ?? null,
         reviewedChangeSetFingerprint,
-        ...(step.skill === 'website.plan' && execution.ok && !integrityChanged && !websitePlanContextError ? {
+        ...(step.skill === 'website.plan' && executionOk && !integrityChanged && !websitePlanContextError ? {
           businessBriefFingerprint: runningPlan.inputFingerprint,
           assetEvidence: safeJson(websiteAssetEvidence),
           assetEvidenceFingerprint: websiteAssetEvidence.fingerprint,
@@ -1607,9 +1614,11 @@ export class WorkflowEngine {
           ? clip(integrityError.message, 1_000)
           : integrityChanged
             ? 'read_only_skill_modified_workspace'
-            : websitePlanContextError
-              ? clip(websitePlanContextError.message, 1_000)
-              : execution.error ?? null
+            : skillOutputValidationError
+              ? clip(skillOutputValidationError.message, 1_000)
+              : websitePlanContextError
+                ? clip(websitePlanContextError.message, 1_000)
+                : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
         step.status = WorkflowStepStatus.FAILED;
@@ -1626,12 +1635,12 @@ export class WorkflowEngine {
         step.error = 'website_plan_context_invalid';
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id, detail: clip(websitePlanContextError.message, 1_000) };
-      } else if (execution.ok && step.skill === 'code.review' && reviewEvidenceVerdict(execution.result) !== 'PASS') {
+      } else if (executionOk && step.skill === 'code.review' && reviewEvidenceVerdict(execution.result) !== 'PASS') {
         step.status = WorkflowStepStatus.FAILED;
         step.error = 'workflow_change_review_failed';
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id, reviewEvidence: safeJson(execution.result?.reviewEvidence ?? null) };
-      } else if (execution.ok) {
+      } else if (executionOk) {
         step.status = WorkflowStepStatus.COMPLETED;
         step.error = null;
         saved.status = WorkflowStepStatus.PENDING;
