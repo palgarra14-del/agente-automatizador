@@ -373,6 +373,50 @@ test('website asset changes after design approval block implementation before Co
   assert.equal(blocked.modelUsage.calls, 1);
 });
 
+test('website implementation fails if Codex mutates a previously verified business asset', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-asset-worker-mutation-'));
+  const configured = managedProject('website-asset-worker-mutation', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute() { return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } }; }
+  };
+  let workerCalls = 0;
+  let workspace;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      await writeFile(join(workspace, 'public/logo.png'), 'logo-replaced-by-worker');
+      return { status: 'completed', summary: 'implemented website', output: '', outputBytes: 0 };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor, codingWorker });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Do not allow verified asset replacement',
+    input: { businessBrief: businessBrief({ assets: { logoPath: 'public/logo.png', photoPaths: [] } }) }
+  });
+  workspace = manager.describe(configured, created.id).workspace;
+  await mkdir(join(workspace, 'public'), { recursive: true });
+  await writeFile(join(workspace, 'public/logo.png'), 'logo-original');
+
+  const designWait = await instance.run(created.id);
+  assert.equal(designWait.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  await instance.approve(created.id, 'design');
+
+  const failed = await instance.run(created.id);
+  const implementation = failed.steps.find((step) => step.id === 'implementation');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(implementation.error, 'website_assets_modified_during_implementation');
+  assert.match(implementation.evidence.error, /website_assets_modified_during_implementation/);
+  assert.equal(workerCalls, 1);
+  assert.equal(failed.modelUsage.calls, 2);
+  assert.equal(failed.steps.find((step) => step.id === 'review').status, WorkflowStepStatus.PENDING);
+});
+
 test('workflow model usage state is persisted and fails closed on tampering', () => {
   const configured = project();
   const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Persist model budget' });
