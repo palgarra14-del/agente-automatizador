@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { evaluateChangePolicy, JsonStore, loadProjects, WorkflowStepStatus } from '../src/core.js';
+import { evaluateChangePolicy, humanApprovalDependencyFingerprint, JsonStore, loadProjects, WorkflowStepStatus } from '../src/core.js';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 import {
@@ -17,6 +17,7 @@ import {
   projectExecutionFingerprint,
   startApprovalFingerprint,
   workflowApprovalFingerprint,
+  workflowBindingFingerprint,
   watchIssueQueue
 } from '../src/issue-queue.js';
 
@@ -104,7 +105,7 @@ class FakeWorkflowEngine {
       step.evidence = {
         approvedAt: '2026-09-12T00:00:00.000Z',
         externalApprovalFingerprint: options.externalApprovalFingerprint ?? null,
-        approvedDependencyEvidenceFingerprint: options.approvedDependencyEvidenceFingerprint ?? null
+        approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(this.plan, stepId)
       };
     }
     this.plan.status = WorkflowStepStatus.PENDING;
@@ -200,7 +201,7 @@ async function queueFixture() {
   return { store, issue, channel, workflowEngine, queue, project, projects };
 }
 
-function persistedRequestFields(queue, issue, project) {
+function persistedRequestFields(queue, issue, project, workflow = workflowPlan()) {
   const parsed = parseIssueRequestBody(issue.body);
   return {
     parsed,
@@ -208,7 +209,8 @@ function persistedRequestFields(queue, issue, project) {
       requestFingerprint: parsed.requestFingerprint,
       issueBodyFingerprint: parsed.issueBodyFingerprint,
       projectFingerprint: projectExecutionFingerprint(project),
-      controlPlaneFingerprint: queue.controlPlaneFingerprint()
+      controlPlaneFingerprint: queue.controlPlaneFingerprint(),
+      workflowBindingFingerprint: workflowBindingFingerprint(workflow)
     }
   };
 }
@@ -725,18 +727,8 @@ test('applied workflow approval recovers after a crash without replaying approva
   afterApproveCrash.steps[1].evidence = {
     approvedAt: '2026-09-12T00:00:00.000Z',
     externalApprovalFingerprint: checkpointToken,
-    approvedDependencyEvidenceFingerprint: workflowApprovalFingerprint({
-      requestFingerprint: record.requestFingerprint,
-      issueBodyFingerprint: record.issueBodyFingerprint,
-      projectFingerprint: record.projectFingerprint,
-      controlPlaneFingerprint: record.controlPlaneFingerprint,
-      workflow: awaitingPlan,
-      stepId: 'plan-change'
-    }) ? null : null
+    approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(afterApproveCrash, 'plan-change')
   };
-  // Fill the dependency fingerprint using the same helper indirectly through the posted approval context below.
-  afterApproveCrash.steps[1].evidence.approvedDependencyEvidenceFingerprint =
-    (await import('../src/core.js')).humanApprovalDependencyFingerprint(afterApproveCrash, 'plan-change');
   workflowEngine.plan = afterApproveCrash;
 
   const completed = clone(afterApproveCrash);
@@ -780,8 +772,7 @@ test('checkpoint crash recovery fails closed if dependency evidence changed afte
   forgedAfterCrash.steps[1].evidence = {
     approvedAt: '2026-09-12T00:00:00.000Z',
     externalApprovalFingerprint: checkpointToken,
-    approvedDependencyEvidenceFingerprint:
-      (await import('../src/core.js')).humanApprovalDependencyFingerprint(awaitingPlan, 'plan-change')
+    approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(awaitingPlan, 'plan-change')
   };
   workflowEngine.plan = forgedAfterCrash;
 
