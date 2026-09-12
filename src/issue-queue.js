@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { maskSecrets, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
+import { humanApprovalDependencyFingerprint, maskSecrets, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
 
 export const ISSUE_REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
@@ -37,6 +37,86 @@ function canonical(value) {
 
 function fingerprint(value) {
   return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+
+function textFingerprint(value) {
+  return createHash('sha256').update(String(value), 'utf8').digest('hex');
+}
+
+export function projectExecutionFingerprint(project) {
+  if (!project || typeof project !== 'object' || Array.isArray(project) || typeof project.id !== 'string' || !project.id) throw new Error('project execution context is invalid');
+  return fingerprint({
+    id: project.id,
+    repository: project.repository ?? null,
+    defaultBranch: project.defaultBranch ?? null,
+    workingBranchPattern: project.workingBranchPattern ?? null,
+    protectedBranches: project.protectedBranches ?? [],
+    workspace: project.workspace ?? null,
+    workspaceStrategy: project.workspaceStrategy ?? null,
+    managedWorkspaceRoot: project.managedWorkspaceRoot ?? null,
+    commandEnvironment: project.commandEnvironment ?? {},
+    execution: project.execution ?? null,
+    toolchain: project.toolchain ?? null,
+    changePolicy: project.changePolicy ?? null,
+    commands: project.commands ?? {},
+    policies: project.policies ?? null,
+    acceptance: project.acceptance ?? null,
+    deployment: project.deployment ?? null,
+    budgets: project.budgets ?? null,
+    skills: project.skills ?? null,
+    pullRequest: project.pullRequest ?? null
+  });
+}
+
+function workflowBindingFingerprint(workflow) {
+  if (!workflow || typeof workflow !== 'object' || !Array.isArray(workflow.steps)) throw new Error('workflow binding context is invalid');
+  return fingerprint({
+    id: workflow.id,
+    goal: workflow.goal,
+    projectId: workflow.projectId,
+    profile: workflow.profile,
+    inputFingerprint: workflow.inputFingerprint ?? null,
+    registryFingerprint: workflow.registryFingerprint,
+    projectSkillPolicyFingerprint: workflow.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: workflow.specialistRegistryFingerprint,
+    scope: workflow.scope,
+    budgets: workflow.budgets,
+    definitionOfDone: workflow.definitionOfDone,
+    bootstrap: workflow.bootstrap ? { required: workflow.bootstrap.required, command: workflow.bootstrap.command, projectId: workflow.bootstrap.projectId } : null,
+    steps: workflow.steps.map((step) => ({
+      id: step.id,
+      type: step.type,
+      skill: step.skill,
+      specialist: step.specialist,
+      dependsOn: step.dependsOn,
+      commands: step.commands
+    }))
+  });
+}
+
+function redactApprovalValue(value, key = '') {
+  if (/(api[_-]?key|token|secret|password|credential|authorization|cookie|session)/i.test(key)) return '[REDACTED]';
+  if (typeof value === 'string') return maskSecrets(value);
+  if (Array.isArray(value)) return value.map((item) => redactApprovalValue(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, redactApprovalValue(child, childKey)]));
+  return value;
+}
+
+function approvalEvidenceSummary(workflow, stepId) {
+  const targetIndex = workflow.steps.findIndex((step) => step.id === stepId);
+  const summary = {
+    dependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(workflow, stepId),
+    predecessors: workflow.steps.slice(0, Math.max(0, targetIndex))
+      .filter((step) => step.status === WorkflowStepStatus.COMPLETED)
+      .map((step) => ({
+        id: step.id,
+        skill: step.skill,
+        result: step.evidence?.result ?? null,
+        changeSetFingerprint: step.evidence?.changeSetFingerprint ?? null,
+        reviewedChangeSetFingerprint: step.evidence?.reviewedChangeSetFingerprint ?? null
+      }))
+  };
+  return JSON.stringify(redactApprovalValue(summary), null, 2).slice(0, 4_000);
 }
 
 function assertObjectKeys(value, allowed, label) {
@@ -100,7 +180,7 @@ export function parseIssueRequestBody(body) {
   try { parsed = JSON.parse(after); }
   catch (error) { throw new Error(`agent request JSON is invalid: ${error.message}`, { cause: error }); }
   const request = normalizeIssueRequest(parsed);
-  return { request, requestFingerprint: fingerprint(request) };
+  return { request, requestFingerprint: fingerprint(request), issueBodyFingerprint: textFingerprint(body) };
 }
 
 export function parseApprovalComment(body) {
@@ -115,46 +195,66 @@ function stepApprovalContext(plan, step) {
     workflowId: plan.id,
     projectId: plan.projectId,
     profile: plan.profile,
+    goal: plan.goal,
     inputFingerprint: plan.inputFingerprint ?? null,
     registryFingerprint: plan.registryFingerprint,
     projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
     specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+    scope: plan.scope,
     workspace: plan.workspace ? {
       managed: Boolean(plan.workspace.managed),
+      path: plan.workspace.path ?? null,
       baseHead: plan.workspace.baseHead ?? null,
       workingBranch: plan.workspace.workingBranch ?? null,
       remote: plan.workspace.remote ?? null
     } : null,
-    modelCalls: plan.modelUsage?.calls ?? 0,
-    step: {
-      id: step.id,
-      type: step.type,
-      skill: step.skill,
-      status: step.status,
-      error: step.error ?? null,
-      evidence: step.evidence ?? null
-    }
+    modelUsage: plan.modelUsage ?? null,
+    outputBytes: plan.outputBytes ?? 0,
+    dependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id),
+    steps: plan.steps.map((candidate) => ({
+      id: candidate.id,
+      type: candidate.type,
+      skill: candidate.skill,
+      specialist: candidate.specialist,
+      status: candidate.status,
+      dependsOn: candidate.dependsOn,
+      attempts: candidate.attempts,
+      commands: candidate.commands,
+      error: candidate.error ?? null,
+      evidence: candidate.evidence ?? null
+    })),
+    targetStepId: step.id
   };
 }
 
-export function startApprovalFingerprint({ requestFingerprint, workflow, dryRun }) {
+export function startApprovalFingerprint({ requestFingerprint, issueBodyFingerprint = null, projectFingerprint = null, controlPlaneFingerprint = null, workflow, dryRun }) {
   return fingerprint({
     kind: 'start',
     requestFingerprint,
+    issueBodyFingerprint,
+    projectFingerprint,
+    controlPlaneFingerprint,
+    workflowBindingFingerprint: workflowBindingFingerprint(workflow),
     workflowId: workflow.id,
     projectId: workflow.projectId,
     profile: workflow.profile,
+    goal: workflow.goal,
     registryFingerprint: workflow.registryFingerprint,
     projectSkillPolicyFingerprint: workflow.projectSkillPolicyFingerprint,
     specialistRegistryFingerprint: workflow.specialistRegistryFingerprint,
     inputFingerprint: workflow.inputFingerprint ?? null,
     scope: workflow.scope,
+    plannedBootstrap: dryRun.plannedBootstrap ?? null,
     plannedSteps: dryRun.plannedSteps?.map((step) => ({
       id: step.id,
       type: step.type,
+      status: step.status,
+      dependsOn: step.dependsOn,
       skill: step.skill,
       specialist: step.specialist,
+      specialistMode: step.specialistMode,
       specialistAuthority: step.specialistAuthority,
+      capability: step.capability ?? null,
       commands: step.commands
     })) ?? [],
     plannedExternalWrites: dryRun.plannedExternalWrites ?? []
@@ -166,10 +266,18 @@ function stepNeedsHumanApproval(step) {
     (step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
 }
 
-export function workflowApprovalFingerprint({ requestFingerprint, workflow, stepId }) {
+export function workflowApprovalFingerprint({ requestFingerprint, issueBodyFingerprint = null, projectFingerprint = null, controlPlaneFingerprint = null, workflow, stepId }) {
   const step = workflow.steps.find((candidate) => candidate.id === stepId);
   if (!stepNeedsHumanApproval(step)) throw new Error('workflow approval target does not require human approval');
-  return fingerprint({ kind: 'workflow-step', requestFingerprint, context: stepApprovalContext(workflow, step) });
+  return fingerprint({
+    kind: 'workflow-step',
+    requestFingerprint,
+    issueBodyFingerprint,
+    projectFingerprint,
+    controlPlaneFingerprint,
+    workflowBindingFingerprint: workflowBindingFingerprint(workflow),
+    context: stepApprovalContext(workflow, step)
+  });
 }
 
 function approvalInstruction(token) {
