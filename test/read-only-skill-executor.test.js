@@ -156,6 +156,39 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(invalid.error, /websitePlan\.pages\[0\]\.slug is invalid/);
 });
 
+test('website change critic independently checks the diff against authoritative business facts', () => {
+  const contract = defaultToolSkillRegistry.getSkill('code.review').contract;
+  const prompt = buildReadOnlySkillPrompt({
+    skill: 'code.review',
+    goal: 'Review website implementation',
+    contract,
+    context: {
+      priorEvidence: { implementation: { changeSetFingerprint: 'a'.repeat(64) } },
+      websiteReview: {
+        businessBrief: {
+          businessName: 'Fontanería Ejemplo',
+          locations: ['Madrid'],
+          facts: ['Servicio de fontanería en Madrid'],
+          contentRestrictions: ['No afirmar servicio 24 horas']
+        },
+        websitePlan: { missingInputs: ['Años de experiencia', 'Precios'] },
+        assetEvidence: { assets: [{ path: 'public/logo.png', sha256: 'b'.repeat(64) }] }
+      }
+    }
+  });
+  for (const required of [
+    'Independently compare all business-specific claims',
+    'testimonials',
+    'prices',
+    'guarantees',
+    'certifications',
+    'opening hours',
+    'missingInputs',
+    'verified asset evidence',
+    'No afirmar servicio 24 horas'
+  ]) assert.ok(prompt.includes(required), required);
+});
+
 test('change critic output is structurally validated and prompt defines PASS/FAIL semantics', async () => {
   let response = JSON.stringify({ reviewEvidence: { verdict: 'PASS', summary: 'No material issue found.', findings: [] } });
   let capturedPrompt = '';
