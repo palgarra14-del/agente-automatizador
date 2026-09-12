@@ -2560,6 +2560,52 @@ test('completed critic PASS cannot be replayed against a different implementatio
   );
 });
 
+test('change critic is never invoked if the governed diff drifted before review starts', async () => {
+  const governed = changedChangeSet(['src/feature.js']);
+  const mutated = changedChangeSet(['src/feature.js', 'src/pre-review-drift.js'], { contentFingerprint: '9'.repeat(64) });
+  const localGit = stableLocalGit({ async inspectChangeSet() { return mutated; } });
+  const configured = configFrom({
+    id: 'pre-review-drift',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let criticCalls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute() {
+      criticCalls += 1;
+      return { ok: true, status: 'completed', outputBytes: 1, result: { reviewEvidence: { verdict: 'PASS', summary: 'must not run', findings: [] } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Reject pre-review drift' });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    completeStep(plan, 'dependency-refresh');
+  });
+
+  const failed = await instance.run(created.id);
+  const review = failed.steps.find((step) => step.id === 'review');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.status, WorkflowStepStatus.FAILED);
+  assert.equal(review.error, 'workflow_change_set_changed_during_verification');
+  assert.equal(review.evidence.phase, 'before-review');
+  assert.equal(review.evidence.expectedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(review.evidence.observedChangeSetFingerprint, mutated.changeSetFingerprint);
+  assert.equal(criticCalls, 0);
+  assert.equal(failed.modelUsage.calls, 0);
+});
+
 test('change critic that mutates the workspace is rejected even if it returns PASS', async () => {
   const governed = changedChangeSet(['src/feature.js']);
   const mutated = changedChangeSet(['src/feature.js', 'src/reviewer-side-effect.js']);
