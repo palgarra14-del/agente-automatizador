@@ -233,6 +233,36 @@ test('workflow profiles create validated deterministic plans', () => {
   }
 });
 
+test('website planner fails cleanly when SEO location is not supplied by the business brief', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-context-invalid-'));
+  const configured = managedProject('website-context-invalid', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const invalidPlan = websitePlanFixture({ seo: { primaryLocation: 'Barcelona', keywords: ['fontanería Barcelona'] } });
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute() { return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: invalidPlan } }; }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Reject invented local SEO',
+    input: { businessBrief: businessBrief({ locations: ['Madrid'] }) }
+  });
+
+  const failed = await instance.run(created.id);
+  const requirements = failed.steps.find((step) => step.id === 'requirements');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.error, 'website_plan_context_invalid');
+  assert.match(requirements.evidence.error, /primary_location_not_supplied/);
+  assert.equal(failed.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.PENDING);
+  assert.equal(failed.modelUsage.calls, 1);
+  assert.equal(failed.modelUsage.entries[0].status, 'failed');
+});
+
 test('website planner verifies repository assets before spending a model call', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-assets-'));
   const configured = managedProject('website-assets', root, {
