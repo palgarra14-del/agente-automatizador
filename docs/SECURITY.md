@@ -26,6 +26,16 @@ Specialist identity is evidence, not a permission source. Project skill policy r
 
 Model-use accounting is also fail-closed. Saved runs/workflows must contain a model ledger whose maximum matches the active project configuration. Calls are reserved before execution; retries consume additional reservations; exceeding the cap stops before another model-backed executor runs. Reported token counts are evidence only and are never trusted to reduce the call count.
 
+## Structured website input and planning boundary
+
+`website-build` accepts business data only through a bounded structured brief. Unknown fields, excessive lengths/counts, repository path escapes, and malformed brand colors are rejected before execution. The normalized brief and its fingerprint are persisted as workflow evidence. Secret-shaped keys/values still pass through structured redaction.
+
+Declared website assets are not trusted merely because the brief names them. Before the planner consumes a model call, each asset must resolve inside the managed workspace without a symlink chain, be a regular file, remain within size budgets, and receive a SHA-256 fingerprint. Assets are re-read before implementation; any substitution after design approval blocks before the coding worker starts.
+
+`website.plan` uses the same isolated read-only Codex boundary as other analysis skills, with network/web search disabled. The prompt forbids unsupported testimonials, credentials, awards, guarantees, pricing, clients, service areas, and similar claims, while the output schema requires a `missingInputs` channel. Deterministic context validation additionally prevents the planner from selecting a primary SEO location absent from the supplied business locations. The requirements specialist has read-only authority only and cannot implement or publish.
+
+Human design approval is tied to the plan fingerprint. Human visual approval and release approval are tied to the independently reviewed implementation fingerprint. A modified persisted approval cannot authorize a different plan or diff. Visual review remains human in v0.13; no browser automation is silently implied.
+
 ## Governed dependency-refresh boundary
 
 Network access after the coding worker is exceptional, not general. `project.dependencies.refresh` is workflow-only and has a dedicated `dependency-manager` authority. It is evaluated only when the approved implementation changes a root or nested package manifest/lockfile. Normal changes complete the stage as a no-op before capability resolution, so they do not acquire network authority.
