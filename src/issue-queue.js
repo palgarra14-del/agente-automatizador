@@ -68,7 +68,7 @@ export function projectExecutionFingerprint(project) {
   });
 }
 
-function workflowBindingFingerprint(workflow) {
+export function workflowBindingFingerprint(workflow) {
   if (!workflow || typeof workflow !== 'object' || !Array.isArray(workflow.steps)) throw new Error('workflow binding context is invalid');
   return fingerprint({
     id: workflow.id,
@@ -500,7 +500,7 @@ export class SupervisedIssueQueue {
   async blockRequestRevalidation(issue, key, record, reason) {
     const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null };
     await this.saveRecord(key, next);
-    await this.post(issue.number, 'Agent request blocked: the current GitHub issue no longer matches the accepted request exactly. No further execution was authorized.');
+    await this.post(issue.number, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
     return next;
   }
 
