@@ -3400,7 +3400,7 @@ function workerEnvironment(environment = process.env) {
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
 }
 
-const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
+const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin', 'win32']);
 const workerProjectControlFiles = Object.freeze(['.codex/config.toml', '.codex/requirements.toml']);
 
 export function codexWorkerSecurityConfig({ writeAccess = false, pathValue = process.env.PATH ?? '', platform = process.platform } = {}) {
