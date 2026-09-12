@@ -119,6 +119,7 @@ class FakeChannel {
     this.commentsByIssue = new Map([[issue.number, []]]);
     this.posted = [];
     this.nextCommentId = 100;
+    this.failNextPost = false;
   }
 
   async openIssues() { return clone(this.issues); }
@@ -132,6 +133,10 @@ class FakeChannel {
   async comments(number) { return clone(this.commentsByIssue.get(number) ?? []); }
 
   async comment(number, body) {
+    if (this.failNextPost) {
+      this.failNextPost = false;
+      throw new Error('fixture comment transport failure');
+    }
     const entry = { id: this.nextCommentId++, number, body };
     this.posted.push(entry);
     return { id: entry.id, url: `https://example.test/comment/${entry.id}` };
@@ -217,6 +222,22 @@ test('new issue produces only a dry-run and fingerprinted start approval request
   assert.equal(again.status, 'awaiting_start_approval');
   assert.equal(workflowEngine.runCalls.length, 1);
   assert.equal(channel.posted.length, 1);
+});
+
+test('missing approval prompt is recovered after a transient GitHub comment failure', async () => {
+  const { queue, channel, workflowEngine } = await queueFixture();
+  channel.failNextPost = true;
+  await assert.rejects(() => queue.tick(), /fixture comment transport failure/);
+
+  const persisted = await queue.getRecord(queue.requestKey(channel.issues[0]));
+  assert.equal(persisted.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  const recovered = await queue.tick();
+  assert.equal(recovered.status, 'awaiting_start_approval');
+  assert.equal(channel.posted.length, 1);
+  assert.ok(channel.posted[0].body.includes(`/agent approve ${persisted.pendingApproval.fingerprint}`));
+  assert.equal(workflowEngine.runCalls.length, 1);
 });
 
 test('unauthorized or malformed comments cannot start real execution', async () => {
