@@ -1395,6 +1395,39 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
 });
 
+test('workflow fails closed if orchestrator repository context drifts during analysis', async () => {
+  const configured = configFrom({
+    id: 'context-drift', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main',
+    protectedBranches: ['main'], workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const content = 'export const fixture = true;\n';
+  const file = { path: 'src/core.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = { version: 1, files: [file], fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex') };
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async prepareContext() { return repositoryContext; },
+    async revalidateContext() { throw new Error('repository_context_changed_during_analysis'); },
+    async execute(request) {
+      calls += 1;
+      assert.equal(request.context.repositoryContext.fingerprint, repositoryContext.fingerprint);
+      return { ok: true, status: 'completed', outputBytes: 20, result: { inspectionEvidence: { summary: 'grounded', relevantPaths: ['src/core.js'], findings: ['fixture'] } } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'reject drift', scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] } });
+  const failed = await instance.run(created.id);
+  const inspect = failed.steps.find((step) => step.id === 'inspect-project');
+  assert.equal(failed.result.error, 'read_only_repository_context_changed');
+  assert.equal(inspect.status, WorkflowStepStatus.FAILED);
+  assert.match(inspect.evidence.error, /repository_context_changed_during_analysis/);
+  assert.notEqual(failed.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(calls, 1);
+});
+
 test('workflow model-call budget stops before invoking another specialist', async () => {
   const configured = configFrom({
     id: 'model-budget-workflow',

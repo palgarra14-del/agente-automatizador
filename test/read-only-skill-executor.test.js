@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt } from '../src/core.js';
+import { link, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext } from '../src/core.js';
 import { defaultToolSkillRegistry } from '../src/capabilities.js';
 
 test('read-only skill executor uses a read-only offline Codex thread and validates strict JSON', async () => {
@@ -69,6 +73,74 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.match(invocation.prompt, /exactly one JSON object/);
   assert.match(invocation.prompt, /relevantPaths/);
   assert.match(invocation.prompt, /If repository access is blocked/);
+});
+
+test('orchestrator repository context is bounded, masked, scope-bound, and rejects aliased files', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-context-'));
+  const outside = await mkdtemp(join(tmpdir(), 'agent-context-outside-'));
+  let manifest = 'src/a.js\n';
+  try {
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    const secret = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890';
+    await writeFile(join(workspace, 'src/a.js'), `export const value = "${secret}";\n`);
+    const external = join(outside, 'shared.js');
+    await writeFile(external, 'export const outside = true;\n');
+    await link(external, join(workspace, 'src/shared.js'));
+    const runner = async () => ({ exitCode: 0, timedOut: false, stdout: manifest, stderr: '', stdoutTruncated: false, stderrTruncated: false });
+    const args = { workspace, project: { changePolicy: { forbiddenPaths: [] } }, scope: { allowedPaths: ['src'], forbiddenPaths: [] }, processRunner: runner, timeoutMs: 500 };
+    const context = await collectReadOnlyRepositoryContext(args);
+    assert.deepEqual(context.files.map((file) => file.path), ['src/a.js']);
+    assert.match(context.fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(context.files[0].content.includes(secret), false);
+    assert.match(context.files[0].content, /\[REDACTED\]/);
+    manifest = 'src/shared.js\n';
+    await assert.rejects(collectReadOnlyRepositoryContext(args), /link count must be one/);
+    manifest = 'outside.js\n';
+    await assert.rejects(collectReadOnlyRepositoryContext(args), /repository_context_scope_violation/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('supplied repository context removes discovery and binds inspection paths', async () => {
+  const content = 'export const fixture = true;\n';
+  const file = { path: 'src/core.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = { version: 1, files: [file], fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex') };
+  let response = JSON.stringify({ inspectionEvidence: { summary: 'Grounded.', relevantPaths: ['src/core.js'], findings: ['Supplied file exports fixture.'] } });
+  let prompt = '';
+  class FakeCodex { startThread() { return { id: 'context-thread', run: async (value) => { prompt = value; return { finalResponse: response, usage: {} }; } }; } }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const request = { skill: 'code.inspect', goal: 'inspect', contract: defaultToolSkillRegistry.getSkill('code.inspect').contract, context: { repositoryContext } };
+  assert.equal((await executor.execute(request, { workspace: '/safe/workspace', timeoutMs: 500 })).ok, true);
+  assert.match(prompt, /Do not invoke shell, filesystem, git, browser, network, or discovery tools/);
+  response = JSON.stringify({ inspectionEvidence: { summary: 'Bad.', relevantPaths: ['src/other.js'], findings: ['Invented.'] } });
+  const invalid = await executor.execute(request, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /inspection_references_unsupplied_path/);
+});
+
+test('review context carries a bounded diff and detects diff drift', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-review-context-'));
+  let diff = 'diff --git a/src/core.js b/src/core.js\n-old\n+new\n';
+  try {
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src/core.js'), 'export const fixture = 2;\n');
+    const runner = async (_command, args) => args[0] === 'ls-files'
+      ? { exitCode: 0, timedOut: false, stdout: 'src/core.js\n', stderr: '', stdoutTruncated: false, stderrTruncated: false }
+      : { exitCode: 0, timedOut: false, stdout: diff, stderr: '', stdoutBytes: Buffer.byteLength(diff), stdoutDigest: createHash('sha256').update(diff).digest('hex'), stdoutTruncated: false, stderrTruncated: false };
+    const executor = new CodexReadOnlySkillExecutor({ contextProcessRunner: runner });
+    const args = { workspace, project: { changePolicy: { forbiddenPaths: [] } }, scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] }, timeoutMs: 500 };
+    const context = await executor.prepareContext({ skill: 'code.review', project: args.project, scope: args.scope }, args);
+    assert.equal(context.reviewDiff.content, diff);
+    const prompt = buildReadOnlySkillPrompt({ skill: 'code.review', goal: 'review', contract: defaultToolSkillRegistry.getSkill('code.review').contract, context: { repositoryContext: context } });
+    assert.match(prompt, /reviewDiff as the trusted bounded Git diff/);
+    await executor.revalidateContext(context, args);
+    diff = 'diff --git a/src/core.js b/src/core.js\n-old\n+changed\n';
+    await assert.rejects(executor.revalidateContext(context, args), /repository_context_changed_during_analysis/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test('read-only skill prompt redacts sensitive request fields', () => {
@@ -298,6 +370,14 @@ test('change critic output is structurally validated and prompt defines PASS/FAI
   const contradictoryPass = await executor.execute({ skill: 'code.review', goal: 'review', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(contradictoryPass.ok, false);
   assert.match(contradictoryPass.error, /review_evidence_pass_contains_blocking_finding/);
+
+  const content = 'export const fixture = true;\n';
+  const file = { path: 'src/core.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = { version: 1, files: [file], fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex') };
+  response = JSON.stringify({ reviewEvidence: { verdict: 'FAIL', summary: 'bad path', findings: [{ severity: 'high', message: 'unsupported', path: 'src/other.js' }] } });
+  const unsupportedPath = await executor.execute({ skill: 'code.review', goal: 'review', contract, context: { repositoryContext } }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(unsupportedPath.ok, false);
+  assert.match(unsupportedPath.error, /review_references_unsupplied_path/);
 });
 
 test('read-only skill executor rejects unsupported skills before starting Codex', async () => {
