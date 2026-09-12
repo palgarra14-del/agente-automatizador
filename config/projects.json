@@ -31,10 +31,8 @@
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [
-          "config/projects.json",
-          "config/issue-queue.json",
-          "src/issue-queue.js",
-          "src/cli.js"
+          "config",
+          "src"
         ],
         "budgets": {
           "maxChangedFiles": 8,
@@ -256,11 +254,17 @@
         }
       },
       "commands": {
-        "test": "npm test"
+        "test": "npm test",
+        "typecheck": "node --check prospect-utils.js",
+        "lint": "node --check prospect.js",
+        "build": "node --check app.js"
       },
       "acceptance": {
         "require": [
           "test",
+          "typecheck",
+          "lint",
+          "build",
           "ci",
           "deployment"
         ]
