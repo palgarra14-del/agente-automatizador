@@ -336,13 +336,28 @@ export class SupervisedIssueQueue {
         startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, lastProcessedCommentId: 0
       });
     }
-    const workflow = await this.workflowEngine.create({
-      profile: parsed.request.profile,
-      projectId: parsed.request.projectId,
-      goal: parsed.request.goal,
-      scope: parsed.request.scope
-    });
-    const dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
+    let workflow;
+    let dryRun;
+    try {
+      workflow = await this.workflowEngine.create({
+        profile: parsed.request.profile,
+        projectId: parsed.request.projectId,
+        goal: parsed.request.goal,
+        scope: parsed.request.scope
+      });
+      dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
+    } catch (error) {
+      const blocked = {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
+        requestFingerprint: parsed.requestFingerprint, request: parsed.request, workflowId: workflow?.id ?? null,
+        status: 'blocked', reason: 'workflow_initialization_failed', createdAt: this.now(), updatedAt: this.now(),
+        pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null,
+        lastProcessedCommentId: 0
+      };
+      await this.saveRecord(this.requestKey(issue), blocked);
+      await this.post(issue.number, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
+      return blocked;
+    }
     const token = startApprovalFingerprint({ requestFingerprint: parsed.requestFingerprint, workflow, dryRun });
     const record = {
       version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
@@ -623,13 +638,17 @@ export class SupervisedIssueQueue {
   }
 }
 
-export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, onTick } = {}) {
+export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, onTick, onError } = {}) {
   if (!queue) throw new Error('watchIssueQueue requires a queue');
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
   for (;;) {
     if (signal?.aborted) return;
-    const result = await queue.tick();
-    await onTick?.(result);
+    try {
+      const result = await queue.tick();
+      await onTick?.(result);
+    } catch (error) {
+      await onError?.(error);
+    }
     if (signal?.aborted) return;
     await new Promise((resolveSleep) => {
       const timer = setTimeout(resolveSleep, pollIntervalMs);
