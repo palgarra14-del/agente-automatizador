@@ -151,7 +151,7 @@ async function queueFixture() {
 }
 
 test('issue request protocol is strict, bounded, canonical, and redacts accidental secrets', () => {
-  const parsed = parseIssueRequestBody(requestBody({ goal: 'Use Bearer abcdefghijklmnop safely' }));
+  const parsed = parseIssueRequestBody(requestBody({ goal: 'Use Authorization: Bearer abcdefghijklmnop safely' }));
   assert.equal(parsed.request.projectId, 'callflow');
   assert.equal(parsed.request.profile, 'app-improvement');
   assert.equal(parsed.request.goal.includes('abcdefghijklmnop'), false);
@@ -264,6 +264,42 @@ test('authorized approvals drive workflow checkpoints without bypassing Workflow
   assert.equal(record.publication.pullRequest, 'https://github.com/owner/callflow/pull/7');
   assert.equal(record.publication.previewUrl, 'https://preview.example.test');
   assert.match(channel.posted.at(-1).body, /No merge or production deployment/);
+});
+
+test('terminal requests return their transition once and do not starve newer queue work', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+  const completed = workflowPlan();
+  completed.status = WorkflowStepStatus.COMPLETED;
+  completed.steps = completed.steps.map((step) => ({
+    ...step,
+    status: WorkflowStepStatus.COMPLETED,
+    error: null,
+    evidence: step.id === 'publication'
+      ? { pullRequest: { number: 9, url: 'https://github.com/owner/callflow/pull/9' }, commit: { finalHead: 'f'.repeat(40) }, preview: { state: 'READY', url: 'https://preview-9.example.test' } }
+      : { approvedAt: '2026-09-12T00:00:00.000Z' }
+  }));
+  workflowEngine.realRunResult = completed;
+  channel.addUserComment(issue.number, { id: 30, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+
+  record = await queue.tick();
+  assert.equal(record.status, 'completed');
+
+  const newer = {
+    number: 42,
+    id: 4200,
+    state: 'open',
+    body: requestBody({ goal: 'Second request' }),
+    user: { login: 'palgarra14-del' }
+  };
+  channel.issues.push(newer);
+  channel.commentsByIssue.set(newer.number, []);
+  workflowEngine.plan = workflowPlan();
+  workflowEngine.realRunResult = null;
+
+  const next = await queue.tick();
+  assert.equal(next.issueNumber, 42);
+  assert.equal(next.status, 'awaiting_start_approval');
 });
 
 test('stale start approval is blocked if persisted workflow planning context changed', async () => {
