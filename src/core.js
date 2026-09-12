@@ -3143,6 +3143,12 @@ export function sanitizeCodingTask(task) {
 
 export function buildWorkerPrompt(task) {
   const cleanTask = sanitizeCodingTask(task);
+  const websiteRules = cleanTask?.websiteBuild ? [
+    'This is a structured website build. Treat the supplied businessBrief as the complete authoritative source of business facts.',
+    'Do not invent or imply testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands used, service areas, opening hours, addresses, contact details, legal claims, or any other factual business claim that is not explicitly present in businessBrief.',
+    'Do not convert websitePlan.missingInputs into guessed content. Omit unsupported facts or use neutral non-factual wording instead.',
+    'Honor every businessBrief.contentRestrictions item and use only the supplied verified asset paths for business-specific imagery or logos.'
+  ] : [];
   return [
     'You are the coding worker in a controlled engineering run.',
     'Implement only the requested objective inside the current workspace.',
@@ -3150,6 +3156,7 @@ export function buildWorkerPrompt(task) {
     'Do not read, create, or modify .env files, credentials, tokens, secrets, deployment settings, or files outside the workspace.',
     'Do not disable policies or safety controls. Do not perform production actions.',
     'The orchestrator, not you, runs validation commands and controls GitHub actions.',
+    ...websiteRules,
     'Make the smallest safe change that satisfies the acceptance criteria. Explain what changed when finished.',
     '', 'Structured coding task:', JSON.stringify(cleanTask, null, 2)
   ].join('\n');
