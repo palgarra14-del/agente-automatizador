@@ -1311,7 +1311,7 @@ export class WorkflowEngine {
       let info;
       try { info = await lstat(target); }
       catch (error) {
-        if (error.code === 'ENOENT') throw new Error(`Business asset does not exist: ${normalized}`);
+        if (error.code === 'ENOENT') throw new Error(`Business asset does not exist: ${normalized}`, { cause: error });
         throw error;
       }
       if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Business asset must be a regular file: ${normalized}`);
