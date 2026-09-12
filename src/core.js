@@ -2548,7 +2548,7 @@ export class WorkflowEngine {
             }
             return { approvedDependencyEvidenceFingerprint };
           })()
-        : {};
+        : { approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id) };
       step.evidence = {
         ...workflowEvidenceContext(plan, step),
         approvedAt: new Date(approvedAt).toISOString(),
