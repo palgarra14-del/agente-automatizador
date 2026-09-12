@@ -509,6 +509,29 @@ test('checkpoint approval fingerprint binds completed dependency evidence', asyn
   assert.equal(workflowEngine.approveCalls.length, 0);
 });
 
+test('missing workflow while a checkpoint approval is pending becomes an explicit block', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { ok: true } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 85, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+  assert.equal(record.status, 'awaiting_workflow_approval');
+
+  workflowEngine.get = async () => null;
+  channel.addUserComment(issue.number, { id: 86, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  const blocked = await queue.tick();
+
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'workflow_missing_or_invalid');
+  assert.equal(workflowEngine.approveCalls.length, 0);
+});
+
 test('a rejection arriving between checkpoint decision read and approval prevents WorkflowEngine approval', async () => {
   const { queue, channel, workflowEngine, issue } = await queueFixture();
   let record = await queue.tick();
