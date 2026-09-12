@@ -488,6 +488,7 @@ export class SupervisedIssueQueue {
   }
 
   async deliverTerminalNotification(issue, key, record) {
+    validateIssueQueueRecord(record);
     const notification = record.terminalNotification;
     if (!notification || notification.sentAt) return record;
     const comments = await this.channel.comments(issue.number);
