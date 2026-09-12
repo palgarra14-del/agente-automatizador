@@ -574,6 +574,7 @@ export class SupervisedIssueQueue {
   }
 
   workflowIsPristine(workflow) {
+    if (!workflow || !Array.isArray(workflow.steps) || !workflow.steps.length) return false;
     if ((workflow.modelUsage?.calls ?? 0) !== 0 || workflow.workspace) return false;
     return workflow.steps.every((step, index) => index === 0 ? step.status === WorkflowStepStatus.READY : step.status === WorkflowStepStatus.PENDING);
   }
@@ -778,6 +779,12 @@ export class SupervisedIssueQueue {
       }
       if (record.pendingApproval.kind === 'workflow-step') {
         const workflow = await this.workflowEngine.get(record.workflowId);
+        if (!workflow || !Array.isArray(workflow.steps)) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_missing_or_invalid', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent workflow is missing or structurally invalid while an approval is pending. Manual inspection is required.');
+          return next;
+        }
         const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
         if (!stepNeedsHumanApproval(targetStep)) {
           const proof = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
