@@ -206,7 +206,13 @@ function clip(value, size = 8_000) {
 }
 
 function safeJson(value) {
-  return JSON.parse(maskSecrets(JSON.stringify(value)));
+  const secretKey = /^[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|credential|authorization|cookie|session)[A-Za-z0-9_-]*$/i;
+  const serialized = JSON.stringify(value, (key, current) => {
+    if (key && secretKey.test(key)) return '[REDACTED]';
+    if (typeof current === 'string') return maskSecrets(current);
+    return current;
+  });
+  return JSON.parse(serialized);
 }
 
 function createModelUsageState(maxCalls) {
@@ -359,7 +365,7 @@ export function maskSecrets(value) {
   const assignment = `\\b(${secretField}\\s*[=:]\\s*)`;
   return String(value)
     .replace(/\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/gi, '[REDACTED]')
-    .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}]+/gi, '$1[REDACTED]')
+    .replace(/\b(Authorization\s*:\s*)(?:Basic|Bearer)\s+[^\s,;}"'\]]+/gi, '$1[REDACTED]')
     .replace(new RegExp(`("${secretField}"\\s*:\\s*)"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
     .replace(new RegExp(`('${secretField}'\\s*:\\s*)'(?:\\\\.|[^'\\\\])*'`, 'gi'), "$1'[REDACTED]'")
     .replace(new RegExp(`${assignment}"(?:\\\\.|[^"\\\\])*"`, 'gi'), '$1"[REDACTED]"')
