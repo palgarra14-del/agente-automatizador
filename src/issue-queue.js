@@ -806,11 +806,9 @@ export class SupervisedIssueQueue {
       const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
       return this.finalizeTerminal(issue, key, next, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
     }
-    if (parsed.requestFingerprint !== record.requestFingerprint) {
-      const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent request blocked: the issue body changed after the request fingerprint was accepted. Create a new request instead of editing an approved one.');
-      return next;
+    if (parsed.requestFingerprint !== record.requestFingerprint || parsed.issueBodyFingerprint !== record.issueBodyFingerprint) {
+      const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+      return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the issue body changed after the request fingerprint was accepted. Create a new request instead of editing an approved one.');
     }
     try {
       validateIssueQueueRecord(record, {
@@ -821,10 +819,31 @@ export class SupervisedIssueQueue {
         controlPlaneFingerprint: this.controlPlaneFingerprint()
       });
     } catch (error) {
-      const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
-      return next;
+      const next = {
+        version: 1,
+        issueNumber: issue.number,
+        issueId: issue.id,
+        author: issue.user?.login ?? null,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectExecutionFingerprint(activeProject),
+        controlPlaneFingerprint: this.controlPlaneFingerprint(),
+        request: parsed.request,
+        workflowId: null,
+        workflowBindingFingerprint: null,
+        status: 'blocked',
+        reason: 'queue_state_invalid',
+        createdAt: typeof record.createdAt === 'string' ? record.createdAt : this.now(),
+        updatedAt: this.now(),
+        pendingApproval: null,
+        activeApproval: null,
+        startApprovalFingerprint: null,
+        startApprovalCommentId: null,
+        startApprovedBy: null,
+        initializationLease: null,
+        lastProcessedCommentId: 0
+      };
+      return this.finalizeTerminal(issue, key, next, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`. The corrupt local record was quarantined and will not be resumed.`);
     }
 
     if (record.pendingApproval) {
@@ -899,10 +918,8 @@ export class SupervisedIssueQueue {
       if (record.pendingApproval.kind === 'workflow-step') {
         const workflow = await this.workflowEngine.get(record.workflowId);
         if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
-          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
-          return next;
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
         }
         const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
         if (!stepNeedsHumanApproval(targetStep)) {
