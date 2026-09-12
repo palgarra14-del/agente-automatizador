@@ -1521,29 +1521,40 @@ test('LocalGitAdapter fingerprints git control files without exposing their cont
 });
 
 
-test('Codex worker permission profile is fail-closed on native Windows', async () => {
+test('Codex worker permission profile remains fail-closed on unknown platforms', async () => {
   let constructed = 0;
   class FakeCodex { constructor() { constructed += 1; } }
-  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
-  const result = await worker.execute({ objective: 'fixture' }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  const worker = new CodexSdkWorker({ CodexClient: FakeCodex, platform: 'freebsd', environment: () => ({ PATH: '/safe' }) });
+  const result = await worker.execute({ objective: 'fixture' }, { workspace: '/workspace', timeoutMs: 100 });
   assert.equal(result.status, 'failed');
-  assert.equal(result.output, 'codex_worker_read_isolation_unverified_on_win32');
+  assert.equal(result.output, 'codex_worker_read_isolation_unverified_on_freebsd');
   assert.equal(constructed, 0);
 });
 
-test('Codex worker security config denies root reads and selects only requested workspace authority', () => {
+test('Codex worker security config denies root reads and preserves restrictive authority on Windows', () => {
   const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux' });
   const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin' });
+  const windowsRead = codexWorkerSecurityConfig({ writeAccess: false, pathValue: 'C:\\safe', platform: 'win32' });
+  const windowsWrite = codexWorkerSecurityConfig({ writeAccess: true, pathValue: 'C:\\safe', platform: 'win32' });
   assert.equal(write.supported, true);
   assert.equal(read.supported, true);
+  assert.equal(windowsRead.supported, true);
+  assert.equal(windowsWrite.supported, true);
   const writeProfile = write.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
   const readProfile = read.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  const windowsReadProfile = windowsRead.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
+  const windowsWriteProfile = windowsWrite.configOverrides.find((entry) => entry.startsWith('permissions.agent-workflow.filesystem='));
   assert.match(writeProfile, /":root"="deny"/);
   assert.match(writeProfile, /":minimal"="read"/);
   assert.match(writeProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
   assert.match(readProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
+  assert.match(windowsReadProfile, /":root"="deny"/);
+  assert.match(windowsReadProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
+  assert.match(windowsWriteProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
   assert.ok(write.configOverrides.includes('shell_environment_policy.set.PATH="/bin:/usr/bin"'));
-  assert.equal(codexWorkerSecurityConfig({ platform: 'win32' }).supported, false);
+  assert.ok(windowsRead.configOverrides.includes('permissions.agent-workflow.network.enabled=false'));
+  assert.ok(windowsWrite.configOverrides.includes('approval_policy="never"'));
+  assert.equal(codexWorkerSecurityConfig({ platform: 'freebsd' }).supported, false);
 });
 
 test('Codex worker rejects project-local Codex control configuration before starting the SDK', async () => {
