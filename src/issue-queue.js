@@ -520,9 +520,9 @@ export class SupervisedIssueQueue {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
     if (record.status === 'initializing') {
-      let abandoned = false;
+      let abandoned;
       try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
-      catch { abandoned = false; }
+      catch { return record; }
       if (!abandoned) return record;
       const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
       await this.saveRecord(key, next);
