@@ -139,6 +139,9 @@ class FakeChannel {
     }
     const entry = { id: this.nextCommentId++, number, body };
     this.posted.push(entry);
+    const comments = this.commentsByIssue.get(number) ?? [];
+    comments.push({ id: 0, user: { login: 'palgarra14-del' }, body });
+    this.commentsByIssue.set(number, comments);
     return { id: entry.id, url: `https://example.test/comment/${entry.id}` };
   }
 
