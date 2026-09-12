@@ -799,8 +799,8 @@ function normalizeWorkflowInput(profile, input) {
 
 const workflowProfiles = Object.freeze({
   'website-build': {
-    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
-    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
+    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }],
+    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder'], ['visual-verification', 'checkpoint']]
   },
   'app-improvement': {
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
@@ -1047,7 +1047,7 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!push || push.branch !== plan.workspace.workingBranch || push.finalHead !== commit.finalHead || push.remoteBranchHead !== commit.finalHead) throw new Error('Completed publication push evidence is invalid');
       if (!pullRequest || !Number.isInteger(pullRequest.number) || pullRequest.number < 1 || typeof pullRequest.url !== 'string' || !pullRequest.url || pullRequest.state !== 'open' || pullRequest.headSha !== commit.finalHead || pullRequest.headRef !== plan.workspace.workingBranch || pullRequest.baseRef !== project.defaultBranch) throw new Error('Completed publication pull request evidence is invalid');
       if (!ci || !Array.isArray(ci.checks) || !Array.isArray(ci.statuses) || ci.state !== 'success' || ciState(ci.checks, ci.statuses) !== 'success') throw new Error('Completed publication requires internally consistent successful CI evidence');
-      const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
+      const previewRequired = plan.profile === 'website-build' || project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
       if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
       if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch)) throw new Error('Completed publication READY preview is not bound to the published commit');
       if (preview.state === 'NOT_REQUIRED' && (previewRequired || project.deployment?.provider === 'vercel')) throw new Error('Completed publication cannot omit configured preview evidence');
@@ -1063,14 +1063,31 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     if (plan.profile === 'website-build' && step.id === 'visual-verification') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const review = plan.steps.find((candidate) => candidate.id === 'review');
-      if (!implementation?.evidence?.changeSetFingerprint || reviewEvidenceVerdict(review?.evidence?.result) !== 'PASS' || review.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed visual verification is not bound to the reviewed implementation');
+      const publication = plan.steps.find((candidate) => candidate.id === 'publication');
+      const preview = publication?.evidence?.preview;
+      const commit = publication?.evidence?.commit;
+      if (
+        !implementation?.evidence?.changeSetFingerprint ||
+        reviewEvidenceVerdict(review?.evidence?.result) !== 'PASS' ||
+        review.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+        publication?.status !== WorkflowStepStatus.COMPLETED ||
+        publication.evidence?.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+        preview?.state !== 'READY' ||
+        preview?.ok !== true ||
+        preview?.environment !== 'preview' ||
+        typeof preview?.url !== 'string' ||
+        !preview.url ||
+        !commit?.finalHead ||
+        preview.commitSha !== commit.finalHead ||
+        step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+        step.evidence.approvedCommitSha !== commit.finalHead ||
+        step.evidence.approvedPreviewUrl !== preview.url
+      ) throw new Error('Completed visual verification is not bound to the published preview');
     }
     if (governedImplementationProfiles.has(plan.profile) && step.id === 'release-readiness') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const review = plan.steps.find((candidate) => candidate.id === 'review');
-      const visual = plan.steps.find((candidate) => candidate.id === 'visual-verification');
-      const visualInvalid = plan.profile === 'website-build' && (visual?.status !== WorkflowStepStatus.COMPLETED || visual.evidence?.approvedChangeSetFingerprint !== implementation?.evidence?.changeSetFingerprint);
-      if (visualInvalid || !implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
+      if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
     }
     return;
   }
@@ -2000,9 +2017,7 @@ export class WorkflowEngine {
     const release = plan.steps.find((step) => step.id === 'release-readiness');
     const existing = next.evidence?.commit ? safeJson(next.evidence) : null;
     const expectedFingerprint = implementation?.evidence?.changeSetFingerprint ?? null;
-    const visual = plan.steps.find((step) => step.id === 'visual-verification');
-    const websiteVisualInvalid = plan.profile === 'website-build' && (visual?.status !== WorkflowStepStatus.COMPLETED || visual.evidence?.approvedChangeSetFingerprint !== expectedFingerprint);
-    if (!governedImplementationProfiles.has(plan.profile) || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || release?.status !== WorkflowStepStatus.COMPLETED || websiteVisualInvalid || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !expectedFingerprint || review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) {
+    if (!governedImplementationProfiles.has(plan.profile) || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || release?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !expectedFingerprint || review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint || release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint) {
       return this.stopPublication(id, next.id, 'workflow_publication_prerequisites_invalid', { blocked: false, phase: 'preflight' });
     }
     if (!plan.workspace?.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) {
@@ -2216,7 +2231,7 @@ export class WorkflowEngine {
     }
 
     let preview = evidence.preview ?? null;
-    const previewRequired = project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
+    const previewRequired = plan.profile === 'website-build' || project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
     if (!preview || (previewRequired && preview.state !== 'READY')) {
       const remaining = this.remainingMs(await this.get(id));
       if (remaining <= 0) return this.stopPublication(id, next.id, 'workflow_publication_preview_timeout', { pause: true, phase: 'preview-timeout' });
@@ -2369,15 +2384,35 @@ export class WorkflowEngine {
             if (plan.profile === 'website-build' && step.id === 'visual-verification') {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
               const review = plan.steps.find((candidate) => candidate.id === 'review');
-              if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Visual verification cannot approve an unbound implementation');
-              return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint };
+              const publication = plan.steps.find((candidate) => candidate.id === 'publication');
+              const preview = publication?.evidence?.preview;
+              const commit = publication?.evidence?.commit;
+              if (
+                implementation?.status !== WorkflowStepStatus.COMPLETED ||
+                review?.status !== WorkflowStepStatus.COMPLETED ||
+                reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' ||
+                !implementation.evidence?.changeSetFingerprint ||
+                review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+                publication?.status !== WorkflowStepStatus.COMPLETED ||
+                publication.evidence?.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint ||
+                preview?.state !== 'READY' ||
+                preview?.ok !== true ||
+                preview?.environment !== 'preview' ||
+                typeof preview?.url !== 'string' ||
+                !preview.url ||
+                !commit?.finalHead ||
+                preview.commitSha !== commit.finalHead
+              ) throw new Error('Visual verification cannot approve without the exact published preview');
+              return {
+                approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+                approvedCommitSha: commit.finalHead,
+                approvedPreviewUrl: preview.url
+              };
             }
             if (governedImplementationProfiles.has(plan.profile) && step.id === 'release-readiness') {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
               const review = plan.steps.find((candidate) => candidate.id === 'review');
-              const visual = plan.steps.find((candidate) => candidate.id === 'visual-verification');
-              const visualInvalid = plan.profile === 'website-build' && (visual?.status !== WorkflowStepStatus.COMPLETED || visual.evidence?.approvedChangeSetFingerprint !== implementation?.evidence?.changeSetFingerprint);
-              if (visualInvalid || implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
+              if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
               return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
             }
             return {};
