@@ -68,6 +68,16 @@ The website graph is `requirements → design approval → implementation → de
 
 Before the critic spends a model call, the engine revalidates that the current diff/Git/protected state still equals the implementation fingerprint. The critic must PASS that exact diff and, for website builds, independently compare business-specific claims with the authoritative brief/plan/assets. Quality requires test/typecheck/lint/build and continuous change-set governance rejects command-induced drift. Release-readiness binds to the reviewed fingerprint and permits publication. Website publication requires successful CI plus a READY non-production preview with URL for the exact commit; only then can visual approval persist the exact change fingerprint, commit SHA, and preview URL. Publication still exposes no merge or production method. v0.13 deliberately leaves browser-based visual inspection to a later reviewed capability; human visual approval is not represented as automated visual QA.
 
+## v0.14 supervised issue control plane
+
+The issue queue is an operator/control plane around WorkflowEngine, not a new execution engine. A local `agent inbox once|watch` process polls one configured GitHub repository with the orchestrator's `GITHUB_TOKEN`; Codex remains local under the existing isolated worker boundary. v0.14 initially accepts only `app-improvement` requests and requires explicit bounded allowed paths.
+
+A request body is strict versioned JSON preceded by a unique marker. It is normalized, secret-masked where appropriate, SHA-256 fingerprinted, and atomically reserved in `JsonStore` before workflow creation. The first executable action is always `WorkflowEngine.run(..., { dryRun: true })`; no model call, project write, Git write, PR or deployment occurs. A start token binds the request, workflow capability/specialist fingerprints, scope, complete dry-run step graph, and declared external writes. The queue rechecks current GitHub comments for an exact approval from an allowlisted actor before a pristine workflow may run, so corrupting local queue status cannot invent start authorization.
+
+Each later WorkflowEngine human checkpoint is approved only through its own fingerprint over persisted workflow/step state. Issue-body edits and stale fingerprints fail closed. Initialization has a process-identity lease so concurrent watchers cannot create duplicate workflows; abandoned initialization becomes a manual block. After creation, WorkflowEngine's existing execution lease prevents duplicate model/executor work. Safe CI/preview observation timeouts may resume; uncertain external-write states keep the v0.11 non-replay behavior.
+
+The queue never merges, never promotes/deploys production, and never bypasses capability/project/change policy. It intentionally processes one active request per polling tick; parallel remote workers remain deferred until the single-worker dogfood path is proven.
+
 ## Adapters
 
 - `CodexSdkWorker`: real workspace-write coding implementation through the official `@openai/codex-sdk`.
