@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { mkdir, mkdtemp, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
@@ -231,6 +231,116 @@ test('workflow profiles create validated deterministic plans', () => {
     assert.ok(plan.steps.length > 3);
     assert.ok(plan.definitionOfDone.length > 0);
   }
+});
+
+test('website planner verifies repository assets before spending a model call', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-assets-'));
+  const configured = managedProject('website-assets', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute(request) {
+      calls += 1;
+      assert.equal(request.context.businessBrief.businessName, 'Fontanería Ejemplo');
+      assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(request.context.assetEvidence.assets.length, 2);
+      assert.ok(request.context.assetEvidence.assets.every((asset) => /^[a-f0-9]{64}$/.test(asset.sha256)));
+      return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Build a factual local website',
+    input: { businessBrief: businessBrief({ assets: { logoPath: 'public/logo.png', photoPaths: ['public/equipo.jpg'] } }) }
+  });
+  const workspace = manager.describe(configured, created.id).workspace;
+  await mkdir(join(workspace, 'public'), { recursive: true });
+  await writeFile(join(workspace, 'public/logo.png'), 'logo-bytes');
+  await writeFile(join(workspace, 'public/equipo.jpg'), 'photo-bytes');
+
+  const waiting = await instance.run(created.id);
+  const requirements = waiting.steps.find((step) => step.id === 'requirements');
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(requirements.evidence.businessBriefFingerprint, waiting.inputFingerprint);
+  assert.match(requirements.evidence.assetEvidenceFingerprint, /^[a-f0-9]{64}$/);
+  assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(calls, 1);
+  assert.equal(waiting.modelUsage.calls, 1);
+});
+
+test('missing or symlinked website assets fail before the planner model is invoked', async () => {
+  for (const kind of ['missing', 'symlink']) {
+    const root = await mkdtemp(join(tmpdir(), `agent-website-asset-${kind}-`));
+    const configured = managedProject(`website-asset-${kind}`, root, {
+      skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+    });
+    const manager = new FakeWorkflowWorkspaceManager();
+    let calls = 0;
+    const skillExecutor = { supports: (skill) => skill === 'website.plan', async execute() { calls += 1; throw new Error('planner must not run'); } };
+    const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor });
+    const created = await instance.create({
+      profile: 'website-build',
+      projectId: configured.id,
+      goal: 'Reject unsafe asset',
+      input: { businessBrief: businessBrief({ assets: { logoPath: 'public/logo.png', photoPaths: [] } }) }
+    });
+    const workspace = manager.describe(configured, created.id).workspace;
+    await mkdir(join(workspace, 'public'), { recursive: true });
+    if (kind === 'symlink') {
+      await writeFile(join(workspace, 'real-logo.png'), 'logo');
+      await symlink(join(workspace, 'real-logo.png'), join(workspace, 'public/logo.png'));
+    }
+
+    const failed = await instance.run(created.id);
+    const requirements = failed.steps.find((step) => step.id === 'requirements');
+    assert.equal(failed.status, WorkflowStepStatus.FAILED);
+    assert.equal(requirements.error, 'website_asset_validation_failed');
+    assert.equal(calls, 0);
+    assert.equal(failed.modelUsage.calls, 0);
+  }
+});
+
+test('website asset changes after design approval block implementation before Codex', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-asset-stale-'));
+  const configured = managedProject('website-asset-stale', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute() { return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } }; }
+  };
+  let workerCalls = 0;
+  const codingWorker = { async execute() { workerCalls += 1; throw new Error('worker must not run for stale assets'); } };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor, codingWorker });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Bind design to assets',
+    input: { businessBrief: businessBrief({ assets: { logoPath: 'public/logo.png', photoPaths: [] } }) }
+  });
+  const workspace = manager.describe(configured, created.id).workspace;
+  await mkdir(join(workspace, 'public'), { recursive: true });
+  await writeFile(join(workspace, 'public/logo.png'), 'logo-v1');
+
+  const designWait = await instance.run(created.id);
+  assert.equal(designWait.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  const approved = await instance.approve(created.id, 'design');
+  assert.equal(approved.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.COMPLETED);
+  await writeFile(join(workspace, 'public/logo.png'), 'logo-v2');
+
+  const blocked = await instance.run(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.error, 'website_assets_changed_after_plan');
+  assert.equal(workerCalls, 0);
+  assert.equal(blocked.modelUsage.calls, 1);
 });
 
 test('workflow model usage state is persisted and fails closed on tampering', () => {
