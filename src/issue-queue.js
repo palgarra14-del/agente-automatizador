@@ -116,7 +116,14 @@ function approvalEvidenceSummary(workflow, stepId) {
         reviewedChangeSetFingerprint: step.evidence?.reviewedChangeSetFingerprint ?? null
       }))
   };
-  return JSON.stringify(redactApprovalValue(summary), null, 2).slice(0, 4_000);
+  let serialized;
+  try { serialized = JSON.stringify(redactApprovalValue(summary), null, 2); }
+  catch { serialized = '"[UNSERIALIZABLE]"'; }
+  const safe = maskSecrets(serialized)
+    .replaceAll('`', "'")
+    .replace(/\/agent/gi, '[agent-command]')
+    .replaceAll('@', '＠');
+  return Buffer.from(safe, 'utf8').subarray(0, 4_000).toString('utf8');
 }
 
 function assertObjectKeys(value, allowed, label) {
