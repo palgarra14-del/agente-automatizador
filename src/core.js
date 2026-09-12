@@ -821,8 +821,9 @@ function workflowBudget(input = {}) {
   };
 }
 
+const websiteQualityCommands = Object.freeze(['test', 'typecheck', 'lint', 'build']);
 const workflowVerificationCommands = Object.freeze({
-  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint', 'build'] }),
+  'website-build': Object.freeze({ quality: websiteQualityCommands }),
   'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
   'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
 });
@@ -954,6 +955,10 @@ export function createWorkflowPlan({ profile, project, goal, input, scope = {}, 
   if (!project?.id) throw new Error('Workflow project is required');
   if (typeof goal !== 'string' || !goal.trim()) throw new Error('Workflow goal is required');
   const normalizedInput = normalizeWorkflowInput(profile, input);
+  if (profile === 'website-build') {
+    const missingQualityCommands = websiteQualityCommands.filter((name) => !Object.hasOwn(project.commands ?? {}, name));
+    if (missingQualityCommands.length) throw new Error(`website-build requires configured quality commands: ${missingQualityCommands.join(', ')}`);
+  }
   const inputFingerprint = normalizedInput ? evidenceFingerprint(normalizedInput) : null;
   const budget = workflowBudget(budgets);
   const steps = template.steps.map(([id, type], index) => ({ id, type, skill: workflowSkill(profile, id), specialist: workflowSpecialist(profile, id, specialistRegistry), status: index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING, dependsOn: index ? [template.steps[index - 1][0]] : [], attempts: 0, commands: workflowCommands(project, profile, id, type), evidence: null, error: null }));
