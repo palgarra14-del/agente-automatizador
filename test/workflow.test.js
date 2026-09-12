@@ -1518,6 +1518,9 @@ function changedChangeSet(paths, overrides = {}) {
 }
 
 async function prepareImplementation(instance, workflowId) {
+  const current = await instance.get(workflowId);
+  const configured = instance.projects.get(current.projectId);
+  if (!current.workspace) await instance.workspaceProject(workflowId, configured);
   await instance.update(workflowId, (plan) => {
     const inspect = completeStep(plan, 'inspect-project');
     inspect.evidence.result = { inspectionEvidence: { summary: 'fixture inspection', relevantPaths: ['src/core.js'] } };
@@ -1543,7 +1546,11 @@ async function prepareApprovedDependencyChange(instance, workflowId, changeSet, 
     implementation.evidence.workerEvidence = { status: 'completed', summary: 'fixture dependency implementation' };
     implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
     implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
-    implementation.evidence.sensitiveApproval = { approvedAt: '2026-09-11T00:00:00.000Z', changeSetFingerprint: changeSet.changeSetFingerprint };
+    implementation.evidence.sensitiveApproval = {
+      approvedAt: '2026-09-11T00:00:00.000Z',
+      changeSetFingerprint: changeSet.changeSetFingerprint,
+      approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, 'implementation')
+    };
     const dependencyRefresh = plan.steps.find((step) => step.id === 'dependency-refresh');
     dependencyRefresh.status = WorkflowStepStatus.PENDING;
     dependencyRefresh.error = null;
