@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { evaluateChangePolicy, humanApprovalDependencyFingerprint, JsonStore, loadProjects, WorkflowStepStatus } from '../src/core.js';
+import { createWorkflowPlan, evaluateChangePolicy, humanApprovalDependencyFingerprint, JsonStore, loadProjects, WorkflowStepStatus } from '../src/core.js';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 import {
@@ -1105,7 +1105,7 @@ test('approval fingerprints bind exact dry-run, project/control context, and all
 test('self project classifies the v0.14 control plane as sensitive', async () => {
   const projects = await loadProjects(join(process.cwd(), 'config/projects.json'));
   const self = projects.get('self');
-  for (const path of ['config/issue-queue.json', 'src/issue-queue.js', 'src/cli.js']) {
+  for (const path of ['config/projects.json', 'config/issue-queue.json', 'src/core.js', 'src/issue-queue.js', 'src/cli.js']) {
     const decision = evaluateChangePolicy(self, {
       paths: [path],
       changedFiles: 1,
@@ -1119,4 +1119,28 @@ test('self project classifies the v0.14 control plane as sensitive', async () =>
     assert.equal(decision.ok, true);
     assert.equal(decision.classification, 'sensitive');
   }
+});
+
+
+test('registered Callflow can execute every deterministic app-improvement verification stage', async () => {
+  const projects = await loadProjects(join(process.cwd(), 'config/projects.json'));
+  const callflow = projects.get('callflow');
+  assert.ok(callflow);
+  assert.deepEqual(
+    Object.fromEntries(['test', 'typecheck', 'lint', 'build'].map((name) => [name, callflow.commands[name]])),
+    {
+      test: 'npm test',
+      typecheck: 'node --check prospect-utils.js',
+      lint: 'node --check prospect.js',
+      build: 'node --check app.js'
+    }
+  );
+  const plan = createWorkflowPlan({
+    profile: 'app-improvement',
+    project: callflow,
+    goal: 'Verify the registered Callflow workflow is executable'
+  });
+  assert.deepEqual(plan.steps.find((step) => step.id === 'tests').commands, ['test']);
+  assert.deepEqual(plan.steps.find((step) => step.id === 'verification').commands, ['typecheck', 'lint', 'build']);
+  assert.ok(['test', 'typecheck', 'lint', 'build', 'ci', 'deployment'].every((name) => callflow.acceptance.require.includes(name)));
 });
