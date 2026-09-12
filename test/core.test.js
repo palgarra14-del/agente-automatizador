@@ -33,6 +33,7 @@ import {
   runProcess,
   report,
   remoteMatchesProject,
+  readBoundedRegularFile,
   resolveExecutionUser,
   safeCommandEnvironment,
   transition,
@@ -258,6 +259,27 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.match(formatDoctor(result), /CAPABILITY REGISTRY\n[0-9a-f]{12}/);
   assert.match(formatDoctor(result), /ORCHESTRATOR SKILLS AVAILABLE/);
   assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
+});
+
+test('bounded regular-file reader rejects symlinks and oversize workflow inputs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bounded-input-'));
+  const regular = join(root, 'brief.json');
+  const oversized = join(root, 'oversized.json');
+  const linked = join(root, 'brief-link.json');
+  await writeFile(regular, '{"ok":true}');
+  await writeFile(oversized, 'x'.repeat(33));
+  await symlink(regular, linked);
+
+  const content = await readBoundedRegularFile(regular, { maxBytes: 32, label: 'Business brief' });
+  assert.equal(content.toString('utf8'), '{"ok":true}');
+  await assert.rejects(
+    readBoundedRegularFile(linked, { maxBytes: 32, label: 'Business brief' }),
+    /regular non-symlink file/
+  );
+  await assert.rejects(
+    readBoundedRegularFile(oversized, { maxBytes: 32, label: 'Business brief' }),
+    /exceeds 32 bytes/
+  );
 });
 
 test('security rejects control characters in governed paths and keeps state private', async () => {
