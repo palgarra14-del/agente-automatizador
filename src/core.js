@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -358,6 +358,28 @@ export function resolveExecutionUser(user = 'host') {
   const gid = typeof process.getgid === 'function' ? process.getgid() : null;
   if (Number.isInteger(uid) && uid >= 0 && Number.isInteger(gid) && gid >= 0) return `${uid}:${gid}`;
   return '1000:1000';
+}
+
+export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label = 'File' } = {}) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxBytes must be a positive integer');
+  const target = resolve(file);
+  const before = await lstat(target);
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error(`${label} must be a regular non-symlink file`);
+  if (before.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+
+  const handle = await open(target, 'r');
+  try {
+    const opened = await handle.stat();
+    const after = await lstat(target);
+    if (!opened.isFile() || after.isSymbolicLink() || !after.isFile()) throw new Error(`${label} must remain a regular non-symlink file`);
+    if (opened.dev !== after.dev || opened.ino !== after.ino) throw new Error(`${label} changed during validation`);
+    if (opened.size > maxBytes || after.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    const content = await handle.readFile();
+    if (content.byteLength > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    return content;
+  } finally {
+    await handle.close();
+  }
 }
 
 export function maskSecrets(value) {
