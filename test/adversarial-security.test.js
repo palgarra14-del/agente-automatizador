@@ -31,6 +31,33 @@ test('secret masking redacts quoted JSON-style secret fields and authorization h
   assert.equal(maskSecrets('Authorization: Basic Zm9vOmJhcg==').includes('Zm9vOmJhcg=='), false);
 });
 
+test('secret masking preserves valid JSON structure while redacting embedded authorization-like strings', () => {
+  const raw = JSON.stringify({
+    note: 'Authorization: Bearer top-secret-token-value',
+    nested: { token: 'nested-secret-value' },
+    list: ['safe', 'Authorization: Basic Zm9vOmJhcg==']
+  });
+  const masked = maskSecrets(raw);
+  const parsed = JSON.parse(masked);
+  assert.equal(parsed.note, 'Authorization: [REDACTED]');
+  assert.equal(parsed.nested.token, '[REDACTED]');
+  assert.equal(parsed.list[1], 'Authorization: [REDACTED]');
+  assert.equal(masked.includes('top-secret-token-value'), false);
+  assert.equal(masked.includes('nested-secret-value'), false);
+  assert.equal(masked.includes('Zm9vOmJhcg=='), false);
+
+  const configured = configFrom({
+    id: 'safe-json-redaction',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    commandEnvironment: { NOTE: 'Authorization: Bearer environment-secret-value' }
+  });
+  assert.equal(configured.commandEnvironment.NOTE, 'Authorization: [REDACTED]');
+});
+
 test('secret masking consumes complete quoted shell and YAML values', () => {
   const cases = [
     ['TOKEN="abc123"', 'abc123'],
