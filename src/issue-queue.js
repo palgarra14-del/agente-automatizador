@@ -385,13 +385,15 @@ export class SupervisedIssueQueue {
     const claim = await this.claimInitialization(issue, parsed);
     if (!claim.claimed) return claim.record;
     if (!this.projects.has(parsed.request.projectId)) {
-      await this.post(issue.number, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
-      return this.saveRecord(this.requestKey(issue), {
+      const rejected = {
         version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
         requestFingerprint: parsed.requestFingerprint, request: parsed.request, workflowId: null,
         status: 'rejected', reason: 'unknown_project', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
         startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null, lastProcessedCommentId: 0
-      });
+      };
+      await this.saveRecord(this.requestKey(issue), rejected);
+      await this.post(issue.number, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
+      return rejected;
     }
     let workflow;
     let dryRun;
@@ -447,6 +449,8 @@ export class SupervisedIssueQueue {
 
   async findDecision(issueNumber, record) {
     const comments = await this.channel.comments(issueNumber);
+    const instruction = record.pendingApproval?.fingerprint ? approvalInstruction(record.pendingApproval.fingerprint) : null;
+    const instructionPresent = Boolean(instruction && comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(instruction)));
     const eligible = comments
       .filter((comment) => Number.isInteger(comment.id) && comment.id > (record.lastProcessedCommentId ?? 0))
       .sort((a, b) => a.id - b.id);
@@ -460,7 +464,7 @@ export class SupervisedIssueQueue {
       decision = { ...parsed, commentId: comment.id, actor: comment.user.login };
       break;
     }
-    return { decision, highestCommentId: highest };
+    return { decision, highestCommentId: highest, instructionPresent };
   }
 
   async historicalApproval(issueNumber, approvalFingerprint) {
@@ -575,11 +579,22 @@ export class SupervisedIssueQueue {
     }
 
     if (record.pendingApproval) {
-      const { decision, highestCommentId } = await this.findDecision(issue.number, record);
+      const { decision, highestCommentId, instructionPresent } = await this.findDecision(issue.number, record);
       if (highestCommentId > (record.lastProcessedCommentId ?? 0)) {
         record = await this.saveRecord(key, { ...record, lastProcessedCommentId: highestCommentId, updatedAt: this.now() });
       }
-      if (!decision) return record;
+      if (!decision) {
+        if (!instructionPresent) {
+          await this.post(issue.number, [
+            `Agent approval instruction recovered for \`${record.pendingApproval.kind}\` / \`${record.pendingApproval.stepId}\`.`,
+            'Approve exactly:',
+            `\`${approvalInstruction(record.pendingApproval.fingerprint)}\``,
+            'Or reject exactly:',
+            `\`${rejectionInstruction(record.pendingApproval.fingerprint)}\``
+          ].join('\n'));
+        }
+        return record;
+      }
       if (decision.decision === 'reject') {
         const next = { ...record, status: 'rejected', reason: `rejected_by:${decision.actor}`, updatedAt: this.now(), pendingApproval: null };
         await this.saveRecord(key, next);
