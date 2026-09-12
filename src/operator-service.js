@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -101,6 +101,15 @@ async function runSystemctl(args, { processRunner } = {}) {
   return result;
 }
 
+async function assertCanonicalDirectory(directory, label) {
+  const expected = resolve(directory);
+  const observed = await realpath(expected);
+  if (observed !== expected) throw new Error(`${label} must not traverse symlinks`);
+  const info = await lstat(expected);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
+  return expected;
+}
+
 async function assertWritableServiceTarget(file) {
   try {
     const info = await lstat(file);
@@ -123,7 +132,9 @@ export async function installOperatorService({
   const serviceDir = safeServicePath(join(home, '.config', 'systemd', 'user'), 'serviceDir');
   const serviceFile = safeServicePath(join(serviceDir, SERVICE_NAME), 'serviceFile');
   validatedToken(await tokenResolver());
+  await assertCanonicalDirectory(root, 'repositoryRoot');
   await mkdir(serviceDir, { recursive: true, mode: 0o700 });
+  await assertCanonicalDirectory(serviceDir, 'serviceDir');
   await assertWritableServiceTarget(serviceFile);
   const unit = buildOperatorServiceUnit({ repositoryRoot: root, nodePath });
   const temp = join(serviceDir, `.${SERVICE_NAME}.tmp-${randomUUID()}`);
