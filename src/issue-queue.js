@@ -792,9 +792,7 @@ export class SupervisedIssueQueue {
       });
     } catch (error) {
       const next = { ...record, status: 'blocked', reason: 'queue_state_invalid', updatedAt: this.now(), pendingApproval: null, initializationLease: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
-      return next;
+      return this.finalizeTerminal(issue, key, next, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`.`);
     }
     if (record.status === 'initializing') {
       let abandoned;
@@ -802,9 +800,7 @@ export class SupervisedIssueQueue {
       catch { return record; }
       if (!abandoned) return record;
       const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
-      return next;
+      return this.finalizeTerminal(issue, key, next, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
     }
 
     if (record.pendingApproval) {
@@ -826,23 +822,17 @@ export class SupervisedIssueQueue {
       }
       if (decision.decision === 'reject') {
         const next = { ...record, status: 'rejected', reason: `rejected_by:${decision.actor}`, updatedAt: this.now(), pendingApproval: null };
-        await this.saveRecord(key, next);
-        await this.post(issue.number, `Agent request rejected by \`${decision.actor}\`. No further execution will occur.`);
-        return next;
+        return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${decision.actor}\`. No further execution will occur.`);
       }
       if (record.pendingApproval.kind === 'start') {
         const workflow = await this.workflowEngine.get(record.workflowId);
         if (!this.workflowMatchesRecord(record, workflow)) {
           const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent start approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
         }
         if (workflow.status !== WorkflowStepStatus.PENDING || !this.workflowIsPristine(workflow)) {
           const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent start approval cannot be applied because the workflow is no longer pristine. Manual inspection is required.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be applied because the workflow is no longer pristine. Manual inspection is required.');
         }
         const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
         const expected = startApprovalFingerprint({
@@ -855,9 +845,7 @@ export class SupervisedIssueQueue {
         });
         if (expected !== record.pendingApproval.fingerprint) {
           const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
         }
         const currentBeforeExecution = await this.revalidateCurrentRequest(issue, record);
         if (!currentBeforeExecution.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeExecution.reason);
@@ -865,9 +853,7 @@ export class SupervisedIssueQueue {
         const latestDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
         if (latestDecision?.decision === 'reject') {
           const next = { ...record, status: 'rejected', reason: `rejected_by:${latestDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, `Agent request rejected by \`${latestDecision.actor}\` before execution. No further execution will occur.`);
-          return next;
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before execution. No further execution will occur.`);
         }
         if (latestDecision?.decision !== 'approve') return record;
         await this.workflowEngine.resetPristineDeadline(record.workflowId);
@@ -887,15 +873,11 @@ export class SupervisedIssueQueue {
         const workflow = await this.workflowEngine.get(record.workflowId);
         if (!this.workflowMatchesRecord(record, workflow)) {
           const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent workflow approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
         }
         if (!Array.isArray(workflow.steps)) {
           const next = { ...record, status: 'blocked', reason: 'workflow_missing_or_invalid', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent workflow is missing or structurally invalid while an approval is pending. Manual inspection is required.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow is missing or structurally invalid while an approval is pending. Manual inspection is required.');
         }
         const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
         if (!stepNeedsHumanApproval(targetStep)) {
