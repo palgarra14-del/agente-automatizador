@@ -257,6 +257,7 @@ export class GitHubIssueChannel {
   async request(path, options = {}) {
     const response = await this.fetch(`https://api.github.com${path}`, {
       ...options,
+      signal: options.signal ?? AbortSignal.timeout(this.requestTimeoutMs),
       headers: { ...this.headers(), ...(options.headers ?? {}) }
     });
     if (!response.ok) throw new Error(`GitHub issue queue request failed: ${response.status}`);
