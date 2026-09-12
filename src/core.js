@@ -673,6 +673,7 @@ const workflowPlanStatuses = new Set([
   WorkflowStepStatus.PENDING, WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED,
   WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL
 ]);
+const governedImplementationProfiles = new Set(['app-improvement', 'website-build']);
 function boundedText(value, label, { required = false, max = 500 } = {}) {
   if (value === undefined || value === null || value === '') {
     if (required) throw new Error(`${label} is required`);
@@ -1041,7 +1042,7 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
   }
   if (step.type === 'checkpoint') {
     if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
-    if (plan.profile === 'app-improvement' && step.id === 'release-readiness') {
+    if (governedImplementationProfiles.has(plan.profile) && step.id === 'release-readiness') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const review = plan.steps.find((candidate) => candidate.id === 'review');
       if (!implementation?.evidence?.changeSetFingerprint || step.evidence.approvedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || step.evidence.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint || review?.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Completed release-readiness approval is not bound to the reviewed implementation');
@@ -1127,7 +1128,7 @@ export function validateWorkflowPlan(plan, knownProjects, registry = defaultTool
   if (plan.status === WorkflowStepStatus.AWAITING_APPROVAL) {
     const waiting = awaitingApproval[0];
     const sensitiveImplementation = awaitingApproval.length === 1 &&
-      plan.profile === 'app-improvement' &&
+      governedImplementationProfiles.has(plan.profile) &&
       waiting?.id === 'implementation' &&
       waiting.type === 'placeholder' &&
       waiting.skill === 'code.implement' &&
@@ -1618,7 +1619,7 @@ export class WorkflowEngine {
   async executeDependencyRefreshWorkflowStep(id, project, next) {
     let plan = await this.get(id);
     const implementation = plan.steps.find((step) => step.id === 'implementation');
-    if (plan.profile !== 'app-improvement' || implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) {
+    if (!governedImplementationProfiles.has(plan.profile) || implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) {
       return this.update(id, (saved) => {
         const step = saved.steps.find((item) => item.id === next.id);
         step.status = WorkflowStepStatus.FAILED;
@@ -1777,7 +1778,7 @@ export class WorkflowEngine {
 
   async guardImplementationChangeSet(id, project, stepId, phase, { outcomes = [], outputBytes = 0 } = {}) {
     const plan = await this.get(id);
-    if (plan.profile !== 'app-improvement') return { ok: true, plan };
+    if (!governedImplementationProfiles.has(plan.profile)) return { ok: true, plan };
     const implementation = plan.steps.find((step) => step.id === 'implementation');
     if (implementation?.status !== WorkflowStepStatus.COMPLETED || !implementation.evidence?.changeSetFingerprint) return { ok: true, plan };
     const workspaceProject = await this.workspaceProject(id, project);
@@ -2148,7 +2149,7 @@ export class WorkflowEngine {
     const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
     if (!approvalCapability.available) throw new Error(`capability_unavailable:human.approval:${approvalCapability.reason}`);
     const currentStep = current.steps.find((candidate) => candidate.id === stepId);
-    const sensitiveImplementationApproval = current.profile === 'app-improvement' &&
+    const sensitiveImplementationApproval = governedImplementationProfiles.has(current.profile) &&
       currentStep?.id === 'implementation' &&
       currentStep.status === WorkflowStepStatus.AWAITING_APPROVAL &&
       currentStep.skill === 'code.implement' &&
@@ -2281,7 +2282,7 @@ export class WorkflowEngine {
         });
         return plan;
       }
-      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'code.implement'].includes(interruptedStep.skill)) {
+      if (interruptedStep && ['code.inspect', 'code.diagnose', 'code.review', 'website.plan', 'code.implement'].includes(interruptedStep.skill)) {
         const project = this.projects.get(plan.projectId);
         const expected = interruptedStep.evidence?.repositoryState;
         if (!plan.workspace || !expected) {
@@ -2321,7 +2322,7 @@ export class WorkflowEngine {
         if (repositoryChanged || filesChanged) {
           await this.update(id, (saved) => {
             const step = saved.steps.find((item) => item.id === interruptedStep.id);
-            const readOnly = ['code.inspect', 'code.diagnose', 'code.review'].includes(step.skill);
+            const readOnly = ['code.inspect', 'code.diagnose', 'code.review', 'website.plan'].includes(step.skill);
             step.error = readOnly ? 'interrupted_read_only_changes_detected' : 'interrupted_implementation_changes_detected';
             step.evidence = {
               ...step.evidence,
@@ -2358,7 +2359,7 @@ export class WorkflowEngine {
     const plan = await this.get(id);
     const expected = this.workspaceManager.describe(project, plan.id);
     const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
-    const publicationEnabled = plan.profile === 'app-improvement' && publicationCapability.available;
+    const publicationEnabled = governedImplementationProfiles.has(plan.profile) && publicationCapability.available;
     if (plan.workspace) {
       validateWorkflowWorkspace(plan.workspace, project);
       if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
@@ -2500,7 +2501,7 @@ export class WorkflowEngine {
       if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
       const next = this.readySteps(plan)[0];
       if (!next) break;
-      if (next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+      if (next.skill === 'project.dependencies.refresh' && governedImplementationProfiles.has(plan.profile)) {
         const implementation = plan.steps.find((step) => step.id === 'implementation');
         if (dependencyChangedPaths(implementation?.evidence?.changeSet ?? {}).length === 0) {
           plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
@@ -2515,17 +2516,17 @@ export class WorkflowEngine {
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'code.implement' && plan.profile === 'app-improvement') {
+      if (next.type === 'placeholder' && next.skill === 'code.implement' && governedImplementationProfiles.has(plan.profile)) {
         plan = await this.executeImplementationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'project.dependencies.refresh' && plan.profile === 'app-improvement') {
+      if (next.type === 'placeholder' && next.skill === 'project.dependencies.refresh' && governedImplementationProfiles.has(plan.profile)) {
         plan = await this.executeDependencyRefreshWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
-      if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && plan.profile === 'app-improvement') {
+      if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && governedImplementationProfiles.has(plan.profile)) {
         plan = await this.executePublicationWorkflowStep(id, project, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
