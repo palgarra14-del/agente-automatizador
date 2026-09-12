@@ -31,7 +31,10 @@
       "changePolicy": {
         "forbiddenPaths": [],
         "sensitivePaths": [
-          "config/projects.json"
+          "config/projects.json",
+          "config/issue-queue.json",
+          "src/issue-queue.js",
+          "src/cli.js"
         ],
         "budgets": {
           "maxChangedFiles": 8,
