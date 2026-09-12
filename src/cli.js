@@ -129,6 +129,9 @@ try {
             signal: controller.signal,
             onTick: (record) => {
               if (record) console.log(JSON.stringify(view(record)));
+            },
+            onError: (error) => {
+              console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
             }
           });
         } finally {
