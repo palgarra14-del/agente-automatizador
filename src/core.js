@@ -320,9 +320,7 @@ export async function collectReadOnlyRepositoryContext({
     if (!isWithin(root, target)) throw new Error(`repository_context_path_escape:${path}`);
     let content;
     try {
-      const pathInfo = await lstat(target);
-      if (Number(pathInfo.nlink) !== 1) throw new Error('repository context file link count is not one');
-      content = await readBoundedRegularFile(target, { maxBytes: maxFileBytes, label: `Repository context file ${path}` });
+      content = await readBoundedRegularFile(target, { maxBytes: maxFileBytes, label: `Repository context file ${path}`, requireSingleLink: true });
     } catch (error) {
       throw new Error(`repository_context_file_read_failed:${path}:${clip(error.message, 300)}`, { cause: error });
     }
@@ -528,11 +526,12 @@ function sameFileVersion(a, b) {
     a.ctimeMs === b.ctimeMs;
 }
 
-export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label = 'File' } = {}) {
+export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label = 'File', requireSingleLink = false } = {}) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxBytes must be a positive integer');
   const target = resolve(file);
   const before = await lstat(target);
   if (before.isSymbolicLink() || !before.isFile()) throw new Error(`${label} must be a regular non-symlink file`);
+  if (requireSingleLink && Number(before.nlink) !== 1) throw new Error(`${label} link count must be one`);
   if (before.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
 
   const handle = await open(target, 'r');
@@ -540,6 +539,7 @@ export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label
     const opened = await handle.stat();
     const afterOpen = await lstat(target);
     if (!opened.isFile() || afterOpen.isSymbolicLink() || !afterOpen.isFile()) throw new Error(`${label} must remain a regular non-symlink file`);
+    if (requireSingleLink && (Number(opened.nlink) !== 1 || Number(afterOpen.nlink) !== 1)) throw new Error(`${label} link count must remain one`);
     if (!sameFileIdentity(opened, afterOpen)) throw new Error(`${label} changed during validation`);
     if (opened.size > maxBytes || afterOpen.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
     const content = await handle.readFile();
@@ -549,6 +549,7 @@ export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label
     if (finalPath.isSymbolicLink() || !finalPath.isFile() || !sameFileVersion(opened, afterRead) || !sameFileIdentity(afterRead, finalPath) || content.byteLength !== afterRead.size) {
       throw new Error(`${label} changed during read`);
     }
+    if (requireSingleLink && (Number(afterRead.nlink) !== 1 || Number(finalPath.nlink) !== 1)) throw new Error(`${label} link count changed during read`);
     return content;
   } finally {
     await handle.close();
