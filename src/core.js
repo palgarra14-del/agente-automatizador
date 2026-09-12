@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
@@ -360,6 +360,17 @@ export function resolveExecutionUser(user = 'host') {
   return '1000:1000';
 }
 
+function sameFileIdentity(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function sameFileVersion(a, b) {
+  return sameFileIdentity(a, b) &&
+    a.size === b.size &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs;
+}
+
 export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label = 'File' } = {}) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxBytes must be a positive integer');
   const target = resolve(file);
@@ -370,13 +381,55 @@ export async function readBoundedRegularFile(file, { maxBytes = 64 * 1024, label
   const handle = await open(target, 'r');
   try {
     const opened = await handle.stat();
-    const after = await lstat(target);
-    if (!opened.isFile() || after.isSymbolicLink() || !after.isFile()) throw new Error(`${label} must remain a regular non-symlink file`);
-    if (opened.dev !== after.dev || opened.ino !== after.ino) throw new Error(`${label} changed during validation`);
-    if (opened.size > maxBytes || after.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    const afterOpen = await lstat(target);
+    if (!opened.isFile() || afterOpen.isSymbolicLink() || !afterOpen.isFile()) throw new Error(`${label} must remain a regular non-symlink file`);
+    if (!sameFileIdentity(opened, afterOpen)) throw new Error(`${label} changed during validation`);
+    if (opened.size > maxBytes || afterOpen.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
     const content = await handle.readFile();
     if (content.byteLength > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    const afterRead = await handle.stat();
+    const finalPath = await lstat(target);
+    if (finalPath.isSymbolicLink() || !finalPath.isFile() || !sameFileVersion(opened, afterRead) || !sameFileIdentity(afterRead, finalPath) || content.byteLength !== afterRead.size) {
+      throw new Error(`${label} changed during read`);
+    }
     return content;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function hashBoundedRegularFile(file, { maxBytes, label }) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('maxBytes must be a positive integer');
+  const target = resolve(file);
+  const before = await lstat(target);
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error(`${label} must be a regular non-symlink file`);
+  if (before.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+
+  const handle = await open(target, 'r');
+  try {
+    const opened = await handle.stat();
+    const afterOpen = await lstat(target);
+    if (!opened.isFile() || afterOpen.isSymbolicLink() || !afterOpen.isFile()) throw new Error(`${label} must remain a regular non-symlink file`);
+    if (!sameFileIdentity(opened, afterOpen)) throw new Error(`${label} changed during validation`);
+    if (opened.size > maxBytes || afterOpen.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let totalBytes = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      totalBytes += bytesRead;
+      if (totalBytes > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+
+    const afterRead = await handle.stat();
+    const finalPath = await lstat(target);
+    if (finalPath.isSymbolicLink() || !finalPath.isFile() || !sameFileVersion(opened, afterRead) || !sameFileIdentity(afterRead, finalPath) || totalBytes !== afterRead.size) {
+      throw new Error(`${label} changed during hash`);
+    }
+    return { size: totalBytes, sha256: hash.digest('hex') };
   } finally {
     await handle.close();
   }
@@ -1350,19 +1403,16 @@ export class WorkflowEngine {
       const target = resolve(root, normalized);
       if (!isWithin(root, target)) throw new Error(`Business asset escaped workspace: ${normalized}`);
       await assertSafePathChain(target);
-      let info;
-      try { info = await lstat(target); }
-      catch (error) {
+      let evidence;
+      try {
+        evidence = await hashBoundedRegularFile(target, { maxBytes: maxAssetBytes, label: `Business asset ${normalized}` });
+      } catch (error) {
         if (error.code === 'ENOENT') throw new Error(`Business asset does not exist: ${normalized}`, { cause: error });
         throw error;
       }
-      if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Business asset must be a regular file: ${normalized}`);
-      if (info.size > maxAssetBytes) throw new Error(`Business asset exceeds 20 MiB: ${normalized}`);
-      totalBytes += Number(info.size);
+      totalBytes += evidence.size;
       if (totalBytes > maxTotalBytes) throw new Error('Business assets exceed 200 MiB total');
-      const hash = createHash('sha256');
-      for await (const chunk of createReadStream(target)) hash.update(chunk);
-      assets.push({ path: normalized, size: Number(info.size), sha256: hash.digest('hex') });
+      assets.push({ path: normalized, size: evidence.size, sha256: evidence.sha256 });
     }
     return { assets, totalBytes, fingerprint: evidenceFingerprint(assets) };
   }
