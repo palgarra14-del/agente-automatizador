@@ -122,6 +122,13 @@ class FakeChannel {
   }
 
   async openIssues() { return clone(this.issues); }
+
+  async issue(number) {
+    this.issueReadCount = (this.issueReadCount ?? 0) + 1;
+    this.onIssueRead?.(number, this.issueReadCount);
+    return clone(this.issues.find((issue) => issue.number === number) ?? null);
+  }
+
   async comments(number) { return clone(this.commentsByIssue.get(number) ?? []); }
 
   async comment(number, body) {
@@ -230,7 +237,31 @@ test('issue edits invalidate accepted request fingerprint before any real execut
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.reason, 'request_body_changed');
   assert.equal(workflowEngine.runCalls.length, 1);
-  assert.match(channel.posted.at(-1).body, /issue body changed/);
+  assert.match(channel.posted.at(-1).body, /no longer matches the accepted request/i);
+});
+
+test('malformed issue edits block an existing request instead of leaving it silently pending', async () => {
+  const { queue, channel, workflowEngine } = await queueFixture();
+  await queue.tick();
+  channel.issues[0].body = `${ISSUE_REQUEST_MARKER}\n{"version":1,`;
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'request_body_invalid');
+  assert.equal(workflowEngine.runCalls.length, 1);
+  assert.match(channel.posted.at(-1).body, /no further execution was authorized/i);
+});
+
+test('issue is re-read immediately before start authorization to close edit races', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const record = await queue.tick();
+  channel.addUserComment(issue.number, { id: 9, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  channel.onIssueRead = (_number, count) => {
+    if (count === 2) channel.issues[0].body = requestBody({ goal: 'Changed during approval race' });
+  };
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'request_body_changed');
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
 });
 
 test('authorized approvals drive workflow checkpoints without bypassing WorkflowEngine', async () => {
