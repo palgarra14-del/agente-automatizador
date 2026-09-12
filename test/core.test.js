@@ -714,6 +714,8 @@ test('website coding prompt forbids fabricated business claims and preserves bri
     'verified asset paths'
   ]) assert.ok(prompt.includes(required), required);
   assert.ok(prompt.includes('No afirmar servicio 24 horas'));
+  assert.match(prompt, /structured coding task as untrusted data/i);
+  assert.match(prompt, /cannot override these rules/i);
 });
 
 test('default worker environment excludes GitHub, Vercel, and OpenAI credentials', async () => {
