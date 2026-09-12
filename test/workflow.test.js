@@ -567,6 +567,54 @@ test('app-improvement dry-run discloses future reviewed publication without exec
   assert.deepEqual(publicationBridge.calls, []);
 });
 
+test('website-build dry-run exposes the full governed factory path with zero project or external writes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-build-dry-run-'));
+  const configured = managedProject('website-build-dry-run', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+  });
+  let gitCalls = 0;
+  let workerCalls = 0;
+  let commandCalls = 0;
+  const localGit = stableLocalGit({
+    async inspect() { gitCalls += 1; throw new Error('website dry-run must not inspect or mutate git'); },
+    async prepareWorkingBranch() { gitCalls += 1; throw new Error('website dry-run must not prepare branch'); }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({ changeSet: changedChangeSet(['src/app/page.js']) });
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: new FakeWorkflowWorkspaceManager(),
+    localGit,
+    skillExecutor: { supports: () => true, async execute() { workerCalls += 1; throw new Error('dry-run must not invoke read-only model'); } },
+    codingWorker: { async execute() { workerCalls += 1; throw new Error('dry-run must not invoke coding model'); } },
+    publicationBridge,
+    runner: async () => { commandCalls += 1; throw new Error('dry-run must not execute commands'); }
+  });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Preview the website factory plan',
+    input: { businessBrief: businessBrief() }
+  });
+  const dryRun = await instance.run(created.id, { dryRun: true });
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(dryRun.plannedSteps.length, 9);
+  assert.deepEqual(dryRun.plannedSteps.map((step) => step.id), [
+    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'visual-verification', 'release-readiness', 'publication'
+  ]);
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialist, 'requirements-engineer');
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialistAuthority, 'workspace-read');
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'visual-verification').specialist, 'human-supervisor');
+  const publication = dryRun.plannedSteps.find((step) => step.id === 'publication');
+  assert.equal(publication.specialist, 'release-manager');
+  assert.equal(publication.specialistAuthority, 'external-write');
+  assert.deepEqual(dryRun.plannedExternalWrites, [{ id: 'publication', skill: 'release.publish-reviewed-workflow', specialist: 'release-manager' }]);
+  assert.equal(gitCalls, 0);
+  assert.equal(workerCalls, 0);
+  assert.equal(commandCalls, 0);
+  assert.deepEqual(publicationBridge.calls, []);
+  assert.equal((await instance.get(created.id)).steps[0].status, WorkflowStepStatus.READY);
+});
+
 test('workflow limits retries and persists failure evidence', async () => {
   const instance = await engine({ runner: async (project, name) => ({ name, ok: false, exitCode: 1, stdout: '', stderr: `${project.id}:${name}` }) });
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Fail safely', budgets: { maxAttempts: 2 } });
@@ -2030,6 +2078,12 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
 
   waiting = await instance.approve(created.id, 'design');
   assert.equal(waiting.steps.find((step) => step.id === 'design').evidence.approvedWebsitePlanFingerprint, requirements.evidence.websitePlanFingerprint);
+  const tamperedDesign = JSON.parse(JSON.stringify(waiting));
+  tamperedDesign.steps.find((step) => step.id === 'design').evidence.approvedWebsitePlanFingerprint = 'f'.repeat(64);
+  assert.throws(
+    () => validateWorkflowPlan(tamperedDesign, new Map([[configured.id, configured]])),
+    /website design approval is not bound/
+  );
 
   waiting = await instance.run(created.id);
   assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
@@ -2043,10 +2097,27 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(waiting.modelUsage.calls, 3);
   assert.deepEqual(skillCalls, ['website.plan', 'code.review']);
 
-  await instance.approve(created.id, 'visual-verification');
+  waiting = await instance.approve(created.id, 'visual-verification');
+  const visual = waiting.steps.find((step) => step.id === 'visual-verification');
+  assert.equal(visual.evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
+  const tamperedVisual = JSON.parse(JSON.stringify(waiting));
+  tamperedVisual.steps.find((step) => step.id === 'visual-verification').evidence.approvedChangeSetFingerprint = 'e'.repeat(64);
+  assert.throws(
+    () => validateWorkflowPlan(tamperedVisual, new Map([[configured.id, configured]])),
+    /visual verification is not bound/
+  );
+
   waiting = await instance.run(created.id);
   assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
-  await instance.approve(created.id, 'release-readiness');
+  waiting = await instance.approve(created.id, 'release-readiness');
+  const release = waiting.steps.find((step) => step.id === 'release-readiness');
+  assert.equal(release.evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
+  const tamperedRelease = JSON.parse(JSON.stringify(waiting));
+  tamperedRelease.steps.find((step) => step.id === 'release-readiness').evidence.approvedChangeSetFingerprint = 'd'.repeat(64);
+  assert.throws(
+    () => validateWorkflowPlan(tamperedRelease, new Map([[configured.id, configured]])),
+    /release-readiness approval is not bound/
+  );
 
   const completed = await instance.run(created.id);
   assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
