@@ -1409,7 +1409,19 @@ export class WorkflowEngine {
           businessBrief: runningPlan.input.businessBrief,
           businessBriefFingerprint: runningPlan.inputFingerprint,
           assetEvidence: websiteAssetEvidence
-        } : {})
+        } : {}),
+        ...(runningStep.skill === 'code.review' && runningPlan.profile === 'website-build' ? (() => {
+          const requirements = runningPlan.steps.find((step) => step.id === 'requirements');
+          return {
+            websiteReview: {
+              businessBrief: runningPlan.input.businessBrief,
+              businessBriefFingerprint: runningPlan.inputFingerprint,
+              websitePlan: requirements?.evidence?.result?.websitePlan ?? null,
+              websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
+              assetEvidence: requirements?.evidence?.assetEvidence ?? null
+            }
+          };
+        })() : {})
       }
     }, {
       workspace: workspaceProject.workspace,
@@ -3327,6 +3339,9 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
   const reviewInstruction = skill === 'code.review'
     ? 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
+  const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
+    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; or if it uses business-specific assets outside the verified asset evidence.'
+    : null;
   const websiteInstruction = skill === 'website.plan'
     ? 'Use only the supplied businessBrief, verified asset evidence, and repository context. Do not use web research and do not invent testimonials, years in business, certifications, awards, clients, guarantees, prices, service areas, factual claims, or credentials that are absent from the brief. Put any fact needed for a professional result but not supplied into missingInputs. websitePlan must contain exactly: summary, pages, design, conversion, seo, implementation, missingInputs. pages items: slug,title,purpose,sections. design: direction,tone,colors,typography. conversion: primaryCta,secondaryCta. seo: primaryLocation,keywords. implementation: priorities,constraints.'
     : null;
@@ -3338,6 +3353,7 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
     'Return exactly one JSON object and no Markdown, prose, or code fences.',
     `The JSON object must contain exactly these top-level keys: ${contract.outputs.join(', ')}.`,
     reviewInstruction,
+    websiteReviewInstruction,
     websiteInstruction,
     'Keep evidence concise, factual, and grounded in files you actually inspected. Do not invent findings.',
     '', 'Structured skill request:', JSON.stringify(clean, null, 2)
