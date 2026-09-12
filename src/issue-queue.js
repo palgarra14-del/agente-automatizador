@@ -564,7 +564,31 @@ export class SupervisedIssueQueue {
   }
 
   async blockRequestRevalidation(issue, key, record, reason) {
-    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null, activeApproval: null, initializationLease: null };
+    const now = this.now();
+    const next = {
+      version: 1,
+      issueNumber: Number.isInteger(issue?.number) ? issue.number : record?.issueNumber,
+      issueId: issue?.id ?? record?.issueId ?? null,
+      author: issue?.user?.login ?? record?.author ?? null,
+      requestFingerprint: null,
+      issueBodyFingerprint: null,
+      projectFingerprint: null,
+      controlPlaneFingerprint: this.controlPlaneFingerprint(),
+      request: null,
+      workflowId: null,
+      workflowBindingFingerprint: null,
+      status: 'blocked',
+      reason,
+      createdAt: typeof record?.createdAt === 'string' ? record.createdAt : now,
+      updatedAt: now,
+      pendingApproval: null,
+      activeApproval: null,
+      startApprovalFingerprint: null,
+      startApprovalCommentId: null,
+      startApprovedBy: null,
+      initializationLease: null,
+      lastProcessedCommentId: 0
+    };
     return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
   }
 
@@ -798,50 +822,31 @@ export class SupervisedIssueQueue {
     if (!currentRequest.ok) return this.blockRequestRevalidation(issue, key, record, currentRequest.reason);
     issue = currentRequest.issue;
     parsed = currentRequest.parsed;
-    const activeProject = this.projects.get(record.request?.projectId);
-    if (!activeProject || projectExecutionFingerprint(activeProject) !== record.projectFingerprint) {
-      return this.blockRequestRevalidation(issue, key, record, 'project_config_changed');
-    }
-    if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
-      return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
-    }
-    if (record.status === 'initializing') {
-      let abandoned;
-      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
-      catch { return record; }
-      if (!abandoned) return record;
-      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null };
-      return this.finalizeTerminal(issue, key, next, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
-    }
-    if (parsed.requestFingerprint !== record.requestFingerprint || parsed.issueBodyFingerprint !== record.issueBodyFingerprint) {
-      const next = { ...record, status: 'blocked', reason: 'request_body_changed', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
-      return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the issue body changed after the request fingerprint was accepted. Create a new request instead of editing an approved one.');
-    }
+    const activeProject = this.projects.get(parsed.request.projectId) ?? null;
     try {
       validateIssueQueueRecord(record, {
         issue,
         requestFingerprint: parsed.requestFingerprint,
-        issueBodyFingerprint: parsed.issueBodyFingerprint,
-        projectFingerprint: projectExecutionFingerprint(activeProject),
-        controlPlaneFingerprint: this.controlPlaneFingerprint()
+        issueBodyFingerprint: parsed.issueBodyFingerprint
       });
     } catch (error) {
+      const now = this.now();
       const next = {
         version: 1,
         issueNumber: issue.number,
         issueId: issue.id,
         author: issue.user?.login ?? null,
-        requestFingerprint: parsed.requestFingerprint,
-        issueBodyFingerprint: parsed.issueBodyFingerprint,
-        projectFingerprint: projectExecutionFingerprint(activeProject),
+        requestFingerprint: null,
+        issueBodyFingerprint: null,
+        projectFingerprint: null,
         controlPlaneFingerprint: this.controlPlaneFingerprint(),
-        request: parsed.request,
+        request: null,
         workflowId: null,
         workflowBindingFingerprint: null,
         status: 'blocked',
         reason: 'queue_state_invalid',
-        createdAt: typeof record.createdAt === 'string' ? record.createdAt : this.now(),
-        updatedAt: this.now(),
+        createdAt: typeof record?.createdAt === 'string' ? record.createdAt : now,
+        updatedAt: now,
         pendingApproval: null,
         activeApproval: null,
         startApprovalFingerprint: null,
@@ -851,6 +856,23 @@ export class SupervisedIssueQueue {
         lastProcessedCommentId: 0
       };
       return this.finalizeTerminal(issue, key, next, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`. The corrupt local record was quarantined and will not be resumed.`);
+    }
+    if (!activeProject) return this.blockRequestRevalidation(issue, key, record, 'project_removed');
+    if (projectExecutionFingerprint(activeProject) !== record.projectFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'project_config_changed');
+    }
+    if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
+    }
+    if (record.status === 'initializing') {
+      let abandoned;
+      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `initialization_lease_check_failed:${maskSecrets(error.message)}`);
+      }
+      if (!abandoned) return record;
+      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+      return this.finalizeTerminal(issue, key, next, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
     }
 
     if (record.pendingApproval) {
