@@ -673,7 +673,7 @@ test('website-build dry-run exposes the full governed factory path with zero pro
   assert.equal(dryRun.dryRun, true);
   assert.equal(dryRun.plannedSteps.length, 9);
   assert.deepEqual(dryRun.plannedSteps.map((step) => step.id), [
-    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'visual-verification', 'release-readiness', 'publication'
+    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'release-readiness', 'publication', 'visual-verification'
   ]);
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialist, 'requirements-engineer');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialistAuthority, 'workspace-read');
@@ -2078,6 +2078,7 @@ test('reviewed publication fails if default branch advances while CI or preview 
 test('website-build runs brief to reviewed PR-ready publication with three bounded model calls', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-e2e-'));
   const configured = managedProject('website-e2e', root, {
+    deployment: { provider: 'vercel', projectId: 'prj_website_e2e', teamId: 'team_website_e2e', requirePreviewReady: true },
     skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
   });
   const manager = new FakeWorkflowWorkspaceManager();
@@ -2133,7 +2134,14 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     }
   };
 
-  const publicationBridge = new FakeWorkflowPublicationBridge({ baseHead, commitHead, changeSet: governed, onCommit: (nextHead) => { head = nextHead; } });
+  const previewUrl = 'https://website-e2e-preview.vercel.app';
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead,
+    commitHead,
+    changeSet: governed,
+    preview: { provider: 'vercel', state: 'READY', ok: true, environment: 'preview', url: previewUrl },
+    onCommit: (nextHead) => { head = nextHead; }
+  });
   const commandCalls = [];
   const instance = await engine({
     projects: new Map([[configured.id, configured]]),
@@ -2172,23 +2180,13 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(waiting.steps.find((step) => step.id === 'dependency-refresh').evidence.required, false);
   assert.equal(waiting.steps.find((step) => step.id === 'review').status, WorkflowStepStatus.COMPLETED);
   assert.equal(waiting.steps.find((step) => step.id === 'quality').status, WorkflowStepStatus.COMPLETED);
-  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'publication').status, WorkflowStepStatus.PENDING);
+  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
   assert.deepEqual(commandCalls, ['test', 'typecheck', 'lint', 'build']);
   assert.equal(waiting.modelUsage.calls, 3);
   assert.deepEqual(skillCalls, ['website.plan', 'code.review']);
 
-  waiting = await instance.approve(created.id, 'visual-verification');
-  const visual = waiting.steps.find((step) => step.id === 'visual-verification');
-  assert.equal(visual.evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
-  const tamperedVisual = JSON.parse(JSON.stringify(waiting));
-  tamperedVisual.steps.find((step) => step.id === 'visual-verification').evidence.approvedChangeSetFingerprint = 'e'.repeat(64);
-  assert.throws(
-    () => validateWorkflowPlan(tamperedVisual, new Map([[configured.id, configured]])),
-    /visual verification is not bound/
-  );
-
-  waiting = await instance.run(created.id);
-  assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
   waiting = await instance.approve(created.id, 'release-readiness');
   const release = waiting.steps.find((step) => step.id === 'release-readiness');
   assert.equal(release.evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
@@ -2199,12 +2197,31 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     /release-readiness approval is not bound/
   );
 
-  const completed = await instance.run(created.id);
-  assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
-  const publication = completed.steps.find((step) => step.id === 'publication');
+  waiting = await instance.run(created.id);
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  const publication = waiting.steps.find((step) => step.id === 'publication');
   assert.equal(publication.status, WorkflowStepStatus.COMPLETED);
   assert.equal(publication.evidence.commit.committedChangeSetFingerprint, governed.changeSetFingerprint);
   assert.equal(publication.evidence.pullRequest.headSha, commitHead);
+  assert.equal(publication.evidence.preview.state, 'READY');
+  assert.equal(publication.evidence.preview.url, previewUrl);
+  assert.equal(publication.evidence.preview.commitSha, commitHead);
+  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
+
+  waiting = await instance.approve(created.id, 'visual-verification');
+  const visual = waiting.steps.find((step) => step.id === 'visual-verification');
+  assert.equal(visual.evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
+  assert.equal(visual.evidence.approvedCommitSha, commitHead);
+  assert.equal(visual.evidence.approvedPreviewUrl, previewUrl);
+  const tamperedVisual = JSON.parse(JSON.stringify(waiting));
+  tamperedVisual.steps.find((step) => step.id === 'visual-verification').evidence.approvedPreviewUrl = 'https://wrong-preview.example';
+  assert.throws(
+    () => validateWorkflowPlan(tamperedVisual, new Map([[configured.id, configured]])),
+    /visual verification is not bound to the published preview/
+  );
+
+  const completed = await instance.run(created.id);
+  assert.equal(completed.status, WorkflowStepStatus.COMPLETED);
   assert.equal(completed.steps.find((step) => step.id === 'visual-verification').evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
   assert.equal(completed.steps.find((step) => step.id === 'release-readiness').evidence.approvedChangeSetFingerprint, governed.changeSetFingerprint);
   assert.equal(completed.modelUsage.calls, 3);
@@ -2294,7 +2311,9 @@ test('website-build dependency change requires one fingerprint approval and one 
   assert.equal(workerCalls, 1);
   assert.equal(waiting.modelUsage.calls, 3);
   assert.equal(waiting.steps.find((step) => step.id === 'review').status, WorkflowStepStatus.COMPLETED);
-  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'publication').status, WorkflowStepStatus.PENDING);
+  assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.PENDING);
 });
 
 test('website-build critic FAIL stops before quality and visual approval', async () => {
