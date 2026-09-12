@@ -1099,7 +1099,8 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       const classification = step.evidence.changePolicy?.classification;
       const sensitiveApproved = classification === 'sensitive' &&
         Number.isFinite(Date.parse(step.evidence.sensitiveApproval?.approvedAt ?? '')) &&
-        step.evidence.sensitiveApproval?.changeSetFingerprint === step.evidence.changeSetFingerprint;
+        step.evidence.sensitiveApproval?.changeSetFingerprint === step.evidence.changeSetFingerprint &&
+        step.evidence.sensitiveApproval?.approvedDependencyEvidenceFingerprint === humanApprovalDependencyFingerprint(plan, step.id);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.changeSetFingerprint ?? '') || step.evidence.changePolicy?.ok !== true || !['normal', 'sensitive'].includes(classification) || (classification === 'sensitive' && !sensitiveApproved) || step.evidence.workerEvidence?.status !== 'completed') throw new Error(`Completed implementation step requires governed change evidence: ${step.id}`);
       if (!repositoryState || typeof repositoryState.branch !== 'string' || !repositoryState.branch || typeof repositoryState.head !== 'string' || !repositoryState.head || typeof repositoryState.remote !== 'string' || !repositoryState.remote) throw new Error(`Completed implementation step requires repository-state evidence: ${step.id}`);
       if (!/^[a-f0-9]{64}$/i.test(step.evidence.protectedIgnoredFingerprint ?? '')) throw new Error(`Completed implementation step requires protected ignored-state evidence: ${step.id}`);
