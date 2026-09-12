@@ -4,7 +4,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
@@ -124,7 +124,7 @@ function completeStep(plan, id) {
     step.evidence = { ...capability, type: 'executor', ok: true, completedAt, result: { reviewEvidence: { verdict: 'PASS', summary: 'fixture review passed', findings: [] } }, reviewedChangeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null };
   }
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
-  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt };
+  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt, approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id) };
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
 }
@@ -3498,4 +3498,52 @@ test('implementation fails if git control state changes even when normal diff is
   assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(implementation.error, 'workflow_implementation_repository_state_changed');
   assert.match(implementation.evidence.error, /repository_control_state_changed/);
+});
+
+
+test('completed human checkpoints remain bound to predecessor evidence', async () => {
+  const configured = project();
+  const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Bind human approval context' });
+  completeStep(plan, 'inspect-project');
+  const diagnosis = completeStep(plan, 'diagnose');
+  diagnosis.evidence.result = { diagnosis: 'original' };
+  const checkpoint = completeStep(plan, 'plan-change');
+  assert.equal(
+    checkpoint.evidence.approvedDependencyEvidenceFingerprint,
+    humanApprovalDependencyFingerprint(plan, 'plan-change')
+  );
+  assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
+
+  diagnosis.evidence.result = { diagnosis: 'tampered later' };
+  assert.throws(
+    () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
+    /checkpoint approval is not bound to its predecessor evidence/
+  );
+});
+
+test('approved-start deadline refresh works only for an untouched pristine workflow', async () => {
+  let clock = 1_000;
+  const configured = project();
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), now: () => clock });
+  const created = await instance.create({
+    profile: 'data-analysis',
+    projectId: configured.id,
+    goal: 'Refresh only the initial supervised wait',
+    budgets: { timeoutMs: 1_000 }
+  });
+  clock = created.deadlineAt + 60_000;
+  const refreshed = await instance.run(created.id, { refreshPristineDeadline: true });
+  assert.notEqual(refreshed.result?.error, 'workflow_budget_deadline_exceeded');
+
+  const second = await instance.create({
+    profile: 'data-analysis',
+    projectId: configured.id,
+    goal: 'Reject non-pristine refresh',
+    budgets: { timeoutMs: 1_000 }
+  });
+  await instance.update(second.id, (saved) => { saved.outputBytes = 1; });
+  await assert.rejects(
+    () => instance.run(second.id, { refreshPristineDeadline: true }),
+    /workflow_start_deadline_refresh_not_pristine/
+  );
 });
