@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext, collectReadOnlyReviewDiff } from '../src/core.js';
@@ -155,6 +155,38 @@ test('orchestrator repository context is scope-bounded, size-bounded, secret-mas
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('orchestrator repository context rejects multiply-linked files', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-readonly-links-'));
+  const outside = await mkdtemp(join(tmpdir(), 'agent-readonly-outside-'));
+  try {
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    const external = join(outside, 'shared.js');
+    await writeFile(external, 'export const outside = true;\n');
+    await link(external, join(workspace, 'src', 'shared.js'));
+    const processRunner = async () => ({
+      exitCode: 0,
+      timedOut: false,
+      stdout: 'src/shared.js\n',
+      stderr: '',
+      stdoutTruncated: false,
+      stderrTruncated: false
+    });
+    await assert.rejects(
+      collectReadOnlyRepositoryContext({
+        workspace,
+        project: { changePolicy: { forbiddenPaths: [] } },
+        scope: { allowedPaths: ['src/shared.js'], forbiddenPaths: [] },
+        processRunner,
+        timeoutMs: 500
+      }),
+      /repository context file link count is not one/
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 
