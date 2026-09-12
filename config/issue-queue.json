@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "repository": {
+    "owner": "palgarra14-del",
+    "name": "agente-automatizador"
+  },
+  "allowedActors": [
+    "palgarra14-del"
+  ],
+  "pollIntervalMs": 15000
+}
