@@ -450,7 +450,7 @@ export class SupervisedIssueQueue {
   async blockRequestRevalidation(issue, key, record, reason) {
     const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null };
     await this.saveRecord(key, next);
-    await this.post(issue.number, 'Agent request blocked: the current GitHub issue no longer matches the accepted request exactly. No further execution was authorized.');
+    await this.post(issue.number, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
     return next;
   }
 
@@ -777,6 +777,14 @@ export class SupervisedIssueQueue {
             const currentBeforeRecovery = await this.revalidateCurrentRequest(issue, record);
             if (!currentBeforeRecovery.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecovery.reason);
             issue = currentBeforeRecovery.issue;
+            const latestRecoveryDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
+            if (latestRecoveryDecision?.decision === 'reject') {
+              const next = { ...record, status: 'rejected', reason: `rejected_by:${latestRecoveryDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
+              await this.saveRecord(key, next);
+              await this.post(issue.number, `Agent request rejected by \`${latestRecoveryDecision.actor}\` before recovered workflow execution. No further execution will occur.`);
+              return next;
+            }
+            if (latestRecoveryDecision?.decision !== 'approve') return record;
             record = await this.saveRecord(key, {
               ...record,
               status: 'running',
@@ -862,12 +870,23 @@ export class SupervisedIssueQueue {
           if (!already) await this.post(issue.number, `Agent start authorization is missing or stale. Approve the current dry-run with exactly:\n\`${approvalInstruction(expectedStart)}\``);
           return next;
         }
+        const currentBeforeRecoveredStart = await this.revalidateCurrentRequest(issue, record);
+        if (!currentBeforeRecoveredStart.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecoveredStart.reason);
+        issue = currentBeforeRecoveredStart.issue;
+        const latestRecoveredStartDecision = await this.historicalDecision(issue.number, expectedStart);
+        if (latestRecoveredStartDecision?.decision === 'reject') {
+          const next = { ...record, status: 'rejected', reason: `rejected_by:${latestRecoveredStartDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, `Agent request rejected by \`${latestRecoveredStartDecision.actor}\` before recovered start execution. No further execution will occur.`);
+          return next;
+        }
+        if (latestRecoveredStartDecision?.decision !== 'approve') return record;
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
           startApprovalFingerprint: expectedStart,
-          startApprovalCommentId: proof.commentId,
-          startApprovedBy: proof.actor,
+          startApprovalCommentId: latestRecoveredStartDecision.commentId,
+          startApprovedBy: latestRecoveredStartDecision.actor,
           pendingApproval: null,
           updatedAt: this.now()
         });
