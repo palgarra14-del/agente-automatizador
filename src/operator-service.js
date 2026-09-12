@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -11,7 +12,7 @@ function safeServicePath(value, label) {
 }
 
 function quoteUnit(value) {
-  return `"${String(value).replaceAll('\\\\', '\\\\').replaceAll('"', '\\"')}"`;
+  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
 export function buildOperatorServiceUnit({ repositoryRoot, nodePath = process.execPath } = {}) {
@@ -118,11 +119,15 @@ export async function installOperatorService({
   await mkdir(serviceDir, { recursive: true, mode: 0o700 });
   await assertWritableServiceTarget(serviceFile);
   const unit = buildOperatorServiceUnit({ repositoryRoot: root, nodePath });
-  const temp = join(serviceDir, `.${SERVICE_NAME}.tmp-${process.pid}`);
-  await writeFile(temp, unit, { mode: 0o600, flag: 'wx' });
-  await chmod(temp, 0o600);
-  await rm(serviceFile, { force: true });
-  await import('node:fs/promises').then(({ rename }) => rename(temp, serviceFile));
+  const temp = join(serviceDir, `.${SERVICE_NAME}.tmp-${randomUUID()}`);
+  try {
+    await writeFile(temp, unit, { mode: 0o600, flag: 'wx' });
+    await chmod(temp, 0o600);
+    await rename(temp, serviceFile);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
+  }
   try {
     await runSystemctl(['daemon-reload'], { processRunner });
     await runSystemctl(['enable', '--now', SERVICE_NAME], { processRunner });
@@ -136,6 +141,7 @@ export async function installOperatorService({
 }
 
 export async function operatorServiceStatus({ processRunner } = {}) {
+  if (!processRunner) throw new Error('processRunner is required');
   const enabled = await processRunner('systemctl', ['--user', 'is-enabled', SERVICE_NAME], { timeoutMs: 10_000, outputLimit: 1_000 });
   const active = await processRunner('systemctl', ['--user', 'is-active', SERVICE_NAME], { timeoutMs: 10_000, outputLimit: 1_000 });
   return {
@@ -147,6 +153,7 @@ export async function operatorServiceStatus({ processRunner } = {}) {
 
 export async function uninstallOperatorService({ home = homedir(), platform = process.platform, processRunner } = {}) {
   if (platform !== 'linux') throw new Error('operator service removal is supported only on Linux/WSL');
+  if (!processRunner) throw new Error('processRunner is required');
   const serviceFile = safeServicePath(join(home, '.config', 'systemd', 'user', SERVICE_NAME), 'serviceFile');
   try { await processRunner('systemctl', ['--user', 'disable', '--now', SERVICE_NAME], { timeoutMs: 30_000, outputLimit: 2_000 }); } catch { /* service may already be absent */ }
   await assertWritableServiceTarget(serviceFile);
