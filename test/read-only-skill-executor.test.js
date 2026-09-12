@@ -100,6 +100,62 @@ test('read-only skill executor fails closed on malformed or contract-mismatched 
   assert.ok(malformed.outputBytes > 0);
 });
 
+test('website planner is offline, anti-fabrication, and structurally validates its plan', async () => {
+  let response = JSON.stringify({
+    websitePlan: {
+      summary: 'Web local orientada a contacto.',
+      pages: [{ slug: '/', title: 'Inicio', purpose: 'Presentar servicios facilitados.', sections: ['Hero', 'Servicios', 'Contacto'] }],
+      design: { direction: 'Limpia y profesional.', tone: 'Profesional', colors: ['#123456'], typography: 'Sans-serif legible.' },
+      conversion: { primaryCta: 'Contactar', secondaryCta: null },
+      seo: { primaryLocation: 'Madrid', keywords: ['fontanería Madrid'] },
+      implementation: { priorities: ['Mobile first'], constraints: ['No inventar reseñas'] },
+      missingInputs: ['Reseñas verificadas no suministradas']
+    }
+  });
+  let prompt = '';
+  let threadOptions = null;
+  class FakeCodex {
+    startThread(options) {
+      threadOptions = options;
+      return { id: 'website-plan-thread', run: async (value) => { prompt = value; return { finalResponse: response, usage: {} }; } };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const result = await executor.execute({
+    skill: 'website.plan',
+    goal: 'Plan a professional business website',
+    contract,
+    context: {
+      businessBrief: { businessName: 'Fontanería Ejemplo', locations: ['Madrid'], facts: [], contentRestrictions: ['No inventar reseñas'] },
+      assetEvidence: { assets: [] }
+    }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result.websitePlan.seo.primaryLocation, 'Madrid');
+  assert.equal(threadOptions.webSearchMode, 'disabled');
+  assert.equal(threadOptions.approvalPolicy, 'never');
+  assert.match(prompt, /Do not use web research/);
+  assert.match(prompt, /do not invent testimonials/i);
+  assert.match(prompt, /missingInputs/);
+
+  response = JSON.stringify({
+    websitePlan: {
+      summary: 'bad plan',
+      pages: [{ slug: 'not-a-route', title: 'Inicio', purpose: 'Bad', sections: ['Hero'] }],
+      design: { direction: 'x', tone: 'x', colors: ['#123456'], typography: 'x' },
+      conversion: { primaryCta: 'x', secondaryCta: null },
+      seo: { primaryLocation: 'Madrid', keywords: [] },
+      implementation: { priorities: ['x'], constraints: [] },
+      missingInputs: []
+    }
+  });
+  const invalid = await executor.execute({ skill: 'website.plan', goal: 'plan', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /websitePlan\.pages\[0\]\.slug is invalid/);
+});
+
 test('change critic output is structurally validated and prompt defines PASS/FAIL semantics', async () => {
   let response = JSON.stringify({ reviewEvidence: { verdict: 'PASS', summary: 'No material issue found.', findings: [] } });
   let capturedPrompt = '';
