@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
+import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -75,6 +76,67 @@ try {
   } else if (command === 'approve' || command === 'reject') {
     await orchestrator.decideApproval(args[1], command === 'approve');
     console.log(`${command}d ${args[1]}`);
+  } else if (command === 'inbox') {
+    const action = args[1] ?? 'once';
+    if (action === 'status') {
+      const requests = Object.values((await store.load()).requests ?? {}).map((record) => ({
+        issueNumber: record.issueNumber,
+        workflowId: record.workflowId,
+        status: record.status,
+        reason: record.reason,
+        pendingApproval: record.pendingApproval ? {
+          kind: record.pendingApproval.kind,
+          stepId: record.pendingApproval.stepId,
+          fingerprint: record.pendingApproval.fingerprint
+        } : null,
+        publication: record.publication ?? null,
+        updatedAt: record.updatedAt
+      }));
+      console.log(JSON.stringify(requests, null, 2));
+    } else {
+      const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
+      const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
+      const queue = new SupervisedIssueQueue({
+        store,
+        projects,
+        workflowEngine: workflows,
+        channel,
+        allowedActors: queueConfig.allowedActors
+      });
+      const view = (record) => record ? {
+        issueNumber: record.issueNumber,
+        workflowId: record.workflowId,
+        status: record.status,
+        reason: record.reason,
+        pendingApproval: record.pendingApproval ? {
+          kind: record.pendingApproval.kind,
+          stepId: record.pendingApproval.stepId,
+          fingerprint: record.pendingApproval.fingerprint
+        } : null,
+        publication: record.publication ?? null,
+        updatedAt: record.updatedAt
+      } : null;
+      if (action === 'once') {
+        console.log(JSON.stringify(view(await queue.tick()), null, 2));
+      } else if (action === 'watch') {
+        const controller = new AbortController();
+        const stop = () => controller.abort();
+        process.once('SIGINT', stop);
+        process.once('SIGTERM', stop);
+        try {
+          await watchIssueQueue(queue, {
+            pollIntervalMs: queueConfig.pollIntervalMs,
+            signal: controller.signal,
+            onTick: (record) => {
+              if (record) console.log(JSON.stringify(view(record)));
+            }
+          });
+        } finally {
+          process.removeListener('SIGINT', stop);
+          process.removeListener('SIGTERM', stop);
+        }
+      } else throw new Error('Usage: agent inbox <once|watch|status>');
+    }
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
@@ -102,7 +164,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
