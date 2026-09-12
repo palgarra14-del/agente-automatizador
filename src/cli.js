@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report, runProcess } from './core.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
+import { installOperatorService, operatorServiceStatus, resolveGitHubToken, uninstallOperatorService } from './operator-service.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -95,11 +96,13 @@ try {
       console.log(JSON.stringify(requests, null, 2));
     } else {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
-      const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
+      const githubToken = await resolveGitHubToken();
+      process.env.GITHUB_TOKEN = githubToken;
+      const channel = new GitHubIssueChannel({ repository: queueConfig.repository, token: githubToken });
       const queue = new SupervisedIssueQueue({
         store,
         projects,
-        workflowEngine: workflows,
+        workflowEngine: new WorkflowEngine({ store, projects }),
         channel,
         allowedActors: queueConfig.allowedActors
       });
@@ -140,6 +143,18 @@ try {
         }
       } else throw new Error('Usage: agent inbox <once|watch|status>');
     }
+  } else if (command === 'service') {
+    const action = args[1] ?? 'status';
+    if (action === 'install') {
+      console.log(JSON.stringify(await installOperatorService({
+        repositoryRoot: resolve('.'),
+        processRunner: runProcess
+      }), null, 2));
+    } else if (action === 'status') {
+      console.log(JSON.stringify(await operatorServiceStatus({ processRunner: runProcess }), null, 2));
+    } else if (action === 'uninstall') {
+      console.log(JSON.stringify(await uninstallOperatorService({ processRunner: runProcess }), null, 2));
+    } else throw new Error('Usage: agent service <install|status|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
@@ -167,7 +182,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent service <install|status|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
