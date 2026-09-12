@@ -350,6 +350,46 @@ test('stale start approval is blocked if persisted workflow planning context cha
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
 });
 
+test('applied workflow approval recovers after a crash without replaying approval', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { ok: true };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, { id: 50, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+  record = await queue.tick();
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  const checkpointToken = record.pendingApproval.fingerprint;
+
+  const afterApproveCrash = clone(awaitingPlan);
+  afterApproveCrash.status = WorkflowStepStatus.PENDING;
+  afterApproveCrash.steps[1].status = WorkflowStepStatus.COMPLETED;
+  afterApproveCrash.steps[1].evidence = { approvedAt: '2026-09-12T00:00:00.000Z' };
+  workflowEngine.plan = afterApproveCrash;
+
+  const completed = clone(afterApproveCrash);
+  completed.status = WorkflowStepStatus.COMPLETED;
+  completed.steps[2].status = WorkflowStepStatus.COMPLETED;
+  completed.steps[2].evidence = {
+    pullRequest: { number: 12, url: 'https://github.com/owner/callflow/pull/12' },
+    commit: { finalHead: 'a'.repeat(40) },
+    preview: { state: 'READY', url: 'https://preview-12.example.test' }
+  };
+  workflowEngine.realRunResult = completed;
+
+  channel.addUserComment(issue.number, { id: 51, login: 'palgarra14-del', body: `/agent approve ${checkpointToken}` });
+  const recovered = await queue.tick();
+
+  assert.equal(recovered.status, 'completed');
+  assert.equal(workflowEngine.approveCalls.length, 0);
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 2);
+});
+
 test('interrupted workflow steps require a new fingerprinted human approval after daemon restart', async () => {
   const { queue, store, channel, workflowEngine, issue } = await queueFixture();
   const parsed = parseIssueRequestBody(issue.body);
