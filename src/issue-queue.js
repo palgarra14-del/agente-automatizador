@@ -816,12 +816,7 @@ export class SupervisedIssueQueue {
         return next;
       }
       if (record.pendingApproval.kind === 'start') {
-        if (!record.pendingApproval && record.status === 'running' && record.activeApproval) {
-      const active = await this.revalidateActiveApproval(issue, key, record);
-      if (!active.ok) return active.record;
-    }
-
-    const workflow = await this.workflowEngine.get(record.workflowId);
+        const workflow = await this.workflowEngine.get(record.workflowId);
         if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
           const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
           await this.saveRecord(key, next);
@@ -978,6 +973,11 @@ export class SupervisedIssueQueue {
         const result = await this.workflowEngine.run(record.workflowId);
         return this.settleWorkflow(issue, key, record, result);
       }
+    }
+
+    if (!record.pendingApproval && record.status === 'running' && record.activeApproval) {
+      const active = await this.revalidateActiveApproval(issue, key, record);
+      if (!active.ok) return active.record;
     }
 
     const workflow = await this.workflowEngine.get(record.workflowId);
