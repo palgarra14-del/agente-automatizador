@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.14
+# Engineering Orchestrator — v0.15
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -17,6 +17,8 @@ Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TO
 
 v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/approval channel; the agent process and Codex authentication stay local. Start with `agent inbox once` while validating the setup, then `agent inbox watch` for a persistent operator.
 
+v0.15 adds an optional persistent Linux/WSL user service for the issue operator. `agent service install` writes a mode-0600 `systemd --user` unit that contains no GitHub token, enables/restarts the watcher, and resolves GitHub authentication at process start from `GITHUB_TOKEN` or the existing `gh auth` session. The unit limits writes to the agent repository, keeps HOME read-only, and does not auto-update the checkout. It starts whenever the WSL/Linux user systemd manager is running; waking WSL automatically at Windows sign-in remains a separate, not-yet-enabled integration.
+
 Read-only `code.inspect`, `code.diagnose`, and `code.review` on explicitly scoped workflows now receive a bounded repository context prepared by the orchestrator itself: only Git-tracked/untracked non-ignored files inside `scope.allowedPaths`, with forbidden/secret-control paths rejected, per-file and total byte limits, SHA-256 evidence, secret masking before prompt construction, and a post-analysis fingerprint recheck. When that context is present, the specialist is instructed not to discover/read repository files through shell or filesystem tools, and returned paths must refer only to supplied files. The Codex filesystem sandbox remains defense in depth rather than the sole source of repository grounding.
 
 ```bash
@@ -24,6 +26,15 @@ node src/cli.js inbox once
 node src/cli.js inbox status
 # after validation:
 node src/cli.js inbox watch
+```
+
+After validation, the persistent operator can replace manual `inbox watch` startup:
+
+```bash
+node src/cli.js service install
+node src/cli.js service status
+# optional rollback:
+node src/cli.js service uninstall
 ```
 
 Issue requests use the exact `<!-- agent-request:v1 -->` marker followed by strict JSON. v0.14 accepts only `app-improvement`, requires at least one explicit bounded `scope.allowedPaths` entry, and never treats an issue as authorization to execute. The first action is always a zero-write workflow dry-run. Real execution requires an exact allowlisted GitHub comment `/agent approve <fingerprint>`; every later WorkflowEngine checkpoint/sensitive approval receives a new state-bound fingerprint.
