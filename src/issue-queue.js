@@ -619,6 +619,17 @@ export class SupervisedIssueQueue {
     return decision;
   }
 
+  workflowMatchesRecord(record, workflow) {
+    return Boolean(
+      workflow &&
+      workflow.id === record.workflowId &&
+      workflow.projectId === record.request?.projectId &&
+      workflow.profile === record.request?.profile &&
+      workflow.goal === record.request?.goal &&
+      JSON.stringify(workflow.scope ?? {}) === JSON.stringify(record.request?.scope ?? {})
+    );
+  }
+
   workflowIsPristine(workflow) {
     if (!workflow || !Array.isArray(workflow.steps) || !workflow.steps.length) return false;
     if ((workflow.modelUsage?.calls ?? 0) !== 0 || workflow.workspace) return false;
@@ -683,6 +694,12 @@ export class SupervisedIssueQueue {
   }
 
   async settleWorkflow(issue, key, record, workflow) {
+    if (!this.workflowMatchesRecord(record, workflow)) {
+      const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      await this.post(issue.number, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
+      return next;
+    }
     const interruptedApproval = workflow.status === WorkflowStepStatus.BLOCKED &&
       workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
     if (workflow.status === WorkflowStepStatus.AWAITING_APPROVAL || interruptedApproval) return this.persistPendingWorkflowApproval(issue, key, record, workflow);
@@ -781,7 +798,13 @@ export class SupervisedIssueQueue {
       }
       if (record.pendingApproval.kind === 'start') {
         const workflow = await this.workflowEngine.get(record.workflowId);
-        if (!workflow || workflow.status !== WorkflowStepStatus.PENDING || !this.workflowIsPristine(workflow)) {
+        if (!this.workflowMatchesRecord(record, workflow)) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent start approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
+          return next;
+        }
+        if (workflow.status !== WorkflowStepStatus.PENDING || !this.workflowIsPristine(workflow)) {
           const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
           await this.saveRecord(key, next);
           await this.post(issue.number, 'Agent start approval cannot be applied because the workflow is no longer pristine. Manual inspection is required.');
@@ -828,7 +851,13 @@ export class SupervisedIssueQueue {
       }
       if (record.pendingApproval.kind === 'workflow-step') {
         const workflow = await this.workflowEngine.get(record.workflowId);
-        if (!workflow || !Array.isArray(workflow.steps)) {
+        if (!this.workflowMatchesRecord(record, workflow)) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+          await this.saveRecord(key, next);
+          await this.post(issue.number, 'Agent workflow approval cannot be applied because the persisted workflow binding no longer matches the accepted request.');
+          return next;
+        }
+        if (!Array.isArray(workflow.steps)) {
           const next = { ...record, status: 'blocked', reason: 'workflow_missing_or_invalid', updatedAt: this.now(), pendingApproval: null };
           await this.saveRecord(key, next);
           await this.post(issue.number, 'Agent workflow is missing or structurally invalid while an approval is pending. Manual inspection is required.');
@@ -912,6 +941,12 @@ export class SupervisedIssueQueue {
     if (!workflow) {
       const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
       await this.saveRecord(key, next);
+      return next;
+    }
+    if (!this.workflowMatchesRecord(record, workflow)) {
+      const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      await this.post(issue.number, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
       return next;
     }
     if (workflow.status === WorkflowStepStatus.PENDING) {
