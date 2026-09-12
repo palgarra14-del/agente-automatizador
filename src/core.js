@@ -999,6 +999,16 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
         ) throw new Error('Completed dependency refresh requires successful frozen container evidence');
       } else if (step.evidence.required !== false) throw new Error('Dependency refresh no-op evidence is invalid');
     }
+    if (step.skill === 'website.plan') {
+      if (
+        step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
+        !step.evidence.result?.websitePlan ||
+        step.evidence.websitePlanFingerprint !== evidenceFingerprint(step.evidence.result.websitePlan) ||
+        !step.evidence.assetEvidence ||
+        step.evidence.assetEvidenceFingerprint !== evidenceFingerprint(step.evidence.assetEvidence.assets ?? []) ||
+        step.evidence.assetEvidenceFingerprint !== step.evidence.assetEvidence.fingerprint
+      ) throw new Error('Completed website plan is not bound to the business brief and verified assets');
+    }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
       const persistedReview = validateReviewEvidence(step.evidence.result?.reviewEvidence);
@@ -1316,6 +1326,21 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
+    let websiteAssetEvidence = null;
+    if (next.skill === 'website.plan') {
+      try {
+        websiteAssetEvidence = await this.websiteAssetEvidence(workspaceProject, (await this.get(id)).input?.businessBrief);
+      } catch (error) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = 'website_asset_validation_failed';
+          step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+    }
     const reservation = await this.reserveWorkflowModelCall(id, next.id);
     if (!reservation.callId) return reservation.plan;
     const modelCallId = reservation.callId;
@@ -1351,7 +1376,15 @@ export class WorkflowEngine {
       skill: runningStep.skill,
       goal: runningPlan.goal,
       contract: skillResolution.contract,
-      context: { projectId: project.id, priorEvidence }
+      context: {
+        projectId: project.id,
+        priorEvidence,
+        ...(runningStep.skill === 'website.plan' ? {
+          businessBrief: runningPlan.input.businessBrief,
+          businessBriefFingerprint: runningPlan.inputFingerprint,
+          assetEvidence: websiteAssetEvidence
+        } : {})
+      }
     }, {
       workspace: workspaceProject.workspace,
       timeoutMs: Math.min(project.budgets.commandTimeoutMs * 4, remainingMs)
@@ -1379,6 +1412,12 @@ export class WorkflowEngine {
         repositoryControlBeforeFingerprint: before.repositoryControl.fingerprint,
         repositoryControlAfterFingerprint: after?.repositoryControl?.fingerprint ?? null,
         reviewedChangeSetFingerprint,
+        ...(step.skill === 'website.plan' && execution.ok && !integrityChanged ? {
+          businessBriefFingerprint: runningPlan.inputFingerprint,
+          assetEvidence: safeJson(websiteAssetEvidence),
+          assetEvidenceFingerprint: websiteAssetEvidence.fingerprint,
+          websitePlanFingerprint: evidenceFingerprint(execution.result.websitePlan)
+        } : {}),
         error: integrityError ? clip(integrityError.message, 1_000) : integrityChanged ? 'read_only_skill_modified_workspace' : execution.error ?? null
       };
       if (saved.outputBytes > saved.budgets.maxOutputBytes) {
