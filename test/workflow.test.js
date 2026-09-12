@@ -2058,6 +2058,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   });
 
   const skillCalls = [];
+  let requirementsPlanFingerprint = null;
   const skillExecutor = {
     supports: (skill) => ['website.plan', 'code.review'].includes(skill),
     async execute(request) {
@@ -2069,6 +2070,10 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
         return { ok: true, status: 'completed', usage: { input_tokens: 50, output_tokens: 30 }, outputBytes: 50, result: { websitePlan } };
       }
       assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, governed.changeSetFingerprint);
+      assert.equal(request.context.websiteReview.businessBrief.businessName, brief.businessName);
+      assert.deepEqual(request.context.websiteReview.websitePlan, websitePlan);
+      assert.equal(request.context.websiteReview.websitePlanFingerprint, requirementsPlanFingerprint);
+      assert.deepEqual(request.context.websiteReview.assetEvidence.assets, []);
       return { ok: true, status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, outputBytes: 30, result: { reviewEvidence: { verdict: 'PASS', summary: 'No blocking issue.', findings: [] } } };
     }
   };
@@ -2103,6 +2108,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.deepEqual(requirements.evidence.result.websitePlan, websitePlan);
   assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
+  requirementsPlanFingerprint = requirements.evidence.websitePlanFingerprint;
   assert.equal(waiting.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(waiting.modelUsage.calls, 1);
 
