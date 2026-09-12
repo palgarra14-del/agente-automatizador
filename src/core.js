@@ -1019,6 +1019,49 @@ function reviewEvidenceVerdict(result) {
   return result?.reviewEvidence?.verdict ?? null;
 }
 
+export function humanApprovalDependencyFingerprint(plan, stepId) {
+  const targetIndex = plan?.steps?.findIndex((step) => step.id === stepId) ?? -1;
+  if (targetIndex < 0) throw new Error('Human approval target step does not exist');
+  const target = plan.steps[targetIndex];
+  const predecessors = plan.steps.slice(0, targetIndex).map((step) => ({
+    id: step.id,
+    type: step.type,
+    skill: step.skill,
+    specialist: step.specialist,
+    status: step.status,
+    attempts: step.attempts,
+    commands: step.commands,
+    error: step.error ?? null,
+    evidence: step.evidence ?? null
+  }));
+  return evidenceFingerprint({
+    workflowId: plan.id,
+    goal: plan.goal,
+    projectId: plan.projectId,
+    profile: plan.profile,
+    inputFingerprint: plan.inputFingerprint ?? null,
+    registryFingerprint: plan.registryFingerprint,
+    projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+    specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+    scope: plan.scope,
+    workspace: plan.workspace ? {
+      managed: Boolean(plan.workspace.managed),
+      path: plan.workspace.path ?? null,
+      baseHead: plan.workspace.baseHead ?? null,
+      workingBranch: plan.workspace.workingBranch ?? null,
+      remote: plan.workspace.remote ?? null
+    } : null,
+    target: {
+      id: target.id,
+      type: target.type,
+      skill: target.skill,
+      specialist: target.specialist,
+      commands: target.commands
+    },
+    predecessors
+  });
+}
+
 function workflowBootstrap(project) {
   const required = project.workspaceStrategy === 'managed' && Object.hasOwn(project.commands ?? {}, 'install');
   return { required, status: required ? 'pending' : 'not_required', command: required ? 'install' : null, workspacePath: null, projectId: required ? project.id : null, attempts: 0, completedAt: null, evidence: null, error: null };
@@ -1136,6 +1179,10 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
   }
   if (step.type === 'checkpoint') {
     if (!Number.isFinite(Date.parse(step.evidence.approvedAt))) throw new Error(`Completed checkpoint step requires approval evidence: ${step.id}`);
+    if (!/^[a-f0-9]{64}$/i.test(step.evidence.approvedDependencyEvidenceFingerprint ?? '') ||
+        step.evidence.approvedDependencyEvidenceFingerprint !== humanApprovalDependencyFingerprint(plan, step.id)) {
+      throw new Error(`Completed checkpoint approval is not bound to its predecessor evidence: ${step.id}`);
+    }
     if (plan.profile === 'website-build' && step.id === 'design') {
       const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
       if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint || step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('Completed website design approval is not bound to the website plan');
@@ -2370,11 +2417,12 @@ export class WorkflowEngine {
     });
   }
 
-  async approve(id, stepId) {
-    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId));
+  async approve(id, stepId, options = {}) {
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId, options));
   }
 
-  async approveUnlocked(id, stepId) {
+  async approveUnlocked(id, stepId, { externalApprovalFingerprint = null } = {}) {
+    if (externalApprovalFingerprint !== null && !/^[a-f0-9]{64}$/i.test(externalApprovalFingerprint)) throw new Error('external approval fingerprint is invalid');
     const approvedAt = this.now();
     const current = await this.get(id);
     validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
@@ -2435,7 +2483,9 @@ export class WorkflowEngine {
           completedAt: new Date(approvedAt).toISOString(),
           sensitiveApproval: {
             approvedAt: new Date(approvedAt).toISOString(),
-            changeSetFingerprint: step.evidence.changeSetFingerprint
+            changeSetFingerprint: step.evidence.changeSetFingerprint,
+            approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id),
+            externalApprovalFingerprint
           }
         };
         plan.status = WorkflowStepStatus.PENDING;
@@ -2455,10 +2505,11 @@ export class WorkflowEngine {
       step.error = null;
       const checkpointBinding = checkpointApproval
         ? (() => {
+            const approvedDependencyEvidenceFingerprint = humanApprovalDependencyFingerprint(plan, step.id);
             if (plan.profile === 'website-build' && step.id === 'design') {
               const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
               if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint) throw new Error('Website design cannot approve an unbound website plan');
-              return { approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint };
+              return { approvedDependencyEvidenceFingerprint, approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint };
             }
             if (plan.profile === 'website-build' && step.id === 'visual-verification') {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -2483,6 +2534,7 @@ export class WorkflowEngine {
                 preview.commitSha !== commit.finalHead
               ) throw new Error('Visual verification cannot approve without the exact published preview');
               return {
+                approvedDependencyEvidenceFingerprint,
                 approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
                 approvedCommitSha: commit.finalHead,
                 approvedPreviewUrl: preview.url
@@ -2492,12 +2544,17 @@ export class WorkflowEngine {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
               const review = plan.steps.find((candidate) => candidate.id === 'review');
               if (implementation?.status !== WorkflowStepStatus.COMPLETED || review?.status !== WorkflowStepStatus.COMPLETED || reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' || !implementation.evidence?.changeSetFingerprint || review.evidence?.reviewedChangeSetFingerprint !== implementation.evidence.changeSetFingerprint) throw new Error('Release readiness cannot approve unbound review evidence');
-              return { approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
+              return { approvedDependencyEvidenceFingerprint, approvedChangeSetFingerprint: implementation.evidence.changeSetFingerprint, reviewedChangeSetFingerprint: review.evidence.reviewedChangeSetFingerprint };
             }
-            return {};
+            return { approvedDependencyEvidenceFingerprint };
           })()
         : {};
-      step.evidence = { ...workflowEvidenceContext(plan, step), approvedAt: new Date(approvedAt).toISOString(), ...checkpointBinding };
+      step.evidence = {
+        ...workflowEvidenceContext(plan, step),
+        approvedAt: new Date(approvedAt).toISOString(),
+        externalApprovalFingerprint,
+        ...checkpointBinding
+      };
       plan.status = WorkflowStepStatus.PENDING;
     });
   }
@@ -2733,7 +2790,7 @@ export class WorkflowEngine {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.runUnlocked(id, options));
   }
 
-  async runUnlocked(id, { dryRun = false } = {}) {
+  async runUnlocked(id, { dryRun = false, refreshPristineDeadline = false } = {}) {
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
@@ -2762,6 +2819,24 @@ export class WorkflowEngine {
         .filter((step) => this.specialistRegistry.get(step.specialist).authority === 'external-write')
         .map((step) => ({ id: step.id, skill: step.skill, specialist: step.specialist }))
     };
+    if (refreshPristineDeadline) {
+      const pristine =
+        plan.status === WorkflowStepStatus.PENDING &&
+        plan.workspace === null &&
+        plan.outputBytes === 0 &&
+        (plan.modelUsage?.calls ?? 0) === 0 &&
+        plan.steps.every((step, index) =>
+          step.status === (index === 0 ? WorkflowStepStatus.READY : WorkflowStepStatus.PENDING) &&
+          step.attempts === 0 &&
+          step.evidence === null &&
+          step.error === null
+        ) &&
+        ['pending', 'not_required'].includes(plan.bootstrap?.status);
+      if (!pristine) throw new Error('workflow_start_deadline_refresh_not_pristine');
+      plan = await this.update(id, (saved) => {
+        saved.deadlineAt = this.now() + saved.budgets.timeoutMs;
+      });
+    }
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
     if (this.remainingMs(plan) <= 0) return this.failDeadline(id);
     while (true) {
