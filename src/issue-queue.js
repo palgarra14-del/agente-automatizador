@@ -1004,9 +1004,10 @@ export class SupervisedIssueQueue {
             const approvedDependencyFingerprint = targetStep?.type === 'checkpoint'
               ? targetStep.evidence?.approvedDependencyEvidenceFingerprint
               : targetStep?.evidence?.sensitiveApproval?.approvedDependencyEvidenceFingerprint ?? targetStep?.evidence?.approvedDependencyEvidenceFingerprint;
-            let currentDependencyFingerprint = null;
-            try { currentDependencyFingerprint = targetStep ? humanApprovalDependencyFingerprint(workflow, targetStep.id) : null; }
-            catch {}
+            const currentDependencyFingerprint = (() => {
+              try { return targetStep ? humanApprovalDependencyFingerprint(workflow, targetStep.id) : null; }
+              catch { return null; }
+            })();
             const appliedState = targetStep?.status === WorkflowStepStatus.COMPLETED || targetStep?.status === WorkflowStepStatus.READY;
             if (appliedState &&
                 externalFingerprint === record.pendingApproval.fingerprint &&
