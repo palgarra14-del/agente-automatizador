@@ -1049,7 +1049,7 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (!ci || !Array.isArray(ci.checks) || !Array.isArray(ci.statuses) || ci.state !== 'success' || ciState(ci.checks, ci.statuses) !== 'success') throw new Error('Completed publication requires internally consistent successful CI evidence');
       const previewRequired = plan.profile === 'website-build' || project.acceptance?.require?.includes('deployment') || project.deployment?.requirePreviewReady === true;
       if (!preview || preview.ok !== true || !['NOT_REQUIRED', 'READY'].includes(preview.state)) throw new Error('Completed publication preview evidence is invalid');
-      if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch)) throw new Error('Completed publication READY preview is not bound to the published commit');
+      if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch || (plan.profile === 'website-build' && (typeof preview.url !== 'string' || !preview.url)))) throw new Error('Completed publication READY preview is not bound to the published commit');
       if (preview.state === 'NOT_REQUIRED' && (previewRequired || project.deployment?.provider === 'vercel')) throw new Error('Completed publication cannot omit configured preview evidence');
     }
     return;
@@ -2253,6 +2253,8 @@ export class WorkflowEngine {
       });
       evidence = plan.steps.find((step) => step.id === next.id).evidence;
       if (previewRequired && preview.state === 'ERROR') return this.stopPublication(id, next.id, 'workflow_publication_preview_failed', { blocked: false, phase: 'preview-failed', patch: { preview } });
+      if (previewRequired && preview.state === 'NOT_REQUIRED') return this.stopPublication(id, next.id, 'workflow_publication_preview_not_configured', { blocked: false, phase: 'preview-missing', patch: { preview } });
+      if (previewRequired && preview.state === 'READY' && plan.profile === 'website-build' && (typeof preview.url !== 'string' || !preview.url)) return this.stopPublication(id, next.id, 'workflow_publication_preview_invalid', { blocked: false, phase: 'preview-invalid', patch: { preview } });
       if (previewRequired && (preview.state === 'TIMEOUT' || preview.state === 'NOT_CONFIGURED' || preview.ok !== true)) {
         const attempts = plan.steps.find((step) => step.id === next.id).attempts;
         if (attempts >= plan.budgets.maxAttempts) return this.stopPublication(id, next.id, 'workflow_publication_observation_attempt_budget_exhausted', { blocked: false, phase: 'preview-timeout', patch: { preview } });
