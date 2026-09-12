@@ -544,12 +544,12 @@ export class SupervisedIssueQueue {
       this.authorized(comment.user?.login) &&
       comment.body.includes(instruction)
     ));
-    const eligible = comments
-      .filter((comment) => Number.isInteger(comment.id) && comment.id > (record.lastProcessedCommentId ?? 0))
+    const ordered = comments
+      .filter((comment) => Number.isInteger(comment.id))
       .sort((a, b) => a.id - b.id);
     let highest = record.lastProcessedCommentId ?? 0;
     let decision = null;
-    for (const comment of eligible) {
+    for (const comment of ordered) {
       highest = Math.max(highest, comment.id);
       const parsed = parseApprovalComment(comment.body);
       if (!parsed || !this.authorized(comment.user?.login)) continue;
