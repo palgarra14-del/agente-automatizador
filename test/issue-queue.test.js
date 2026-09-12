@@ -327,6 +327,29 @@ test('latest exact human decision wins when approve and reject both exist before
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
 });
 
+test('pending approval survives a transient workflow lookup failure after its comment was observed', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const record = await queue.tick();
+  channel.addUserComment(issue.number, { id: 75, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+
+  const originalGet = workflowEngine.get.bind(workflowEngine);
+  let getCalls = 0;
+  workflowEngine.get = async (...args) => {
+    getCalls += 1;
+    if (getCalls === 1) throw new Error('fixture transient workflow lookup');
+    return originalGet(...args);
+  };
+
+  await assert.rejects(() => queue.tick(), /fixture transient workflow lookup/);
+  const stillPending = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(stillPending.status, 'awaiting_start_approval');
+
+  const retried = await queue.tick();
+  assert.equal(getCalls >= 2, true);
+  assert.notEqual(retried.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
+});
+
 test('issue edits invalidate accepted request fingerprint before any real execution', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   await queue.tick();
