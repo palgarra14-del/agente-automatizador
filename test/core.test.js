@@ -207,12 +207,12 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
 });
 
-test('v0.5 treats only the self control-plane project configuration as sensitive', async () => {
+test('self control-plane source and configuration require sensitive approval', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
-  const controlPlane = evaluateChangePolicy(configured.get('self'), { paths: ['config/projects.json'], changedFiles: 1, diffLines: 1 });
-  const ordinarySource = evaluateChangePolicy(configured.get('self'), { paths: ['src/feature.js'], changedFiles: 1, diffLines: 1 });
-  assert.equal(controlPlane.classification, 'sensitive');
-  assert.equal(ordinarySource.classification, 'normal');
+  for (const path of ['config/projects.json', 'config/issue-queue.json', 'src/core.js', 'src/issue-queue.js', 'src/feature.js']) {
+    const decision = evaluateChangePolicy(configured.get('self'), { paths: [path], changedFiles: 1, diffLines: 1 });
+    assert.equal(decision.classification, 'sensitive', path);
+  }
 });
 
 test('v0.4 change policy rejects forbidden files, workspace escape, scope violations, and over-budget diffs', () => {

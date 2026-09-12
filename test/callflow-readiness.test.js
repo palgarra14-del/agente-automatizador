@@ -14,7 +14,10 @@ test('Callflow is registered as a governed isolated project', async () => {
   assert.equal(callflow.execution.provider, 'container-required');
   assert.equal(callflow.execution.image, 'node:22-bookworm-slim');
   assert.equal(callflow.commands.test, 'npm test');
-  assert.deepEqual(callflow.acceptance.require, ['test', 'ci', 'deployment']);
+  assert.equal(callflow.commands.typecheck, 'node --check prospect-utils.js');
+  assert.equal(callflow.commands.lint, 'node --check prospect.js');
+  assert.equal(callflow.commands.build, 'node --check app.js');
+  assert.deepEqual(callflow.acceptance.require, ['test', 'typecheck', 'lint', 'build', 'ci', 'deployment']);
   assert.equal(callflow.deployment.provider, 'vercel');
   assert.equal(callflow.deployment.requirePreviewReady, true);
   assert.match(callflow.pullRequest.titleTemplate, /^Agent:/);
