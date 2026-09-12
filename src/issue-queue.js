@@ -131,9 +131,14 @@ export function startApprovalFingerprint({ requestFingerprint, workflow, dryRun 
   });
 }
 
+function stepNeedsHumanApproval(step) {
+  return step?.status === WorkflowStepStatus.AWAITING_APPROVAL ||
+    (step?.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+}
+
 export function workflowApprovalFingerprint({ requestFingerprint, workflow, stepId }) {
   const step = workflow.steps.find((candidate) => candidate.id === stepId);
-  if (!step || step.status !== WorkflowStepStatus.AWAITING_APPROVAL) throw new Error('workflow approval target is not awaiting approval');
+  if (!stepNeedsHumanApproval(step)) throw new Error('workflow approval target does not require human approval');
   return fingerprint({ kind: 'workflow-step', requestFingerprint, context: stepApprovalContext(workflow, step) });
 }
 
@@ -335,8 +340,8 @@ export class SupervisedIssueQueue {
   }
 
   async persistPendingWorkflowApproval(issue, key, record, workflow) {
-    const step = workflow.steps.find((candidate) => candidate.status === WorkflowStepStatus.AWAITING_APPROVAL);
-    if (!step) throw new Error('workflow reports awaiting approval without an awaiting step');
+    const step = workflow.steps.find((candidate) => stepNeedsHumanApproval(candidate));
+    if (!step) throw new Error('workflow reports human approval is needed without an approvable step');
     const token = workflowApprovalFingerprint({ requestFingerprint: record.requestFingerprint, workflow, stepId: step.id });
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
     const next = {
@@ -363,7 +368,16 @@ export class SupervisedIssueQueue {
   }
 
   async settleWorkflow(issue, key, record, workflow) {
-    if (workflow.status === WorkflowStepStatus.AWAITING_APPROVAL) return this.persistPendingWorkflowApproval(issue, key, record, workflow);
+    const interruptedApproval = workflow.status === WorkflowStepStatus.BLOCKED &&
+      workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+    if (workflow.status === WorkflowStepStatus.AWAITING_APPROVAL || interruptedApproval) return this.persistPendingWorkflowApproval(issue, key, record, workflow);
+    const resumableObservation = workflow.status === WorkflowStepStatus.BLOCKED &&
+      workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error));
+    if (resumableObservation) {
+      const next = { ...record, status: 'running', reason: 'resumable_publication_observation', updatedAt: this.now(), pendingApproval: null };
+      await this.saveRecord(key, next);
+      return next;
+    }
     if (workflow.status === WorkflowStepStatus.COMPLETED) {
       const published = publicationSummary(workflow);
       const next = { ...record, status: 'completed', reason: null, updatedAt: this.now(), pendingApproval: null, publication: published };
@@ -451,6 +465,11 @@ export class SupervisedIssueQueue {
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.RUNNING) {
+      const result = await this.workflowEngine.resume(workflow.id);
+      return this.settleWorkflow(issue, key, record, result);
+    }
+    if (workflow.status === WorkflowStepStatus.BLOCKED &&
+        workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
       const result = await this.workflowEngine.resume(workflow.id);
       return this.settleWorkflow(issue, key, record, result);
     }
