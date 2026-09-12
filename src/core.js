@@ -320,6 +320,8 @@ export async function collectReadOnlyRepositoryContext({
     if (!isWithin(root, target)) throw new Error(`repository_context_path_escape:${path}`);
     let content;
     try {
+      const pathInfo = await lstat(target);
+      if (Number(pathInfo.nlink) !== 1) throw new Error('repository context file link count is not one');
       content = await readBoundedRegularFile(target, { maxBytes: maxFileBytes, label: `Repository context file ${path}` });
     } catch (error) {
       throw new Error(`repository_context_file_read_failed:${path}:${clip(error.message, 300)}`, { cause: error });
