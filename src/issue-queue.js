@@ -884,16 +884,12 @@ export class SupervisedIssueQueue {
           const proof = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
           if (proof?.decision === 'reject') {
             const next = { ...record, status: 'rejected', reason: `rejected_by:${proof.actor}`, updatedAt: this.now(), pendingApproval: null };
-            await this.saveRecord(key, next);
-            await this.post(issue.number, `Agent request rejected by \`${proof.actor}\` during approval recovery. No further execution will occur.`);
-            return next;
+            return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${proof.actor}\` during approval recovery. No further execution will occur.`);
           }
           if (proof?.decision === 'approve' && targetStep?.status === WorkflowStepStatus.COMPLETED) {
             if (!this.completedCheckpointMatchesPendingApproval(record, workflow, record.pendingApproval.stepId)) {
               const next = { ...record, status: 'blocked', reason: 'workflow_approval_recovery_mismatch', updatedAt: this.now(), pendingApproval: null };
-              await this.saveRecord(key, next);
-              await this.post(issue.number, 'Agent checkpoint recovery could not prove that the completed step matches the exact approved pre-state. Manual inspection is required.');
-              return next;
+              return this.finalizeTerminal(issue, key, next, 'Agent checkpoint recovery could not prove that the completed step matches the exact approved pre-state. Manual inspection is required.');
             }
             const currentBeforeRecovery = await this.revalidateCurrentRequest(issue, record);
             if (!currentBeforeRecovery.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecovery.reason);
@@ -901,9 +897,7 @@ export class SupervisedIssueQueue {
             const latestRecoveryDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
             if (latestRecoveryDecision?.decision === 'reject') {
               const next = { ...record, status: 'rejected', reason: `rejected_by:${latestRecoveryDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
-              await this.saveRecord(key, next);
-              await this.post(issue.number, `Agent request rejected by \`${latestRecoveryDecision.actor}\` before recovered workflow execution. No further execution will occur.`);
-              return next;
+              return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestRecoveryDecision.actor}\` before recovered workflow execution. No further execution will occur.`);
             }
             if (latestRecoveryDecision?.decision !== 'approve') return record;
             record = await this.saveRecord(key, {
@@ -917,9 +911,7 @@ export class SupervisedIssueQueue {
             return this.settleWorkflow(issue, key, record, result);
           }
           const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent workflow approval state diverged from the pending queue checkpoint. Manual inspection is required; the approval will not be replayed.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow approval state diverged from the pending queue checkpoint. Manual inspection is required; the approval will not be replayed.');
         }
         const expected = workflowApprovalFingerprint({
           requestFingerprint: record.requestFingerprint,
@@ -931,9 +923,7 @@ export class SupervisedIssueQueue {
         });
         if (expected !== record.pendingApproval.fingerprint) {
           const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, 'Agent workflow approval became stale because the persisted workflow state changed. Manual inspection is required.');
-          return next;
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted workflow state changed. Manual inspection is required.');
         }
         const currentBeforeApproval = await this.revalidateCurrentRequest(issue, record);
         if (!currentBeforeApproval.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeApproval.reason);
@@ -941,9 +931,7 @@ export class SupervisedIssueQueue {
         const latestDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
         if (latestDecision?.decision === 'reject') {
           const next = { ...record, status: 'rejected', reason: `rejected_by:${latestDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, `Agent request rejected by \`${latestDecision.actor}\` before workflow approval. No further execution will occur.`);
-          return next;
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before workflow approval. No further execution will occur.`);
         }
         if (latestDecision?.decision !== 'approve') return record;
         await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId);
@@ -956,14 +944,11 @@ export class SupervisedIssueQueue {
     const workflow = await this.workflowEngine.get(record.workflowId);
     if (!workflow) {
       const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      return next;
+      return this.finalizeTerminal(issue, key, next, 'Agent workflow is missing from persisted workflow state. Manual inspection is required.');
     }
     if (!this.workflowMatchesRecord(record, workflow)) {
       const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
-      return next;
+      return this.finalizeTerminal(issue, key, next, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
     }
     if (workflow.status === WorkflowStepStatus.PENDING) {
       if (this.workflowIsPristine(workflow)) {
@@ -979,9 +964,7 @@ export class SupervisedIssueQueue {
         const proof = await this.historicalDecision(issue.number, expectedStart);
         if (proof?.decision === 'reject') {
           const next = { ...record, status: 'rejected', reason: `rejected_by:${proof.actor}`, updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, `Agent request rejected by \`${proof.actor}\` before recovered start execution. No further execution will occur.`);
-          return next;
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${proof.actor}\` before recovered start execution. No further execution will occur.`);
         }
         if (proof?.decision !== 'approve') {
           const already = record.status === 'awaiting_start_approval' && record.pendingApproval?.fingerprint === expectedStart;
@@ -1003,9 +986,7 @@ export class SupervisedIssueQueue {
         const latestRecoveredStartDecision = await this.historicalDecision(issue.number, expectedStart);
         if (latestRecoveredStartDecision?.decision === 'reject') {
           const next = { ...record, status: 'rejected', reason: `rejected_by:${latestRecoveredStartDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
-          await this.saveRecord(key, next);
-          await this.post(issue.number, `Agent request rejected by \`${latestRecoveredStartDecision.actor}\` before recovered start execution. No further execution will occur.`);
-          return next;
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestRecoveredStartDecision.actor}\` before recovered start execution. No further execution will occur.`);
         }
         if (latestRecoveredStartDecision?.decision !== 'approve') return record;
         await this.workflowEngine.resetPristineDeadline(workflow.id);
