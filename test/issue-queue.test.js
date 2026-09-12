@@ -375,6 +375,33 @@ test('terminal requests return their transition once and do not starve newer que
   assert.equal(next.status, 'awaiting_start_approval');
 });
 
+test('newer rejection cancels recovered start after crash before real execution', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const record = await queue.tick();
+  channel.addUserComment(issue.number, { id: 60, login: 'palgarra14-del', body: `/agent approve ${record.pendingApproval.fingerprint}` });
+
+  const originalRun = workflowEngine.run.bind(workflowEngine);
+  let realAttempts = 0;
+  workflowEngine.run = async (id, options = {}) => {
+    if (!options.dryRun) {
+      realAttempts += 1;
+      if (realAttempts === 1) throw new Error('fixture crash after queue start persistence');
+    }
+    return originalRun(id, options);
+  };
+
+  await assert.rejects(() => queue.tick(), /fixture crash/);
+  const afterCrash = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(afterCrash.status, 'running');
+  assert.equal(workflowEngine.plan.status, WorkflowStepStatus.PENDING);
+
+  channel.addUserComment(issue.number, { id: 61, login: 'palgarra14-del', body: `/agent reject ${record.pendingApproval.fingerprint}` });
+  const rejected = await queue.tick();
+
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(realAttempts, 1);
+});
+
 test('stale start approval is blocked if persisted workflow planning context changed', async () => {
   const { queue, channel, workflowEngine, issue } = await queueFixture();
   const record = await queue.tick();
