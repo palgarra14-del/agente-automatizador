@@ -379,6 +379,75 @@ test('safe CI/preview observation timeouts resume without creating a human appro
   assert.equal(workflowEngine.approveCalls.length, 0);
 });
 
+test('concurrent watchers atomically reserve a new issue and create only one workflow', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let releaseCreate;
+  const createGate = new Promise((resolveGate) => { releaseCreate = resolveGate; });
+  const originalCreate = workflowEngine.create.bind(workflowEngine);
+  let createCalls = 0;
+  workflowEngine.create = async (input) => {
+    createCalls += 1;
+    await createGate;
+    return originalCreate(input);
+  };
+
+  const first = queue.processIssue(issue);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  const second = queue.processIssue(issue);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  releaseCreate();
+  const [left, right] = await Promise.all([first, second]);
+
+  assert.equal(createCalls, 1);
+  assert.equal(channel.posted.length, 1);
+  assert.ok([left.status, right.status].includes('initializing'));
+  assert.ok([left.status, right.status].includes('awaiting_start_approval'));
+  const persisted = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(persisted.status, 'awaiting_start_approval');
+  assert.equal(persisted.initializationLease, null);
+});
+
+test('abandoned initialization lease blocks instead of automatically creating a duplicate workflow', async () => {
+  const { queue, store, channel, workflowEngine, issue } = await queueFixture();
+  const parsed = parseIssueRequestBody(issue.body);
+  const key = queue.requestKey(issue);
+  store.lockOwnerIsAbandoned = async () => true;
+  await store.mutate((data) => {
+    data.requests = {
+      [key]: {
+        version: 1,
+        issueNumber: issue.number,
+        issueId: issue.id,
+        author: 'palgarra14-del',
+        requestFingerprint: parsed.requestFingerprint,
+        request: parsed.request,
+        workflowId: null,
+        status: 'initializing',
+        reason: null,
+        createdAt: '2026-09-12T00:00:00.000Z',
+        updatedAt: '2026-09-12T00:00:00.000Z',
+        pendingApproval: null,
+        startApprovalFingerprint: null,
+        startApprovalCommentId: null,
+        startApprovedBy: null,
+        initializationLease: {
+          leaseId: 'fixture-lease',
+          pid: 999999,
+          createdAt: '2026-09-12T00:00:00.000Z',
+          ownerIdentity: 'dead-owner'
+        },
+        lastProcessedCommentId: 0
+      }
+    };
+  });
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'initialization_interrupted');
+  assert.equal(workflowEngine.createCalls.length, 0);
+  assert.match(channel.posted.at(-1).body, /No automatic retry or duplicate workflow/);
+});
+
 test('workflow initialization failure is persisted as blocked and is not retried forever', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   let createCalls = 0;
