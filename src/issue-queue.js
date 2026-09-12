@@ -541,9 +541,7 @@ export class SupervisedIssueQueue {
 
   async blockRequestRevalidation(issue, key, record, reason) {
     const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null, initializationLease: null };
-    await this.saveRecord(key, next);
-    await this.post(issue.number, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
-    return next;
+    return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
   }
 
   async initializeIssue(issue, parsed) {
@@ -561,9 +559,7 @@ export class SupervisedIssueQueue {
         status: 'rejected', reason: 'unknown_project', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
         startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null, lastProcessedCommentId: 0
       };
-      await this.saveRecord(this.requestKey(issue), rejected);
-      await this.post(issue.number, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
-      return rejected;
+      return this.finalizeTerminal(issue, this.requestKey(issue), rejected, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
     }
     let workflow;
     let dryRun;
@@ -585,9 +581,7 @@ export class SupervisedIssueQueue {
         pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, initializationLease: null,
         lastProcessedCommentId: 0
       };
-      await this.saveRecord(this.requestKey(issue), blocked);
-      await this.post(issue.number, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
-      return blocked;
+      return this.finalizeTerminal(issue, this.requestKey(issue), blocked, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
     }
     const token = startApprovalFingerprint({
       requestFingerprint: parsed.requestFingerprint,
@@ -742,9 +736,7 @@ export class SupervisedIssueQueue {
   async settleWorkflow(issue, key, record, workflow) {
     if (!this.workflowMatchesRecord(record, workflow)) {
       const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
-      return next;
+      return this.finalizeTerminal(issue, key, next, 'Agent workflow no longer matches the accepted issue/project/profile/goal/scope binding. Manual inspection is required.');
     }
     const interruptedApproval = workflow.status === WorkflowStepStatus.BLOCKED &&
       workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
@@ -759,21 +751,17 @@ export class SupervisedIssueQueue {
     if (workflow.status === WorkflowStepStatus.COMPLETED) {
       const published = publicationSummary(workflow);
       const next = { ...record, status: 'completed', reason: null, updatedAt: this.now(), pendingApproval: null, publication: published };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, [
+      return this.finalizeTerminal(issue, key, next, [
         'Agent workflow completed its Definition of Done.',
         published?.pullRequest ? `Pull request: ${published.pullRequest}` : 'Pull request: not recorded',
         published?.previewUrl ? `Preview: ${published.previewUrl}` : 'Preview: not recorded',
         'No merge or production deployment was performed by the issue queue.'
       ].join('\n'));
-      return next;
     }
     if (workflow.status === WorkflowStepStatus.FAILED || workflow.status === WorkflowStepStatus.BLOCKED) {
       const reason = maskSecrets(workflow.result?.error ?? workflow.status);
       const next = { ...record, status: workflow.status, reason, updatedAt: this.now(), pendingApproval: null };
-      await this.saveRecord(key, next);
-      await this.post(issue.number, `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`. No automatic merge/production action was attempted.`);
-      return next;
+      return this.finalizeTerminal(issue, key, next, `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`. No automatic merge/production action was attempted.`);
     }
     const next = { ...record, status: 'running', reason: null, updatedAt: this.now(), pendingApproval: null };
     await this.saveRecord(key, next);
