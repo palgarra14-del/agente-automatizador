@@ -3400,10 +3400,13 @@ function workerEnvironment(environment = process.env) {
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
 }
 
-const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin', 'win32']);
+const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
 const workerProjectControlFiles = Object.freeze(['.codex/config.toml', '.codex/requirements.toml']);
 
 export function codexWorkerSecurityConfig({ writeAccess = false, pathValue = process.env.PATH ?? '', platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    return { supported: false, error: 'codex_worker_native_windows_isolation_unverified_use_wsl', configOverrides: [] };
+  }
   if (!verifiedCodexWorkerPlatforms.has(platform)) {
     return { supported: false, error: `codex_worker_read_isolation_unverified_on_${platform}`, configOverrides: [] };
   }
@@ -3549,6 +3552,12 @@ const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review'
 
 export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }) {
   const clean = sanitizeCodingTask({ skill, goal, context });
+  const inspectInstruction = skill === 'code.inspect'
+    ? 'Inspect at least one actual repository file relevant to the goal. For inspectionEvidence return exactly: {"summary":"non-empty string","relevantPaths":["repository-relative path", "..."],"findings":["non-empty grounded finding", "..."]}. relevantPaths and findings must both contain at least one item. If repository access is blocked or you cannot inspect a relevant file, do not invent evidence: return relevantPaths:[] so validation fails closed.'
+    : null;
+  const diagnoseInstruction = skill === 'code.diagnose'
+    ? 'Use the validated inspect-project evidence supplied in priorEvidence. For diagnosis return exactly: {"summary":"non-empty string","cause":"non-empty grounded cause","relevantPaths":["repository-relative path", "..."],"recommendedChange":"non-empty minimal change description","risks":["bounded risk or regression concern", "..."]}. relevantPaths must contain at least one path and every path must already appear in inspect-project.inspectionEvidence.relevantPaths. If the inspection evidence is insufficient, do not guess: return relevantPaths:[] so validation fails closed.'
+    : null;
   const reviewInstruction = skill === 'code.review'
     ? 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
@@ -3566,6 +3575,8 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
     'Do not use network access or web search. Do not read .env files, credentials, tokens, secrets, or files outside the workspace.',
     'Return exactly one JSON object and no Markdown, prose, or code fences.',
     `The JSON object must contain exactly these top-level keys: ${contract.outputs.join(', ')}.`,
+    inspectInstruction,
+    diagnoseInstruction,
     reviewInstruction,
     websiteReviewInstruction,
     websiteInstruction,
@@ -3651,13 +3662,46 @@ function validateReviewEvidence(reviewEvidence) {
   });
 }
 
-function validateSkillOutput(contract, output, skillId = null) {
+function groundedRepositoryPaths(value, label) {
+  const paths = boundedTextList(value, label, { required: true, min: 1, max: 30, itemMax: 240 })
+    .map((path) => normalizeRepositoryPath(path, label));
+  return [...new Set(paths)];
+}
+
+function normalizeInspectionEvidence(value) {
+  assertObjectKeys(value, new Set(['summary', 'relevantPaths', 'findings']), 'inspectionEvidence');
+  return safeJson({
+    summary: boundedText(value.summary, 'inspectionEvidence.summary', { required: true, max: 1_200 }),
+    relevantPaths: groundedRepositoryPaths(value.relevantPaths, 'inspectionEvidence.relevantPaths'),
+    findings: boundedTextList(value.findings, 'inspectionEvidence.findings', { required: true, min: 1, max: 30, itemMax: 500 })
+  });
+}
+
+function normalizeDiagnosis(value, context = {}) {
+  assertObjectKeys(value, new Set(['summary', 'cause', 'relevantPaths', 'recommendedChange', 'risks']), 'diagnosis');
+  const relevantPaths = groundedRepositoryPaths(value.relevantPaths, 'diagnosis.relevantPaths');
+  const inspectedPaths = context?.priorEvidence?.['inspect-project']?.inspectionEvidence?.relevantPaths;
+  if (!Array.isArray(inspectedPaths) || inspectedPaths.length < 1) throw new Error('diagnosis_missing_validated_inspection_evidence');
+  const inspected = new Set(inspectedPaths.map((path) => normalizeRepositoryPath(path, 'inspectionEvidence.relevantPaths')));
+  if (relevantPaths.some((path) => !inspected.has(path))) throw new Error('diagnosis_references_uninspected_path');
+  return safeJson({
+    summary: boundedText(value.summary, 'diagnosis.summary', { required: true, max: 1_200 }),
+    cause: boundedText(value.cause, 'diagnosis.cause', { required: true, max: 1_200 }),
+    relevantPaths,
+    recommendedChange: boundedText(value.recommendedChange, 'diagnosis.recommendedChange', { required: true, max: 1_500 }),
+    risks: boundedTextList(value.risks ?? [], 'diagnosis.risks', { max: 20, itemMax: 400 })
+  });
+}
+
+function validateSkillOutput(contract, output, skillId = null, context = {}) {
   if (!output || typeof output !== 'object' || Array.isArray(output)) throw new Error('skill_output_must_be_json_object');
   const keys = Object.keys(output).sort();
   const expected = [...contract.outputs].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)) throw new Error('skill_output_contract_mismatch');
   for (const key of expected) if (output[key] === undefined || output[key] === null) throw new Error(`skill_output_missing:${key}`);
   const normalized = safeJson(output);
+  if (skillId === 'code.inspect') normalized.inspectionEvidence = normalizeInspectionEvidence(normalized.inspectionEvidence);
+  if (skillId === 'code.diagnose') normalized.diagnosis = normalizeDiagnosis(normalized.diagnosis, context);
   if (skillId === 'code.review') normalized.reviewEvidence = validateReviewEvidence(normalized.reviewEvidence);
   if (skillId === 'website.plan') normalized.websitePlan = normalizeWebsitePlan(normalized.websitePlan);
   return normalized;
@@ -3696,7 +3740,7 @@ export class CodexReadOnlySkillExecutor {
       const raw = String(turn.finalResponse ?? '').trim();
       outputBytes = Buffer.byteLength(raw);
       if (outputBytes > this.maxOutputBytes) throw new Error('skill_output_too_large');
-      const parsed = validateSkillOutput(request.contract, JSON.parse(raw), request.skill);
+      const parsed = validateSkillOutput(request.contract, JSON.parse(raw), request.skill, request.context);
       return {
         status: 'completed',
         ok: true,
