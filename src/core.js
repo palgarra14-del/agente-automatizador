@@ -798,8 +798,8 @@ function normalizeWorkflowInput(profile, input) {
 
 const workflowProfiles = Object.freeze({
   'website-build': {
-    definitionOfDone: [{ id: 'implementationCompleted', steps: ['implementation'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }],
-    steps: [['research', 'placeholder'], ['business-analysis', 'placeholder'], ['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'verification']]
+    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['visual-verification', 'checkpoint'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
   'app-improvement': {
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
@@ -821,7 +821,7 @@ function workflowBudget(input = {}) {
 }
 
 const workflowVerificationCommands = Object.freeze({
-  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint'], 'release-readiness': ['build'] }),
+  'website-build': Object.freeze({ quality: ['test', 'typecheck', 'lint', 'build'] }),
   'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
   'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
 });
@@ -834,14 +834,15 @@ function workflowCommands(project, profile, stepId, type) {
 
 const workflowStepSkills = Object.freeze({
   'website-build': Object.freeze({
-    research: 'research.web',
-    'business-analysis': 'business.analyze',
-    requirements: 'requirements.define',
+    requirements: 'website.plan',
     design: 'human.approval',
     implementation: 'code.implement',
+    'dependency-refresh': 'project.dependencies.refresh',
+    review: 'code.review',
     quality: 'project.verify',
     'visual-verification': 'human.approval',
-    'release-readiness': 'project.verify'
+    'release-readiness': 'human.approval',
+    publication: 'release.publish-reviewed-workflow'
   }),
   'app-improvement': Object.freeze({
     'inspect-project': 'code.inspect',
@@ -867,14 +868,15 @@ const workflowStepSkills = Object.freeze({
 
 const workflowStepSpecialists = Object.freeze({
   'website-build': Object.freeze({
-    research: 'researcher',
-    'business-analysis': 'business-analyst',
     requirements: 'requirements-engineer',
     design: 'human-supervisor',
     implementation: 'implementer',
+    'dependency-refresh': 'dependency-manager',
+    review: 'change-critic',
     quality: 'verifier',
     'visual-verification': 'human-supervisor',
-    'release-readiness': 'verifier'
+    'release-readiness': 'human-supervisor',
+    publication: 'release-manager'
   }),
   'app-improvement': Object.freeze({
     'inspect-project': 'code-inspector',
