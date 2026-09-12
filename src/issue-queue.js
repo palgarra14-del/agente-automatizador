@@ -813,6 +813,7 @@ export class SupervisedIssueQueue {
           return next;
         }
         if (latestDecision?.decision !== 'approve') return record;
+        await this.workflowEngine.resetPristineDeadline(record.workflowId);
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
@@ -956,6 +957,7 @@ export class SupervisedIssueQueue {
           return next;
         }
         if (latestRecoveredStartDecision?.decision !== 'approve') return record;
+        await this.workflowEngine.resetPristineDeadline(workflow.id);
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
