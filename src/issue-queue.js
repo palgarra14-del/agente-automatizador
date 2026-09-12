@@ -417,6 +417,30 @@ function publicationSummary(workflow) {
   };
 }
 
+function safeIssueInline(value, maxBytes = 1_000) {
+  const safe = maskSecrets(String(value ?? ''))
+    .replaceAll('`', "'")
+    .replace(/\/agent/gi, '[agent-command]')
+    .replaceAll('@', '＠');
+  return Buffer.from(safe, 'utf8').subarray(0, maxBytes).toString('utf8');
+}
+
+function workflowFailureSummary(workflow) {
+  const stepId = typeof workflow.result?.stepId === 'string' ? workflow.result.stepId : null;
+  const step = workflow.steps?.find((candidate) => candidate.id === stepId)
+    ?? workflow.steps?.find((candidate) => [WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(candidate.status))
+    ?? null;
+  const detail = step?.evidence?.error ?? workflow.result?.detail ?? null;
+  return {
+    stepId: step?.id ?? stepId,
+    skill: step?.skill ?? null,
+    specialist: step?.specialist ?? null,
+    attempts: Number.isInteger(step?.attempts) ? step.attempts : null,
+    maxAttempts: Number.isInteger(workflow.budgets?.maxAttempts) ? workflow.budgets.maxAttempts : null,
+    detail: detail === null || detail === undefined ? null : safeIssueInline(detail)
+  };
+}
+
 export class GitHubIssueChannel {
   constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 30_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
@@ -846,9 +870,19 @@ export class SupervisedIssueQueue {
       ].join('\n'));
     }
     if (workflow.status === WorkflowStepStatus.FAILED || workflow.status === WorkflowStepStatus.BLOCKED) {
-      const reason = maskSecrets(workflow.result?.error ?? workflow.status);
+      const reason = safeIssueInline(workflow.result?.error ?? workflow.status);
+      const failure = workflowFailureSummary(workflow);
+      const detail = [
+        `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`.`,
+        failure.stepId ? `Step: \`${safeIssueInline(failure.stepId, 200)}\`.` : null,
+        failure.skill ? `Skill: \`${safeIssueInline(failure.skill, 200)}\`.` : null,
+        failure.specialist ? `Specialist: \`${safeIssueInline(failure.specialist, 200)}\`.` : null,
+        failure.attempts !== null ? `Attempts: \`${failure.attempts}${failure.maxAttempts !== null ? `/${failure.maxAttempts}` : ''}\`.` : null,
+        failure.detail ? `Cause: \`${failure.detail}\`.` : 'Cause: no executor detail was recorded.',
+        'No automatic merge/production action was attempted.'
+      ].filter(Boolean).join('\n');
       const next = { ...record, status: workflow.status, reason, updatedAt: this.now(), pendingApproval: null, activeApproval: null };
-      return this.finalizeTerminal(issue, key, next, `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`. No automatic merge/production action was attempted.`);
+      return this.finalizeTerminal(issue, key, next, detail);
     }
     const next = { ...record, status: 'running', reason: null, updatedAt: this.now(), pendingApproval: null };
     await this.saveRecord(key, next);
