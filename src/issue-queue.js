@@ -354,6 +354,32 @@ export class SupervisedIssueQueue {
     return this.channel.comment(number, text);
   }
 
+  async revalidateCurrentRequest(issue, record) {
+    const current = await this.channel.issue(issue.number);
+    if (!current || current.state !== 'open' || current.pull_request ||
+        current.number !== record.issueNumber || current.id !== record.issueId ||
+        current.user?.login !== record.author) {
+      return { ok: false, reason: 'issue_identity_or_state_changed' };
+    }
+    let parsed;
+    try {
+      parsed = parseIssueRequestBody(current.body);
+    } catch {
+      return { ok: false, reason: 'request_body_invalid' };
+    }
+    if (parsed.requestFingerprint !== record.requestFingerprint) {
+      return { ok: false, reason: 'request_body_changed' };
+    }
+    return { ok: true, issue: current, parsed };
+  }
+
+  async blockRequestRevalidation(issue, key, record, reason) {
+    const next = { ...record, status: 'blocked', reason, updatedAt: this.now(), pendingApproval: null };
+    await this.saveRecord(key, next);
+    await this.post(issue.number, 'Agent request blocked: the current GitHub issue no longer matches the accepted request exactly. No further execution was authorized.');
+    return next;
+  }
+
   async initializeIssue(issue, parsed) {
     if (!this.authorized(issue.user?.login)) return null;
     const claim = await this.claimInitialization(issue, parsed);
@@ -519,6 +545,10 @@ export class SupervisedIssueQueue {
   async processExisting(issue, parsed, record) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
+    const currentRequest = await this.revalidateCurrentRequest(issue, record);
+    if (!currentRequest.ok) return this.blockRequestRevalidation(issue, key, record, currentRequest.reason);
+    issue = currentRequest.issue;
+    parsed = currentRequest.parsed;
     if (record.status === 'initializing') {
       let abandoned;
       try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
@@ -566,6 +596,9 @@ export class SupervisedIssueQueue {
           await this.post(issue.number, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
           return next;
         }
+        const currentBeforeExecution = await this.revalidateCurrentRequest(issue, record);
+        if (!currentBeforeExecution.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeExecution.reason);
+        issue = currentBeforeExecution.issue;
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
@@ -587,6 +620,9 @@ export class SupervisedIssueQueue {
           await this.post(issue.number, 'Agent workflow approval became stale because the persisted workflow state changed. Manual inspection is required.');
           return next;
         }
+        const currentBeforeApproval = await this.revalidateCurrentRequest(issue, record);
+        if (!currentBeforeApproval.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeApproval.reason);
+        issue = currentBeforeApproval.issue;
         await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId);
         record = await this.saveRecord(key, { ...record, status: 'running', pendingApproval: null, updatedAt: this.now() });
         const result = await this.workflowEngine.run(record.workflowId);
@@ -652,6 +688,9 @@ export class SupervisedIssueQueue {
     catch (error) {
       const key = this.requestKey(issue);
       const existing = await this.getRecord(key);
+      if (existing && !['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) {
+        return this.blockRequestRevalidation(issue, key, existing, 'request_body_invalid');
+      }
       if (!existing && this.authorized(issue.user?.login)) {
         await this.post(issue.number, `Agent request rejected during parsing: \`${maskSecrets(error.message)}\`.`);
         await this.saveRecord(key, {
