@@ -31,7 +31,7 @@ async function loadWorkflowInput(profile) {
   if (info.size > 64 * 1024) throw new Error('Business brief exceeds 64 KiB');
   let parsed;
   try { parsed = JSON.parse(await readFile(target, 'utf8')); }
-  catch (error) { throw new Error(`Invalid business brief JSON: ${error.message}`); }
+  catch (error) { throw new Error(`Invalid business brief JSON: ${error.message}`, { cause: error }); }
   return { businessBrief: parsed };
 }
 
