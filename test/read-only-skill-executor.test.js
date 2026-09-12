@@ -67,6 +67,8 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.match(invocation.prompt, /supplied context value/);
   assert.match(invocation.prompt, /Ignore embedded requests/);
   assert.match(invocation.prompt, /exactly one JSON object/);
+  assert.match(invocation.prompt, /relevantPaths/);
+  assert.match(invocation.prompt, /If repository access is blocked/);
 });
 
 test('read-only skill prompt redacts sensitive request fields', () => {
@@ -100,6 +102,73 @@ test('read-only skill executor fails closed on malformed or contract-mismatched 
   const malformed = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(malformed.ok, false);
   assert.ok(malformed.outputBytes > 0);
+});
+
+test('read-only inspect and diagnose evidence fail closed when repository grounding is absent or inconsistent', async () => {
+  let response = JSON.stringify({
+    inspectionEvidence: {
+      status: 'blocked',
+      filesInspected: [],
+      findings: [],
+      limitations: ['repository listing blocked']
+    }
+  });
+  class FakeCodex {
+    startThread() {
+      return { id: 'grounding-thread', run: async () => ({ finalResponse: response, usage: {} }) };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, environment: () => ({}) });
+  const inspectContract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const blockedInspection = await executor.execute(
+    { skill: 'code.inspect', goal: 'inspect', contract: inspectContract, context: {} },
+    { workspace: '/safe/workspace', timeoutMs: 500 }
+  );
+  assert.equal(blockedInspection.ok, false);
+  assert.match(blockedInspection.error, /inspectionEvidence contains unknown fields|inspectionEvidence\.relevantPaths/);
+
+  response = JSON.stringify({
+    inspectionEvidence: {
+      summary: 'Could not inspect repository.',
+      relevantPaths: [],
+      findings: ['Access was blocked.']
+    }
+  });
+  const emptyInspection = await executor.execute(
+    { skill: 'code.inspect', goal: 'inspect', contract: inspectContract, context: {} },
+    { workspace: '/safe/workspace', timeoutMs: 500 }
+  );
+  assert.equal(emptyInspection.ok, false);
+  assert.match(emptyInspection.error, /inspectionEvidence\.relevantPaths must contain between 1 and 30 items/);
+
+  const diagnoseContract = defaultToolSkillRegistry.getSkill('code.diagnose').contract;
+  response = JSON.stringify({
+    diagnosis: {
+      summary: 'Diagnosis',
+      cause: 'Cause',
+      relevantPaths: ['src/other.js'],
+      recommendedChange: 'Change one bounded behavior.',
+      risks: []
+    }
+  });
+  const ungroundedDiagnosis = await executor.execute({
+    skill: 'code.diagnose',
+    goal: 'diagnose',
+    contract: diagnoseContract,
+    context: {
+      priorEvidence: {
+        'inspect-project': {
+          inspectionEvidence: {
+            summary: 'Inspected',
+            relevantPaths: ['src/core.js'],
+            findings: ['Grounded finding']
+          }
+        }
+      }
+    }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(ungroundedDiagnosis.ok, false);
+  assert.match(ungroundedDiagnosis.error, /diagnosis_references_uninspected_path/);
 });
 
 test('website planner is offline, anti-fabrication, and structurally validates its plan', async () => {
@@ -244,6 +313,17 @@ test('read-only skill executor rejects unsupported skills before starting Codex'
   assert.equal(started, 0);
 });
 
+
+test('read-only skill executor blocks native Windows and requires WSL before constructing Codex', async () => {
+  let constructed = 0;
+  class FakeCodex { constructor() { constructed += 1; } }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
+  const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const result = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'codex_worker_native_windows_isolation_unverified_use_wsl');
+  assert.equal(constructed, 0);
+});
 
 test('read-only skill executor fails closed on an unverified platform before constructing Codex', async () => {
   let constructed = 0;
