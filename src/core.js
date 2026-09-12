@@ -1312,6 +1312,26 @@ export class WorkflowEngine {
   async get(id) { return (await this.store.load()).workflows?.[id]; }
   async list() { return Object.values((await this.store.load()).workflows ?? {}); }
 
+  async resetPristineDeadline(id) {
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.update(id, (saved) => {
+      validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
+      const pristine = saved.status === WorkflowStepStatus.PENDING &&
+        saved.workspace === null &&
+        saved.outputBytes === 0 &&
+        (saved.modelUsage?.calls ?? 0) === 0 &&
+        (saved.bootstrap?.attempts ?? 0) === 0 &&
+        saved.steps.every((step, index) =>
+          step.attempts === 0 &&
+          step.evidence === null &&
+          step.error === null &&
+          (index === 0 ? step.status === WorkflowStepStatus.READY : step.status === WorkflowStepStatus.PENDING)
+        );
+      if (!pristine) throw new Error('workflow_not_pristine_for_start_deadline_reset');
+      saved.deadlineAt = this.now() + saved.budgets.timeoutMs;
+      saved.pausedAt = null;
+    }));
+  }
+
   async update(id, mutator) {
     return this.store.mutate((data) => {
       const plan = data.workflows?.[id];
