@@ -8,8 +8,8 @@ export function normalizeIssueQueueConfig(value) {
   assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs']), 'issue queue config');
   if (value.version !== 1) throw new Error('issue queue config version must be 1');
   assertObjectKeys(value.repository, new Set(['owner', 'name']), 'issue queue config repository');
-  const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 });
-  const name = boundedString(value.repository.name, 'issue queue repository name', { required: true, max: 100 });
+  const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 }).toLowerCase();
+  const name = boundedString(value.repository.name, 'issue queue repository name', { required: true, max: 100 }).toLowerCase();
   if (!Array.isArray(value.allowedActors) || value.allowedActors.length < 1 || value.allowedActors.length > 20) throw new Error('issue queue allowedActors must contain between 1 and 20 logins');
   const allowedActors = [...new Set(value.allowedActors.map((actor, index) => boundedString(actor, `issue queue allowedActors[${index}]`, { required: true, max: 80 }).toLowerCase()))].sort();
   const pollIntervalMs = value.pollIntervalMs ?? 15_000;
@@ -366,7 +366,7 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
   if (!Number.isFinite(Date.parse(record.createdAt ?? '')) || !Number.isFinite(Date.parse(record.updatedAt ?? ''))) throw new Error('issue queue record timestamps are invalid');
   const terminal = ['completed', 'failed', 'blocked', 'rejected'].includes(record.status);
   if (record.status === 'initializing' &&
-      (record.workflowId !== null || record.workflowBindingFingerprint !== null || record.pendingApproval !== null || record.activeApproval !== null)) {
+      (record.workflowId != null || record.workflowBindingFingerprint != null || record.pendingApproval != null || record.activeApproval != null)) {
     throw new Error('initializing issue queue state is inconsistent');
   }
   if (record.status === 'awaiting_start_approval' &&
@@ -374,19 +374,19 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
        record.pendingApproval?.kind !== 'start' ||
        record.pendingApproval.stepId !== 'start' ||
        record.startApprovalFingerprint !== record.pendingApproval.fingerprint ||
-       record.activeApproval !== null)) {
+       record.activeApproval != null)) {
     throw new Error('awaiting_start_approval state is inconsistent');
   }
   if (record.status === 'awaiting_workflow_approval' &&
       (!record.workflowId || !record.workflowBindingFingerprint ||
        record.pendingApproval?.kind !== 'workflow-step' ||
-       record.activeApproval !== null)) {
+       record.activeApproval != null)) {
     throw new Error('awaiting_workflow_approval state is inconsistent');
   }
-  if (record.status === 'running' && (!record.workflowId || !record.workflowBindingFingerprint || record.pendingApproval !== null)) {
+  if (record.status === 'running' && (!record.workflowId || !record.workflowBindingFingerprint || record.pendingApproval != null)) {
     throw new Error('running issue queue state is inconsistent');
   }
-  if (terminal && (record.pendingApproval !== null || record.activeApproval !== null || record.initializationLease !== null)) {
+  if (terminal && (record.pendingApproval != null || record.activeApproval != null || record.initializationLease != null)) {
     throw new Error('terminal issue queue state cannot retain live execution state');
   }
   const approvalCommentPresent = record.startApprovalCommentId !== null && record.startApprovalCommentId !== undefined;
