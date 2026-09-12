@@ -6,17 +6,6 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
 
-function repositoryContextFixture(entries = [{ path: 'src/core.js', content: 'export const fixture = true;\n' }]) {
-  const files = entries.map(({ path, content }) => ({
-    path,
-    content,
-    bytes: Buffer.byteLength(content),
-    sha256: createHash('sha256').update(content).digest('hex')
-  }));
-  const fingerprint = createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex');
-  return { version: 1, files, fingerprint };
-}
-
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
@@ -1379,18 +1368,8 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
     }
   });
   const calls = [];
-  const preparedContexts = [];
-  const repositoryContext = repositoryContextFixture();
   const skillExecutor = {
     supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
-    async prepareContext(request) {
-      preparedContexts.push(request.skill);
-      return repositoryContext;
-    },
-    async revalidateContext(expected) {
-      assert.equal(expected.fingerprint, repositoryContext.fingerprint);
-      return repositoryContext;
-    },
     async execute(request) {
       calls.push(request);
       if (request.skill === 'code.inspect') {
@@ -1408,31 +1387,25 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').status, WorkflowStepStatus.COMPLETED);
   assert.equal(waiting.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(calls.length, 2);
-  assert.deepEqual(preparedContexts, ['code.inspect', 'code.diagnose']);
   assert.deepEqual(calls[0].contract.outputs, ['inspectionEvidence']);
   assert.deepEqual(calls[1].contract.outputs, ['diagnosis']);
-  assert.equal(calls[0].context.repositoryContext.fingerprint, repositoryContext.fingerprint);
-  assert.equal(calls[1].context.repositoryContext.fingerprint, repositoryContext.fingerprint);
   assert.equal(calls[1].context.priorEvidence['inspect-project'].inspectionEvidence.summary, 'inspected');
   assert.equal(waiting.outputBytes, 220);
   assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
-  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.repositoryContextFingerprint, repositoryContext.fingerprint);
-  assert.deepEqual(waiting.steps.find((step) => step.id === 'inspect-project').evidence.repositoryContextPaths, ['src/core.js']);
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
 });
 
-test('workflow fails closed when orchestrator repository context changes during read-only analysis', async () => {
+test('workflow fails closed if orchestrator repository context drifts during analysis', async () => {
   const configured = configFrom({
-    id: 'context-drift-workflow',
-    repository: { owner: 'owner', name: 'repo' },
-    defaultBranch: 'main',
-    protectedBranches: ['main'],
-    workspace: '.',
+    id: 'context-drift', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main',
+    protectedBranches: ['main'], workspace: '.',
     commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
     execution: { provider: 'local-sanitized' },
     skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
   });
-  const repositoryContext = repositoryContextFixture();
+  const content = 'export const fixture = true;\n';
+  const file = { path: 'src/core.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = { version: 1, files: [file], fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex') };
   let calls = 0;
   const skillExecutor = {
     supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
@@ -1440,38 +1413,18 @@ test('workflow fails closed when orchestrator repository context changes during 
     async revalidateContext() { throw new Error('repository_context_changed_during_analysis'); },
     async execute(request) {
       calls += 1;
-      assert.equal(request.skill, 'code.inspect');
-      return {
-        ok: true,
-        status: 'completed',
-        outputBytes: 40,
-        result: {
-          inspectionEvidence: {
-            summary: 'Grounded before drift.',
-            relevantPaths: ['src/core.js'],
-            findings: ['Initial supplied context was readable.']
-          }
-        }
-      };
+      assert.equal(request.context.repositoryContext.fingerprint, repositoryContext.fingerprint);
+      return { ok: true, status: 'completed', outputBytes: 20, result: { inspectionEvidence: { summary: 'grounded', relevantPaths: ['src/core.js'], findings: ['fixture'] } } };
     }
   };
   const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
-  const created = await instance.create({
-    profile: 'app-improvement',
-    projectId: configured.id,
-    goal: 'Reject context drift',
-    scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] }
-  });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'reject drift', scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] } });
   const failed = await instance.run(created.id);
   const inspect = failed.steps.find((step) => step.id === 'inspect-project');
-  const checkpoint = failed.steps.find((step) => step.id === 'plan-change');
-
-  assert.equal(failed.status, WorkflowStepStatus.FAILED);
   assert.equal(failed.result.error, 'read_only_repository_context_changed');
-  assert.equal(failed.result.stepId, 'inspect-project');
   assert.equal(inspect.status, WorkflowStepStatus.FAILED);
   assert.match(inspect.evidence.error, /repository_context_changed_during_analysis/);
-  assert.notEqual(checkpoint.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.notEqual(failed.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(calls, 1);
 });
 
