@@ -6,6 +6,17 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
 
+function repositoryContextFixture(entries = [{ path: 'src/core.js', content: 'export const fixture = true;\n' }]) {
+  const files = entries.map(({ path, content }) => ({
+    path,
+    content,
+    bytes: Buffer.byteLength(content),
+    sha256: createHash('sha256').update(content).digest('hex')
+  }));
+  const fingerprint = createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex');
+  return { version: 1, files, fingerprint };
+}
+
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
 }
@@ -1368,8 +1379,18 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
     }
   });
   const calls = [];
+  const preparedContexts = [];
+  const repositoryContext = repositoryContextFixture();
   const skillExecutor = {
     supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async prepareContext(request) {
+      preparedContexts.push(request.skill);
+      return repositoryContext;
+    },
+    async revalidateContext(expected) {
+      assert.equal(expected.fingerprint, repositoryContext.fingerprint);
+      return repositoryContext;
+    },
     async execute(request) {
       calls.push(request);
       if (request.skill === 'code.inspect') {
@@ -1387,11 +1408,16 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').status, WorkflowStepStatus.COMPLETED);
   assert.equal(waiting.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(calls.length, 2);
+  assert.deepEqual(preparedContexts, ['code.inspect', 'code.diagnose']);
   assert.deepEqual(calls[0].contract.outputs, ['inspectionEvidence']);
   assert.deepEqual(calls[1].contract.outputs, ['diagnosis']);
+  assert.equal(calls[0].context.repositoryContext.fingerprint, repositoryContext.fingerprint);
+  assert.equal(calls[1].context.repositoryContext.fingerprint, repositoryContext.fingerprint);
   assert.equal(calls[1].context.priorEvidence['inspect-project'].inspectionEvidence.summary, 'inspected');
   assert.equal(waiting.outputBytes, 220);
   assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.repositoryContextFingerprint, repositoryContext.fingerprint);
+  assert.deepEqual(waiting.steps.find((step) => step.id === 'inspect-project').evidence.repositoryContextPaths, ['src/core.js']);
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
 });
 
