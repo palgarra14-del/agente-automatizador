@@ -2667,6 +2667,10 @@ export class WorkflowEngine {
       const skillResolution = this.registry.resolve(project, next.skill, { surface: 'workflow' });
       if (!skillResolution.available) return this.blockForCapability(id, next.id, skillResolution);
       if (next.type === 'placeholder' && this.skillExecutor.supports(next.skill)) {
+        if (next.skill === 'code.review' && governedImplementationProfiles.has(plan.profile)) {
+          const governed = await this.guardImplementationChangeSet(id, project, next.id, 'before-review');
+          if (!governed.ok) return governed.plan;
+        }
         plan = await this.executeReadOnlyWorkflowStep(id, project, next, skillResolution);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
