@@ -357,7 +357,7 @@ export async function collectReadOnlyReviewDiff({
   const boundedMaxBytes = positiveInteger(maxBytes, 128 * 1024, 'review diff maxBytes');
   const result = await processRunner(
     'git',
-    ['diff', 'HEAD', '--no-ext-diff', '--no-color', '--', ...normalizedScope.allowedPaths],
+    ['diff', 'HEAD', '--no-ext-diff', '--no-color', '--no-renames', '--', ...normalizedScope.allowedPaths],
     { cwd: resolve(workspace), timeoutMs, outputLimit: boundedMaxBytes, captureOutputDigest: true }
   );
   if (result.timedOut || result.exitCode !== 0) throw new Error('repository_context_review_diff_failed');
