@@ -245,13 +245,13 @@ test('read-only skill executor rejects unsupported skills before starting Codex'
 });
 
 
-test('read-only skill executor fails closed on native Windows before constructing Codex', async () => {
+test('read-only skill executor fails closed on an unverified platform before constructing Codex', async () => {
   let constructed = 0;
   class FakeCodex { constructor() { constructed += 1; } }
-  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, platform: 'win32', environment: () => ({ PATH: 'C:\\safe' }) });
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: FakeCodex, platform: 'freebsd', environment: () => ({ PATH: '/safe' }) });
   const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
-  const result = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: 'C:\\workspace', timeoutMs: 100 });
+  const result = await executor.execute({ skill: 'code.inspect', goal: 'inspect', contract }, { workspace: '/workspace', timeoutMs: 100 });
   assert.equal(result.ok, false);
-  assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_win32');
+  assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_freebsd');
   assert.equal(constructed, 0);
 });
