@@ -37,6 +37,23 @@ import {
   watchIssueQueue
 } from '../src/issue-queue.js';
 
+function businessBrief(overrides = {}) {
+  return {
+    version: 1,
+    businessName: 'Fontanería Piloto',
+    category: 'Fontanería',
+    locations: ['Madrid'],
+    services: [{ name: 'Reparación de fugas', description: 'Diagnóstico y reparación.' }],
+    contact: { whatsapp: '34600000000' },
+    brand: { tone: 'profesional' },
+    website: { language: 'es', primaryGoal: 'contacto', requiredPages: ['home', 'servicios', 'contacto'], requiredFeatures: ['CTA WhatsApp'] },
+    facts: [],
+    contentRestrictions: ['No inventar reseñas.'],
+    assets: {},
+    ...overrides
+  };
+}
+
 function requestBody(overrides = {}) {
   const request = {
     version: 1,
@@ -97,6 +114,12 @@ class FakeWorkflowEngine {
 
   async create(input) {
     this.createCalls.push(clone(input));
+    this.plan.goal = input.goal;
+    this.plan.projectId = input.projectId;
+    this.plan.profile = input.profile;
+    this.plan.scope = clone(input.scope ?? { allowedPaths: [], forbiddenPaths: [] });
+    this.plan.input = input.input ? clone(input.input) : null;
+    this.plan.inputFingerprint = input.input ? 'f'.repeat(64) : null;
     return clone(this.plan);
   }
 
@@ -247,6 +270,52 @@ test('issue request protocol is strict, bounded, canonical, and redacts accident
   assert.throws(() => parseIssueRequestBody(`prefix\n${requestBody()}`), /marker must be the first/);
   assert.throws(() => parseIssueRequestBody(`${requestBody()}\n${ISSUE_REQUEST_MARKER}\n{}`), /exactly one request marker/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: ['../escape'] } }), /safe repository-relative path/);
+});
+
+test('website-build request is strict, normalized, and forwarded to WorkflowEngine', async () => {
+  const input = { businessBrief: businessBrief({ facts: ['Authorization: Bearer abcdefghijklmnop'] }) };
+  const normalized = normalizeIssueRequest({
+    version: 1,
+    projectId: 'website-pilot',
+    profile: 'website-build',
+    goal: 'Build a professional website',
+    scope: { allowedPaths: ['index.html', 'servicios'], forbiddenPaths: ['vercel.json'] },
+    input
+  });
+  assert.equal(normalized.profile, 'website-build');
+  assert.equal(normalized.input.businessBrief.businessName, 'Fontanería Piloto');
+  assert.equal(normalized.input.businessBrief.facts[0].includes('abcdefghijklmnop'), false);
+  assert.throws(() => normalizeIssueRequest({
+    version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x',
+    scope: { allowedPaths: ['app'] }, input
+  }), /input is supported only for website-build/);
+  assert.throws(() => normalizeIssueRequest({
+    version: 1, projectId: 'website-pilot', profile: 'website-build', goal: 'x',
+    scope: { allowedPaths: ['index.html'] }
+  }), /agent request input must be an object/);
+
+  const { queue, channel, workflowEngine } = await queueFixture();
+  channel.issues[0].body = requestBody({
+    profile: 'website-build',
+    goal: 'Build pilot website',
+    input: { businessBrief: businessBrief() }
+  });
+  const record = await queue.tick();
+  assert.equal(record.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.createCalls[0].profile, 'website-build');
+  assert.equal(workflowEngine.createCalls[0].input.businessBrief.businessName, 'Fontanería Piloto');
+  assert.deepEqual(Object.keys(workflowEngine.createCalls[0].input), ['businessBrief']);
+});
+
+test('website-build issue body accepts bounded briefs above the legacy 16 KiB limit', () => {
+  const facts = Array.from({ length: 40 }, (_, index) => `Dato ${index}: ${'x'.repeat(330)}`);
+  const body = requestBody({
+    profile: 'website-build',
+    input: { businessBrief: businessBrief({ facts }) }
+  });
+  assert.ok(Buffer.byteLength(body, 'utf8') > 16 * 1024);
+  assert.equal(parseIssueRequestBody(body).request.input.businessBrief.facts.length, 40);
+  assert.throws(() => parseIssueRequestBody(`${ISSUE_REQUEST_MARKER}\n${'x'.repeat(80 * 1024)}`), /exceeds 80 KiB/);
 });
 
 test('exact issue-body fingerprint invalidates formatting-only and masked-secret edits', () => {
