@@ -1513,6 +1513,25 @@ export function evaluateDefinitionOfDone(plan) {
   return { ok: requirements.every((requirement) => requirement.ok), requirements };
 }
 
+function pristineHistoricalWorkflow(plan, leaseId) {
+  if (!plan || typeof plan !== 'object' || plan.status !== WorkflowStepStatus.PENDING) return false;
+  if (!plan.executionLease || plan.executionLease.leaseId !== leaseId || plan.executionLease.kind !== 'workflow') return false;
+  if (plan.pausedAt !== null || plan.workspace !== null || plan.result !== null || plan.validation !== null || plan.dryRun !== false) return false;
+  const usage = plan.modelUsage;
+  if (!usage || usage.calls !== 0 || usage.inputTokens !== 0 || usage.outputTokens !== 0 || usage.totalTokens !== 0 || usage.unknownUsageCalls !== 0 || !Array.isArray(usage.entries) || usage.entries.length !== 0) return false;
+  if (!Array.isArray(plan.steps) || !plan.steps.length) return false;
+  if (plan.steps[0].status !== WorkflowStepStatus.READY) return false;
+  if (plan.steps.slice(1).some((step) => step.status !== WorkflowStepStatus.PENDING)) return false;
+  if (plan.steps.some((step) => step.attempts !== 0 || step.evidence !== null || step.error !== null)) return false;
+  const bootstrap = plan.bootstrap;
+  if (!bootstrap || bootstrap.attempts !== 0 || !['pending', 'not_required'].includes(bootstrap.status) || bootstrap.completedAt !== null || bootstrap.evidence !== null || bootstrap.error !== null) return false;
+  return true;
+}
+
+function historicalFingerprintMismatch(error) {
+  return /(?:capability registry|specialist registry|project skill policy) fingerprint does not match/i.test(String(error?.message ?? ''));
+}
+
 export class WorkflowEngine {
   constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
@@ -1532,12 +1551,21 @@ export class WorkflowEngine {
 
   async cancel(id, { reason = 'workflow_cancelled' } = {}) {
     if (typeof reason !== 'string' || !/^[a-z][a-z0-9_.:-]{2,120}$/.test(reason)) throw new Error('workflow cancellation reason is invalid');
-    return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
+    return this.store.withExecutionLease('workflows', id, 'workflow', async (lease) => {
       const current = await this.get(id);
       if (!current) throw new Error('Workflow not found');
-      validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
       if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(current.status)) return current;
+
+      let historicalPristine = false;
+      try {
+        validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
+      } catch (error) {
+        historicalPristine = historicalFingerprintMismatch(error) && pristineHistoricalWorkflow(current, lease.leaseId);
+        if (!historicalPristine) throw error;
+      }
+
       return this.update(id, (saved) => {
+        if (historicalPristine && !pristineHistoricalWorkflow(saved, lease.leaseId)) throw new Error('historical_workflow_recovery_not_pristine');
         const completed = new Set(saved.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
         const cancellableStatuses = new Set([WorkflowStepStatus.READY, WorkflowStepStatus.RUNNING, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.PENDING]);
         const step = saved.steps.find((candidate) =>
@@ -1547,14 +1575,16 @@ export class WorkflowEngine {
         if (step) {
           step.status = WorkflowStepStatus.BLOCKED;
           step.error = reason;
-          step.evidence = step.evidence
-            ? { ...step.evidence, cancellation: { reason, cancelledAt: new Date(this.now()).toISOString() } }
-            : { type: 'cancellation', reason, cancelledAt: new Date(this.now()).toISOString(), ...workflowEvidenceContext(saved, step) };
+          step.evidence = historicalPristine
+            ? { type: 'historical-cancellation', reason, cancelledAt: new Date(this.now()).toISOString() }
+            : step.evidence
+              ? { ...step.evidence, cancellation: { reason, cancelledAt: new Date(this.now()).toISOString() } }
+              : { type: 'cancellation', reason, cancelledAt: new Date(this.now()).toISOString(), ...workflowEvidenceContext(saved, step) };
         }
         saved.status = WorkflowStepStatus.BLOCKED;
         saved.pausedAt = null;
-        saved.result = { error: reason, stepId: step?.id ?? null };
-        validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
+        saved.result = { error: reason, stepId: step?.id ?? null, ...(historicalPristine ? { historicalRecovery: true } : {}) };
+        if (!historicalPristine) validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
       });
     });
   }
