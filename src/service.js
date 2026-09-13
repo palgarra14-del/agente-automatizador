@@ -231,6 +231,7 @@ export async function syncInboxService({
   const unit = renderInboxServiceUnit({ repositoryRoot: root, nodePath, home, environment });
   const changed = previous !== unit;
   const temporary = `${unitPath}.tmp-${process.pid}`;
+
   try {
     if (changed) {
       await writeFile(temporary, unit, { mode: 0o600, flag: 'wx' });
@@ -449,7 +450,8 @@ async function writeUpgradeLease(file) {
     leaseId: randomUUID(),
     pid: process.pid,
     createdAt: new Date().toISOString(),
-    ownerIdentity: await upgradeProcessIdentity(process.pid)  };
+    ownerIdentity: await upgradeProcessIdentity(process.pid)
+  };
   await writeFile(file, JSON.stringify(lease), { flag: 'wx', mode: 0o600 });
   return lease;
 }
