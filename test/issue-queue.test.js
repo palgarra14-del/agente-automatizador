@@ -1158,6 +1158,30 @@ test('issue queue watcher lease rejects a concurrent operator and recovers an ab
   assert.equal((await store.load()).issueQueueWatcherLease, null);
 });
 
+test('watcher preflight exits before a stale process can tick and releases its singleton lease', async () => {
+  let ticks = 0;
+  const queue = leaseableTestQueue({
+    async tick() {
+      ticks += 1;
+      return null;
+    }
+  });
+
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    beforeTick: async () => false
+  });
+
+  assert.equal(ticks, 0);
+  const lease = await queue.claimWatcherLease();
+  assert.equal(await queue.releaseWatcherLease(lease.leaseId), true);
+
+  await assert.rejects(
+    watchIssueQueue(queue, { pollIntervalMs: 1_000, beforeTick: true }),
+    /issue queue beforeTick must be a function/
+  );
+});
+
 test('watch loop fails closed if its singleton lease is lost before shutdown', async () => {
   const controller = new AbortController();
   const queue = {

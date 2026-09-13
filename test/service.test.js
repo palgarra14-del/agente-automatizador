@@ -8,6 +8,7 @@ import {
   INBOX_SERVICE_NAME,
   ensureGitHubToken,
   installInboxService,
+  readCheckoutRevision,
   renderInboxServiceUnit,
   restartInboxService,
   serviceStatus,
@@ -44,6 +45,43 @@ test('GitHub token bootstrap prefers environment and otherwise reads gh auth wit
   await assert.rejects(
     ensureGitHubToken({ environment: { PATH: '/usr/bin', HOME: '/home/test' }, commandRunner: async () => ({ exitCode: 1, stdout: secret, stderr: secret }) }),
     (error) => error.message === 'github_cli_auth_required' && !error.message.includes(secret)
+  );
+});
+
+test('checkout revision probe is local, bounded, and receives no GitHub secret', async () => {
+  const secret = 'gho_abcdefghijklmnopqrstuvwxyz1234567890';
+  const revision = 'A'.repeat(40);
+  const calls = [];
+  const result = await readCheckoutRevision({
+    repositoryRoot: '/home/pablo/projects/agente-automatizador',
+    environment: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/home/pablo',
+      LANG: 'C.UTF-8',
+      GITHUB_TOKEN: secret
+    },
+    commandRunner: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { exitCode: 0, stdout: revision + '\n', stderr: '' };
+    }
+  });
+  assert.equal(result, revision.toLowerCase());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'git');
+  assert.deepEqual(calls[0].args, ['rev-parse', '--verify', 'HEAD']);
+  assert.equal(calls[0].options.cwd, '/home/pablo/projects/agente-automatizador');
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
+  assert.equal(JSON.stringify(calls[0].options).includes(secret), false);
+  assert.equal(calls[0].options.env.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(calls[0].options.maxOutputBytes, 512);
+
+  await assert.rejects(
+    readCheckoutRevision({
+      repositoryRoot: '/repo',
+      commandRunner: async () => ({ exitCode: 0, stdout: 'not-a-sha\n', stderr: '' }),
+      environment: { PATH: '/usr/bin', HOME: '/home/pablo' }
+    }),
+    /service_checkout_revision_unavailable/
   );
 });
 

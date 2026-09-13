@@ -37,6 +37,32 @@ function serviceRuntimeEnvironment(environment = {}) {
   return result;
 }
 
+function checkoutReadEnvironment(environment = process.env) {
+  const result = {};
+  for (const name of ['PATH', 'HOME', 'LANG', 'LC_ALL']) {
+    if (environment[name] !== undefined) result[name] = validateText(String(environment[name]), name);
+  }
+  result.GIT_TERMINAL_PROMPT = '0';
+  return result;
+}
+
+export async function readCheckoutRevision({
+  repositoryRoot = process.cwd(),
+  commandRunner = runLocalCommand,
+  environment = process.env
+} = {}) {
+  const root = resolve(validateText(String(repositoryRoot), 'repositoryRoot'));
+  const result = await commandRunner('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: root,
+    env: checkoutReadEnvironment(environment),
+    timeoutMs: 5_000,
+    maxOutputBytes: 512
+  });
+  const revision = String(result.stdout ?? '').trim().toLowerCase();
+  if (result.exitCode !== 0 || !/^[a-f0-9]{40}$/.test(revision)) throw new Error('service_checkout_revision_unavailable');
+  return revision;
+}
+
 export function runLocalCommand(command, args, { cwd, env, timeoutMs = 15_000, maxOutputBytes = 16_384 } = {}) {
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, { cwd, env, shell: false, windowsHide: true });
