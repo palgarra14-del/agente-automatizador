@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.17
+# Engineering Orchestrator — v0.18
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -20,6 +20,8 @@ v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/
 `inbox watch` is singleton-controlled through a durable watcher lease in the local state store. A second current-version watcher fails closed instead of polling concurrently; a valid lease whose PID/identity is abandoned after a crash is recovered on the next start, and graceful shutdown releases the exact lease it acquired.
 
 On Linux/WSL with systemd enabled, the inbox can be installed as a persistent user service with `agent service install`. Use `agent service sync` after updating the checkout: it installs or refreshes only the agent-managed unit, reloads systemd, restarts the watcher, and verifies that it is enabled and active. The unit stores no GitHub token; on each start the CLI obtains the token in memory from the already authenticated GitHub CLI (`gh auth token`) when `GITHUB_TOKEN` is absent. Its service PATH is reduced to the Node binary directory plus trusted system binary directories, while non-secret custom GitHub/Codex config locations are preserved. `status`, `restart`, and `uninstall` never take ownership of an unmanaged unit file.
+
+v0.18 adds `agent service upgrade` for a governed self-update of an already installed operator. It refuses active runs/workflows/requests, requires a clean `main` checkout and the exact configured GitHub remote, fetches only the configured default branch, permits only fast-forward updates, and verifies every new commit as the merge commit of a PR whose `CI` workflow succeeded. Only after those checks does it stop the watcher, fast-forward, run `npm ci --ignore-scripts`, and execute the upgraded CLI's `service sync`. Any local refresh/start failure rolls the checkout back to the previous SHA, restores frozen dependencies, and resynchronizes the old service; an incomplete rollback fails explicitly.
 
 Read-only `code.inspect`, `code.diagnose`, and `code.review` on explicitly scoped workflows now receive a bounded repository context prepared by the orchestrator itself: only Git-tracked/untracked non-ignored files inside `scope.allowedPaths`, with forbidden/secret-control paths rejected, per-file and total byte limits, SHA-256 evidence, secret masking before prompt construction, and a post-analysis fingerprint recheck. When that context is present, the specialist is instructed not to discover/read repository files through shell or filesystem tools, and returned paths must refer only to supplied files. The Codex filesystem sandbox remains defense in depth rather than the sole source of repository grounding.
 
