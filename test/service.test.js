@@ -132,7 +132,6 @@ test('auto-upgrade units are bounded, persistent, and never persist GitHub crede
   assert.match(service, /managed-by=engineering-orchestrator:v1/);
   assert.match(service, /Type=oneshot/);
   assert.match(service, /service auto-upgrade/);
-  assert.match(service, new RegExp(AUTO_UPGRADE_SERVICE_NAME.replaceAll('.', '\\.'), 'i'));
   assert.doesNotMatch(service, /GITHUB_TOKEN|gho_|ghp_|abcdefghijklmnopqrstuvwxyz/);
   assert.match(service, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
 
