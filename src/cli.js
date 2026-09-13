@@ -4,6 +4,7 @@ import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProj
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
+import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, uninstallInboxService } from './service.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -13,6 +14,10 @@ const take = (name) => {
 const has = (name) => args.includes(name);
 const takeAll = (name) => args.flatMap((value, index) => value === name && args[index + 1] ? [args[index + 1]] : []);
 const command = args[0];
+const githubRequired = command === 'run' || command === 'resume' || command === 'doctor' || command === 'inbox' ||
+  (command === 'workflow' && ['run', 'resume'].includes(args[1]));
+if (githubRequired) await ensureGitHubToken();
+
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
@@ -140,6 +145,17 @@ try {
         }
       } else throw new Error('Usage: agent inbox <once|watch|status>');
     }
+  } else if (command === 'service') {
+    const action = args[1] ?? 'status';
+    if (action === 'install') {
+      console.log(JSON.stringify(await installInboxService(), null, 2));
+    } else if (action === 'status') {
+      console.log(JSON.stringify(await serviceStatus(), null, 2));
+    } else if (action === 'restart') {
+      console.log(JSON.stringify(await restartInboxService(), null, 2));
+    } else if (action === 'uninstall') {
+      console.log(JSON.stringify(await uninstallInboxService(), null, 2));
+    } else throw new Error('Usage: agent service <install|status|restart|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
@@ -167,7 +183,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent service <install|status|restart|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
