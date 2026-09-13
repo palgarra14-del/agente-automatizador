@@ -164,7 +164,7 @@ try {
       console.log(JSON.stringify(await upgradeInboxService({
         repositoryRoot: resolve('.'),
         expectedRepository: `${queueConfig.repository.owner}/${queueConfig.repository.name}`,
-        state: await store.load()
+        stateLoader: () => store.load()
       }), null, 2));
     } else if (action === 'uninstall') {
       console.log(JSON.stringify(await uninstallInboxService(), null, 2));
