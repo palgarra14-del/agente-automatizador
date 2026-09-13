@@ -20,6 +20,7 @@ import {
   buildWorkerPrompt,
   codexWorkerSecurityConfig,
   codexTurnFailureDiagnostics,
+  collectReadOnlyRepositoryContext,
   configFrom,
   doctor,
   evaluate,
@@ -287,6 +288,66 @@ test('bounded regular-file reader rejects symlinks and oversize workflow inputs'
     readBoundedRegularFile(oversized, { maxBytes: 32, label: 'Business brief' }),
     /exceeds 32 bytes/
   );
+});
+
+test('read-only repository context excerpts large files while fingerprinting the full source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-large-context-'));
+  try {
+    await mkdir(join(root, 'src'), { recursive: true });
+    const path = join(root, 'src', 'large.js');
+    const source = Array.from({ length: 7_000 }, (_, index) => `export const marker${index} = "${index}";`).join('\n') + '\n';
+    assert.ok(Buffer.byteLength(source) > 64 * 1024);
+    await writeFile(path, source);
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['add', 'src/large.js'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+
+    const configured = { changePolicy: { forbiddenPaths: [] } };
+    const limits = {
+      maxFileBytes: 8 * 1024,
+      maxSourceFileBytes: 512 * 1024,
+      maxTotalBytes: 16 * 1024,
+      maxSourceTotalBytes: 1024 * 1024
+    };
+    const first = await collectReadOnlyRepositoryContext({
+      workspace: root,
+      project: configured,
+      scope: { allowedPaths: ['src/large.js'], forbiddenPaths: [] },
+      limits
+    });
+    const file = first.files[0];
+    assert.equal(file.path, 'src/large.js');
+    assert.equal(file.excerpted, true);
+    assert.ok(file.bytes > limits.maxFileBytes);
+    assert.ok(file.excerptBytes <= limits.maxFileBytes);
+    assert.ok(Buffer.byteLength(file.content) <= limits.maxFileBytes);
+    assert.match(file.content, /marker0/);
+    assert.match(file.content, /marker6999/);
+    assert.match(file.content, /repository context excerpt 1\/8/);
+    assert.match(file.sha256, /^[a-f0-9]{64}$/);
+
+    const changed = source.replace('marker3500 = "3500"', 'marker3500 = "X3500"');
+    await writeFile(path, changed);
+    const second = await collectReadOnlyRepositoryContext({
+      workspace: root,
+      project: configured,
+      scope: { allowedPaths: ['src/large.js'], forbiddenPaths: [] },
+      limits
+    });
+    assert.notEqual(second.files[0].sha256, file.sha256);
+    assert.notEqual(second.fingerprint, first.fingerprint);
+
+    await assert.rejects(
+      collectReadOnlyRepositoryContext({
+        workspace: root,
+        project: configured,
+        scope: { allowedPaths: ['src/large.js'], forbiddenPaths: [] },
+        limits: { ...limits, maxSourceFileBytes: 64 * 1024 }
+      }),
+      /repository_context_file_read_failed:src\/large\.js:.*exceeds 65536 bytes/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('security rejects control characters in governed paths and keeps state private', async () => {
