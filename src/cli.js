@@ -163,7 +163,7 @@ try {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
       console.log(JSON.stringify(await upgradeInboxService({
         repositoryRoot: resolve('.'),
-        expectedRepository: queueConfig.repository,
+        expectedRepository: `${queueConfig.repository.owner}/${queueConfig.repository.name}`,
         state: await store.load()
       }), null, 2));
     } else if (action === 'uninstall') {
