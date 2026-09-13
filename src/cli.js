@@ -113,12 +113,16 @@ try {
     } else {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
+      const watcherRepositoryRoot = resolve('.');
+      const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
       const queue = new SupervisedIssueQueue({
         store,
         projects,
         workflowEngine: workflows,
         channel,
-        allowedActors: queueConfig.allowedActors
+        allowedActors: queueConfig.allowedActors,
+        operatorRevision: loadedRevision,
+        operatorBranch: 'main'
       });
       const view = (record) => record ? {
         issueNumber: record.issueNumber,
@@ -138,8 +142,6 @@ try {
       } else if (action === 'watch') {
         const controller = new AbortController();
         const stop = () => controller.abort();
-        const watcherRepositoryRoot = resolve('.');
-        const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
         let checkoutReloadRevision = null;
         process.once('SIGINT', stop);
         process.once('SIGTERM', stop);
