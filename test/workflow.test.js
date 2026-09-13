@@ -1393,6 +1393,16 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.outputBytes, 220);
   assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
+
+  const approved = await instance.approve(created.id, 'plan-change');
+  const checkpoint = approved.steps.find((step) => step.id === 'plan-change');
+  assert.equal(checkpoint.evidence.approvedRecommendedChange, 'fixture change');
+  assert.match(checkpoint.evidence.approvedDiagnosisFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(instance.completedContext(approved)['plan-change'].recommendedChange, 'fixture change');
+  assert.equal(
+    instance.completedContext(approved)['plan-change'].approvedDependencyEvidenceFingerprint,
+    checkpoint.evidence.approvedDependencyEvidenceFingerprint
+  );
 });
 
 test('workflow fails closed if orchestrator repository context drifts during analysis', async () => {
