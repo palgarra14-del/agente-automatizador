@@ -395,7 +395,7 @@ const upgradeOptions = (home, root, runner, stateLoader = async () => ({})) => (
   environment: upgradeEnvironment(home)
 });
 
-function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, failFirstNpm = false, unsafeGitConfig = '' } = {}) {
+function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, dependencyChanged = false, failFirstNpm = false, failAllNpm = false, unsafeGitConfig = '' } = {}) {
   const calls = [];
   let npmCalls = 0;
   let head = oldSha;
@@ -437,6 +437,9 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       if (key === 'rev-parse refs/remotes/origin/main') return result(newSha + '\n');
       if (key === `merge-base --is-ancestor ${oldSha} ${newSha}`) return result();
       if (key === `rev-list --first-parent --reverse ${oldSha}..${newSha}`) return result(newSha + '\n');
+      if (key === `diff --name-only ${oldSha} ${newSha} -- package.json package-lock.json npm-shrinkwrap.json`) {
+        return result(dependencyChanged ? 'package-lock.json\n' : '');
+      }
       if (args.includes('merge')) { head = newSha; return result(); }
       if (args.includes('reset')) { head = oldSha; return result(); }
       return result();
@@ -451,7 +454,7 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
     if (command === 'npm') {
       assert.equal(options.env.GITHUB_TOKEN, undefined);
       npmCalls += 1;
-      return failFirstNpm && npmCalls === 1 ? result('', 1) : result();
+      return failAllNpm || (failFirstNpm && npmCalls === 1) ? result('', 1) : result();
     }
     if (command === process.execPath) assert.match(options.env.GITHUB_TOKEN ?? '', /^gho_/);
     return result(command === process.execPath ? '{}\n' : '');
@@ -536,8 +539,25 @@ test('operator upgrade verifies GitHub review and CI before exact fast-forward',
     const merge = fixture.calls.findIndex((call) => call[0] === 'git' && call.includes('merge'));
     assert.ok(ci >= 0 && stop > ci && merge > stop);
     assert.ok(fixture.calls.some((call) => call[0] === 'git' && call.includes('core.hooksPath=/dev/null') && call.includes(fixture.newSha)));
-    assert.ok(fixture.calls.some((call) => call[0] === 'npm' && call.slice(1).join(' ') === 'ci --ignore-scripts'));
+    assert.equal(fixture.calls.some((call) => call[0] === 'npm'), false);
+    assert.ok(fixture.calls.some((call) => call[0] === 'git' && call[1] === 'diff' && call.includes('package-lock.json')));
     assert.ok(fixture.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('operator upgrade refreshes dependencies only when dependency control files changed', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-deps-'));
+  const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-deps-repo-'));
+  try {
+    await prepareManagedUpgradeService(home, root);
+    const fixture = upgradeFixtureRunner({ root, dependencyChanged: true });
+    const result = await upgradeInboxService(upgradeOptions(home, root, fixture.runner));
+    assert.equal(result.upgraded, true);
+    assert.equal(fixture.calls.filter((call) => call[0] === 'npm').length, 1);
+    assert.ok(fixture.calls.some((call) => call[0] === 'npm' && call.slice(1).join(' ') === 'ci --ignore-scripts'));
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
@@ -574,11 +594,17 @@ test('operator upgrade rejects unverified CI and rolls back failed dependency re
     await assert.rejects(upgradeInboxService(upgradeOptions(home, root, unverified.runner)), /operator_upgrade_ci_not_verified/);
     assert.equal(unverified.calls.some((call) => call[1] === 'stop'), false);
 
-    const rollback = upgradeFixtureRunner({ root, failFirstNpm: true });
-    await assert.rejects(upgradeInboxService(upgradeOptions(home, root, rollback.runner)), /operator_upgrade_command_failed:npm:ci/);
+    const rollback = upgradeFixtureRunner({ root, dependencyChanged: true, failFirstNpm: true });
+    await assert.rejects(upgradeInboxService(upgradeOptions(home, root, rollback.runner)), /operator_upgrade_dependency_refresh_failed/);
     assert.ok(rollback.calls.some((call) => call[0] === 'git' && call.includes('reset') && call.includes(rollback.oldSha)));
-    assert.ok(rollback.calls.filter((call) => call[0] === 'npm').length >= 2);
+    assert.equal(rollback.calls.filter((call) => call[0] === 'npm').length, 2);
     assert.ok(rollback.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
+
+    const brokenRollback = upgradeFixtureRunner({ root, dependencyChanged: true, failAllNpm: true });
+    await assert.rejects(
+      upgradeInboxService(upgradeOptions(home, root, brokenRollback.runner)),
+      /operator_upgrade_failed_rollback_incomplete:stage=dependencies:primary=operator_upgrade_dependency_refresh_failed:rollback=operator_upgrade_command_failed:npm:ci/
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
