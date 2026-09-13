@@ -28,7 +28,7 @@ function fixture({ dockerAvailable = true, present = [], pullFails = false, pull
         ? { exitCode: 0, stdout: `sha256:${'a'.repeat(64)}\n`, stderr: '' }
         : { exitCode: 1, stdout: '', stderr: 'missing' };
     }
-    if (args[0] === 'pull') {
+    if (args.includes('pull')) {
       const image = args.at(-1);
       if (pullFails) return { exitCode: 1, stdout: '', stderr: 'denied' };
       if (pullPersists) images.add(image);
@@ -56,7 +56,7 @@ test('runtime status deduplicates shared images and never writes', async () => {
   assert.deepEqual(pinned.projects, ['callflow', 'self']);
   assert.equal(pinned.action, 'present');
   assert.equal(status.images.find((entry) => entry.image === LOCAL).action, 'missing');
-  assert.equal(f.calls.some((call) => call.args[0] === 'pull'), false);
+  assert.equal(f.calls.some((call) => call.args.includes('pull')), false);
   for (const call of f.calls) {
     assert.deepEqual(call.options.env, { PATH: '/usr/bin:/bin', CI: 'true' });
     assert.equal(call.options.env.GITHUB_TOKEN, undefined);
@@ -72,9 +72,13 @@ test('runtime sync pulls each missing digest-pinned image exactly once and verif
   assert.deepEqual(result.missingUnmanaged, [LOCAL]);
   assert.equal(result.images.find((entry) => entry.image === PINNED).action, 'pulled');
   assert.equal(result.images.find((entry) => entry.image === LOCAL).action, 'manual');
-  const pulls = f.calls.filter((call) => call.args[0] === 'pull');
+  const pulls = f.calls.filter((call) => call.args.includes('pull'));
   assert.equal(pulls.length, 1);
-  assert.deepEqual(pulls[0].args, ['pull', '--quiet', PINNED]);
+  assert.equal(pulls[0].args[0], '--config');
+  assert.match(pulls[0].args[1], /engineering-orchestrator-docker-/);
+  assert.deepEqual(pulls[0].args.slice(2), ['pull', '--quiet', PINNED]);
+  assert.equal(pulls[0].options.env.HOME, undefined);
+  assert.equal(pulls[0].options.env.GITHUB_TOKEN, undefined);
 });
 
 test('runtime sync performs no pull when configured images are already present', async () => {
@@ -82,7 +86,7 @@ test('runtime sync performs no pull when configured images are already present',
   const result = await syncProjectRuntimes(projects(), { environment: { PATH: '/usr/bin:/bin' }, commandRunner: f.runner });
   assert.equal(result.ready, true);
   assert.equal(result.images.every((entry) => entry.action === 'present'), true);
-  assert.equal(f.calls.some((call) => call.args[0] === 'pull'), false);
+  assert.equal(f.calls.some((call) => call.args.includes('pull')), false);
 });
 
 test('runtime sync fails closed when Docker or a managed pull is unavailable', async () => {
