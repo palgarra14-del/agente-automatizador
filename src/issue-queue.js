@@ -124,7 +124,9 @@ function approvalEvidenceSummary(workflow, stepId) {
     .replaceAll('`', "'")
     .replace(/\/agent/gi, '[agent-command]')
     .replaceAll('@', '＠');
-  return Buffer.from(safe, 'utf8').subarray(0, 4_000).toString('utf8');
+  const bytes = Buffer.byteLength(safe, 'utf8');
+  if (bytes > 32 * 1024) throw new Error(`approval_evidence_summary_too_large:${bytes}>32768`);
+  return safe;
 }
 
 function assertObjectKeys(value, allowed, label) {
