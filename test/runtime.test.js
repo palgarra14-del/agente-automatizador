@@ -116,6 +116,9 @@ test('runtime build configuration is strict, unique, and repository-relative', (
       { image: LOCAL, context: 'docker/y', files: [{ path: 'Dockerfile', sha256: 'b'.repeat(64) }] }
     ]
   }), /duplicate/);
+  const tamperedFingerprint = buildConfig();
+  tamperedFingerprint.builds[0].fingerprint = '0'.repeat(64);
+  assert.throws(() => normalizeRuntimeImageConfig(tamperedFingerprint), /fingerprint_invalid/);
 });
 
 test('runtime config loader rejects symlinked configuration files', async () => {
