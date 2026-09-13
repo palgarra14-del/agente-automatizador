@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runLocalCommand } from './service.js';
 
 const digestPinnedImagePattern = /^[^\s@]+@sha256:[a-f0-9]{64}$/i;
@@ -104,11 +107,17 @@ export async function syncProjectRuntimes(projects, {
       continue;
     }
 
-    const pulled = await dockerCommand(commandRunner, dockerBinary, ['pull', '--quiet', entry.image], {
-      environment,
-      timeoutMs: pullTimeoutMs,
-      maxOutputBytes: 64 * 1024
-    });
+    const dockerConfig = await mkdtemp(join(tmpdir(), 'engineering-orchestrator-docker-'));
+    let pulled;
+    try {
+      pulled = await dockerCommand(commandRunner, dockerBinary, ['--config', dockerConfig, 'pull', '--quiet', entry.image], {
+        environment,
+        timeoutMs: pullTimeoutMs,
+        maxOutputBytes: 64 * 1024
+      });
+    } finally {
+      await rm(dockerConfig, { recursive: true, force: true });
+    }
     if (pulled.exitCode !== 0) throw new Error(`runtime_image_pull_failed:${entry.image}`);
 
     const after = await inspectImage(commandRunner, dockerBinary, entry.image, environment);
