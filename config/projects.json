@@ -321,6 +321,118 @@
         ],
         "deny": []
       }
+    },
+    {
+      "id": "website-pilot",
+      "displayName": "Website Pilot (Zasert)",
+      "repository": {
+        "owner": "palgarra14-del",
+        "name": "Zasert"
+      },
+      "defaultBranch": "main",
+      "workingBranchPattern": "agent/{runId}",
+      "protectedBranches": [
+        "main"
+      ],
+      "workspace": "..",
+      "workspaceStrategy": "managed",
+      "commandEnvironment": {},
+      "execution": {
+        "provider": "container-required",
+        "image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
+        "resources": {
+          "memoryMb": 768,
+          "cpuCount": 1,
+          "pidsLimit": 96
+        }
+      },
+      "toolchain": {
+        "command": "npm"
+      },
+      "changePolicy": {
+        "forbiddenPaths": [
+          ".vercel"
+        ],
+        "sensitivePaths": [
+          "package.json",
+          "vercel.json",
+          "scripts"
+        ],
+        "budgets": {
+          "maxChangedFiles": 12,
+          "maxDiffLines": 1200
+        }
+      },
+      "commands": {
+        "test": "node --test test/website.test.js",
+        "typecheck": "node --check scripts/check-static.mjs",
+        "lint": "node --check scripts/generate-services.mjs",
+        "build": "node scripts/check-static.mjs",
+        "dependencyRefresh": "npm ci --ignore-scripts"
+      },
+      "acceptance": {
+        "require": [
+          "test",
+          "typecheck",
+          "lint",
+          "build",
+          "ci",
+          "deployment"
+        ]
+      },
+      "deployment": {
+        "provider": "vercel",
+        "projectId": "prj_JWGFirkcQg3pmNFOdyoTRAArYCVK",
+        "teamId": "team_WDwd9ZZgxEdlv4AS0oIP1num",
+        "requirePreviewReady": true
+      },
+      "pullRequest": {
+        "titleTemplate": "Agent Website Pilot: {objective}"
+      },
+      "policies": {
+        "requireApprovalFor": [
+          "merge",
+          "production_deploy",
+          "destructive_data_change",
+          "modify_secrets"
+        ],
+        "forbidden": [
+          "force_push_main",
+          "delete_protected_branch"
+        ]
+      },
+      "budgets": {
+        "maxIterations": 3,
+        "maxTasks": 12,
+        "maxRuntimeMinutes": 25,
+        "maxModelCalls": 6,
+        "maxWorkerAttempts": 2,
+        "commandTimeoutMs": 120000,
+        "ciTimeoutMs": 600000,
+        "ciPollIntervalMs": 10000,
+        "deploymentTimeoutMs": 600000,
+        "deploymentPollIntervalMs": 15000
+      },
+      "skills": {
+        "allow": [
+          "workspace.prepare",
+          "project.verify",
+          "project.dependencies.refresh",
+          "human.approval",
+          "repository.observe",
+          "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview",
+          "code.inspect",
+          "code.diagnose",
+          "code.review",
+          "website.plan",
+          "release.publish-reviewed-workflow"
+        ],
+        "deny": []
+      }
     }
   ]
 }
