@@ -183,6 +183,10 @@ async function sourceBuildContext(recipe, repositoryRoot) {
     if (createHash('sha256').update(data).digest('hex') !== file.sha256) throw new Error(`runtime_build_context_hash_mismatch:${file.path}`);
     contents.set(file.path, data);
   }
+  const dockerfile = contents.get('Dockerfile').toString('utf8');
+  const fromLines = dockerfile.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^FROM\s+/i.test(line));
+  const immutableBase = /^FROM\s+(?:--platform=[^\s]+\s+)?(?:scratch|[^\s]+@sha256:[a-f0-9]{64})(?:\s+AS\s+[A-Za-z0-9._-]+)?$/i;
+  if (fromLines.length < 1 || fromLines.some((line) => !immutableBase.test(line))) throw new Error('runtime_build_base_image_not_pinned');
   return contents;
 }
 
