@@ -373,7 +373,102 @@ export async function upgradeInboxService({
   if (resolve(repository) !== root) throw new Error('operator_upgrade_repository_root_mismatch');
   const gitDirectory = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', '--absolute-git-dir'], { cwd: root, env })).stdout.trim();
   if (resolve(gitDirectory) !== resolve(root, '.git')) throw new Error('operator_upgrade_git_directory_mismatch');
-  const unsafeGitConfig = await checkedUpgradeCommand(commandRunner, 'git', ['config', '--get-regexp', '^(url\\..*\\.insteadOf|remote\\.origin\\.uploadpack|core\\.sshCommand)  const branch = (await checkedUpgradeCommand(commandRunner, 'git', ['branch', '--show-current'], { cwd: root, env })).stdout.trim();
+  const unsafeGitConfig = await checkedUpgradeCommand(commandRunner, 'git', ['config', '--get-regexp', '^(url\\..*\\.insteadOf|remote\\.origin\\.uploadpack|core\\.sshCommand)
+  if (branch !== defaultBranch) throw new Error(`operator_upgrade_wrong_branch:${branch || 'detached'}`);
+  const dirty = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
+  if (dirty) throw new Error('operator_upgrade_worktree_not_clean');
+  const remote = (await checkedUpgradeCommand(commandRunner, 'git', ['remote', 'get-url', 'origin'], { cwd: root, env })).stdout.trim();
+  if (normalizedGitHubRepository(remote)?.toLowerCase() !== expectedRepository.toLowerCase()) throw new Error('operator_upgrade_remote_mismatch');
+
+  const localSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', 'HEAD'], { cwd: root, env })).stdout.trim();
+  await checkedUpgradeCommand(commandRunner, 'git', ['fetch', '--no-tags', 'origin', defaultBranch], { cwd: root, env, timeoutMs: 60_000 });
+  const remoteRef = `refs/remotes/origin/${defaultBranch}`;
+  const remoteSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', remoteRef], { cwd: root, env })).stdout.trim();
+  if (localSha === remoteSha) return { ...status, upgraded: false, from: localSha, to: remoteSha, commits: 0 };
+
+  const ancestor = await checkedUpgradeCommand(commandRunner, 'git', ['merge-base', '--is-ancestor', localSha, remoteSha], { cwd: root, env, allowExitCodes: [0, 1] });
+  if (ancestor.exitCode !== 0) throw new Error('operator_upgrade_requires_fast_forward');
+  const commits = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-list', '--reverse', `${localSha}..${remoteSha}`], { cwd: root, env })).stdout.split(/\r?\n/).filter(Boolean);
+  if (!commits.length || commits.length > maxCommits) throw new Error('operator_upgrade_commit_range_out_of_bounds');
+  for (const commit of commits) await verifyUpgradeCommit(commandRunner, expectedRepository, defaultBranch, commit, { cwd: root, env });
+
+  await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue: trustedPath });
+  try {
+    assertOperatorUpgradeIdleState(await stateLoader());
+  } catch (error) {
+    const restored = await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue: trustedPath, allowFailure: true });
+    if (restored.exitCode !== 0) throw new Error('operator_upgrade_state_changed_watcher_restore_failed', { cause: error });
+    throw error;
+  }
+  let upgraded = false;
+  try {
+    await checkedUpgradeCommand(commandRunner, 'git', ['-c', 'core.hooksPath=/dev/null', 'merge', '--ff-only', remoteRef], { cwd: root, env, timeoutMs: 60_000 });
+    upgraded = true;
+    await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+    await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    const finalStatus = await serviceStatus({ home, pathValue: trustedPath, commandRunner });
+    if (!finalStatus.enabled || !finalStatus.active) throw new Error('operator_upgrade_service_not_active');
+    return { ...finalStatus, upgraded: true, from: localSha, to: remoteSha, commits: commits.length };
+  } catch (error) {
+    let rollbackError = null;
+    try {
+      if (upgraded) await checkedUpgradeCommand(commandRunner, 'git', ['reset', '--hard', localSha], { cwd: root, env, timeoutMs: 30_000 });
+      await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    } catch (rollback) {
+      rollbackError = rollback;
+    }
+    if (rollbackError) throw new Error('operator_upgrade_failed_rollback_incomplete', { cause: error });
+    throw error;
+  }
+}
+], { cwd: root, env, allowExitCodes: [0, 1] });
+  if (unsafeGitConfig.stdout.trim()) throw new Error('operator_upgrade_unsafe_git_transport_config');
+  const branch = (await checkedUpgradeCommand(commandRunner, 'git', ['branch', '--show-current'], { cwd: root, env })).stdout.trim();
+  if (branch !== defaultBranch) throw new Error(`operator_upgrade_wrong_branch:${branch || 'detached'}`);
+  const dirty = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
+  if (dirty) throw new Error('operator_upgrade_worktree_not_clean');
+  const remote = (await checkedUpgradeCommand(commandRunner, 'git', ['remote', 'get-url', 'origin'], { cwd: root, env })).stdout.trim();
+  if (normalizedGitHubRepository(remote)?.toLowerCase() !== expectedRepository.toLowerCase()) throw new Error('operator_upgrade_remote_mismatch');
+
+  const localSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', 'HEAD'], { cwd: root, env })).stdout.trim();
+  await checkedUpgradeCommand(commandRunner, 'git', ['fetch', '--no-tags', 'origin', defaultBranch], { cwd: root, env, timeoutMs: 60_000 });
+  const remoteRef = `refs/remotes/origin/${defaultBranch}`;
+  const remoteSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', remoteRef], { cwd: root, env })).stdout.trim();
+  if (localSha === remoteSha) return { ...status, upgraded: false, from: localSha, to: remoteSha, commits: 0 };
+
+  const ancestor = await checkedUpgradeCommand(commandRunner, 'git', ['merge-base', '--is-ancestor', localSha, remoteSha], { cwd: root, env, allowExitCodes: [0, 1] });
+  if (ancestor.exitCode !== 0) throw new Error('operator_upgrade_requires_fast_forward');
+  const commits = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-list', '--reverse', `${localSha}..${remoteSha}`], { cwd: root, env })).stdout.split(/\r?\n/).filter(Boolean);
+  if (!commits.length || commits.length > maxCommits) throw new Error('operator_upgrade_commit_range_out_of_bounds');
+  for (const commit of commits) await verifyUpgradeCommit(commandRunner, expectedRepository, defaultBranch, commit, { cwd: root, env });
+
+  await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue });
+  let upgraded = false;
+  try {
+    await checkedUpgradeCommand(commandRunner, 'git', ['merge', '--ff-only', remoteRef], { cwd: root, env, timeoutMs: 60_000 });
+    upgraded = true;
+    await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+    await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    const finalStatus = await serviceStatus({ home, pathValue, commandRunner });
+    if (!finalStatus.enabled || !finalStatus.active) throw new Error('operator_upgrade_service_not_active');
+    return { ...finalStatus, upgraded: true, from: localSha, to: remoteSha, commits: commits.length };
+  } catch (error) {
+    let rollbackError = null;
+    try {
+      if (upgraded) await checkedUpgradeCommand(commandRunner, 'git', ['reset', '--hard', localSha], { cwd: root, env, timeoutMs: 30_000 });
+      await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    } catch (rollback) {
+      rollbackError = rollback;
+    }
+    if (rollbackError) throw new Error('operator_upgrade_failed_rollback_incomplete', { cause: error });
+    throw error;
+  }
+}
+], { cwd: root, env, allowExitCodes: [0, 1] });
+  if (unsafeGitConfig.stdout.trim()) throw new Error('operator_upgrade_unsafe_git_transport_config');
+  const branch = (await checkedUpgradeCommand(commandRunner, 'git', ['branch', '--show-current'], { cwd: root, env })).stdout.trim();
   if (branch !== defaultBranch) throw new Error(`operator_upgrade_wrong_branch:${branch || 'detached'}`);
   const dirty = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
   if (dirty) throw new Error('operator_upgrade_worktree_not_clean');
