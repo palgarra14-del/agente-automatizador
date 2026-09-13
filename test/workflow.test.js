@@ -1150,7 +1150,16 @@ test('human checkpoint wait time pauses the workflow execution deadline', async 
   const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Pause while waiting', budgets: { timeoutMs: 1_000 } });
   await instance.update(created.id, (plan) => {
     completeStep(plan, 'inspect-project');
-    completeStep(plan, 'diagnose');
+    const diagnosis = completeStep(plan, 'diagnose');
+    diagnosis.evidence.result = {
+      diagnosis: {
+        summary: 'fixture diagnosis',
+        cause: 'fixture cause',
+        relevantPaths: ['src/core.js'],
+        recommendedChange: 'fixture approved change',
+        risks: []
+      }
+    };
   });
   clock = 200;
   const waiting = await instance.run(created.id);
@@ -3626,7 +3635,15 @@ test('completed human checkpoints remain bound to predecessor evidence', async (
   const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Bind human approval context' });
   completeStep(plan, 'inspect-project');
   const diagnosis = completeStep(plan, 'diagnose');
-  diagnosis.evidence.result = { diagnosis: 'original' };
+  diagnosis.evidence.result = {
+    diagnosis: {
+      summary: 'original',
+      cause: 'fixture cause',
+      relevantPaths: ['src/core.js'],
+      recommendedChange: 'fixture approved change',
+      risks: []
+    }
+  };
   const checkpoint = completeStep(plan, 'plan-change');
   assert.equal(
     checkpoint.evidence.approvedDependencyEvidenceFingerprint,
@@ -3634,7 +3651,7 @@ test('completed human checkpoints remain bound to predecessor evidence', async (
   );
   assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
 
-  diagnosis.evidence.result = { diagnosis: 'tampered later' };
+  diagnosis.evidence.result.diagnosis.summary = 'tampered later';
   assert.throws(
     () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
     /checkpoint approval is not bound to its predecessor evidence/
