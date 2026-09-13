@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.21
+# Engineering Orchestrator — v0.22
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -29,6 +29,8 @@ v0.20.1 hardens the guardian filesystem boundary: symlinked parent directories a
 
 v0.21 adds an explicit runtime-maintenance plane. `agent runtime status` is read-only. `agent runtime sync` may pull only missing container images that are configured by exact `@sha256:` digest; shared images are deduplicated, the pull is verified by a second exact-image inspection, and Docker receives only a minimal non-secret environment. Missing mutable/local images are never pulled implicitly and are reported for manual preparation. `agent service bootstrap` now performs this governed runtime sync before touching the persistent service or Windows wakeup state, so registered digest-pinned runtimes such as CallFlow's Node image no longer need a separate manual `docker pull`.
 
+v0.22 extends that maintenance plane to explicitly registered local build recipes. `config/runtime-images.json` binds a local image name to a repository-relative build context and an exact SHA-256 manifest. The agent rejects symlinked/hardlinked/drifted/extra context state, copies only the verified manifest into a fresh temporary build context, builds with an anonymous temporary Docker client configuration, and labels the result with the recipe fingerprint. A present local image without the exact fingerprint is treated as stale and rebuilt. The staged context and Docker client configuration are deleted after use. The registered LeadFinder `agent-node22-pnpm11:local` image is now covered by this path, so `agent service bootstrap` can prepare every currently registered runtime without a separate `docker pull` or `docker build` command.
+
 v0.18 adds `agent service upgrade` for a governed self-update of an already installed operator. It refuses active runs/workflows/requests, requires a clean `main` checkout and the exact configured GitHub remote, fetches only the configured default branch, permits only fast-forward updates, and verifies every new commit as the merge commit of a PR whose `CI` workflow succeeded. Only after those checks does it stop the watcher, fast-forward, run `npm ci --ignore-scripts`, and execute the upgraded CLI's `service sync`. Any local refresh/start failure rolls the checkout back to the previous SHA, restores frozen dependencies, and resynchronizes the old service; an incomplete rollback fails explicitly.
 
 v0.18.1 hardens the self-update Git transport: the fetch is non-interactive, clears inherited credential helpers, installs only the GitHub CLI credential helper under the service's trusted PATH, forces TLS verification for GitHub, and rejects custom Git CA/backend configuration before network access. The Git process never receives `GITHUB_TOKEN`; GitHub API verification remains isolated to the `gh` subprocess environment.
@@ -44,11 +46,7 @@ node src/cli.js inbox watch
 
 Issue requests use the exact `<!-- agent-request:v1 -->` marker followed by strict JSON. The queue accepts `app-improvement` and `website-build`, requires at least one explicit bounded `scope.allowedPaths` entry, and never treats an issue as authorization to execute. `website-build` additionally requires exactly `input.businessBrief`; `app-improvement` rejects request input. The issue body is bounded to 80 KiB and the brief itself is normalized by the existing bounded business schema. The first action is always a zero-write workflow dry-run. Real execution requires an exact allowlisted GitHub comment `/agent approve <fingerprint>`; every later WorkflowEngine checkpoint/sensitive approval receives a new state-bound fingerprint.
 
-Digest-pinned registered images can now be prepared with `node src/cli.js runtime sync` or as part of `node src/cli.js service bootstrap`. LeadFinder's custom local image remains intentionally explicit for now:
-
-```bash
-docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
-```
+All currently registered runtime images can now be prepared with `node src/cli.js runtime sync` or as part of `node src/cli.js service bootstrap`. Digest-pinned remote images are pulled only by exact digest; LeadFinder's custom local image is built only from its verified recipe manifest.
 
 ```bash
 npm ci
