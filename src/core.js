@@ -3818,6 +3818,40 @@ function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   return environment;
 }
 
+export function codexTurnFailureDiagnostics(items = []) {
+  if (!Array.isArray(items)) return [];
+  const diagnostics = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.type === 'error' && typeof item.message === 'string') {
+      diagnostics.push({ type: 'error', message: clip(item.message, 2_000) });
+    } else if (item.type === 'command_execution' && item.status === 'failed') {
+      diagnostics.push({
+        type: 'command_execution',
+        command: clip(item.command, 800),
+        output: clip(item.aggregated_output, 3_000),
+        exitCode: Number.isInteger(item.exit_code) ? item.exit_code : null
+      });
+    } else if (item.type === 'file_change' && item.status === 'failed') {
+      diagnostics.push({
+        type: 'file_change',
+        paths: Array.isArray(item.changes)
+          ? item.changes.slice(0, 20).map((change) => clip(change?.path, 300)).filter(Boolean)
+          : []
+      });
+    } else if (item.type === 'mcp_tool_call' && item.status === 'failed') {
+      diagnostics.push({
+        type: 'mcp_tool_call',
+        server: clip(item.server, 120),
+        tool: clip(item.tool, 120),
+        message: clip(item.error?.message, 2_000)
+      });
+    }
+    if (diagnostics.length >= 8) break;
+  }
+  return diagnostics;
+}
+
 export class CodexSdkWorker extends CodingWorker {
   constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
     super();
@@ -3846,11 +3880,13 @@ export class CodexSdkWorker extends CodingWorker {
       });
       const turn = await thread.run(buildWorkerPrompt(task), { signal: controller.signal });
       const output = clip(turn.finalResponse);
+      const diagnostics = codexTurnFailureDiagnostics(turn.items);
       return {
         status: 'completed',
         summary: 'Codex SDK completed the coding task',
         codexThreadId: thread.id,
         usage: turn.usage === undefined ? null : safeJson(turn.usage),
+        diagnostics,
         output,
         outputBytes: Buffer.byteLength(String(turn.finalResponse ?? ''))
       };
