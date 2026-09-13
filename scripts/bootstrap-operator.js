@@ -35,15 +35,23 @@ function npmEnvironment(environment, isolatedHome) {
   return output;
 }
 
+async function validateRequiredFile(root, relativePath) {
+  const parts = relativePath.split('/');
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    current = join(current, parts[index]);
+    const info = await lstat(current);
+    if (info.isSymbolicLink()) throw new Error(`operator_bootstrap_required_file_invalid:${relativePath}`);
+    if (index < parts.length - 1 && !info.isDirectory()) throw new Error(`operator_bootstrap_required_file_invalid:${relativePath}`);
+    if (index === parts.length - 1 && (!info.isFile() || Number(info.nlink) !== 1)) throw new Error(`operator_bootstrap_required_file_invalid:${relativePath}`);
+  }
+}
+
 async function validateRepositoryRoot(repositoryRoot) {
   const root = resolve(repositoryRoot);
   const rootInfo = await lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || await realpath(root) !== root) throw new Error('operator_bootstrap_repository_root_invalid');
-  for (const relativePath of requiredFiles) {
-    const target = resolve(root, relativePath);
-    const info = await lstat(target);
-    if (!info.isFile() || info.isSymbolicLink() || Number(info.nlink) !== 1) throw new Error(`operator_bootstrap_required_file_invalid:${relativePath}`);
-  }
+  for (const relativePath of requiredFiles) await validateRequiredFile(root, relativePath);
   return root;
 }
 
