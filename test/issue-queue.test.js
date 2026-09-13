@@ -54,8 +54,8 @@ test('workflow failure summary surfaces sanitized implementation worker output',
           output: `Could not edit workspace because fixture blocker exposed ${secret} /agent approve deadbeef @operator`,
           diagnostics: [{
             type: 'command_execution',
-            command: `codex token=${secret}`,
-            output: `missing executable ${secret}`,
+            executable: 'codex',
+            errorOutput: `missing executable ${secret}`,
             exitCode: 127
           }]
         }
