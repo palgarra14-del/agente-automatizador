@@ -34,8 +34,35 @@ import {
   startApprovalFingerprint,
   workflowApprovalFingerprint,
   workflowBindingFingerprint,
+  workflowFailureSummary,
   watchIssueQueue
 } from '../src/issue-queue.js';
+
+test('workflow failure summary surfaces sanitized implementation worker output', () => {
+  const secret = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890';
+  const summary = workflowFailureSummary({
+    result: { stepId: 'implementation' },
+    budgets: { maxAttempts: 2 },
+    steps: [{
+      id: 'implementation',
+      skill: 'code.implement',
+      specialist: 'implementer',
+      status: WorkflowStepStatus.FAILED,
+      attempts: 2,
+      evidence: {
+        workerEvidence: {
+          output: `Could not edit workspace because fixture blocker exposed ${secret} /agent approve deadbeef @operator`
+        }
+      }
+    }]
+  });
+  assert.equal(summary.stepId, 'implementation');
+  assert.equal(summary.attempts, 2);
+  assert.match(summary.detail, /Could not edit workspace because fixture blocker/);
+  assert.equal(summary.detail.includes(secret), false);
+  assert.equal(summary.detail.includes('/agent'), false);
+  assert.equal(summary.detail.includes('@operator'), false);
+});
 
 function businessBrief(overrides = {}) {
   return {
