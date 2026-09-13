@@ -305,7 +305,7 @@ function normalizedGitHubRepository(remote) {
 }
 
 function upgradeEnvironment(environment = {}) {
-  const allowed = ['HOME', 'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'LANG', 'LC_ALL', 'GITHUB_TOKEN'];
+  const allowed = ['HOME', 'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'LANG', 'LC_ALL'];
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
 }
 
@@ -485,6 +485,7 @@ async function performInboxServiceUpgrade({
   const authEnvironment = { ...environment, PATH: trustedPath, HOME: resolve(home), GH_HOST: 'github.com' };
   await ensureGitHubToken({ environment: authEnvironment, commandRunner, home });
   const env = { ...upgradeEnvironment(authEnvironment), PATH: trustedPath, HOME: resolve(home), GH_HOST: 'github.com' };
+  const githubEnv = { ...env, GITHUB_TOKEN: authEnvironment.GITHUB_TOKEN };
 
   const root = resolve(repositoryRoot);
   const status = await serviceStatus({ home, pathValue: trustedPath, commandRunner });
@@ -516,7 +517,7 @@ async function performInboxServiceUpgrade({
   const remoteSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', remoteRef], { cwd: root, env })).stdout.trim();
   if (!/^[a-f0-9]{40}$/i.test(localSha) || !/^[a-f0-9]{40}$/i.test(remoteSha)) throw new Error('operator_upgrade_commit_identity_invalid');
 
-  const branchEvidence = await ghApiJson(commandRunner, `repos/${expectedRepository}/branches/${encodeURIComponent(defaultBranch)}`, { cwd: root, env });
+  const branchEvidence = await ghApiJson(commandRunner, `repos/${expectedRepository}/branches/${encodeURIComponent(defaultBranch)}`, { cwd: root, env: githubEnv });
   if (branchEvidence?.commit?.sha !== remoteSha) throw new Error('operator_upgrade_remote_head_not_confirmed_by_github');
   if (localSha === remoteSha) return { ...status, upgraded: false, from: localSha, to: remoteSha, commits: 0 };
 
@@ -525,7 +526,7 @@ async function performInboxServiceUpgrade({
   const commits = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-list', '--first-parent', '--reverse', `${localSha}..${remoteSha}`], { cwd: root, env }))
     .stdout.split(/\r?\n/).filter(Boolean);
   if (!commits.length || commits.length > maxCommits) throw new Error('operator_upgrade_commit_range_out_of_bounds');
-  for (const commit of commits) await verifyUpgradeCommit(commandRunner, expectedRepository, defaultBranch, commit, { cwd: root, env });
+  for (const commit of commits) await verifyUpgradeCommit(commandRunner, expectedRepository, defaultBranch, commit, { cwd: root, env: githubEnv });
 
   await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue: trustedPath });
   try {
@@ -555,7 +556,7 @@ async function performInboxServiceUpgrade({
     const postInstallStatus = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
     if (postInstallStatus) throw new Error('operator_upgrade_dependency_refresh_modified_repository');
 
-    await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env: githubEnv, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
     const finalStatus = await serviceStatus({ home, pathValue: trustedPath, commandRunner });
     if (!finalStatus.enabled || !finalStatus.active) throw new Error('operator_upgrade_service_not_active');
     return { ...finalStatus, upgraded: true, from: localSha, to: remoteSha, commits: commits.length };
@@ -564,7 +565,7 @@ async function performInboxServiceUpgrade({
     try {
       if (upgraded) await checkedUpgradeCommand(commandRunner, 'git', ['-c', 'core.hooksPath=/dev/null', 'reset', '--hard', localSha], { cwd: root, env, timeoutMs: 30_000 });
       await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
-      await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+      await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env: githubEnv, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
     } catch (rollback) {
       rollbackError = rollback;
     }
