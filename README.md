@@ -17,6 +17,8 @@ Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TO
 
 v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/approval channel; the agent process and Codex authentication stay local. Start with `agent inbox once` while validating the setup, then `agent inbox watch` for a persistent operator.
 
+On Linux/WSL with systemd enabled, the inbox can be installed as a persistent user service with `agent service install`. The unit contains no GitHub token: on each service start the CLI obtains the token in memory from the already authenticated GitHub CLI (`gh auth token`) when `GITHUB_TOKEN` is absent. Use `agent service status`, `agent service restart`, or `agent service uninstall` to manage only the unit created by the agent. The installer refuses to overwrite an unmanaged unit file.
+
 Read-only `code.inspect`, `code.diagnose`, and `code.review` on explicitly scoped workflows now receive a bounded repository context prepared by the orchestrator itself: only Git-tracked/untracked non-ignored files inside `scope.allowedPaths`, with forbidden/secret-control paths rejected, per-file and total byte limits, SHA-256 evidence, secret masking before prompt construction, and a post-analysis fingerprint recheck. When that context is present, the specialist is instructed not to discover/read repository files through shell or filesystem tools, and returned paths must refer only to supplied files. The Codex filesystem sandbox remains defense in depth rather than the sole source of repository grounding.
 
 ```bash
