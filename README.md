@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.16
+# Engineering Orchestrator — v0.17
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -16,6 +16,8 @@ A CLI-first, policy-governed engineering loop for registered repositories. It tu
 Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository, pull-request, CI, and deployment-read access, and a clean checkout. The governed Codex worker is supported only on verified Linux/macOS isolation paths; on a Windows host, run the agent inside WSL/Linux. Native Windows execution fails closed instead of weakening filesystem isolation. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. For Vercel projects, preview observation uses the Vercel API when `VERCEL_TOKEN` is available and otherwise falls back to read-only GitHub Deployments evidence for the exact commit/branch. The fallback accepts only an explicit non-production `Preview` deployment, a Vercel bot status, and a trusted HTTPS `*.vercel.app` environment URL. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
 
 v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/approval channel; the agent process and Codex authentication stay local. Start with `agent inbox once` while validating the setup, then `agent inbox watch` for a persistent operator.
+
+`inbox watch` is singleton-controlled through a durable watcher lease in the local state store. A second current-version watcher fails closed instead of polling concurrently; a valid lease whose PID/identity is abandoned after a crash is recovered on the next start, and graceful shutdown releases the exact lease it acquired.
 
 On Linux/WSL with systemd enabled, the inbox can be installed as a persistent user service with `agent service install`. Use `agent service sync` after updating the checkout: it installs or refreshes only the agent-managed unit, reloads systemd, restarts the watcher, and verifies that it is enabled and active. The unit stores no GitHub token; on each start the CLI obtains the token in memory from the already authenticated GitHub CLI (`gh auth token`) when `GITHUB_TOKEN` is absent. Its service PATH is reduced to the Node binary directory plus trusted system binary directories, while non-secret custom GitHub/Codex config locations are preserved. `status`, `restart`, and `uninstall` never take ownership of an unmanaged unit file.
 
