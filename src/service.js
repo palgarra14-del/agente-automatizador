@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 export const INBOX_SERVICE_NAME = 'engineering-orchestrator-inbox.service';
 const managedMarker = '# managed-by=engineering-orchestrator:v1';
@@ -69,9 +69,11 @@ export async function ensureGitHubToken({ environment = process.env, commandRunn
 }
 
 export function renderInboxServiceUnit({ repositoryRoot, nodePath, pathValue, home = homedir() }) {
-  const root = resolve(validateText(repositoryRoot, 'repositoryRoot'));
-  const node = resolve(validateText(nodePath, 'nodePath'));
-  if (!isAbsolute(root) || !isAbsolute(node)) throw new Error('service paths must be absolute');
+  const rawRoot = validateText(repositoryRoot, 'repositoryRoot');
+  const rawNode = validateText(nodePath, 'nodePath');
+  if (!isAbsolute(rawRoot) || !isAbsolute(rawNode)) throw new Error('service paths must be absolute');
+  const root = resolve(rawRoot);
+  const node = resolve(rawNode);
   const cli = join(root, 'src', 'cli.js');
   return [
     managedMarker,
