@@ -4622,7 +4622,48 @@ export class GitHubAdapter {
         const leftTime = Date.parse(left?.updated_at ?? left?.created_at ?? '') || 0;
         return rightTime - leftTime || Number(right?.id ?? 0) - Number(left?.id ?? 0);
       });
-    if (!matching.length) return { provider: 'vercel', source: 'github-deployments', state: 'NOT_FOUND', ok: false, commitSha, branch };
+    if (!matching.length) {
+      if (!branch || branch === project.defaultBranch) {
+        return { provider: 'vercel', source: 'github-deployments', state: 'NOT_FOUND', ok: false, commitSha, branch };
+      }
+      const latestStatuses = new Map();
+      for (const status of await this.commitStatuses(project, commitSha)) {
+        if (!isDeploymentCommitStatus(project, status)) continue;
+        const context = String(status.context ?? '');
+        if (!context) continue;
+        const previous = latestStatuses.get(context);
+        const timestamp = Date.parse(status.updated_at ?? status.created_at ?? '');
+        const previousTimestamp = previous ? Date.parse(previous.updated_at ?? previous.created_at ?? '') : Number.NEGATIVE_INFINITY;
+        if (!previous || (Number.isFinite(timestamp) && (!Number.isFinite(previousTimestamp) || timestamp > previousTimestamp))) {
+          latestStatuses.set(context, status);
+        }
+      }
+      const vercelStatuses = [...latestStatuses.values()];
+      if (!vercelStatuses.length) {
+        return { provider: 'vercel', source: 'github-deployments', state: 'NOT_FOUND', ok: false, commitSha, branch };
+      }
+      const normalized = vercelStatuses.map((status) => ({
+        context: status.context,
+        state: status.state,
+        targetUrl: status.target_url ?? null
+      }));
+      if (vercelStatuses.some((status) => ['error', 'failure'].includes(String(status.state ?? '').toLowerCase()))) {
+        return { provider: 'vercel', source: 'github-commit-statuses', state: 'ERROR', ok: false, commitSha, branch, statuses: normalized };
+      }
+      if (vercelStatuses.some((status) => String(status.state ?? '').toLowerCase() !== 'success')) {
+        return { provider: 'vercel', source: 'github-commit-statuses', state: 'BUILDING', ok: false, commitSha, branch, statuses: normalized };
+      }
+      return {
+        provider: 'vercel',
+        source: 'github-commit-statuses',
+        state: 'READY',
+        ok: true,
+        environment: 'preview',
+        commitSha,
+        branch,
+        statuses: normalized
+      };
+    }
 
     const deployment = matching[0];
     const statuses = (await this.deploymentStatuses(project, deployment.id))
