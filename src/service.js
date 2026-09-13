@@ -346,6 +346,8 @@ function trustedGitHubFetchArgs(defaultBranch) {
   ];
 }
 
+export const UPGRADE_UNSAFE_GIT_CONFIG_PATTERN = '^(url\\..*\\.insteadof|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshcommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required)|http(\\..*)?\\.(sslverify|sslcainfo|sslcapath|sslbackend))$';
+
 async function checkedUpgradeCommand(commandRunner, command, args, { cwd, env, allowExitCodes = [0], timeoutMs = 30_000, maxOutputBytes = 128 * 1024 } = {}) {
   const result = await commandRunner(command, args, { cwd, env, timeoutMs, maxOutputBytes });
   if (result.timedOut || !allowExitCodes.includes(result.exitCode)) throw new Error(`operator_upgrade_command_failed:${command}:${args[0]}`);
@@ -533,7 +535,7 @@ async function performInboxServiceUpgrade({
   const unsafeGitConfig = await checkedUpgradeCommand(
     commandRunner,
     'git',
-    ['config', '--get-regexp', '^(url\\..*\\.insteadof|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshcommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required)|http(?:\\..*)?\\.(sslverify|sslcainfo|sslcapath|sslbackend))$'],
+    ['config', '--get-regexp', UPGRADE_UNSAFE_GIT_CONFIG_PATTERN],
     { cwd: root, env: gitEnv, allowExitCodes: [0, 1] }
   );
   if (unsafeGitConfig.stdout.trim()) throw new Error('operator_upgrade_unsafe_git_transport_config');
