@@ -4245,11 +4245,18 @@ export class CodexReadOnlySkillExecutor {
   }
 }
 
+const managedGitCommitIdentity = Object.freeze({
+  GIT_AUTHOR_NAME: 'Engineering Orchestrator',
+  GIT_AUTHOR_EMAIL: 'engineering-orchestrator@localhost.invalid',
+  GIT_COMMITTER_NAME: 'Engineering Orchestrator',
+  GIT_COMMITTER_EMAIL: 'engineering-orchestrator@localhost.invalid'
+});
+
 export class LocalGitAdapter {
   constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
 
-  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false } = {}) {
-    const result = await this.processRunner('git', args, { cwd: project.workspace, timeoutMs: project.budgets.commandTimeoutMs, outputLimit, captureOutputDigest });
+  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {} } = {}) {
+    const result = await this.processRunner('git', args, { cwd: project.workspace, timeoutMs: project.budgets.commandTimeoutMs, outputLimit, captureOutputDigest, env });
     if (!allowExitCodes.includes(result.exitCode) || result.timedOut) throw new Error(`Git ${args[0]} failed: ${clip(result.stderr || result.stdout)}`);
     return result;
   }
@@ -4465,7 +4472,7 @@ export class LocalGitAdapter {
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--no-verify', '--message', safeMessage], project);
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: managedGitCommitIdentity });
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
