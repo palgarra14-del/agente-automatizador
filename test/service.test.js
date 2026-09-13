@@ -59,7 +59,7 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /ExecStart=.*src\/cli\.js.*inbox watch/);
   assert.match(unit, /Restart=always/);
   assert.match(unit, /WantedBy=default\.target/);
-  assert.match(unit, /PATH=\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin/);
+  assert.match(unit, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
   assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
   assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|must-never-be-rendered|gho_|ghp_/);
@@ -124,6 +124,40 @@ test('service install/status/restart/uninstall is managed and rollback-safe', as
       installInboxService({ repositoryRoot, nodePath, pathValue, home, platform: 'linux', commandRunner: runner, environment }),
       /service_unit_not_managed_by_agent/
     );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test('service sync rolls back first-install enablement when restart fails', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-service-sync-rollback-home-'));
+  const repositoryRoot = await mkdtemp(join(tmpdir(), 'agent-service-sync-rollback-repo-'));
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'gh') return { exitCode: 0, stdout: 'gho_abcdefghijklmnopqrstuvwxyz1234567890\n', stderr: '' };
+    const action = args[1];
+    if (action === 'restart') return { exitCode: 1, stdout: '', stderr: 'failed' };
+    return { exitCode: 0, stdout: action === 'is-enabled' ? 'enabled\n' : action === 'is-active' ? 'active\n' : '', stderr: '' };
+  };
+  try {
+    await mkdir(join(repositoryRoot, 'src'), { recursive: true });
+    await writeFile(join(repositoryRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n');
+    await assert.rejects(
+      syncInboxService({
+        repositoryRoot,
+        nodePath: process.execPath,
+        pathValue: '/usr/bin:/bin',
+        home,
+        platform: 'linux',
+        commandRunner: runner,
+        environment: { PATH: '/usr/bin:/bin', HOME: home }
+      }),
+      /systemd_user_command_failed:restart/
+    );
+    assert.ok(calls.some((entry) => entry.join(' ') === `systemctl --user disable --now ${INBOX_SERVICE_NAME}`));
+    assert.equal((await serviceStatus({ home, pathValue: '/usr/bin:/bin', commandRunner: runner })).installed, false);
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(repositoryRoot, { recursive: true, force: true });
