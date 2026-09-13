@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "node --test",
-    "typecheck": "node --check src/capabilities.js && node --check src/specialists.js && node --check src/core.js && node --check src/cli.js && node --check src/issue-queue.js",
+    "typecheck": "node --check src/capabilities.js && node --check src/specialists.js && node --check src/core.js && node --check src/cli.js && node --check src/issue-queue.js && node --check src/service.js",
     "lint": "eslint . --max-warnings 0",
     "build": "node scripts/build.js"
   },
