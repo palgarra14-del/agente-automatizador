@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +14,8 @@ import {
   syncInboxService,
   uninstallInboxService,
   assertOperatorUpgradeIdleState,
-  upgradeInboxService
+  upgradeInboxService,
+  UPGRADE_UNSAFE_GIT_CONFIG_PATTERN
 } from '../src/service.js';
 
 test('GitHub token bootstrap prefers environment and otherwise reads gh auth without persisting it', async () => {
@@ -253,6 +255,20 @@ async function prepareManagedUpgradeService(home, root) {
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, INBOX_SERVICE_NAME), renderInboxServiceUnit({ repositoryRoot: root, nodePath: process.execPath, home }));
 }
+
+test('operator upgrade unsafe Git config pattern is accepted by real git', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-git-config-regex-'));
+  const configFile = join(directory, 'empty.gitconfig');
+  try {
+    await writeFile(configFile, '');
+    const result = spawnSync('git', ['config', '--file', configFile, '--get-regexp', UPGRADE_UNSAFE_GIT_CONFIG_PATTERN], {
+      encoding: 'utf8'
+    });
+    assert.ok([0, 1].includes(result.status), `git rejected upgrade regex with exit ${result.status}: ${result.stderr}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('operator upgrade idle gate treats only live work as active', () => {
   assert.throws(() => assertOperatorUpgradeIdleState({ requests: { a: { status: 'running', issueNumber: 42 } } }), /operator_upgrade_active_request:42/);
