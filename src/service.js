@@ -437,7 +437,7 @@ async function acquireUpgradeLease(home) {
       if (error.code !== 'EEXIST') throw error;
       const observed = await readUpgradeLease(lockFile);
       if (!observed) continue;
-      if (!await upgradeLeaseAbandoned(observed)) throw new Error('operator_upgrade_in_progress');
+      if (!await upgradeLeaseAbandoned(observed)) throw new Error('operator_upgrade_in_progress', { cause: error });
       let recoveryOwned = false;
       try {
         await writeUpgradeLease(recoveryFile);
