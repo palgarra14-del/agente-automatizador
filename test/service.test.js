@@ -11,7 +11,9 @@ import {
   restartInboxService,
   serviceStatus,
   syncInboxService,
-  uninstallInboxService
+  uninstallInboxService,
+  assertOperatorUpgradeIdleState,
+  upgradeInboxService
 } from '../src/service.js';
 
 test('GitHub token bootstrap prefers environment and otherwise reads gh auth without persisting it', async () => {
@@ -169,4 +171,133 @@ test('service installation fails closed outside Linux', async () => {
     installInboxService({ platform: 'win32' }),
     /persistent_inbox_service_requires_linux_systemd/
   );
+});
+
+
+function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, failFirstNpm = false } = {}) {
+  const calls = [];
+  let npmCalls = 0;
+  const runner = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'systemctl') {
+      const action = args[1];
+      if (action === 'is-enabled') return { exitCode: 0, stdout: 'enabled\n', stderr: '' };
+      if (action === 'is-active') return { exitCode: 0, stdout: 'active\n', stderr: '' };
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
+    if (command === 'git') {
+      const key = args.join(' ');
+      if (key === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: root + '\n', stderr: '' };
+      if (key === 'branch --show-current') return { exitCode: 0, stdout: 'main\n', stderr: '' };
+      if (key === 'status --porcelain=v1 --untracked-files=normal') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === 'remote get-url origin') return { exitCode: 0, stdout: 'https://github.com/palgarra14-del/agente-automatizador.git\n', stderr: '' };
+      if (key === 'rev-parse HEAD') return { exitCode: 0, stdout: oldSha + '\n', stderr: '' };
+      if (key === 'rev-parse refs/remotes/origin/main') return { exitCode: 0, stdout: newSha + '\n', stderr: '' };
+      if (key === `merge-base --is-ancestor ${oldSha} ${newSha}`) return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === `rev-list --reverse ${oldSha}..${newSha}`) return { exitCode: 0, stdout: newSha + '\n', stderr: '' };
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
+    if (command === 'gh') {
+      const endpoint = args[1];
+      if (endpoint.includes(`commits/${newSha}/pulls`)) {
+        return { exitCode: 0, stdout: JSON.stringify([{ merged_at: '2026-09-13T00:00:00Z', merge_commit_sha: newSha, base: { ref: 'main' }, head: { sha: 'c'.repeat(40) } }]), stderr: '' };
+      }
+      if (endpoint.includes('/actions/runs?')) {
+        return { exitCode: 0, stdout: JSON.stringify({ workflow_runs: ciSuccess ? [{ name: 'CI', event: 'pull_request', head_sha: 'c'.repeat(40), conclusion: 'success' }] : [] }), stderr: '' };
+      }
+    }
+    if (command === 'npm') {
+      npmCalls += 1;
+      if (failFirstNpm && npmCalls === 1) return { exitCode: 1, stdout: '', stderr: 'failed' };
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
+    if (command === process.execPath) return { exitCode: 0, stdout: '{}\n', stderr: '' };
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+  return { runner, calls, oldSha, newSha };
+}
+
+async function prepareManagedUpgradeService(home, root) {
+  const dir = join(home, '.config', 'systemd', 'user');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, INBOX_SERVICE_NAME), renderInboxServiceUnit({ repositoryRoot: root, nodePath: process.execPath, home }));
+}
+
+test('operator upgrade refuses active work before touching Git or systemd', () => {
+  assert.throws(() => assertOperatorUpgradeIdleState({ requests: { a: { status: 'running', issueNumber: 42 } } }), /operator_upgrade_active_request:42/);
+  assert.throws(() => assertOperatorUpgradeIdleState({ workflows: { w: { id: 'w', status: 'awaiting_approval' } } }), /operator_upgrade_active_workflow:w/);
+  assert.equal(assertOperatorUpgradeIdleState({ runs: { r: { id: 'r', status: 'failed' } }, requests: { a: { status: 'rejected' } } }), true);
+});
+
+test('operator upgrade verifies reviewed CI commits before fast-forwarding and restarting the new service', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-home-'));
+  const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-repo-'));
+  try {
+    await prepareManagedUpgradeService(home, root);
+    const fixture = upgradeFixtureRunner({ root });
+    const result = await upgradeInboxService({
+      repositoryRoot: root,
+      expectedRepository: 'palgarra14-del/agente-automatizador',
+      state: { runs: {}, workflows: {}, requests: {} },
+      home,
+      pathValue: '/usr/bin:/bin',
+      commandRunner: fixture.runner,
+      environment: { PATH: '/usr/bin:/bin', HOME: home, GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890' }
+    });
+    assert.equal(result.upgraded, true);
+    assert.equal(result.from, fixture.oldSha);
+    assert.equal(result.to, fixture.newSha);
+    assert.equal(result.commits, 1);
+    const stopIndex = fixture.calls.findIndex((call) => call.join(' ') === `systemctl --user stop ${INBOX_SERVICE_NAME}`);
+    const ciIndex = fixture.calls.findIndex((call) => call[0] === 'gh' && call.join(' ').includes('/actions/runs?'));
+    const mergeIndex = fixture.calls.findIndex((call) => call[0] === 'git' && call[1] === 'merge');
+    assert.ok(ciIndex >= 0 && stopIndex > ciIndex && mergeIndex > stopIndex);
+    assert.ok(fixture.calls.some((call) => call[0] === 'npm' && call[1] === 'ci' && call[2] === '--ignore-scripts'));
+    assert.ok(fixture.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('operator upgrade fails closed on unverified CI and rolls back a failed local dependency refresh', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-home-'));
+  const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-repo-'));
+  try {
+    await prepareManagedUpgradeService(home, root);
+    const unverified = upgradeFixtureRunner({ root, ciSuccess: false });
+    await assert.rejects(
+      upgradeInboxService({
+        repositoryRoot: root,
+        expectedRepository: 'palgarra14-del/agente-automatizador',
+        state: {},
+        home,
+        pathValue: '/usr/bin:/bin',
+        commandRunner: unverified.runner,
+        environment: { PATH: '/usr/bin:/bin', HOME: home, GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890' }
+      }),
+      /operator_upgrade_ci_not_verified/
+    );
+    assert.equal(unverified.calls.some((call) => call.join(' ') === `systemctl --user stop ${INBOX_SERVICE_NAME}`), false);
+
+    const rollback = upgradeFixtureRunner({ root, failFirstNpm: true });
+    await assert.rejects(
+      upgradeInboxService({
+        repositoryRoot: root,
+        expectedRepository: 'palgarra14-del/agente-automatizador',
+        state: {},
+        home,
+        pathValue: '/usr/bin:/bin',
+        commandRunner: rollback.runner,
+        environment: { PATH: '/usr/bin:/bin', HOME: home, GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890' }
+      }),
+      /operator_upgrade_command_failed:npm:ci/
+    );
+    assert.ok(rollback.calls.some((call) => call[0] === 'git' && call[1] === 'reset' && call[2] === '--hard' && call[3] === rollback.oldSha));
+    assert.ok(rollback.calls.filter((call) => call[0] === 'npm').length >= 2);
+    assert.ok(rollback.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
 });
