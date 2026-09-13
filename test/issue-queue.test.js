@@ -6,6 +6,22 @@ import { join } from 'node:path';
 import { createWorkflowPlan, evaluateChangePolicy, humanApprovalDependencyFingerprint, JsonStore, loadProjects, WorkflowStepStatus } from '../src/core.js';
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
+function leaseableTestQueue(queue) {
+  let activeLease = null;
+  return Object.assign(queue, {
+    async claimWatcherLease() {
+      if (activeLease) throw new Error('issue_queue_watcher_already_running');
+      activeLease = { leaseId: 'fixture-watcher-lease' };
+      return activeLease;
+    },
+    async releaseWatcherLease(leaseId) {
+      if (!activeLease || activeLease.leaseId !== leaseId) return false;
+      activeLease = null;
+      return true;
+    }
+  });
+}
+
 import {
   GitHubIssueChannel,
   ISSUE_REQUEST_MARKER,
@@ -997,19 +1013,52 @@ test('workflow initialization failure is persisted as blocked and is not retried
   assert.equal(createCalls, 1);
 });
 
+test('issue queue watcher lease rejects a concurrent operator and recovers an abandoned owner', async () => {
+  const { queue, store } = await queueFixture();
+  const first = await queue.claimWatcherLease();
+  await assert.rejects(queue.claimWatcherLease(), /issue_queue_watcher_already_running/);
+  assert.equal(await queue.releaseWatcherLease(first.leaseId), true);
+
+  await store.mutate((data) => {
+    data.issueQueueWatcherLease = {
+      leaseId: 'abandoned-fixture',
+      pid: 999999999,
+      createdAt: '2026-09-12T00:00:00.000Z',
+      ownerIdentity: null
+    };
+  });
+  const recovered = await queue.claimWatcherLease();
+  assert.notEqual(recovered.leaseId, 'abandoned-fixture');
+  assert.equal(await queue.releaseWatcherLease(recovered.leaseId), true);
+  assert.equal((await store.load()).issueQueueWatcherLease, null);
+});
+
+test('watch loop fails closed if its singleton lease is lost before shutdown', async () => {
+  const controller = new AbortController();
+  const queue = {
+    async claimWatcherLease() { return { leaseId: 'lease-1' }; },
+    async releaseWatcherLease() { return false; },
+    async tick() { controller.abort(); return null; }
+  };
+  await assert.rejects(
+    watchIssueQueue(queue, { pollIntervalMs: 1_000, signal: controller.signal }),
+    /issue_queue_watcher_lease_lost/
+  );
+});
+
 test('watcher survives a transient queue error and processes a later tick', async () => {
   let calls = 0;
   const controller = new AbortController();
   const observed = [];
   const errors = [];
-  const queue = {
+  const queue = leaseableTestQueue({
     async tick() {
       calls += 1;
       if (calls === 1) throw new Error('transient github failure');
       controller.abort();
       return { status: 'awaiting_start_approval', issueNumber: 41 };
     }
-  };
+  });
 
   await watchIssueQueue(queue, {
     pollIntervalMs: 1_000,
@@ -1037,13 +1086,13 @@ test('watch loop removes abort listeners after ordinary poll sleeps', async () =
       for (const listener of [...this.listeners]) listener();
     }
   };
-  const queue = {
+  const queue = leaseableTestQueue({
     async tick() {
       calls += 1;
       if (calls === 2) signal.abort();
       return null;
     }
-  };
+  });
 
   await watchIssueQueue(queue, { pollIntervalMs: 1_000, signal });
   assert.equal(calls, 2);
@@ -1063,7 +1112,7 @@ test('watch loop notices an abort that races with listener registration', async 
     },
     removeEventListener() { this.listener = null; }
   };
-  const queue = { async tick() { calls += 1; return null; } };
+  const queue = leaseableTestQueue({ async tick() { calls += 1; return null; } });
 
   await watchIssueQueue(queue, { pollIntervalMs: 300_000, signal });
   assert.equal(calls, 1);
