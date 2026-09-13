@@ -3740,7 +3740,11 @@ test('historical pristine workflow can be terminalized despite registry fingerpr
   assert.equal(recovered.steps[0].status, WorkflowStepStatus.BLOCKED);
   assert.equal(recovered.steps[0].attempts, 0);
   assert.equal(recovered.steps[0].evidence.type, 'historical-cancellation');
-  assert.equal(recovered.executionLease, null);
+  assert.equal(recovered.executionLease?.kind, 'workflow');
+
+  const persisted = await workflowEngine.get(created.id);
+  assert.equal(persisted.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(persisted.executionLease, null);
 });
 
 test('historical workflow recovery fails closed once any execution attempt exists', async () => {
