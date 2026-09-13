@@ -1530,6 +1530,35 @@ export class WorkflowEngine {
   async get(id) { return (await this.store.load()).workflows?.[id]; }
   async list() { return Object.values((await this.store.load()).workflows ?? {}); }
 
+  async cancel(id, { reason = 'workflow_cancelled' } = {}) {
+    if (typeof reason !== 'string' || !/^[a-z][a-z0-9_.:-]{2,120}$/.test(reason)) throw new Error('workflow cancellation reason is invalid');
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
+      const current = await this.get(id);
+      if (!current) throw new Error('Workflow not found');
+      validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
+      if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(current.status)) return current;
+      return this.update(id, (saved) => {
+        const completed = new Set(saved.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
+        const cancellableStatuses = new Set([WorkflowStepStatus.READY, WorkflowStepStatus.RUNNING, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.PENDING]);
+        const step = saved.steps.find((candidate) =>
+          cancellableStatuses.has(candidate.status) &&
+          candidate.dependsOn.every((dependency) => completed.has(dependency))
+        ) ?? null;
+        if (step) {
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = reason;
+          step.evidence = step.evidence
+            ? { ...step.evidence, cancellation: { reason, cancelledAt: new Date(this.now()).toISOString() } }
+            : { type: 'cancellation', reason, cancelledAt: new Date(this.now()).toISOString(), ...workflowEvidenceContext(saved, step) };
+        }
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.pausedAt = null;
+        saved.result = { error: reason, stepId: step?.id ?? null };
+        validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
+      });
+    });
+  }
+
   async update(id, mutator) {
     return this.store.mutate((data) => {
       const plan = data.workflows?.[id];
