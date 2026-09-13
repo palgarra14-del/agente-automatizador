@@ -19,6 +19,7 @@ import {
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
   codexWorkerSecurityConfig,
+  codexTurnFailureDiagnostics,
   configFrom,
   doctor,
   evaluate,
@@ -642,7 +643,26 @@ test('worker prompt redacts secrets and Codex SDK receives isolated permission-p
         run: async (prompt, turnOptions) => {
           invocation.prompt = prompt;
           invocation.turnOptions = turnOptions;
-          return { finalResponse: 'changed one fixture', usage: { input_tokens: 1 } };
+          return {
+            finalResponse: 'changed one fixture',
+            usage: { input_tokens: 1 },
+            items: [
+              {
+                id: 'cmd-1',
+                type: 'command_execution',
+                command: 'codex --fixture token=ghp_hiddenDiagnosticSecret',
+                aggregated_output: 'spawn failed: executable missing; Authorization: Bearer secret-diagnostic',
+                exit_code: 127,
+                status: 'failed'
+              },
+              {
+                id: 'file-1',
+                type: 'file_change',
+                changes: [{ path: 'tests/prospect-utils.test.mjs', kind: 'update' }],
+                status: 'failed'
+              }
+            ]
+          };
         }
       };
     }
@@ -659,6 +679,13 @@ test('worker prompt redacts secrets and Codex SDK receives isolated permission-p
   });
   const result = await worker.execute({ objective: 'update fixture', token: 'ghp_hiddenToken', nested: { password: 'hidden' } }, { workspace: '/safe/workspace', timeoutMs: 500 });
   assert.equal(result.status, 'completed');
+  assert.equal(result.diagnostics.length, 2);
+  assert.equal(result.diagnostics[0].type, 'command_execution');
+  assert.equal(result.diagnostics[0].exitCode, 127);
+  assert.equal(result.diagnostics[0].executable, 'codex');
+  assert.equal(result.diagnostics[0].errorOutput.includes('secret-diagnostic'), false);
+  assert.equal(JSON.stringify(result.diagnostics[0]).includes('ghp_hiddenDiagnosticSecret'), false);
+  assert.deepEqual(result.diagnostics[1], { type: 'file_change', paths: ['tests/prospect-utils.test.mjs'] });
   assert.equal(invocation.clientOptions.env.PATH, '/safe/bin');
   assert.equal(invocation.clientOptions.env.CODEX_HOME, '/isolated/codex-home');
   assert.equal(invocation.clientOptions.env.HOME, '/isolated/codex-home');
@@ -1655,6 +1682,28 @@ test('Codex worker security config denies root reads on verified platforms and b
   assert.equal(windowsRead.configOverrides.length, 0);
   assert.equal(windowsWrite.configOverrides.length, 0);
   assert.equal(codexWorkerSecurityConfig({ platform: 'freebsd' }).supported, false);
+});
+
+test('Codex turn diagnostics retain only bounded failed tool evidence', () => {
+  const diagnostics = codexTurnFailureDiagnostics([
+    { type: 'reasoning', text: 'must never be retained' },
+    { type: 'agent_message', text: 'must never be retained either' },
+    { type: 'error', message: 'tool failed with sk-superSecretValue' },
+    { type: 'mcp_tool_call', server: 'fixture', tool: 'write', status: 'failed', error: { message: 'Bearer sensitive-value' } },
+    { type: 'command_execution', command: 'node fixture.js', aggregated_output: 'ordinary source line\nfailure: fixture exploded', exit_code: 1, status: 'failed' },
+    { type: 'command_execution', command: 'node successful.js', aggregated_output: 'failure word in successful output', exit_code: 0, status: 'completed' }
+  ]);
+  assert.equal(diagnostics.length, 3);
+  assert.equal(diagnostics[0].type, 'error');
+  assert.equal(diagnostics[0].message.includes('sk-superSecretValue'), false);
+  assert.equal(diagnostics[1].type, 'mcp_tool_call');
+  assert.equal(diagnostics[2].type, 'command_execution');
+  assert.equal(diagnostics[2].executable, 'node');
+  assert.equal(diagnostics[2].errorOutput.includes('ordinary source line'), false);
+  assert.match(diagnostics[2].errorOutput, /failure: fixture exploded/);
+  assert.equal(JSON.stringify(diagnostics).includes('reasoning'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('must never'), false);
+  assert.equal(JSON.stringify(diagnostics).includes('successful.js'), false);
 });
 
 test('Codex worker rejects project-local Codex control configuration before starting the SDK', async () => {

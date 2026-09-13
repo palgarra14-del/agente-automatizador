@@ -441,7 +441,11 @@ export function workflowFailureSummary(workflow) {
   const step = workflow.steps?.find((candidate) => candidate.id === stepId)
     ?? workflow.steps?.find((candidate) => [WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(candidate.status))
     ?? null;
-  const detail = step?.evidence?.error ?? step?.evidence?.workerEvidence?.output ?? step?.evidence?.workerEvidence?.summary ?? workflow.result?.detail ?? null;
+  const workerEvidence = step?.evidence?.workerEvidence;
+  const workerDetail = workerEvidence?.diagnostics?.length
+    ? [`Tool diagnostics: ${JSON.stringify(workerEvidence.diagnostics)}`, workerEvidence.output ?? workerEvidence.summary ?? null].filter(Boolean).join('\n')
+    : workerEvidence?.output ?? workerEvidence?.summary ?? null;
+  const detail = step?.evidence?.error ?? workerDetail ?? workflow.result?.detail ?? null;
   return {
     stepId: step?.id ?? stepId,
     skill: step?.skill ?? null,
