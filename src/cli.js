@@ -5,6 +5,7 @@ import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
 import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
+import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -155,6 +156,16 @@ try {
       console.log(JSON.stringify(await installInboxService(), null, 2));
     } else if (action === 'sync') {
       console.log(JSON.stringify(await syncInboxService(), null, 2));
+    } else if (action === 'bootstrap') {
+      const service = await syncInboxService();
+      const wakeup = await syncWslWakeup();
+      console.log(JSON.stringify({ service, wakeup }, null, 2));
+    } else if (action === 'wakeup') {
+      const wakeupAction = args[2] ?? 'status';
+      if (wakeupAction === 'sync') console.log(JSON.stringify(await syncWslWakeup(), null, 2));
+      else if (wakeupAction === 'status') console.log(JSON.stringify(await wslWakeupStatus(), null, 2));
+      else if (wakeupAction === 'uninstall') console.log(JSON.stringify(await uninstallWslWakeup(), null, 2));
+      else throw new Error('Usage: agent service wakeup <sync|status|uninstall>');
     } else if (action === 'status') {
       console.log(JSON.stringify(await serviceStatus(), null, 2));
     } else if (action === 'restart') {
@@ -168,7 +179,7 @@ try {
       }), null, 2));
     } else if (action === 'uninstall') {
       console.log(JSON.stringify(await uninstallInboxService(), null, 2));
-    } else throw new Error('Usage: agent service <install|sync|status|restart|upgrade|uninstall>');
+    } else throw new Error('Usage: agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
@@ -196,7 +207,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent service <install|status|restart|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
