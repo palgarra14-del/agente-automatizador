@@ -652,7 +652,16 @@ export class SupervisedIssueQueue {
     return next;
   }
 
+  async reconcileTerminalWorkflow(workflowId, status) {
+    if (!workflowId || !['failed', 'blocked', 'rejected'].includes(status)) return;
+    const workflow = await this.workflowEngine.get(workflowId);
+    if (workflow && ![WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(workflow.status)) {
+      await this.workflowEngine.cancel(workflowId, { reason: `issue_queue_${status}` });
+    }
+  }
+
   async finalizeTerminal(issue, key, record, text) {
+    await this.reconcileTerminalWorkflow(record.workflowId, record.status);
     const body = maskSecrets(String(text)).slice(0, 12_000);
     const next = {
       ...record,
@@ -685,6 +694,7 @@ export class SupervisedIssueQueue {
   }
 
   async blockRequestRevalidation(issue, key, record, reason) {
+    await this.reconcileTerminalWorkflow(record?.workflowId ?? null, 'blocked');
     const now = this.now();
     const next = {
       version: 1,

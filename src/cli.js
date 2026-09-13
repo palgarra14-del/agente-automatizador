@@ -211,9 +211,11 @@ try {
       console.log(JSON.stringify(await workflows.resume(args[2], { dryRun: has('--dry-run') }), null, 2));
     } else if (action === 'approve') {
       console.log(JSON.stringify(await workflows.approve(args[2], args[3]), null, 2));
+    } else if (action === 'cancel') {
+      console.log(JSON.stringify(await workflows.cancel(args[2], { reason: take('--reason') ?? 'workflow_cancelled_by_operator' }), null, 2));
     } else if (action === 'list') {
       console.log(JSON.stringify(await workflows.list(), null, 2));
-    } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | list');
+    } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
     console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
