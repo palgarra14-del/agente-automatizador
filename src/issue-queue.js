@@ -324,6 +324,44 @@ function compactDryRun(dryRun) {
   };
 }
 
+function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {}) {
+  const summary = compactDryRun(dryRun);
+  return [
+    recovered
+      ? 'Agent dry-run approval instruction recovered. No Codex call, project write, Git write, PR creation, or deployment was performed.'
+      : 'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+    '',
+    `Workflow: \`${workflow.id}\``,
+    `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
+    `Planned steps: ${summary.steps.map((step) => `${step.id}[${step.specialist}/${step.authority}]`).join(' → ')}`,
+    `Planned external writes: ${summary.externalWrites.length ? summary.externalWrites.map((write) => write.id).join(', ') : 'none'}`,
+    '',
+    'To authorize the first real execution transition, post exactly:',
+    `\`${approvalInstruction(token)}\``,
+    '',
+    'To reject this request, post exactly:',
+    `\`${rejectionInstruction(token)}\``
+  ].join('\n');
+}
+
+function workflowApprovalMessage(workflow, step, token, { recovered = false } = {}) {
+  return [
+    recovered
+      ? `Agent workflow approval instruction recovered for step \`${step.id}\` (skill \`${step.skill}\`).`
+      : `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
+    `Current workflow status: \`${workflow.status}\`.`,
+    '',
+    'Evidence bound to this approval fingerprint:',
+    `\`\`\`json\n${approvalEvidenceSummary(workflow, step.id)}\n\`\`\``,
+    '',
+    'Approve exactly this persisted state with:',
+    `\`${approvalInstruction(token)}\``,
+    '',
+    'Reject with:',
+    `\`${rejectionInstruction(token)}\``
+  ].join('\n');
+}
+
 const requestStatuses = new Set(['initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
 
 export function validateIssueQueueRecord(record, { issue, requestFingerprint, issueBodyFingerprint, projectFingerprint, controlPlaneFingerprint } = {}) {
@@ -827,21 +865,7 @@ export class SupervisedIssueQueue {
       lastProcessedCommentId: 0
     };
     await this.saveRecord(this.requestKey(issue), record);
-    const summary = compactDryRun(dryRun);
-    await this.post(issue.number, [
-      'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
-      '',
-      `Workflow: \`${workflow.id}\``,
-      `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
-      `Planned steps: ${summary.steps.map((step) => `${step.id}[${step.specialist}/${step.authority}]`).join(' → ')}`,
-      `Planned external writes: ${summary.externalWrites.length ? summary.externalWrites.map((write) => write.id).join(', ') : 'none'}`,
-      '',
-      'To authorize the first real execution transition, post exactly:',
-      `\`${approvalInstruction(token)}\``,
-      '',
-      'To reject this request, post exactly:',
-      `\`${rejectionInstruction(token)}\``
-    ].join('\n'));
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
     return record;
   }
 
@@ -930,6 +954,13 @@ export class SupervisedIssueQueue {
       stepId: step.id
     });
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
+    let approvalMessage = null;
+    if (!already) {
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+      }
+    }
     const next = {
       ...record,
       status: 'awaiting_workflow_approval',
@@ -939,21 +970,7 @@ export class SupervisedIssueQueue {
       activeApproval: null
     };
     await this.saveRecord(key, next);
-    if (!already) {
-      await this.post(issue.number, [
-        `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
-        `Current workflow status: \`${workflow.status}\`.`,
-        '',
-        'Evidence bound to this approval fingerprint:',
-        `\`\`\`json\n${approvalEvidenceSummary(workflow, step.id)}\n\`\`\``,
-        '',
-        'Approve exactly this persisted state with:',
-        `\`${approvalInstruction(token)}\``,
-        '',
-        'Reject with:',
-        `\`${rejectionInstruction(token)}\``
-      ].join('\n'));
-    }
+    if (approvalMessage) await this.post(issue.number, approvalMessage);
     return next;
   }
 
