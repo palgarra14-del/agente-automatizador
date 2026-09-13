@@ -6,7 +6,7 @@ import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
 import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
-import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
+import { loadRuntimeImageConfig, projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -75,8 +75,10 @@ try {
   } else if (command === 'runtime') {
     const action = args[1] ?? 'status';
     const registeredProjects = [...projects.values()];
-    if (action === 'status') console.log(JSON.stringify(await projectRuntimeStatus(registeredProjects), null, 2));
-    else if (action === 'sync') console.log(JSON.stringify(await syncProjectRuntimes(registeredProjects), null, 2));
+    const buildConfig = await loadRuntimeImageConfig(resolve('config/runtime-images.json'));
+    const runtimeOptions = { buildConfig, repositoryRoot: resolve('.') };
+    if (action === 'status') console.log(JSON.stringify(await projectRuntimeStatus(registeredProjects, runtimeOptions), null, 2));
+    else if (action === 'sync') console.log(JSON.stringify(await syncProjectRuntimes(registeredProjects, runtimeOptions), null, 2));
     else throw new Error('Usage: agent runtime <status|sync>');
   } else if (command === 'report') {
     const run = await store.getRun(args[1]);
@@ -164,7 +166,8 @@ try {
     } else if (action === 'sync') {
       console.log(JSON.stringify(await syncInboxService(), null, 2));
     } else if (action === 'bootstrap') {
-      const runtimes = await syncProjectRuntimes([...projects.values()]);
+      const buildConfig = await loadRuntimeImageConfig(resolve('config/runtime-images.json'));
+      const runtimes = await syncProjectRuntimes([...projects.values()], { buildConfig, repositoryRoot: resolve('.') });
       const service = await syncInboxService();
       const wakeup = await syncWslWakeup();
       console.log(JSON.stringify({ runtimes, service, wakeup }, null, 2));
