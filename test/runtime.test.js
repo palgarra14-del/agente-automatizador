@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import {
   isDigestPinnedRuntimeImage,
@@ -129,6 +129,21 @@ test('runtime config loader rejects symlinked configuration files', async () => 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('checked-in runtime recipe matches the checked-in LeadFinder build context', async () => {
+  const config = await loadRuntimeImageConfig(resolve('config/runtime-images.json'));
+  const f = fixture({ present: [PINNED] });
+  const status = await projectRuntimeStatus(projects(), {
+    buildConfig: config,
+    repositoryRoot: resolve('.'),
+    environment: { PATH: '/usr/bin:/bin' },
+    commandRunner: f.runner
+  });
+  const local = status.images.find((entry) => entry.image === LOCAL);
+  assert.equal(local.managedBuild, true);
+  assert.notEqual(local.action, 'invalid-recipe');
+  assert.match(local.recipeFingerprint, /^[a-f0-9]{64}$/);
 });
 
 test('runtime status deduplicates shared images and never writes', async () => {
