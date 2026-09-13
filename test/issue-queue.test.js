@@ -221,6 +221,11 @@ class FakeChannel {
 
   async openIssues() { return clone(this.issues); }
 
+  async branchHead() {
+    this.branchHeadReadCount = (this.branchHeadReadCount ?? 0) + 1;
+    return this.remoteBranchHead ?? 'a'.repeat(40);
+  }
+
   async issue(number) {
     this.issueReadCount = (this.issueReadCount ?? 0) + 1;
     this.onIssueRead?.(number, this.issueReadCount);
@@ -304,6 +309,100 @@ function persistedRequestFields(queue, issue, project, workflow = workflowPlan()
     }
   };
 }
+
+test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
+  const { store, channel, workflowEngine, project, projects } = await queueFixture();
+  channel.remoteBranchHead = 'b'.repeat(40);
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors: ['palgarra14-del'],
+    operatorRevision: 'a'.repeat(40),
+    operatorBranch: 'main',
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+
+  const result = await queue.tick();
+  assert.equal(result.status, 'operator_update_pending');
+  assert.equal(result.localRevision, 'a'.repeat(40));
+  assert.equal(result.remoteRevision, 'b'.repeat(40));
+  assert.equal(workflowEngine.createCalls.length, 0);
+  assert.equal(workflowEngine.runCalls.length, 0);
+  assert.deepEqual((await store.load()).requests ?? {}, {});
+  assert.equal(channel.posted.length, 0);
+  assert.equal(channel.branchHeadReadCount, 1);
+});
+
+test('new issue requests initialize normally when operator checkout matches main', async () => {
+  const { store, channel, workflowEngine, projects } = await queueFixture();
+  channel.remoteBranchHead = 'a'.repeat(40);
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors: ['palgarra14-del'],
+    operatorRevision: 'a'.repeat(40),
+    operatorBranch: 'main',
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+
+  const result = await queue.tick();
+  assert.equal(result.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.createCalls.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+  assert.equal(channel.branchHeadReadCount, 1);
+  assert.equal(Object.keys((await store.load()).requests ?? {}).length, 1);
+});
+
+test('existing active issue request continues without remote revision gating', async () => {
+  const { store, channel, workflowEngine, projects } = await queueFixture();
+  channel.remoteBranchHead = 'a'.repeat(40);
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors: ['palgarra14-del'],
+    operatorRevision: 'a'.repeat(40),
+    operatorBranch: 'main',
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+
+  const initialized = await queue.tick();
+  assert.equal(initialized.status, 'awaiting_start_approval');
+  const readsAfterInitialization = channel.branchHeadReadCount;
+  channel.remoteBranchHead = 'b'.repeat(40);
+
+  const existing = await queue.tick();
+  assert.equal(existing.status, 'awaiting_start_approval');
+  assert.equal(channel.branchHeadReadCount, readsAfterInitialization);
+  assert.equal(workflowEngine.createCalls.length, 1);
+});
+
+test('GitHubIssueChannel reads and validates the configured branch head', async () => {
+  const calls = [];
+  const valid = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({ commit: { sha: 'c'.repeat(40) } }) };
+    }
+  });
+  assert.equal(await valid.branchHead('main'), 'c'.repeat(40));
+  assert.match(calls[0], /\/branches\/main$/);
+  await assert.rejects(valid.branchHead('../main'), /branch is invalid/);
+
+  const malformed = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ commit: { sha: 'not-a-sha' } }) })
+  });
+  await assert.rejects(malformed.branchHead('main'), /branch response is invalid/);
+});
 
 test('issue request protocol is strict, bounded, canonical, and redacts accidental secrets', () => {
   const parsed = parseIssueRequestBody(requestBody({ goal: 'Use Authorization: Bearer abcdefghijklmnop safely' }));
