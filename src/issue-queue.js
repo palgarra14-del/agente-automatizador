@@ -653,6 +653,12 @@ export class SupervisedIssueQueue {
   }
 
   async finalizeTerminal(issue, key, record, text) {
+    if (record.workflowId && ['failed', 'blocked', 'rejected'].includes(record.status)) {
+      const workflow = await this.workflowEngine.get(record.workflowId);
+      if (workflow && ![WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(workflow.status)) {
+        await this.workflowEngine.cancel(record.workflowId, { reason: `issue_queue_${record.status}` });
+      }
+    }
     const body = maskSecrets(String(text)).slice(0, 12_000);
     const next = {
       ...record,
