@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { link, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -133,6 +133,26 @@ test('WSL wakeup refuses foreign or tampered startup state', async () => {
     await assert.rejects(syncWslWakeup(options), /wsl_guardian_must_not_be_hardlinked/);
   } finally {
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('WSL wakeup refuses a symlinked config ancestor before creating guardian state', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'w-'));
+  const target = await mkdtemp(join(tmpdir(), 'w-target-'));
+  const fixture = fixtureRunner();
+  try {
+    await symlink(target, join(home, '.config'), 'dir');
+    const serviceDirectory = join(target, 'systemd', 'user');
+    await mkdir(serviceDirectory, { recursive: true });
+    await writeFile(join(serviceDirectory, 'engineering-orchestrator-inbox.service'), '# managed-by=engineering-orchestrator:v1\n');
+
+    const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+    await assert.rejects(syncWslWakeup(options), /wsl_guardian_directory_invalid/);
+    await assert.rejects(lstat(join(target, 'engineering-orchestrator')), /ENOENT/);
+    assert.equal(fixture.registry.size, 0);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
   }
 });
 
