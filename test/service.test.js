@@ -200,7 +200,14 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       const key = args.join(' ');
       if (key === 'rev-parse --show-toplevel') return result(root + '\n');
       if (key === 'rev-parse --absolute-git-dir') return result(join(root, '.git') + '\n');
-      if (key.startsWith('config --get-regexp ')) return unsafeGitConfig ? result(unsafeGitConfig) : result('', 1);
+      if (key.startsWith('config --get-regexp ')) {
+        assert.match(key, /insteadof/);
+        assert.match(key, /sshcommand/);
+        assert.match(key, /sslverify/);
+        assert.match(key, /sslcainfo/);
+        assert.doesNotMatch(key, /insteadOf|sshCommand|sslVerify|sslCAInfo/);
+        return unsafeGitConfig ? result(unsafeGitConfig) : result('', 1);
+      }
       if (args.includes('fetch')) {
         assert.equal(options.env.GITHUB_TOKEN, undefined);
         assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
@@ -308,7 +315,7 @@ test('operator upgrade rejects unverified CI and rolls back failed dependency re
   const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-repo-'));
   try {
     await prepareManagedUpgradeService(home, root);
-    const unsafeTls = upgradeFixtureRunner({ root, unsafeGitConfig: 'http.https://github.com/.sslCAInfo /tmp/attacker-ca.pem\n' });
+    const unsafeTls = upgradeFixtureRunner({ root, unsafeGitConfig: 'http.https://github.com/.sslcainfo /tmp/attacker-ca.pem\n' });
     await assert.rejects(upgradeInboxService(upgradeOptions(home, root, unsafeTls.runner)), /operator_upgrade_unsafe_git_transport_config/);
     assert.equal(unsafeTls.calls.some((call) => call.includes('fetch')), false);
 
