@@ -520,7 +520,7 @@ async function performInboxServiceUpgrade({
   const unsafeGitConfig = await checkedUpgradeCommand(
     commandRunner,
     'git',
-    ['config', '--get-regexp', '^(url\\..*\\.insteadOf|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshCommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required)|http(?:\\..*)?\\.(sslVerify|sslCAInfo|sslCAPath|sslBackend))$'],
+    ['config', '--get-regexp', '^(url\\..*\\.insteadof|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshcommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required)|http(?:\\..*)?\\.(sslverify|sslcainfo|sslcapath|sslbackend))$'],
     { cwd: root, env: gitEnv, allowExitCodes: [0, 1] }
   );
   if (unsafeGitConfig.stdout.trim()) throw new Error('operator_upgrade_unsafe_git_transport_config');
