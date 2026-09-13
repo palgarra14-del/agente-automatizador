@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { readBoundedRegularFile } from './core.js';
 import { runLocalCommand } from './service.js';
 
 const digestPinnedImagePattern = /^[^\s@]+@sha256:[a-f0-9]{64}$/i;
@@ -69,10 +70,14 @@ export function normalizeRuntimeImageConfig(value) {
 }
 
 export async function loadRuntimeImageConfig(file) {
-  const info = await lstat(file);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 32 * 1024) throw new Error('runtime_image_config_file_invalid');
+  let content;
+  try {
+    content = await readBoundedRegularFile(file, { maxBytes: 32 * 1024, label: 'Runtime image config', requireSingleLink: true });
+  } catch (error) {
+    throw new Error('runtime_image_config_file_invalid', { cause: error });
+  }
   let parsed;
-  try { parsed = JSON.parse(await readFile(file, 'utf8')); }
+  try { parsed = JSON.parse(content.toString('utf8')); }
   catch (error) { throw new Error('runtime_image_config_json_invalid', { cause: error }); }
   return normalizeRuntimeImageConfig(parsed);
 }
@@ -175,11 +180,14 @@ async function sourceBuildContext(recipe, repositoryRoot) {
   let totalBytes = 0;
   for (const file of recipe.files) {
     const target = join(context, file.path);
-    const info = await lstat(target);
-    if (!info.isFile() || info.isSymbolicLink() || Number(info.nlink) !== 1 || info.size > 128 * 1024) throw new Error('runtime_build_context_file_invalid');
-    totalBytes += info.size;
+    let data;
+    try {
+      data = await readBoundedRegularFile(target, { maxBytes: 128 * 1024, label: 'Runtime build context file', requireSingleLink: true });
+    } catch (error) {
+      throw new Error('runtime_build_context_file_invalid', { cause: error });
+    }
+    totalBytes += data.byteLength;
     if (totalBytes > 512 * 1024) throw new Error('runtime_build_context_too_large');
-    const data = await readFile(target);
     if (createHash('sha256').update(data).digest('hex') !== file.sha256) throw new Error(`runtime_build_context_hash_mismatch:${file.path}`);
     contents.set(file.path, data);
   }
