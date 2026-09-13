@@ -187,7 +187,7 @@ try {
       }), null, 2));
     } else if (action === 'uninstall') {
       console.log(JSON.stringify(await uninstallInboxService(), null, 2));
-    } else throw new Error('Usage: agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall>');
+    } else throw new Error('Usage: agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
