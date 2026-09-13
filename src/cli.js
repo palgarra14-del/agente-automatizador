@@ -14,9 +14,13 @@ const take = (name) => {
 const has = (name) => args.includes(name);
 const takeAll = (name) => args.flatMap((value, index) => value === name && args[index + 1] ? [args[index + 1]] : []);
 const command = args[0];
-const githubRequired = command === 'run' || command === 'resume' || command === 'doctor' || command === 'inbox' ||
+const githubRequired = command === 'run' || command === 'resume' ||
+  (command === 'inbox' && (args[1] ?? 'once') !== 'status') ||
   (command === 'workflow' && ['run', 'resume'].includes(args[1]));
 if (githubRequired) await ensureGitHubToken();
+if (command === 'doctor') {
+  try { await ensureGitHubToken(); } catch { /* Doctor reports missing connectivity instead of failing. */ }
+}
 
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
