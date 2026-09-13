@@ -21,7 +21,7 @@ function minimalGhEnvironment(environment) {
 }
 
 function trustedServicePath(nodePath) {
-  return [...new Set([dirname(resolve(nodePath)), '/usr/local/bin', '/usr/bin', '/bin'])].join(':');
+  return [...new Set(['/usr/local/bin', '/usr/bin', '/bin', dirname(resolve(nodePath))])].join(':');
 }
 
 function serviceRuntimeEnvironment(environment = {}) {
@@ -213,6 +213,7 @@ export async function syncInboxService({
 
   const existed = await assertManagedOrMissing(unitPath);
   const previous = existed ? await readFile(unitPath, 'utf8') : null;
+  const previousStatus = existed ? await serviceStatus({ home, pathValue, commandRunner }) : null;
   const unit = renderInboxServiceUnit({ repositoryRoot: root, nodePath, home, environment });
   const changed = previous !== unit;
   const temporary = `${unitPath}.tmp-${process.pid}`;
@@ -230,10 +231,18 @@ export async function syncInboxService({
     return { ...status, changed };
   } catch (error) {
     await rm(temporary, { force: true });
-    if (previous !== null && changed) await writeFile(unitPath, previous, { mode: 0o600 });
-    if (previous === null) await rm(unitPath, { force: true });
-    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
-    if (previous !== null) await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+    if (previous === null) {
+      await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      await rm(unitPath, { force: true });
+      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
+    } else {
+      if (changed) await writeFile(unitPath, previous, { mode: 0o600 });
+      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
+      if (previousStatus.enabled) await systemctl(commandRunner, ['enable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      else await systemctl(commandRunner, ['disable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      if (previousStatus.active) await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      else await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+    }
     throw error;
   }
 }
