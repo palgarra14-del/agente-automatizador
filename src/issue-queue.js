@@ -522,6 +522,14 @@ export class GitHubIssueChannel {
     throw new Error('GitHub issue comments pagination limit exceeded');
   }
 
+  async branchHead(branch) {
+    if (typeof branch !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(branch) || branch.includes('..')) throw new Error('issue channel branch is invalid');
+    const result = await this.request(this.path(`/branches/${encodeURIComponent(branch)}`));
+    const sha = result?.commit?.sha;
+    if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) throw new Error('GitHub issue queue branch response is invalid');
+    return sha.toLowerCase();
+  }
+
   async comment(number, body) {
     const result = await this.request(this.path(`/issues/${encodeURIComponent(number)}/comments`), {
       method: 'POST',
@@ -548,14 +556,31 @@ function validateWatcherLease(lease) {
 }
 
 export class SupervisedIssueQueue {
-  constructor({ store, projects, workflowEngine, channel, allowedActors, now = () => new Date().toISOString() } = {}) {
+  constructor({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors,
+    operatorRevision = null,
+    operatorBranch = 'main',
+    now = () => new Date().toISOString()
+  } = {}) {
     if (!store || !projects || !workflowEngine || !channel) throw new Error('SupervisedIssueQueue requires store, projects, workflowEngine, and channel');
     if (!Array.isArray(allowedActors) || !allowedActors.length) throw new Error('SupervisedIssueQueue requires at least one allowed actor');
+    if (operatorRevision !== null && (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision))) {
+      throw new Error('SupervisedIssueQueue operatorRevision must be a 40-character commit sha');
+    }
+    if (typeof operatorBranch !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(operatorBranch) || operatorBranch.includes('..')) {
+      throw new Error('SupervisedIssueQueue operatorBranch is invalid');
+    }
     this.store = store;
     this.projects = projects;
     this.workflowEngine = workflowEngine;
     this.channel = channel;
     this.allowedActors = new Set(allowedActors.map((actor) => boundedString(actor, 'allowed actor', { required: true, max: 80 }).toLowerCase()));
+    this.operatorRevision = operatorRevision?.toLowerCase() ?? null;
+    this.operatorBranch = operatorBranch;
     this.now = now;
   }
 
@@ -1321,10 +1346,23 @@ export class SupervisedIssueQueue {
       }
     }
     const issues = await this.channel.openIssues();
+    let remoteOperatorRevision = null;
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
       const existing = await this.getRecord(this.requestKey(issue));
       if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
+      if (!existing && this.operatorRevision) {
+        remoteOperatorRevision ??= await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          return {
+            status: 'operator_update_pending',
+            issueNumber: issue.number,
+            localRevision: this.operatorRevision,
+            remoteRevision: remoteOperatorRevision,
+            updatedAt: this.now()
+          };
+        }
+      }
       const result = await this.processIssue(issue);
       if (result) return result;
     }
