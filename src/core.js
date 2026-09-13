@@ -4377,7 +4377,7 @@ export class GitHubAdapter {
         deployment?.sha === commitSha &&
         (!branch || deployment?.ref === branch) &&
         String(deployment?.environment ?? '').toLowerCase() === 'preview' &&
-        deployment?.production_environment !== true
+        deployment?.production_environment === false
       )
       .sort((left, right) => {
         const rightTime = Date.parse(right?.updated_at ?? right?.created_at ?? '') || 0;
@@ -4397,6 +4397,11 @@ export class GitHubAdapter {
       return { provider: 'vercel', source: 'github-deployments', state: 'BUILDING', ok: false, deploymentId: String(deployment.id), commitSha, branch };
     }
     const latest = statuses[0];
+    const statusEnvironment = String(latest.environment ?? deployment.environment ?? '').toLowerCase();
+    const actor = String(latest.creator?.login ?? deployment.creator?.login ?? '').toLowerCase();
+    if (statusEnvironment !== 'preview' || !/^vercel(?:\[bot\])?$/.test(actor)) {
+      return { provider: 'vercel', source: 'github-deployments', state: 'INVALID', ok: false, reason: 'GitHub deployment evidence is not an exact Vercel Preview status', deploymentId: String(deployment.id), commitSha, branch };
+    }
     const state = githubPreviewState(latest.state);
     const url = normalizeVercelPreviewUrl(latest.environment_url);
     if (state === 'READY' && !url) {
