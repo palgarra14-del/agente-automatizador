@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -21,6 +21,12 @@ function environment(overrides = {}) {
     WSL_INTEROP: '/run/WSL/123_interop',
     ...overrides
   };
+}
+
+async function seedInboxService(home) {
+  const directory = join(home, '.config', 'systemd', 'user');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'engineering-orchestrator-inbox.service'), '# managed-by=engineering-orchestrator:v1\n');
 }
 
 function fixtureRunner({ failRunWrite = false } = {}) {
@@ -76,6 +82,7 @@ test('WSL wakeup command is bounded, hidden, explicit-user, and guardian keeps W
 test('WSL wakeup sync is idempotent and status is ownership-bound', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
+  await seedInboxService(home);
   const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
   try {
     const first = await syncWslWakeup(options);
@@ -105,6 +112,7 @@ test('WSL wakeup sync is idempotent and status is ownership-bound', async () => 
 test('WSL wakeup refuses foreign or tampered startup state', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
+  await seedInboxService(home);
   const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
   try {
     const installed = await syncWslWakeup(options);
@@ -117,6 +125,12 @@ test('WSL wakeup refuses foreign or tampered startup state', async () => {
     await rm(installed.guardianPath, { force: true });
     await writeFile(installed.guardianPath, '#!/bin/sh\necho foreign\n', { mode: 0o700 });
     await assert.rejects(syncWslWakeup(options), /wsl_guardian_not_managed_by_agent/);
+
+    await rm(installed.guardianPath, { force: true });
+    const linkedGuardian = join(home, 'linked-guardian.sh');
+    await writeFile(linkedGuardian, renderWslGuardianScript(), { mode: 0o700 });
+    await link(linkedGuardian, installed.guardianPath);
+    await assert.rejects(syncWslWakeup(options), /wsl_guardian_must_not_be_hardlinked/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -125,6 +139,7 @@ test('WSL wakeup refuses foreign or tampered startup state', async () => {
 test('WSL wakeup rolls registry and guardian back if Windows registration fails', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner({ failRunWrite: true });
+  await seedInboxService(home);
   const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
   try {
     await assert.rejects(syncWslWakeup(options), /windows_registry_write_failed:EngineeringOrchestratorWSLWakeup/);
