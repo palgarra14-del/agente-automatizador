@@ -4515,8 +4515,17 @@ function isDeploymentCommitStatus(project, status) {
 }
 
 export class GitHubAdapter {
-  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)), now = () => Date.now() } = {}) {
-    Object.assign(this, { token, fetch: fetchImpl, sleep, now });
+  constructor({
+    token = process.env.GITHUB_TOKEN,
+    fetchImpl = fetch,
+    sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)),
+    now = () => Date.now(),
+    requestTimeoutMs = 30_000
+  } = {}) {
+    if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 120_000) {
+      throw new Error('github_request_timeout_invalid');
+    }
+    Object.assign(this, { token, fetch: fetchImpl, sleep, now, requestTimeoutMs });
   }
 
   headers() {
@@ -4525,9 +4534,23 @@ export class GitHubAdapter {
   }
 
   async request(path, options = {}) {
-    const response = await this.fetch(`https://api.github.com${path}`, { ...options, headers: { ...this.headers(), ...(options.headers ?? {}) } });
-    if (!response.ok) throw new Error(`GitHub API request failed: ${response.status}`);
-    return response.json();
+    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    const signal = options.signal
+      ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
+    let response;
+    try {
+      response = await this.fetch(`https://api.github.com${path}`, {
+        ...options,
+        signal,
+        headers: { ...this.headers(), ...(options.headers ?? {}) }
+      });
+      if (!response.ok) throw new Error(`GitHub API request failed: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      if (timeoutSignal.aborted) throw new Error('github_api_request_timeout', { cause: error });
+      throw error;
+    }
   }
 
   path(project, suffix = '') { return `/repos/${encodeURIComponent(project.repository.owner)}/${encodeURIComponent(project.repository.name)}${suffix}`; }

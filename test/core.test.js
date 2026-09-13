@@ -898,6 +898,46 @@ test('GitHub adapter derives a process-local commit identity from the authentica
   }
 });
 
+test('GitHub adapter bounds individual API requests so publication timeouts cannot hang on one fetch', async () => {
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    requestTimeoutMs: 5,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      const signal = options.signal;
+      assert.ok(signal, 'request must provide an abort signal');
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  });
+
+  await assert.rejects(adapter.authenticatedCommitIdentity(), /github_api_request_timeout/);
+  assert.throws(
+    () => new GitHubAdapter({ token: 'ghp_adapterToken', requestTimeoutMs: 0 }),
+    /github_request_timeout_invalid/
+  );
+  assert.throws(
+    () => new GitHubAdapter({ token: 'ghp_adapterToken', requestTimeoutMs: 120_001 }),
+    /github_request_timeout_invalid/
+  );
+
+  const controller = new globalThis.AbortController();
+  const callerAbort = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    requestTimeoutMs: 30_000,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('caller_abort_fixture')), { once: true });
+      controller.abort();
+    })
+  });
+  await assert.rejects(
+    callerAbort.request('/user', { signal: controller.signal }),
+    /caller_abort_fixture|aborted/i
+  );
+});
+
 test('GitHub adapter keeps Vercel preview statuses out of CI while retaining them as deployment evidence', async () => {
   const responses = [
     { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
