@@ -135,6 +135,7 @@ class FakeWorkflowEngine {
     this.runCalls = [];
     this.approveCalls = [];
     this.resumeCalls = [];
+    this.cancelCalls = [];
     this.realRunResult = null;
     this.resumeResult = null;
   }
@@ -181,6 +182,21 @@ class FakeWorkflowEngine {
   async resume() {
     this.resumeCalls.push(true);
     if (this.resumeResult) this.plan = clone(this.resumeResult);
+    return clone(this.plan);
+  }
+
+  async cancel(_id, { reason = 'workflow_cancelled' } = {}) {
+    this.cancelCalls.push(reason);
+    if (![WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(this.plan.status)) {
+      const active = this.plan.steps.find((step) => [WorkflowStepStatus.READY, WorkflowStepStatus.RUNNING, WorkflowStepStatus.AWAITING_APPROVAL].includes(step.status))
+        ?? this.plan.steps.find((step) => step.status === WorkflowStepStatus.PENDING);
+      if (active) {
+        active.status = WorkflowStepStatus.BLOCKED;
+        active.error = reason;
+      }
+      this.plan.status = WorkflowStepStatus.BLOCKED;
+      this.plan.result = { error: reason, stepId: active?.id ?? null };
+    }
     return clone(this.plan);
   }
 }
@@ -445,6 +461,8 @@ test('latest exact human decision wins when approve and reject both exist before
   assert.equal(rejected.status, 'rejected');
   assert.match(rejected.reason, /^rejected_by:/);
   assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
+  assert.deepEqual(workflowEngine.cancelCalls, ['issue_queue_rejected']);
+  assert.equal(workflowEngine.plan.status, WorkflowStepStatus.BLOCKED);
 });
 
 test('pending approval survives a transient workflow lookup failure after its comment was observed', async () => {
@@ -479,6 +497,8 @@ test('issue edits invalidate accepted request fingerprint before any real execut
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.reason, 'request_body_changed');
   assert.equal(workflowEngine.runCalls.length, 1);
+  assert.deepEqual(workflowEngine.cancelCalls, ['issue_queue_blocked']);
+  assert.equal(workflowEngine.plan.status, WorkflowStepStatus.BLOCKED);
   assert.match(channel.posted.at(-1).body, /accepted request\/control context changed|can no longer be verified exactly/i);
 });
 
