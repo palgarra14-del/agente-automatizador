@@ -141,10 +141,23 @@ async function assertManagedOrMissing(unitPath) {
   }
 }
 
-async function systemctl(commandRunner, args, { home, pathValue, allowFailure = false }) {
+function systemdUserCommandEnvironment({ home, pathValue, environment = process.env }) {
+  const result = { PATH: pathValue, HOME: home };
+  const runtimeDir = environment.XDG_RUNTIME_DIR;
+  if (runtimeDir !== undefined) {
+    const value = validateText(String(runtimeDir), 'XDG_RUNTIME_DIR');
+    if (!isAbsolute(value)) throw new Error('XDG_RUNTIME_DIR must be absolute');
+    result.XDG_RUNTIME_DIR = value;
+  }
+  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS;
+  if (busAddress !== undefined) result.DBUS_SESSION_BUS_ADDRESS = validateText(String(busAddress), 'DBUS_SESSION_BUS_ADDRESS');
+  return result;
+}
+
+async function systemctl(commandRunner, args, { home, pathValue, allowFailure = false, environment = process.env }) {
   const result = await commandRunner('systemctl', ['--user', ...args], {
     cwd: home,
-    env: { PATH: pathValue, HOME: home },
+    env: systemdUserCommandEnvironment({ home, pathValue, environment }),
     timeoutMs: 20_000,
     maxOutputBytes: 16_384
   });
@@ -177,15 +190,15 @@ export async function installInboxService({
   await writeFile(temporary, unit, { mode: 0o600, flag: 'wx' });
   await rename(temporary, unitPath);
   try {
-    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
-    await systemctl(commandRunner, ['enable', '--now', INBOX_SERVICE_NAME], { home, pathValue });
-    const status = await serviceStatus({ home, pathValue, commandRunner });
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
+    await systemctl(commandRunner, ['enable', '--now', INBOX_SERVICE_NAME], { home, pathValue, environment });
+    const status = await serviceStatus({ home, pathValue, commandRunner, environment });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
     return status;
   } catch (error) {
-    await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+    await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
     await rm(unitPath, { force: true });
-    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true, environment });
     throw error;
   }
 }
@@ -214,46 +227,45 @@ export async function syncInboxService({
 
   const existed = await assertManagedOrMissing(unitPath);
   const previous = existed ? await readFile(unitPath, 'utf8') : null;
-  const previousStatus = existed ? await serviceStatus({ home, pathValue, commandRunner }) : null;
+  const previousStatus = existed ? await serviceStatus({ home, pathValue, commandRunner, environment }) : null;
   const unit = renderInboxServiceUnit({ repositoryRoot: root, nodePath, home, environment });
   const changed = previous !== unit;
   const temporary = `${unitPath}.tmp-${process.pid}`;
-
   try {
     if (changed) {
       await writeFile(temporary, unit, { mode: 0o600, flag: 'wx' });
       await rename(temporary, unitPath);
     }
-    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
-    await systemctl(commandRunner, ['enable', INBOX_SERVICE_NAME], { home, pathValue });
-    await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue });
-    const status = await serviceStatus({ home, pathValue, commandRunner });
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
+    await systemctl(commandRunner, ['enable', INBOX_SERVICE_NAME], { home, pathValue, environment });
+    await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, environment });
+    const status = await serviceStatus({ home, pathValue, commandRunner, environment });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
     return { ...status, changed };
   } catch (error) {
     await rm(temporary, { force: true });
     if (previous === null) {
-      await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
       await rm(unitPath, { force: true });
-      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
+      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true, environment });
     } else {
       if (changed) await writeFile(unitPath, previous, { mode: 0o600 });
-      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
-      if (previousStatus.enabled) await systemctl(commandRunner, ['enable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-      else await systemctl(commandRunner, ['disable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-      if (previousStatus.active) await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-      else await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+      await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true, environment });
+      if (previousStatus.enabled) await systemctl(commandRunner, ['enable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+      else await systemctl(commandRunner, ['disable', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+      if (previousStatus.active) await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+      else await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
     }
     throw error;
   }
 }
 
-export async function serviceStatus({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand } = {}) {
+export async function serviceStatus({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand, environment = process.env } = {}) {
   const { unitPath } = servicePaths(home);
   const installed = await assertManagedOrMissing(unitPath);
   if (!installed) return { service: INBOX_SERVICE_NAME, installed: false, enabled: false, active: false, unitPath };
-  const enabled = await systemctl(commandRunner, ['is-enabled', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-  const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  const enabled = await systemctl(commandRunner, ['is-enabled', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+  const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
   return {
     service: INBOX_SERVICE_NAME,
     installed: true,
@@ -263,22 +275,22 @@ export async function serviceStatus({ home = homedir(), pathValue = process.env.
   };
 }
 
-export async function restartInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand } = {}) {
+export async function restartInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand, environment = process.env } = {}) {
   const { unitPath } = servicePaths(home);
   if (!await assertManagedOrMissing(unitPath)) throw new Error('persistent_inbox_service_not_installed');
-  await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue });
-  return serviceStatus({ home, pathValue, commandRunner });
+  await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, environment });
+  return serviceStatus({ home, pathValue, commandRunner, environment });
 }
 
-export async function uninstallInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand } = {}) {
+export async function uninstallInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand, environment = process.env } = {}) {
   const { unitPath } = servicePaths(home);
   if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath };
-  await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-  const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+  const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
   if (active.exitCode === 0 && active.stdout.trim() === 'active') throw new Error('persistent_inbox_service_still_active');
   await rm(unitPath, { force: true });
-  await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
-  await systemctl(commandRunner, ['reset-failed', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
+  await systemctl(commandRunner, ['reset-failed', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
   return { service: INBOX_SERVICE_NAME, installed: false, removed: true, unitPath };
 }
 
@@ -437,8 +449,7 @@ async function writeUpgradeLease(file) {
     leaseId: randomUUID(),
     pid: process.pid,
     createdAt: new Date().toISOString(),
-    ownerIdentity: await upgradeProcessIdentity(process.pid)
-  };
+    ownerIdentity: await upgradeProcessIdentity(process.pid)  };
   await writeFile(file, JSON.stringify(lease), { flag: 'wx', mode: 0o600 });
   return lease;
 }
