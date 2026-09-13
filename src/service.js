@@ -5,6 +5,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const INBOX_SERVICE_NAME = 'engineering-orchestrator-inbox.service';
+export const MAINTENANCE_SERVICE_NAME = 'engineering-orchestrator-maintenance.service';
+export const MAINTENANCE_TIMER_NAME = 'engineering-orchestrator-maintenance.timer';
 const managedMarker = '# managed-by=engineering-orchestrator:v1';
 
 function validateText(value, label) {
@@ -123,9 +125,61 @@ export function renderInboxServiceUnit({ repositoryRoot, nodePath, home = homedi
   ].join('\n');
 }
 
+export function renderMaintenanceServiceUnit({ repositoryRoot, nodePath, home = homedir(), environment = {} }) {
+  const rawRoot = validateText(repositoryRoot, 'repositoryRoot');
+  const rawNode = validateText(nodePath, 'nodePath');
+  if (!isAbsolute(rawRoot) || !isAbsolute(rawNode)) throw new Error('service paths must be absolute');
+  const root = resolve(rawRoot);
+  const node = resolve(rawNode);
+  const cli = join(root, 'src', 'cli.js');
+  const runtimeEnvironment = serviceRuntimeEnvironment(environment);
+  const environmentLines = Object.entries(runtimeEnvironment).map(([name, value]) => `Environment=${systemdQuote(`${name}=${value}`)}`);
+  return [
+    managedMarker,
+    '[Unit]',
+    'Description=Engineering Orchestrator governed maintenance',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    `WorkingDirectory=${systemdQuote(root)}`,
+    `ExecStart=${systemdQuote(node)} ${systemdQuote(cli)} service maintain`,
+    `Environment=${systemdQuote(`PATH=${trustedServicePath(node)}`)}`,
+    `Environment=${systemdQuote(`HOME=${resolve(home)}`)}`,
+    ...environmentLines,
+    'UMask=0077',
+    'StandardOutput=journal',
+    'StandardError=journal',
+    ''
+  ].join('\n');
+}
+
+export function renderMaintenanceTimerUnit() {
+  return [
+    managedMarker,
+    '[Unit]',
+    'Description=Engineering Orchestrator governed maintenance schedule',
+    '',
+    '[Timer]',
+    'OnCalendar=hourly',
+    'RandomizedDelaySec=10min',
+    'AccuracySec=1min',
+    'Persistent=true',
+    `Unit=${MAINTENANCE_SERVICE_NAME}`,
+    '',
+    '[Install]',
+    'WantedBy=timers.target',
+    ''
+  ].join('\n');
+}
+
 function servicePaths(home) {
   const unitDirectory = join(resolve(home), '.config', 'systemd', 'user');
-  return { unitDirectory, unitPath: join(unitDirectory, INBOX_SERVICE_NAME) };
+  return {
+    unitDirectory,
+    unitPath: join(unitDirectory, INBOX_SERVICE_NAME),
+    maintenanceServicePath: join(unitDirectory, MAINTENANCE_SERVICE_NAME),
+    maintenanceTimerPath: join(unitDirectory, MAINTENANCE_TIMER_NAME)
+  };
 }
 
 async function assertManagedOrMissing(unitPath) {
@@ -150,6 +204,64 @@ async function systemctl(commandRunner, args, { home, pathValue, allowFailure = 
   });
   if (!allowFailure && result.exitCode !== 0) throw new Error(`systemd_user_command_failed:${args[0]}`);
   return result;
+}
+
+async function syncMaintenanceUnits({ repositoryRoot, nodePath, home, pathValue, commandRunner, environment }) {
+  const { maintenanceServicePath, maintenanceTimerPath } = servicePaths(home);
+  const serviceExisted = await assertManagedOrMissing(maintenanceServicePath);
+  const timerExisted = await assertManagedOrMissing(maintenanceTimerPath);
+  const previousService = serviceExisted ? await readFile(maintenanceServicePath, 'utf8') : null;
+  const previousTimer = timerExisted ? await readFile(maintenanceTimerPath, 'utf8') : null;
+  const previousEnabled = timerExisted ? await systemctl(commandRunner, ['is-enabled', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true }) : null;
+  const previousActive = timerExisted ? await systemctl(commandRunner, ['is-active', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true }) : null;
+  const serviceUnit = renderMaintenanceServiceUnit({ repositoryRoot, nodePath, home, environment });
+  const timerUnit = renderMaintenanceTimerUnit();
+  const serviceChanged = previousService !== serviceUnit;
+  const timerChanged = previousTimer !== timerUnit;
+  const serviceTemporary = `${maintenanceServicePath}.tmp-${process.pid}`;
+  const timerTemporary = `${maintenanceTimerPath}.tmp-${process.pid}`;
+  try {
+    if (serviceChanged) {
+      await writeFile(serviceTemporary, serviceUnit, { mode: 0o600, flag: 'wx' });
+      await rename(serviceTemporary, maintenanceServicePath);
+    }
+    if (timerChanged) {
+      await writeFile(timerTemporary, timerUnit, { mode: 0o600, flag: 'wx' });
+      await rename(timerTemporary, maintenanceTimerPath);
+    }
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
+    await systemctl(commandRunner, ['enable', '--now', MAINTENANCE_TIMER_NAME], { home, pathValue });
+    const enabled = await systemctl(commandRunner, ['is-enabled', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+    const active = await systemctl(commandRunner, ['is-active', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+    if (enabled.exitCode !== 0 || enabled.stdout.trim() !== 'enabled' || active.exitCode !== 0 || active.stdout.trim() !== 'active') throw new Error('automatic_maintenance_timer_failed_to_start');
+    return { enabled: true, active: true, changed: serviceChanged || timerChanged };
+  } catch (error) {
+    await rm(serviceTemporary, { force: true });
+    await rm(timerTemporary, { force: true });
+    await systemctl(commandRunner, ['disable', '--now', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+    if (previousService === null) await rm(maintenanceServicePath, { force: true });
+    else if (serviceChanged) await writeFile(maintenanceServicePath, previousService, { mode: 0o600 });
+    if (previousTimer === null) await rm(maintenanceTimerPath, { force: true });
+    else if (timerChanged) await writeFile(maintenanceTimerPath, previousTimer, { mode: 0o600 });
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
+    if (previousEnabled?.exitCode === 0 && previousEnabled.stdout.trim() === 'enabled') await systemctl(commandRunner, ['enable', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+    if (previousActive?.exitCode === 0 && previousActive.stdout.trim() === 'active') await systemctl(commandRunner, ['start', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+    throw error;
+  }
+}
+
+async function removeMaintenanceUnits({ home, pathValue, commandRunner }) {
+  const { maintenanceServicePath, maintenanceTimerPath } = servicePaths(home);
+  const serviceManaged = await assertManagedOrMissing(maintenanceServicePath);
+  const timerManaged = await assertManagedOrMissing(maintenanceTimerPath);
+  if (!serviceManaged && !timerManaged) return { removed: false };
+  await systemctl(commandRunner, ['disable', '--now', MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+  await systemctl(commandRunner, ['stop', MAINTENANCE_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  if (timerManaged) await rm(maintenanceTimerPath, { force: true });
+  if (serviceManaged) await rm(maintenanceServicePath, { force: true });
+  await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
+  await systemctl(commandRunner, ['reset-failed', MAINTENANCE_SERVICE_NAME, MAINTENANCE_TIMER_NAME], { home, pathValue, allowFailure: true });
+  return { removed: true };
 }
 
 export async function installInboxService({
@@ -181,7 +293,8 @@ export async function installInboxService({
     await systemctl(commandRunner, ['enable', '--now', INBOX_SERVICE_NAME], { home, pathValue });
     const status = await serviceStatus({ home, pathValue, commandRunner });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
-    return status;
+    const maintenance = await syncMaintenanceUnits({ repositoryRoot: resolve(repositoryRoot), nodePath, home, pathValue, commandRunner, environment });
+    return { ...status, maintenance };
   } catch (error) {
     await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
     await rm(unitPath, { force: true });
@@ -229,7 +342,8 @@ export async function syncInboxService({
     await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue });
     const status = await serviceStatus({ home, pathValue, commandRunner });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
-    return { ...status, changed };
+    const maintenance = await syncMaintenanceUnits({ repositoryRoot: root, nodePath, home, pathValue, commandRunner, environment });
+    return { ...status, changed, maintenance };
   } catch (error) {
     await rm(temporary, { force: true });
     if (previous === null) {
@@ -272,14 +386,16 @@ export async function restartInboxService({ home = homedir(), pathValue = proces
 
 export async function uninstallInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand } = {}) {
   const { unitPath } = servicePaths(home);
-  if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath };
+  const installed = await assertManagedOrMissing(unitPath);
+  const maintenance = await removeMaintenanceUnits({ home, pathValue, commandRunner });
+  if (!installed) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath, maintenance };
   await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
   const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
   if (active.exitCode === 0 && active.stdout.trim() === 'active') throw new Error('persistent_inbox_service_still_active');
   await rm(unitPath, { force: true });
   await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
   await systemctl(commandRunner, ['reset-failed', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
-  return { service: INBOX_SERVICE_NAME, installed: false, removed: true, unitPath };
+  return { service: INBOX_SERVICE_NAME, installed: false, removed: true, unitPath, maintenance };
 }
 
 
@@ -591,6 +707,16 @@ async function performInboxServiceUpgrade({
       rollbackError = rollback;
     }
     if (rollbackError) throw new Error('operator_upgrade_failed_rollback_incomplete', { cause: error });
+    throw error;
+  }
+}
+
+export async function maintainInboxService(options = {}) {
+  try {
+    const result = await upgradeInboxService(options);
+    return { skipped: false, ...result };
+  } catch (error) {
+    if (/^(?:operator_upgrade_active_(?:run|workflow|request):|operator_upgrade_in_progress$|operator_upgrade_lease_timeout$)/.test(error.message)) return { skipped: true, reason: error.message };
     throw error;
   }
 }
