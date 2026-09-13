@@ -1304,16 +1304,16 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
+  let operationError = null;
   try {
-    for (;;) {
-      if (signal?.aborted) return;
+    while (!signal?.aborted) {
       try {
         const result = await queue.tick();
         await onTick?.(result);
       } catch (error) {
         await onError?.(error);
       }
-      if (signal?.aborted) return;
+      if (signal?.aborted) break;
       await new Promise((resolveSleep) => {
         let timer = null;
         let settled = false;
@@ -1332,8 +1332,14 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
         }
       });
     }
-  } finally {
-    const released = await queue.releaseWatcherLease(lease.leaseId);
-    if (!released) throw new Error('issue_queue_watcher_lease_lost');
+  } catch (error) {
+    operationError = error;
   }
+  let released = false;
+  let releaseError = null;
+  try { released = await queue.releaseWatcherLease(lease.leaseId); }
+  catch (error) { releaseError = error; }
+  if (releaseError) throw new Error('issue_queue_watcher_lease_release_failed', { cause: releaseError });
+  if (!released) throw new Error('issue_queue_watcher_lease_lost', { cause: operationError ?? undefined });
+  if (operationError) throw operationError;
 }
