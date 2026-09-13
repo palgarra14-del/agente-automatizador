@@ -87,6 +87,15 @@ async function engine({ runner, projects, workspaceManager, localGit, skillExecu
   return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
+function fixtureEvidenceFingerprint(value) {
+  const canonical = (input) => {
+    if (Array.isArray(input)) return input.map(canonical);
+    if (input && typeof input === 'object') return Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])]));
+    return input;
+  };
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+
 function completeStep(plan, id) {
   const step = plan.steps.find((candidate) => candidate.id === id);
   if (!step) throw new Error(`Unknown workflow step fixture: ${id}`);
@@ -124,7 +133,20 @@ function completeStep(plan, id) {
     step.evidence = { ...capability, type: 'executor', ok: true, completedAt, result: { reviewEvidence: { verdict: 'PASS', summary: 'fixture review passed', findings: [] } }, reviewedChangeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null };
   }
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
-  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt, approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id) };
+  else if (step.type === 'checkpoint') {
+    const checkpointEvidence = { ...capability, approvedAt: completedAt };
+    if (plan.profile === 'app-improvement' && step.id === 'plan-change') {
+      const diagnosisStep = plan.steps.find((candidate) => candidate.id === 'diagnose');
+      diagnosisStep.evidence ??= { ...capability, type: 'executor', ok: true, completedAt };
+      diagnosisStep.evidence.result ??= {};
+      diagnosisStep.evidence.result.diagnosis ??= { summary: 'fixture diagnosis', cause: 'fixture cause' };
+      diagnosisStep.evidence.result.diagnosis.recommendedChange ??= 'fixture approved change';
+      checkpointEvidence.approvedRecommendedChange = diagnosisStep.evidence.result.diagnosis.recommendedChange;
+      checkpointEvidence.approvedDiagnosisFingerprint = fixtureEvidenceFingerprint(diagnosisStep.evidence.result.diagnosis);
+    }
+    checkpointEvidence.approvedDependencyEvidenceFingerprint = humanApprovalDependencyFingerprint(plan, step.id);
+    step.evidence = checkpointEvidence;
+  }
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
 }
