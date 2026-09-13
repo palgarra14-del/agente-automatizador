@@ -3818,6 +3818,17 @@ function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   return environment;
 }
 
+function diagnosticCommandExecutable(command) {
+  const first = String(command ?? '').trim().split(/\s+/, 1)[0] ?? '';
+  return clip(first, 300);
+}
+
+function diagnosticErrorLines(output) {
+  const signal = /(?:\berror\b|\bfailed\b|\bfailure\b|\bmissing\b|not found|no such file|enoent|eacces|permission denied|operation not permitted|cannot|could not|spawn|exit(?:ed)?(?: code)?\s*\d+)/i;
+  const lines = String(output ?? '').split(/\r?\n/).filter((line) => signal.test(line));
+  return clip(lines.slice(-12).join('\n'), 2_000);
+}
+
 export function codexTurnFailureDiagnostics(items = []) {
   if (!Array.isArray(items)) return [];
   const diagnostics = [];
@@ -3828,8 +3839,8 @@ export function codexTurnFailureDiagnostics(items = []) {
     } else if (item.type === 'command_execution' && item.status === 'failed') {
       diagnostics.push({
         type: 'command_execution',
-        command: clip(item.command, 800),
-        output: clip(item.aggregated_output, 3_000),
+        executable: diagnosticCommandExecutable(item.command),
+        errorOutput: diagnosticErrorLines(item.aggregated_output),
         exitCode: Number.isInteger(item.exit_code) ? item.exit_code : null
       });
     } else if (item.type === 'file_change' && item.status === 'failed') {
