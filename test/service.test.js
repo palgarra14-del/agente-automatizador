@@ -385,7 +385,14 @@ test('service installation fails closed outside Linux', async () => {
 });
 
 
-const upgradeEnvironment = (home) => ({ PATH: '/tmp/untrusted:/usr/bin', HOME: home, GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890' });
+const upgradeEnvironment = (home) => ({
+  PATH: '/tmp/untrusted:/usr/bin',
+  HOME: home,
+  XDG_RUNTIME_DIR: '/run/user/1000',
+  DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+  GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890',
+  ORCHESTRATOR_TEST_SECRET: 'must-not-cross-upgrade-boundary'
+});
 const upgradeOptions = (home, root, runner, stateLoader = async () => ({})) => ({
   repositoryRoot: root,
   expectedRepository: 'palgarra14-del/agente-automatizador',
@@ -456,7 +463,12 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       npmCalls += 1;
       return failAllNpm || (failFirstNpm && npmCalls === 1) ? result('', 1) : result();
     }
-    if (command === process.execPath) assert.match(options.env.GITHUB_TOKEN ?? '', /^gho_/);
+    if (command === process.execPath) {
+      assert.match(options.env.GITHUB_TOKEN ?? '', /^gho_/);
+      assert.equal(options.env.XDG_RUNTIME_DIR, '/run/user/1000');
+      assert.equal(options.env.DBUS_SESSION_BUS_ADDRESS, 'unix:path=/run/user/1000/bus');
+      assert.equal(options.env.ORCHESTRATOR_TEST_SECRET, undefined);
+    }
     return result(command === process.execPath ? '{}\n' : '');
   };
   return { runner, calls, oldSha, newSha };
@@ -492,6 +504,36 @@ test('automatic upgrade treats busy state as a benign skip but preserves real fa
     }),
     /persistent_inbox_service_requires_linux_systemd/
   );
+});
+
+test('operator upgrade rejects a relative systemd runtime directory before external work', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-invalid-bus-'));
+  const calls = [];
+  try {
+    await assert.rejects(
+      upgradeInboxService({
+        repositoryRoot: '/unused',
+        expectedRepository: 'palgarra14-del/agente-automatizador',
+        stateLoader: async () => ({}),
+        home,
+        platform: 'linux',
+        commandRunner: async (command, args) => {
+          calls.push([command, ...args]);
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+        environment: {
+          PATH: '/usr/bin:/bin',
+          HOME: home,
+          XDG_RUNTIME_DIR: 'relative/runtime',
+          DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus'
+        }
+      }),
+      /XDG_RUNTIME_DIR must be absolute/
+    );
+    assert.equal(calls.length, 0);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('operator upgrade unsafe Git config pattern is accepted by real git', async () => {
