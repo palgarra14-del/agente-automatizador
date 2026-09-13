@@ -396,12 +396,13 @@ export async function upgradeInboxService({
   try {
     assertOperatorUpgradeIdleState(await stateLoader());
   } catch (error) {
-    await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue: trustedPath, allowFailure: true });
+    const restored = await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue: trustedPath, allowFailure: true });
+    if (restored.exitCode !== 0) throw new Error('operator_upgrade_state_changed_watcher_restore_failed', { cause: error });
     throw error;
   }
   let upgraded = false;
   try {
-    await checkedUpgradeCommand(commandRunner, 'git', ['merge', '--ff-only', remoteRef], { cwd: root, env, timeoutMs: 60_000 });
+    await checkedUpgradeCommand(commandRunner, 'git', ['-c', 'core.hooksPath=/dev/null', 'merge', '--ff-only', remoteRef], { cwd: root, env, timeoutMs: 60_000 });
     upgraded = true;
     await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
     await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
