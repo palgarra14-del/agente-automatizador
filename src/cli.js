@@ -4,7 +4,7 @@ import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProj
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
-import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService } from './service.js';
+import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -159,9 +159,16 @@ try {
       console.log(JSON.stringify(await serviceStatus(), null, 2));
     } else if (action === 'restart') {
       console.log(JSON.stringify(await restartInboxService(), null, 2));
+    } else if (action === 'upgrade') {
+      const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
+      console.log(JSON.stringify(await upgradeInboxService({
+        repositoryRoot: resolve('.'),
+        expectedRepository: queueConfig.repository,
+        state: await store.load()
+      }), null, 2));
     } else if (action === 'uninstall') {
       console.log(JSON.stringify(await uninstallInboxService(), null, 2));
-    } else throw new Error('Usage: agent service <install|sync|status|restart|uninstall>');
+    } else throw new Error('Usage: agent service <install|sync|status|restart|upgrade|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
