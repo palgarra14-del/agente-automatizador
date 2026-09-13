@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -134,6 +134,19 @@ test('runtime config loader rejects symlinked configuration files', async () => 
   }
 });
 
+test('runtime config loader rejects hardlinked configuration files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-config-'));
+  try {
+    const real = join(root, 'real.json');
+    const linked = join(root, 'runtime-images.json');
+    await writeFile(real, JSON.stringify(buildConfig()));
+    await link(real, linked);
+    await assert.rejects(loadRuntimeImageConfig(linked), /runtime_image_config_file_invalid/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('checked-in runtime recipe matches the checked-in LeadFinder build context', async () => {
   const config = await loadRuntimeImageConfig(resolve('config/runtime-images.json'));
   const f = fixture({ present: [PINNED] });
@@ -243,6 +256,30 @@ test('managed local runtime with a missing or wrong recipe label is rebuilt', as
     });
     assert.equal(result.images.find((entry) => entry.image === LOCAL).action, 'rebuilt');
     assert.equal(f.calls.filter((call) => call.args.includes('build')).length, 1);
+  } finally {
+    await rm(repoFixture.root, { recursive: true, force: true });
+  }
+});
+
+test('managed local build rejects hardlinked manifest files before Docker execution', async () => {
+  const repoFixture = await buildRepository();
+  const config = buildConfig();
+  const alternate = join(repoFixture.root, 'alternate-Dockerfile');
+  const f = fixture({ present: [PINNED] });
+  try {
+    await writeFile(alternate, DOCKERFILE);
+    await rm(join(repoFixture.context, 'Dockerfile'));
+    await link(alternate, join(repoFixture.context, 'Dockerfile'));
+    await assert.rejects(
+      syncProjectRuntimes(projects(), {
+        buildConfig: config,
+        repositoryRoot: repoFixture.root,
+        environment: { PATH: '/usr/bin:/bin' },
+        commandRunner: f.runner
+      }),
+      /runtime_build_context_file_invalid/
+    );
+    assert.equal(f.calls.some((call) => call.args.includes('build')), false);
   } finally {
     await rm(repoFixture.root, { recursive: true, force: true });
   }
