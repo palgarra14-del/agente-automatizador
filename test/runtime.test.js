@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { lstat } from 'node:fs/promises';
 import test from 'node:test';
 import { isDigestPinnedRuntimeImage, projectRuntimeStatus, syncProjectRuntimes } from '../src/runtime.js';
 
@@ -79,6 +80,7 @@ test('runtime sync pulls each missing digest-pinned image exactly once and verif
   assert.deepEqual(pulls[0].args.slice(2), ['pull', '--quiet', PINNED]);
   assert.equal(pulls[0].options.env.HOME, undefined);
   assert.equal(pulls[0].options.env.GITHUB_TOKEN, undefined);
+  await assert.rejects(lstat(pulls[0].args[1]), /ENOENT/);
 });
 
 test('runtime sync performs no pull when configured images are already present', async () => {
