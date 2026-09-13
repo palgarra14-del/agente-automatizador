@@ -41,7 +41,7 @@ export function normalizeRuntimeImageConfig(value) {
   const seen = new Set();
   const builds = value.builds.map((input, index) => {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error(`runtime_image_build_${index}_invalid`);
-    if (Object.keys(input).some((key) => !['image', 'context', 'files'].includes(key))) throw new Error(`runtime_image_build_${index}_invalid`);
+    if (Object.keys(input).some((key) => !['image', 'context', 'files', 'fingerprint'].includes(key))) throw new Error(`runtime_image_build_${index}_invalid`);
     const image = boundedText(input.image, `runtime_image_build_${index}_image`, 512);
     if (!literalImagePattern.test(image) || digestPinnedImagePattern.test(image)) throw new Error(`runtime_image_build_${index}_image_invalid`);
     if (seen.has(image)) throw new Error('runtime_image_build_duplicate');
@@ -61,7 +61,9 @@ export function normalizeRuntimeImageConfig(value) {
     }).sort((a, b) => a.path.localeCompare(b.path));
     if (!fileNames.has('Dockerfile')) throw new Error(`runtime_image_build_${index}_requires_dockerfile`);
     const recipe = { image, context, files };
-    return { ...recipe, fingerprint: fingerprint(recipe) };
+    const recipeFingerprint = fingerprint(recipe);
+    if (input.fingerprint !== undefined && input.fingerprint !== recipeFingerprint) throw new Error(`runtime_image_build_${index}_fingerprint_invalid`);
+    return { ...recipe, fingerprint: recipeFingerprint };
   });
   return { version: 1, builds };
 }
