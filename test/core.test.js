@@ -1661,9 +1661,11 @@ test('Codex worker permission profile remains fail-closed on unknown platforms',
   assert.equal(constructed, 0);
 });
 
-test('Codex worker security config denies root reads on verified platforms and blocks native Windows', () => {
-  const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux' });
-  const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin' });
+test('Codex worker security config denies root reads, exposes only the exact native runtime, and blocks native Windows', () => {
+  const writeRuntime = '/opt/agent-native/codex-linux-x64';
+  const readRuntime = '/opt/agent-native/codex-darwin-x64';
+  const write = codexWorkerSecurityConfig({ writeAccess: true, pathValue: '/bin:/usr/bin', platform: 'linux', nativeRuntimePath: writeRuntime });
+  const read = codexWorkerSecurityConfig({ writeAccess: false, pathValue: '/bin:/usr/bin', platform: 'darwin', nativeRuntimePath: readRuntime });
   const windowsRead = codexWorkerSecurityConfig({ writeAccess: false, pathValue: 'C:\\safe', platform: 'win32' });
   const windowsWrite = codexWorkerSecurityConfig({ writeAccess: true, pathValue: 'C:\\safe', platform: 'win32' });
   assert.equal(write.supported, true);
@@ -1678,9 +1680,26 @@ test('Codex worker security config denies root reads on verified platforms and b
   assert.match(writeProfile, /":minimal"="read"/);
   assert.match(writeProfile, /":workspace_roots"=\{"\."="write","\.git"="read"\}/);
   assert.match(readProfile, /":workspace_roots"=\{"\."="read","\.git"="read"\}/);
+  assert.ok(writeProfile.includes(`${JSON.stringify(writeRuntime)}="read"`));
+  assert.ok(readProfile.includes(`${JSON.stringify(readRuntime)}="read"`));
+  assert.equal(writeProfile.includes('"/opt/agent-native"="read"'), false);
+  assert.equal(writeProfile.includes('"/opt"="read"'), false);
   assert.ok(write.configOverrides.includes('shell_environment_policy.set.PATH="/bin:/usr/bin"'));
   assert.equal(windowsRead.configOverrides.length, 0);
   assert.equal(windowsWrite.configOverrides.length, 0);
+
+  const unavailable = codexWorkerSecurityConfig({
+    platform: 'linux',
+    arch: 'x64',
+    nativeRuntimeResolver: () => { throw new Error('fixture secret must not escape'); }
+  });
+  assert.equal(unavailable.supported, false);
+  assert.equal(unavailable.error, 'codex_worker_native_runtime_unavailable_on_linux_x64');
+  assert.equal(JSON.stringify(unavailable).includes('fixture secret'), false);
+
+  const invalidRoot = codexWorkerSecurityConfig({ platform: 'linux', nativeRuntimePath: '/' });
+  assert.equal(invalidRoot.supported, false);
+  assert.equal(invalidRoot.error, 'codex_worker_native_runtime_path_invalid');
   assert.equal(codexWorkerSecurityConfig({ platform: 'freebsd' }).supported, false);
 });
 

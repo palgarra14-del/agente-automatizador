@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { URL, URLSearchParams } from 'node:url';
@@ -3717,17 +3718,72 @@ function workerEnvironment(environment = process.env) {
 }
 
 const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
+const codexNativePackageByRuntime = Object.freeze({
+  linux: Object.freeze({
+    x64: '@openai/codex-linux-x64',
+    arm64: '@openai/codex-linux-arm64'
+  }),
+  darwin: Object.freeze({
+    x64: '@openai/codex-darwin-x64',
+    arm64: '@openai/codex-darwin-arm64'
+  })
+});
+const codexModuleRequire = createRequire(import.meta.url);
 const workerProjectControlFiles = Object.freeze(['.codex/config.toml', '.codex/requirements.toml']);
 
-export function codexWorkerSecurityConfig({ writeAccess = false, pathValue = process.env.PATH ?? '', platform = process.platform } = {}) {
+export function resolveCodexNativeRuntimePath({
+  platform = process.platform,
+  arch = process.arch,
+  resolvePackage = (specifier) => codexModuleRequire.resolve(specifier)
+} = {}) {
+  const packageName = codexNativePackageByRuntime[platform]?.[arch];
+  if (!packageName) throw new Error(`codex_worker_native_runtime_unverified_on_${platform}_${arch}`);
+  try {
+    const packageJsonPath = resolvePackage(`${packageName}/package.json`);
+    const packageRoot = dirname(packageJsonPath);
+    if (resolve(packageRoot) !== packageRoot || packageRoot === parse(packageRoot).root) throw new Error('invalid_native_runtime_root');
+    return packageRoot;
+  } catch {
+    throw new Error(`codex_worker_native_runtime_unavailable_on_${platform}_${arch}`);
+  }
+}
+
+export function codexWorkerSecurityConfig({
+  writeAccess = false,
+  pathValue = process.env.PATH ?? '',
+  platform = process.platform,
+  arch = process.arch,
+  nativeRuntimePath,
+  nativeRuntimeResolver = resolveCodexNativeRuntimePath
+} = {}) {
   if (platform === 'win32') {
     return { supported: false, error: 'codex_worker_native_windows_isolation_unverified_use_wsl', configOverrides: [] };
   }
   if (!verifiedCodexWorkerPlatforms.has(platform)) {
     return { supported: false, error: `codex_worker_read_isolation_unverified_on_${platform}`, configOverrides: [] };
   }
+  let runtimePath = nativeRuntimePath;
+  if (runtimePath === undefined) {
+    try {
+      runtimePath = nativeRuntimeResolver({ platform, arch });
+    } catch {
+      return {
+        supported: false,
+        error: `codex_worker_native_runtime_unavailable_on_${platform}_${arch}`,
+        configOverrides: []
+      };
+    }
+  }
+  if (typeof runtimePath !== 'string' || !runtimePath.trim()) {
+    return { supported: false, error: 'codex_worker_native_runtime_path_invalid', configOverrides: [] };
+  }
+  const normalizedRuntimePath = resolve(runtimePath);
+  if (normalizedRuntimePath !== runtimePath || normalizedRuntimePath === parse(normalizedRuntimePath).root) {
+    return { supported: false, error: 'codex_worker_native_runtime_path_invalid', configOverrides: [] };
+  }
   const workspaceAccess = writeAccess ? 'write' : 'read';
-  const filesystemProfile = `{":root"="deny",":minimal"="read",":tmpdir"="deny",":slash_tmp"="deny",":workspace_roots"={"."="${workspaceAccess}",".git"="read"}}`;
+  const nativeRuntimeRule = `${JSON.stringify(normalizedRuntimePath)}="read"`;
+  const filesystemProfile = `{":root"="deny",":minimal"="read",":tmpdir"="deny",":slash_tmp"="deny",${nativeRuntimeRule},":workspace_roots"={"."="${workspaceAccess}",".git"="read"}}`;
   return {
     supported: true,
     error: null,
