@@ -5,6 +5,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const INBOX_SERVICE_NAME = 'engineering-orchestrator-inbox.service';
+export const AUTO_UPGRADE_SERVICE_NAME = 'engineering-orchestrator-upgrade.service';
+export const AUTO_UPGRADE_TIMER_NAME = 'engineering-orchestrator-upgrade.timer';
 const managedMarker = '# managed-by=engineering-orchestrator:v1';
 
 function validateText(value, label) {
@@ -149,9 +151,67 @@ export function renderInboxServiceUnit({ repositoryRoot, nodePath, home = homedi
   ].join('\n');
 }
 
+export function renderAutoUpgradeServiceUnit({ repositoryRoot, nodePath, home = homedir(), environment = {} }) {
+  const rawRoot = validateText(repositoryRoot, 'repositoryRoot');
+  const rawNode = validateText(nodePath, 'nodePath');
+  if (!isAbsolute(rawRoot) || !isAbsolute(rawNode)) throw new Error('service paths must be absolute');
+  const root = resolve(rawRoot);
+  const node = resolve(rawNode);
+  const cli = join(root, 'src', 'cli.js');
+  const runtimeEnvironment = serviceRuntimeEnvironment(environment);
+  const environmentLines = Object.entries(runtimeEnvironment).map(([name, value]) => `Environment=${systemdQuote(`${name}=${value}`)}`);
+  return [
+    managedMarker,
+    '[Unit]',
+    'Description=Engineering Orchestrator verified auto-upgrade',
+    `After=network-online.target ${INBOX_SERVICE_NAME}`,
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=oneshot',
+    `WorkingDirectory=${root}`,
+    `ExecStart=${systemdQuote(node)} ${systemdQuote(cli)} service auto-upgrade`,
+    `Environment=${systemdQuote(`PATH=${trustedServicePath(node)}`)}`,
+    `Environment=${systemdQuote(`HOME=${resolve(home)}`)}`,
+    ...environmentLines,
+    'UMask=0077',
+    'StandardOutput=journal',
+    'StandardError=journal',
+    ''
+  ].join('\n');
+}
+
+export function renderAutoUpgradeTimerUnit() {
+  return [
+    managedMarker,
+    '[Unit]',
+    'Description=Periodic verified Engineering Orchestrator upgrade check',
+    '',
+    '[Timer]',
+    'OnBootSec=2min',
+    'OnUnitActiveSec=10min',
+    'RandomizedDelaySec=30s',
+    'Persistent=true',
+    `Unit=${AUTO_UPGRADE_SERVICE_NAME}`,
+    '',
+    '[Install]',
+    'WantedBy=timers.target',
+    ''
+  ].join('\n');
+}
+
 function servicePaths(home) {
   const unitDirectory = join(resolve(home), '.config', 'systemd', 'user');
   return { unitDirectory, unitPath: join(unitDirectory, INBOX_SERVICE_NAME) };
+}
+
+function autoUpgradePaths(home) {
+  const unitDirectory = join(resolve(home), '.config', 'systemd', 'user');
+  return {
+    unitDirectory,
+    serviceUnitPath: join(unitDirectory, AUTO_UPGRADE_SERVICE_NAME),
+    timerUnitPath: join(unitDirectory, AUTO_UPGRADE_TIMER_NAME)
+  };
 }
 
 async function assertManagedOrMissing(unitPath) {
@@ -191,6 +251,139 @@ async function systemctl(commandRunner, args, { home, pathValue, allowFailure = 
   return result;
 }
 
+export async function autoUpgradeTimerStatus({
+  home = homedir(),
+  pathValue = process.env.PATH ?? '',
+  commandRunner = runLocalCommand,
+  environment = process.env
+} = {}) {
+  const { serviceUnitPath, timerUnitPath } = autoUpgradePaths(home);
+  const serviceInstalled = await assertManagedOrMissing(serviceUnitPath);
+  const timerInstalled = await assertManagedOrMissing(timerUnitPath);
+  const installed = serviceInstalled && timerInstalled;
+  if (!installed) {
+    return {
+      service: AUTO_UPGRADE_SERVICE_NAME,
+      timer: AUTO_UPGRADE_TIMER_NAME,
+      installed: false,
+      enabled: false,
+      active: false,
+      serviceUnitPath,
+      timerUnitPath
+    };
+  }
+  const enabled = await systemctl(commandRunner, ['is-enabled', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, allowFailure: true, environment });
+  const active = await systemctl(commandRunner, ['is-active', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, allowFailure: true, environment });
+  return {
+    service: AUTO_UPGRADE_SERVICE_NAME,
+    timer: AUTO_UPGRADE_TIMER_NAME,
+    installed: true,
+    enabled: enabled.exitCode === 0 && enabled.stdout.trim() === 'enabled',
+    active: active.exitCode === 0 && active.stdout.trim() === 'active',
+    serviceUnitPath,
+    timerUnitPath
+  };
+}
+
+export async function syncAutoUpgradeTimer({
+  repositoryRoot = process.cwd(),
+  nodePath = process.execPath,
+  pathValue = process.env.PATH ?? '',
+  home = homedir(),
+  platform = process.platform,
+  commandRunner = runLocalCommand,
+  environment = process.env
+} = {}) {
+  if (platform !== 'linux') throw new Error('persistent_inbox_service_requires_linux_systemd');
+  const root = resolve(repositoryRoot);
+  const { unitDirectory, serviceUnitPath, timerUnitPath } = autoUpgradePaths(home);
+  await mkdir(unitDirectory, { recursive: true, mode: 0o700 });
+  const directoryInfo = await lstat(unitDirectory);
+  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('service_unit_directory_invalid');
+
+  const serviceExisted = await assertManagedOrMissing(serviceUnitPath);
+  const timerExisted = await assertManagedOrMissing(timerUnitPath);
+  const previousService = serviceExisted ? await readFile(serviceUnitPath, 'utf8') : null;
+  const previousTimer = timerExisted ? await readFile(timerUnitPath, 'utf8') : null;
+  const previousStatus = serviceExisted && timerExisted
+    ? await autoUpgradeTimerStatus({ home, pathValue, commandRunner, environment })
+    : null;
+  const serviceUnit = renderAutoUpgradeServiceUnit({ repositoryRoot: root, nodePath, home, environment });
+  const timerUnit = renderAutoUpgradeTimerUnit();
+  const serviceChanged = previousService !== serviceUnit;
+  const timerChanged = previousTimer !== timerUnit;
+  const serviceTemp = `${serviceUnitPath}.tmp-${process.pid}`;
+  const timerTemp = `${timerUnitPath}.tmp-${process.pid}`;
+
+  try {
+    if (serviceChanged) {
+      await writeFile(serviceTemp, serviceUnit, { mode: 0o600, flag: 'wx' });
+      await rename(serviceTemp, serviceUnitPath);
+    }
+    if (timerChanged) {
+      await writeFile(timerTemp, timerUnit, { mode: 0o600, flag: 'wx' });
+      await rename(timerTemp, timerUnitPath);
+    }
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
+    await systemctl(commandRunner, ['enable', '--now', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, environment });
+    const status = await autoUpgradeTimerStatus({ home, pathValue, commandRunner, environment });
+    if (!status.enabled || !status.active) throw new Error('auto_upgrade_timer_failed_to_start');
+    return { ...status, changed: serviceChanged || timerChanged };
+  } catch (error) {
+    await rm(serviceTemp, { force: true });
+    await rm(timerTemp, { force: true });
+    await systemctl(commandRunner, ['disable', '--now', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, allowFailure: true, environment });
+    if (previousService === null) await rm(serviceUnitPath, { force: true });
+    else if (serviceChanged) await writeFile(serviceUnitPath, previousService, { mode: 0o600 });
+    if (previousTimer === null) await rm(timerUnitPath, { force: true });
+    else if (timerChanged) await writeFile(timerUnitPath, previousTimer, { mode: 0o600 });
+    await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true, environment });
+    if (previousStatus?.enabled) {
+      const args = previousStatus.active
+        ? ['enable', '--now', AUTO_UPGRADE_TIMER_NAME]
+        : ['enable', AUTO_UPGRADE_TIMER_NAME];
+      await systemctl(commandRunner, args, { home, pathValue, allowFailure: true, environment });
+    }
+    throw error;
+  }
+}
+
+export async function uninstallAutoUpgradeTimer({
+  home = homedir(),
+  pathValue = process.env.PATH ?? '',
+  commandRunner = runLocalCommand,
+  environment = process.env
+} = {}) {
+  const { serviceUnitPath, timerUnitPath } = autoUpgradePaths(home);
+  const serviceInstalled = await assertManagedOrMissing(serviceUnitPath);
+  const timerInstalled = await assertManagedOrMissing(timerUnitPath);
+  if (!serviceInstalled && !timerInstalled) {
+    return {
+      service: AUTO_UPGRADE_SERVICE_NAME,
+      timer: AUTO_UPGRADE_TIMER_NAME,
+      installed: false,
+      removed: false,
+      serviceUnitPath,
+      timerUnitPath
+    };
+  }
+  await systemctl(commandRunner, ['disable', '--now', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, allowFailure: true, environment });
+  await systemctl(commandRunner, ['stop', AUTO_UPGRADE_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+  if (serviceInstalled) await rm(serviceUnitPath, { force: true });
+  if (timerInstalled) await rm(timerUnitPath, { force: true });
+  await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
+  await systemctl(commandRunner, ['reset-failed', AUTO_UPGRADE_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
+  await systemctl(commandRunner, ['reset-failed', AUTO_UPGRADE_TIMER_NAME], { home, pathValue, allowFailure: true, environment });
+  return {
+    service: AUTO_UPGRADE_SERVICE_NAME,
+    timer: AUTO_UPGRADE_TIMER_NAME,
+    installed: false,
+    removed: true,
+    serviceUnitPath,
+    timerUnitPath
+  };
+}
+
 export async function installInboxService({
   repositoryRoot = process.cwd(),
   nodePath = process.execPath,
@@ -220,7 +413,8 @@ export async function installInboxService({
     await systemctl(commandRunner, ['enable', '--now', INBOX_SERVICE_NAME], { home, pathValue, environment });
     const status = await serviceStatus({ home, pathValue, commandRunner, environment });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
-    return status;
+    const autoUpgrade = await syncAutoUpgradeTimer({ repositoryRoot, nodePath, pathValue, home, platform, commandRunner, environment });
+    return { ...status, autoUpgrade };
   } catch (error) {
     await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
     await rm(unitPath, { force: true });
@@ -268,7 +462,8 @@ export async function syncInboxService({
     await systemctl(commandRunner, ['restart', INBOX_SERVICE_NAME], { home, pathValue, environment });
     const status = await serviceStatus({ home, pathValue, commandRunner, environment });
     if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
-    return { ...status, changed };
+    const autoUpgrade = await syncAutoUpgradeTimer({ repositoryRoot: root, nodePath, pathValue, home, platform, commandRunner, environment });
+    return { ...status, changed, autoUpgrade };
   } catch (error) {
     await rm(temporary, { force: true });
     if (previous === null) {
@@ -310,6 +505,7 @@ export async function restartInboxService({ home = homedir(), pathValue = proces
 }
 
 export async function uninstallInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand, environment = process.env } = {}) {
+  const autoUpgrade = await uninstallAutoUpgradeTimer({ home, pathValue, commandRunner, environment });
   const { unitPath } = servicePaths(home);
   if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath };
   await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
@@ -318,7 +514,7 @@ export async function uninstallInboxService({ home = homedir(), pathValue = proc
   await rm(unitPath, { force: true });
   await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, environment });
   await systemctl(commandRunner, ['reset-failed', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
-  return { service: INBOX_SERVICE_NAME, installed: false, removed: true, unitPath };
+  return { service: INBOX_SERVICE_NAME, installed: false, removed: true, unitPath, autoUpgrade };
 }
 
 
@@ -683,4 +879,18 @@ export async function upgradeInboxService({
   if (releaseError || !released) throw new Error('operator_upgrade_lease_release_failed', { cause: operationError ?? releaseError ?? undefined });
   if (operationError) throw operationError;
   return output;
+}
+
+const automaticUpgradeSkippablePattern = /^(?:operator_upgrade_active_(?:run|workflow|request):|operator_upgrade_in_progress$|operator_upgrade_service_must_be_enabled_and_active$)/;
+
+export async function autoUpgradeInboxService(options = {}) {
+  try {
+    return { ...(await upgradeInboxService(options)), skipped: null };
+  } catch (error) {
+    const reason = String(error?.message ?? '');
+    if (automaticUpgradeSkippablePattern.test(reason)) {
+      return { upgraded: false, skipped: reason };
+    }
+    throw error;
+  }
 }
