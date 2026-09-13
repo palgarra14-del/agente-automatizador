@@ -13,7 +13,7 @@ function projects() {
   ];
 }
 
-function fixture({ dockerAvailable = true, present = [], pullFails = false } = {}) {
+function fixture({ dockerAvailable = true, present = [], pullFails = false, pullPersists = true } = {}) {
   const images = new Set(present);
   const calls = [];
   const runner = async (command, args, options) => {
@@ -31,7 +31,7 @@ function fixture({ dockerAvailable = true, present = [], pullFails = false } = {
     if (args[0] === 'pull') {
       const image = args.at(-1);
       if (pullFails) return { exitCode: 1, stdout: '', stderr: 'denied' };
-      images.add(image);
+      if (pullPersists) images.add(image);
       return { exitCode: 0, stdout: image, stderr: '' };
     }
     throw new Error(`unexpected docker command: ${args.join(' ')}`);
@@ -96,6 +96,14 @@ test('runtime sync fails closed when Docker or a managed pull is unavailable', a
   await assert.rejects(
     syncProjectRuntimes(projects(), { environment: { PATH: '/usr/bin:/bin' }, commandRunner: failingPull.runner }),
     /runtime_image_pull_failed:node:22-bookworm-slim@sha256:/
+  );
+});
+
+test('runtime sync verifies a successful pull actually made the exact image inspectable', async () => {
+  const f = fixture({ pullPersists: false });
+  await assert.rejects(
+    syncProjectRuntimes(projects(), { environment: { PATH: '/usr/bin:/bin' }, commandRunner: f.runner }),
+    /runtime_image_pull_verification_failed:node:22-bookworm-slim@sha256:/
   );
 });
 
