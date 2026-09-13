@@ -1323,16 +1323,19 @@ export class SupervisedIssueQueue {
   }
 }
 
-export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, onTick, onError } = {}) {
+export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
   if (!queue || typeof queue.claimWatcherLease !== 'function' || typeof queue.releaseWatcherLease !== 'function') {
     throw new Error('watchIssueQueue requires a lease-capable queue');
   }
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
+  if (beforeTick !== undefined && typeof beforeTick !== 'function') throw new Error('issue queue beforeTick must be a function');
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
   let operationError = null;
   try {
     while (!signal?.aborted) {
+      if (beforeTick && await beforeTick() === false) break;
+      if (signal?.aborted) break;
       try {
         const result = await queue.tick();
         await onTick?.(result);
