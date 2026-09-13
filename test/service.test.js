@@ -177,7 +177,8 @@ test('service installation fails closed outside Linux', async () => {
 function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, failFirstNpm = false } = {}) {
   const calls = [];
   let npmCalls = 0;
-  const runner = async (command, args) => {
+  let head = oldSha;
+  const runner = async (command, args, options = {}) => {
     calls.push([command, ...args]);
     if (command === 'systemctl') {
       const action = args[1];
@@ -193,14 +194,18 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       if (key === 'branch --show-current') return { exitCode: 0, stdout: 'main\n', stderr: '' };
       if (key === 'status --porcelain=v1 --untracked-files=normal') return { exitCode: 0, stdout: '', stderr: '' };
       if (key === 'remote get-url origin') return { exitCode: 0, stdout: 'https://github.com/palgarra14-del/agente-automatizador.git\n', stderr: '' };
-      if (key === 'rev-parse HEAD') return { exitCode: 0, stdout: oldSha + '\n', stderr: '' };
+      if (key === 'rev-parse HEAD') return { exitCode: 0, stdout: head + '\n', stderr: '' };
       if (key === 'rev-parse refs/remotes/origin/main') return { exitCode: 0, stdout: newSha + '\n', stderr: '' };
       if (key === `merge-base --is-ancestor ${oldSha} ${newSha}`) return { exitCode: 0, stdout: '', stderr: '' };
-      if (key === `rev-list --reverse ${oldSha}..${newSha}`) return { exitCode: 0, stdout: newSha + '\n', stderr: '' };
+      if (key === `rev-list --first-parent --reverse ${oldSha}..${newSha}`) return { exitCode: 0, stdout: newSha + '\n', stderr: '' };
+      if (args.includes('merge')) { head = newSha; return { exitCode: 0, stdout: '', stderr: '' }; }
+      if (args.includes('reset')) { head = oldSha; return { exitCode: 0, stdout: '', stderr: '' }; }
       return { exitCode: 0, stdout: '', stderr: '' };
     }
     if (command === 'gh') {
+      assert.equal(options.env.GH_HOST, 'github.com');
       const endpoint = args[1];
+      if (endpoint.includes('/branches/main')) return { exitCode: 0, stdout: JSON.stringify({ commit: { sha: newSha } }), stderr: '' };
       if (endpoint.includes(`commits/${newSha}/pulls`)) {
         return { exitCode: 0, stdout: JSON.stringify([{ merged_at: '2026-09-13T00:00:00Z', merge_commit_sha: newSha, base: { ref: 'main' }, head: { sha: 'c'.repeat(40) } }]), stderr: '' };
       }
@@ -229,6 +234,37 @@ test('operator upgrade refuses active work before touching Git or systemd', () =
   assert.throws(() => assertOperatorUpgradeIdleState({ requests: { a: { status: 'running', issueNumber: 42 } } }), /operator_upgrade_active_request:42/);
   assert.throws(() => assertOperatorUpgradeIdleState({ workflows: { w: { id: 'w', status: 'awaiting_approval' } } }), /operator_upgrade_active_workflow:w/);
   assert.equal(assertOperatorUpgradeIdleState({ runs: { r: { id: 'r', status: 'failed' } }, requests: { a: { status: 'rejected' } } }), true);
+});
+
+test('operator upgrade lease rejects a concurrent live upgrader before external work', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-lease-home-'));
+  const lockDirectory = join(home, '.config', 'engineering-orchestrator');
+  const calls = [];
+  try {
+    await mkdir(lockDirectory, { recursive: true });
+    await writeFile(join(lockDirectory, 'operator-upgrade.lock'), JSON.stringify({
+      leaseId: 'live-upgrade',
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+      ownerIdentity: null
+    }));
+    await assert.rejects(
+      upgradeInboxService({
+        repositoryRoot: '/tmp/unused',
+        expectedRepository: 'palgarra14-del/agente-automatizador',
+        stateLoader: async () => ({}),
+        home,
+        commandRunner: async (command, args) => {
+          calls.push([command, ...args]);
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+      }),
+      /operator_upgrade_in_progress/
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('operator upgrade verifies reviewed CI commits before fast-forwarding and restarting the new service', async () => {
@@ -325,7 +361,7 @@ test('operator upgrade fails closed on unverified CI and rolls back a failed loc
       }),
       /operator_upgrade_command_failed:npm:ci/
     );
-    assert.ok(rollback.calls.some((call) => call[0] === 'git' && call[1] === 'reset' && call[2] === '--hard' && call[3] === rollback.oldSha));
+    assert.ok(rollback.calls.some((call) => call[0] === 'git' && call.includes('reset') && call.includes('--hard') && call.includes(rollback.oldSha)));
     assert.ok(rollback.calls.filter((call) => call[0] === 'npm').length >= 2);
     assert.ok(rollback.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
   } finally {
