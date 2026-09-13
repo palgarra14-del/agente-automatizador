@@ -436,12 +436,12 @@ function safeIssueInline(value, maxBytes = 1_000) {
   return Buffer.from(safe, 'utf8').subarray(0, maxBytes).toString('utf8');
 }
 
-function workflowFailureSummary(workflow) {
+export function workflowFailureSummary(workflow) {
   const stepId = typeof workflow.result?.stepId === 'string' ? workflow.result.stepId : null;
   const step = workflow.steps?.find((candidate) => candidate.id === stepId)
     ?? workflow.steps?.find((candidate) => [WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(candidate.status))
     ?? null;
-  const detail = step?.evidence?.error ?? workflow.result?.detail ?? null;
+  const detail = step?.evidence?.error ?? step?.evidence?.workerEvidence?.output ?? step?.evidence?.workerEvidence?.summary ?? workflow.result?.detail ?? null;
   return {
     stepId: step?.id ?? stepId,
     skill: step?.skill ?? null,
