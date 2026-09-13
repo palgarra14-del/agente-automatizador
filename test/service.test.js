@@ -5,16 +5,24 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  AUTO_UPGRADE_SERVICE_NAME,
+  AUTO_UPGRADE_TIMER_NAME,
   INBOX_SERVICE_NAME,
+  assertOperatorUpgradeIdleState,
+  autoUpgradeInboxService,
+  autoUpgradeTimerStatus,
   ensureGitHubToken,
   installInboxService,
   readCheckoutRevision,
+  renderAutoUpgradeServiceUnit,
+  renderAutoUpgradeTimerUnit,
   renderInboxServiceUnit,
   restartInboxService,
   serviceStatus,
+  syncAutoUpgradeTimer,
   syncInboxService,
+  uninstallAutoUpgradeTimer,
   uninstallInboxService,
-  assertOperatorUpgradeIdleState,
   upgradeInboxService,
   UPGRADE_UNSAFE_GIT_CONFIG_PATTERN
 } from '../src/service.js';
@@ -105,6 +113,170 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
   assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
   assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|must-never-be-rendered|gho_|ghp_/);
+});
+
+test('auto-upgrade units are bounded, persistent, and never persist GitHub credentials', () => {
+  const secret = 'gho_abcdefghijklmnopqrstuvwxyz1234567890';
+  const service = renderAutoUpgradeServiceUnit({
+    repositoryRoot: '/home/pablo/projects/agente-automatizador',
+    nodePath: '/home/pablo/.nvm/versions/node/v22.23.2/bin/node',
+    home: '/home/pablo',
+    environment: {
+      GH_CONFIG_DIR: '/home/pablo/.config/gh',
+      CODEX_HOME: '/home/pablo/.codex',
+      GITHUB_TOKEN: secret
+    }
+  });
+  const timer = renderAutoUpgradeTimerUnit();
+
+  assert.match(service, /managed-by=engineering-orchestrator:v1/);
+  assert.match(service, /Type=oneshot/);
+  assert.match(service, /service auto-upgrade/);
+  assert.match(service, new RegExp(AUTO_UPGRADE_SERVICE_NAME.replaceAll('.', '\\.'), 'i'));
+  assert.doesNotMatch(service, /GITHUB_TOKEN|gho_|ghp_|abcdefghijklmnopqrstuvwxyz/);
+  assert.match(service, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
+
+  assert.match(timer, /managed-by=engineering-orchestrator:v1/);
+  assert.match(timer, /OnBootSec=2min/);
+  assert.match(timer, /OnUnitActiveSec=10min/);
+  assert.match(timer, /RandomizedDelaySec=30s/);
+  assert.match(timer, /Persistent=true/);
+  assert.match(timer, new RegExp(`Unit=${AUTO_UPGRADE_SERVICE_NAME.replaceAll('.', '\\.')}\\b`));
+  assert.doesNotMatch(timer, /GITHUB_TOKEN|gho_|ghp_/);
+});
+
+test('auto-upgrade timer sync is managed, idempotent, and removable without touching foreign units', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-auto-upgrade-home-'));
+  const repositoryRoot = await mkdtemp(join(tmpdir(), 'agent-auto-upgrade-repo-'));
+  const pathValue = '/usr/bin:/bin';
+  const states = new Map();
+  const calls = [];
+  const result = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '' });
+  const unitFromArgs = (args) => args.find((value) => typeof value === 'string' && value.endsWith('.service') || typeof value === 'string' && value.endsWith('.timer'));
+  const runner = async (command, args) => {
+    calls.push([command, ...args]);
+    assert.equal(command, 'systemctl');
+    const action = args[1];
+    const unit = unitFromArgs(args);
+    if (action === 'enable') {
+      const current = states.get(unit) ?? {};
+      states.set(unit, { ...current, enabled: true, active: args.includes('--now') ? true : current.active ?? false });
+      return result();
+    }
+    if (action === 'disable') {
+      const current = states.get(unit) ?? {};
+      states.set(unit, { ...current, enabled: false, active: args.includes('--now') ? false : current.active ?? false });
+      return result();
+    }
+    if (action === 'stop') {
+      const current = states.get(unit) ?? {};
+      states.set(unit, { ...current, active: false });
+      return result();
+    }
+    if (action === 'is-enabled') {
+      const enabled = states.get(unit)?.enabled === true;
+      return result(enabled ? 'enabled\n' : 'disabled\n', enabled ? 0 : 1);
+    }
+    if (action === 'is-active') {
+      const active = states.get(unit)?.active === true;
+      return result(active ? 'active\n' : 'inactive\n', active ? 0 : 3);
+    }
+    return result();
+  };
+
+  try {
+    await mkdir(join(repositoryRoot, 'src'), { recursive: true });
+    await writeFile(join(repositoryRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n');
+
+    const first = await syncAutoUpgradeTimer({
+      repositoryRoot,
+      nodePath: process.execPath,
+      pathValue,
+      home,
+      platform: 'linux',
+      commandRunner: runner,
+      environment: { PATH: pathValue, HOME: home, GITHUB_TOKEN: 'must-not-persist' }
+    });
+    assert.equal(first.installed, true);
+    assert.equal(first.enabled, true);
+    assert.equal(first.active, true);
+    assert.equal(first.changed, true);
+
+    const serviceUnit = await readFile(first.serviceUnitPath, 'utf8');
+    const timerUnit = await readFile(first.timerUnitPath, 'utf8');
+    assert.equal(serviceUnit.includes('must-not-persist'), false);
+    assert.equal(timerUnit.includes('must-not-persist'), false);
+
+    const second = await syncAutoUpgradeTimer({
+      repositoryRoot,
+      nodePath: process.execPath,
+      pathValue,
+      home,
+      platform: 'linux',
+      commandRunner: runner,
+      environment: { PATH: pathValue, HOME: home }
+    });
+    assert.equal(second.changed, false);
+
+    const status = await autoUpgradeTimerStatus({ home, pathValue, commandRunner: runner });
+    assert.equal(status.enabled, true);
+    assert.equal(status.active, true);
+
+    const removed = await uninstallAutoUpgradeTimer({ home, pathValue, commandRunner: runner });
+    assert.equal(removed.removed, true);
+    assert.equal((await autoUpgradeTimerStatus({ home, pathValue, commandRunner: runner })).installed, false);
+    assert.ok(calls.some((entry) => entry.join(' ') === `systemctl --user disable --now ${AUTO_UPGRADE_TIMER_NAME}`));
+
+    await writeFile(removed.timerUnitPath, '[Unit]\nDescription=foreign\n');
+    await assert.rejects(
+      syncAutoUpgradeTimer({
+        repositoryRoot,
+        nodePath: process.execPath,
+        pathValue,
+        home,
+        platform: 'linux',
+        commandRunner: runner,
+        environment: { PATH: pathValue, HOME: home }
+      }),
+      /service_unit_not_managed_by_agent/
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test('auto-upgrade timer rolls back its managed files if enablement fails', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-auto-upgrade-rollback-home-'));
+  const repositoryRoot = await mkdtemp(join(tmpdir(), 'agent-auto-upgrade-rollback-repo-'));
+  const pathValue = '/usr/bin:/bin';
+  const result = (stdout = '', exitCode = 0, stderr = '') => ({ exitCode, stdout, stderr });
+  const runner = async (command, args) => {
+    assert.equal(command, 'systemctl');
+    if (args[1] === 'enable' && args.includes(AUTO_UPGRADE_TIMER_NAME)) return result('', 1, 'fixture failure');
+    return result();
+  };
+  try {
+    await mkdir(join(repositoryRoot, 'src'), { recursive: true });
+    await writeFile(join(repositoryRoot, 'src', 'cli.js'), '#!/usr/bin/env node\n');
+    await assert.rejects(
+      syncAutoUpgradeTimer({
+        repositoryRoot,
+        nodePath: process.execPath,
+        pathValue,
+        home,
+        platform: 'linux',
+        commandRunner: runner,
+        environment: { PATH: pathValue, HOME: home }
+      }),
+      /systemd_user_command_failed:enable/
+    );
+    const status = await autoUpgradeTimerStatus({ home, pathValue, commandRunner: runner });
+    assert.equal(status.installed, false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
 });
 
 test('service install/status/restart/uninstall is managed and rollback-safe', async () => {
@@ -293,6 +465,32 @@ async function prepareManagedUpgradeService(home, root) {
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, INBOX_SERVICE_NAME), renderInboxServiceUnit({ repositoryRoot: root, nodePath: process.execPath, home }));
 }
+
+test('automatic upgrade treats busy state as a benign skip but preserves real failures', async () => {
+  const skipped = await autoUpgradeInboxService({
+    platform: 'linux',
+    repositoryRoot: '/unused',
+    expectedRepository: 'palgarra14-del/agente-automatizador',
+    stateLoader: async () => ({ requests: { r: { status: 'running', issueNumber: 68 } } }),
+    home: '/tmp/unused-auto-upgrade-home',
+    commandRunner: async () => {
+      throw new Error('external work must not occur while busy');
+    },
+    environment: { PATH: '/usr/bin', HOME: '/tmp' }
+  });
+  assert.equal(skipped.upgraded, false);
+  assert.equal(skipped.skipped, 'operator_upgrade_active_request:68');
+
+  await assert.rejects(
+    autoUpgradeInboxService({
+      platform: 'win32',
+      repositoryRoot: '/unused',
+      expectedRepository: 'palgarra14-del/agente-automatizador',
+      stateLoader: async () => ({})
+    }),
+    /persistent_inbox_service_requires_linux_systemd/
+  );
+});
 
 test('operator upgrade unsafe Git config pattern is accepted by real git', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-git-config-regex-'));
