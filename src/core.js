@@ -4534,9 +4534,9 @@ export class GitHubAdapter {
   }
 
   async request(path, options = {}) {
-    const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs);
+    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
     const signal = options.signal
-      ? AbortSignal.any([options.signal, timeoutSignal])
+      ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
       : timeoutSignal;
     let response;
     try {
