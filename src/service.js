@@ -313,6 +313,26 @@ function upgradeTrustedPath(nodePath) {
   return [...new Set([dirname(resolve(nodePath)), '/usr/bin', '/bin', '/usr/local/bin'])].join(':');
 }
 
+function upgradeGitEnvironment(env) {
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: '/bin/false',
+    SSH_ASKPASS: '/bin/false',
+    GCM_INTERACTIVE: 'Never'
+  };
+}
+
+function trustedGitHubFetchArgs(defaultBranch) {
+  return [
+    '-c', 'credential.helper=',
+    '-c', 'credential.https://github.com.helper=!gh auth git-credential',
+    '-c', 'http.sslVerify=true',
+    '-c', 'http.https://github.com/.sslVerify=true',
+    'fetch', '--no-tags', 'origin', defaultBranch
+  ];
+}
+
 async function checkedUpgradeCommand(commandRunner, command, args, { cwd, env, allowExitCodes = [0], timeoutMs = 30_000, maxOutputBytes = 128 * 1024 } = {}) {
   const result = await commandRunner(command, args, { cwd, env, timeoutMs, maxOutputBytes });
   if (result.timedOut || !allowExitCodes.includes(result.exitCode)) throw new Error(`operator_upgrade_command_failed:${command}:${args[0]}`);
@@ -485,6 +505,7 @@ async function performInboxServiceUpgrade({
   const authEnvironment = { ...environment, PATH: trustedPath, HOME: resolve(home), GH_HOST: 'github.com' };
   await ensureGitHubToken({ environment: authEnvironment, commandRunner, home });
   const env = { ...upgradeEnvironment(authEnvironment), PATH: trustedPath, HOME: resolve(home), GH_HOST: 'github.com' };
+  const gitEnv = upgradeGitEnvironment(env);
   const githubEnv = { ...env, GITHUB_TOKEN: authEnvironment.GITHUB_TOKEN };
 
   const root = resolve(repositoryRoot);
@@ -499,8 +520,8 @@ async function performInboxServiceUpgrade({
   const unsafeGitConfig = await checkedUpgradeCommand(
     commandRunner,
     'git',
-    ['config', '--get-regexp', '^(url\\..*\\.insteadOf|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshCommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required))$'],
-    { cwd: root, env, allowExitCodes: [0, 1] }
+    ['config', '--get-regexp', '^(url\\..*\\.insteadof|remote\\.origin\\.(uploadpack|receivepack)|core\\.(sshcommand|fsmonitor)|filter\\..*\\.(clean|smudge|process|required)|http(?:\\..*)?\\.(sslverify|sslcainfo|sslcapath|sslbackend))$'],
+    { cwd: root, env: gitEnv, allowExitCodes: [0, 1] }
   );
   if (unsafeGitConfig.stdout.trim()) throw new Error('operator_upgrade_unsafe_git_transport_config');
 
@@ -512,7 +533,7 @@ async function performInboxServiceUpgrade({
   if (normalizedGitHubRepository(remote)?.toLowerCase() !== expectedRepository.toLowerCase()) throw new Error('operator_upgrade_remote_mismatch');
 
   const localSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', 'HEAD'], { cwd: root, env })).stdout.trim();
-  await checkedUpgradeCommand(commandRunner, 'git', ['fetch', '--no-tags', 'origin', defaultBranch], { cwd: root, env, timeoutMs: 60_000 });
+  await checkedUpgradeCommand(commandRunner, 'git', trustedGitHubFetchArgs(defaultBranch), { cwd: root, env: gitEnv, timeoutMs: 60_000 });
   const remoteRef = `refs/remotes/origin/${defaultBranch}`;
   const remoteSha = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', remoteRef], { cwd: root, env })).stdout.trim();
   if (!/^[a-f0-9]{40}$/i.test(localSha) || !/^[a-f0-9]{40}$/i.test(remoteSha)) throw new Error('operator_upgrade_commit_identity_invalid');
