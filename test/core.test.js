@@ -1380,6 +1380,65 @@ test('GitHub deployment observer accepts only exact Preview evidence and trusted
   assert.match(wrongActor.reason, /not an exact Vercel Preview status/);
 });
 
+test('GitHub preview observer falls back to trusted Vercel commit statuses only for non-default branches', async () => {
+  const sha = 'd'.repeat(40);
+  const branch = 'agent/run';
+  const configured = leadfinderProject();
+  const makeAdapter = (statuses) => new GitHubAdapter({
+    token: 'github-test-token',
+    fetchImpl: async (url) => ({
+      ok: true,
+      json: async () => url.includes('/deployments?') ? [] : statuses
+    })
+  });
+
+  const ready = await makeAdapter([
+    { context: 'Vercel – primary', state: 'failure', target_url: 'https://vercel.com/team/project/older', updated_at: '2026-09-13T00:00:00Z' },
+    { context: 'Vercel – primary', state: 'success', target_url: 'https://vercel.com/team/project/newer', updated_at: '2026-09-13T00:02:00Z' },
+    { context: 'Vercel – secondary', state: 'success', target_url: 'https://vercel.com/team/project/secondary', updated_at: '2026-09-13T00:01:00Z' }
+  ]).previewDeployment(configured, { commitSha: sha, branch });
+  assert.equal(ready.state, 'READY');
+  assert.equal(ready.ok, true);
+  assert.equal(ready.source, 'github-commit-statuses');
+  assert.equal(ready.environment, 'preview');
+  assert.equal(ready.commitSha, sha);
+  assert.equal(ready.branch, branch);
+  assert.equal(ready.url, undefined);
+  assert.equal(ready.statuses.length, 2);
+
+  const failed = await makeAdapter([
+    { context: 'Vercel – primary', state: 'success', target_url: 'https://vercel.com/team/project/ok' },
+    { context: 'Vercel – secondary', state: 'failure', target_url: 'https://vercel.com/team/project/fail' }
+  ]).previewDeployment(configured, { commitSha: sha, branch });
+  assert.equal(failed.state, 'ERROR');
+  assert.equal(failed.ok, false);
+
+  const building = await makeAdapter([
+    { context: 'Vercel – primary', state: 'success', target_url: 'https://vercel.com/team/project/ok' },
+    { context: 'Vercel – secondary', state: 'pending', target_url: 'https://vercel.com/team/project/pending' }
+  ]).previewDeployment(configured, { commitSha: sha, branch });
+  assert.equal(building.state, 'BUILDING');
+  assert.equal(building.ok, false);
+
+  const spoofed = await makeAdapter([
+    { context: 'Vercel – spoofed', state: 'success', target_url: 'https://attacker.example/deployment' }
+  ]).previewDeployment(configured, { commitSha: sha, branch });
+  assert.equal(spoofed.state, 'NOT_FOUND');
+  assert.equal(spoofed.ok, false);
+
+  let statusRequests = 0;
+  const defaultBranch = new GitHubAdapter({
+    token: 'github-test-token',
+    fetchImpl: async (url) => {
+      if (url.includes('/statuses?')) statusRequests += 1;
+      return { ok: true, json: async () => [] };
+    }
+  });
+  const productionLike = await defaultBranch.previewDeployment(configured, { commitSha: sha, branch: configured.defaultBranch });
+  assert.equal(productionLike.state, 'NOT_FOUND');
+  assert.equal(statusRequests, 0);
+});
+
 test('GitHub deployment observer uses the latest status and Vercel adapter falls back without a Vercel token', async () => {
   const sha = 'b'.repeat(40);
   const branch = 'agent/run';
