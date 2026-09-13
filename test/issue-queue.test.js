@@ -801,7 +801,7 @@ test('workflow approval evidence remains complete and valid beyond the old 4 KiB
   const body = channel.posted.at(-1).body;
   assert.ok(Buffer.byteLength(body, 'utf8') > 4_000);
   assert.match(body, /KEEP_THIS_RECOMMENDATION_VISIBLE/);
-  const match = body.match(/\`\`\`json\n([\s\S]*?)\n\`\`\`/);
+  const match = body.match(/```json\n([\s\S]*?)\n```/);
   assert.ok(match);
   const evidence = JSON.parse(match[1]);
   assert.equal(evidence.predecessors[0].result.recommendedChange, 'KEEP_THIS_RECOMMENDATION_VISIBLE');
