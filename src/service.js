@@ -12,7 +12,7 @@ function validateText(value, label) {
 }
 
 function systemdQuote(value) {
-  return `"${validateText(value, 'systemd value').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  return `"${validateText(value, 'systemd value').replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
 function minimalGhEnvironment(environment) {
@@ -154,12 +154,15 @@ export async function installInboxService({
   try {
     await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
     await systemctl(commandRunner, ['enable', '--now', INBOX_SERVICE_NAME], { home, pathValue });
+    const status = await serviceStatus({ home, pathValue, commandRunner });
+    if (!status.enabled || !status.active) throw new Error('persistent_inbox_service_failed_to_start');
+    return status;
   } catch (error) {
+    await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
     await rm(unitPath, { force: true });
     await systemctl(commandRunner, ['daemon-reload'], { home, pathValue, allowFailure: true });
     throw error;
   }
-  return serviceStatus({ home, pathValue, commandRunner });
 }
 
 export async function serviceStatus({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand } = {}) {
@@ -188,6 +191,8 @@ export async function uninstallInboxService({ home = homedir(), pathValue = proc
   const { unitPath } = servicePaths(home);
   if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath };
   await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
+  if (active.exitCode === 0 && active.stdout.trim() === 'active') throw new Error('persistent_inbox_service_still_active');
   await rm(unitPath, { force: true });
   await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
   await systemctl(commandRunner, ['reset-failed', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true });
