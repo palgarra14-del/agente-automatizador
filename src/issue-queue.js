@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { humanApprovalDependencyFingerprint, maskSecrets, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
+import { humanApprovalDependencyFingerprint, maskSecrets, normalizeBusinessBrief, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
 
 export const ISSUE_REQUEST_MARKER = '<!-- agent-request:v1 -->';
+const ISSUE_REQUEST_MAX_BYTES = 80 * 1024;
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
 
 export function normalizeIssueQueueConfig(value) {
@@ -156,28 +157,38 @@ function pathList(value, label) {
 }
 
 export function normalizeIssueRequest(value) {
-  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'scope']), 'agent request');
+  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'scope', 'input']), 'agent request');
   if (value.version !== 1) throw new Error('agent request version must be 1');
-  if (value.profile !== 'app-improvement') throw new Error('issue queue currently supports only app-improvement');
+  if (!['app-improvement', 'website-build'].includes(value.profile)) throw new Error('issue queue profile must be app-improvement or website-build');
   if (!value.scope || typeof value.scope !== 'object' || Array.isArray(value.scope)) throw new Error('agent request scope is required');
   const scope = value.scope;
   assertObjectKeys(scope, new Set(['allowedPaths', 'forbiddenPaths']), 'agent request scope');
   const allowedPaths = pathList(scope.allowedPaths, 'agent request scope.allowedPaths');
   if (allowedPaths.length < 1) throw new Error('agent request scope.allowedPaths must contain at least one bounded path');
+
+  let input = null;
+  if (value.profile === 'website-build') {
+    assertObjectKeys(value.input, new Set(['businessBrief']), 'agent request input');
+    input = { businessBrief: normalizeBusinessBrief(value.input.businessBrief) };
+  } else if (value.input !== undefined && value.input !== null) {
+    throw new Error('agent request input is supported only for website-build');
+  }
+
   return {
     version: 1,
     projectId: boundedString(value.projectId, 'agent request projectId', { required: true, max: 80 }),
-    profile: 'app-improvement',
+    profile: value.profile,
     goal: maskSecrets(boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 })),
     scope: {
       allowedPaths,
       forbiddenPaths: pathList(scope.forbiddenPaths, 'agent request scope.forbiddenPaths')
-    }
+    },
+    ...(input ? { input } : {})
   };
 }
 
 export function parseIssueRequestBody(body) {
-  if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > 16 * 1024) throw new Error('agent request body is missing or exceeds 16 KiB');
+  if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > ISSUE_REQUEST_MAX_BYTES) throw new Error('agent request body is missing or exceeds 80 KiB');
   const markerIndex = body.indexOf(ISSUE_REQUEST_MARKER);
   if (markerIndex < 0 || body.indexOf(ISSUE_REQUEST_MARKER, markerIndex + ISSUE_REQUEST_MARKER.length) >= 0) throw new Error('agent request body must contain exactly one request marker');
   const before = body.slice(0, markerIndex).trim();
@@ -726,7 +737,8 @@ export class SupervisedIssueQueue {
         profile: parsed.request.profile,
         projectId: parsed.request.projectId,
         goal: parsed.request.goal,
-        scope: parsed.request.scope
+        scope: parsed.request.scope,
+        ...(parsed.request.input ? { input: parsed.request.input } : {})
       });
       dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
     } catch (error) {
