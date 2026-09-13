@@ -1082,13 +1082,55 @@ export class SupervisedIssueQueue {
       }
       if (!decision) {
         if (!instructionPresent) {
-          await this.post(issue.number, [
-            `Agent approval instruction recovered for \`${record.pendingApproval.kind}\` / \`${record.pendingApproval.stepId}\`.`,
-            'Approve exactly:',
-            `\`${approvalInstruction(record.pendingApproval.fingerprint)}\``,
-            'Or reject exactly:',
-            `\`${rejectionInstruction(record.pendingApproval.fingerprint)}\``
-          ].join('\n'));
+          const workflow = await this.workflowEngine.get(record.workflowId);
+          if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+            const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+            return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+          }
+          let recoveredMessage;
+          if (record.pendingApproval.kind === 'start') {
+            if (!this.workflowIsPristine(workflow)) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be recovered because the workflow is no longer pristine.');
+            }
+            const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
+            const expected = startApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              dryRun
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
+            }
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+          } else {
+            const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
+            if (!stepNeedsHumanApproval(targetStep)) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval cannot be recovered because the target step no longer requires approval.');
+            }
+            const expected = workflowApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              stepId: targetStep.id
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
+            }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            catch (error) {
+              return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+            }
+          }
+          await this.post(issue.number, recoveredMessage);
         }
         return record;
       }
