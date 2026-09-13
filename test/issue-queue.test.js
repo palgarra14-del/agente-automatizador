@@ -596,6 +596,30 @@ test('pending approval survives a transient workflow lookup failure after its co
   assert.equal(workflowEngine.runCalls.some((call) => call.refreshPristineDeadline === true), true);
 });
 
+test('externally closed issue reconciles a persisted active request and cancels its workflow', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const prepared = await queue.tick();
+  assert.equal(prepared.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  channel.issues[0].state = 'closed';
+  channel.openIssues = async () => [];
+
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'issue_identity_or_state_changed');
+  assert.deepEqual(workflowEngine.cancelCalls, ['issue_queue_blocked']);
+  assert.equal(workflowEngine.plan.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(workflowEngine.runCalls.length, 1);
+  assert.equal(blocked.workflowId, null);
+  assert.match(channel.posted.at(-1).body, /no further execution was authorized/i);
+
+  const persisted = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(persisted.status, 'blocked');
+  assert.equal(persisted.pendingApproval, null);
+  assert.equal(persisted.activeApproval, null);
+});
+
 test('issue edits invalidate accepted request fingerprint before any real execution', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   await queue.tick();

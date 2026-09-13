@@ -1345,6 +1345,24 @@ export class SupervisedIssueQueue {
         notificationError ??= error;
       }
     }
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) ||
+          ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
+      const issue = await this.channel.issue(record.issueNumber);
+      if (!issue ||
+          issue.state !== 'open' ||
+          issue.pull_request ||
+          issue.number !== record.issueNumber ||
+          issue.id !== record.issueId ||
+          issue.user?.login !== record.author) {
+        return this.blockRequestRevalidation(
+          issue ?? { number: record.issueNumber, id: record.issueId, user: { login: record.author } },
+          key,
+          record,
+          'issue_identity_or_state_changed'
+        );
+      }
+    }
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
     for (const issue of issues) {
