@@ -3719,3 +3719,93 @@ test('workflow cancellation reason is strictly bounded', async () => {
   });
   await assert.rejects(() => workflowEngine.cancel(created.id, { reason: '../unsafe reason' }), /workflow cancellation reason is invalid/);
 });
+
+
+test('historical pristine workflow can be terminalized despite registry fingerprint drift', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'historical pristine recovery'
+  });
+
+  await workflowEngine.store.mutate((data) => {
+    data.workflows[created.id].registryFingerprint = '1'.repeat(64);
+  });
+
+  const recovered = await workflowEngine.cancel(created.id, { reason: 'historical_fixture_cancelled' });
+  assert.equal(recovered.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(recovered.result.error, 'historical_fixture_cancelled');
+  assert.equal(recovered.result.historicalRecovery, true);
+  assert.equal(recovered.steps[0].status, WorkflowStepStatus.BLOCKED);
+  assert.equal(recovered.steps[0].attempts, 0);
+  assert.equal(recovered.steps[0].evidence.type, 'historical-cancellation');
+  assert.equal(recovered.executionLease?.kind, 'workflow');
+
+  const persisted = await workflowEngine.get(created.id);
+  assert.equal(persisted.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(persisted.executionLease, null);
+});
+
+test('historical workflow recovery fails closed once any execution attempt exists', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'historical non-pristine recovery'
+  });
+
+  await workflowEngine.store.mutate((data) => {
+    const workflow = data.workflows[created.id];
+    workflow.registryFingerprint = '2'.repeat(64);
+    workflow.steps[0].attempts = 1;
+  });
+
+  await assert.rejects(
+    () => workflowEngine.cancel(created.id, { reason: 'historical_fixture_cancelled' }),
+    /Workflow capability registry fingerprint does not match the active registry/
+  );
+
+  const unchanged = await workflowEngine.get(created.id);
+  assert.equal(unchanged.status, WorkflowStepStatus.PENDING);
+  assert.equal(unchanged.steps[0].status, WorkflowStepStatus.READY);
+  assert.equal(unchanged.steps[0].attempts, 1);
+  assert.equal(unchanged.executionLease, null);
+});
+
+test('historical workflow recovery fails closed after any model call reservation', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'historical model-usage recovery'
+  });
+
+  await workflowEngine.store.mutate((data) => {
+    const workflow = data.workflows[created.id];
+    workflow.registryFingerprint = '3'.repeat(64);
+    workflow.modelUsage.calls = 1;
+    workflow.modelUsage.entries = [{
+      id: 'model-call-1',
+      status: 'failed',
+      surface: 'workflow',
+      skill: 'code.inspect',
+      stepId: 'inspect-project',
+      specialist: 'code-inspector',
+      attempt: 1,
+      startedAt: '2026-09-13T00:00:00.000Z',
+      completedAt: '2026-09-13T00:00:01.000Z',
+      usage: null
+    }];
+    workflow.modelUsage.unknownUsageCalls = 1;
+  });
+
+  await assert.rejects(
+    () => workflowEngine.cancel(created.id, { reason: 'historical_fixture_cancelled' }),
+    /Workflow capability registry fingerprint does not match the active registry/
+  );
+
+  const unchanged = await workflowEngine.get(created.id);
+  assert.equal(unchanged.status, WorkflowStepStatus.PENDING);
+  assert.equal(unchanged.executionLease, null);
+});
