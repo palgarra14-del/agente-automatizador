@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { runLocalCommand } from './service.js';
 
 const digestPinnedImagePattern = /^[^\s@]+@sha256:[a-f0-9]{64}$/i;
 const literalImagePattern = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$/;
 const relativePathPattern = /^[A-Za-z0-9._/-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
+const recipeLabel = 'engineering-orchestrator.runtime.recipe-sha256';
 
 function boundedText(value, label, max = 1_000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\0\r\n]/.test(value)) throw new Error(`${label}_invalid`);
@@ -20,12 +21,22 @@ function safeRelativePath(value, label) {
   return path;
 }
 
+function recipeFingerprint(recipe) {
+  const canonical = JSON.stringify({
+    context: recipe.context,
+    dockerfile: recipe.dockerfile,
+    dockerfileSha256: recipe.dockerfileSha256,
+    image: recipe.image
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
 function dockerEnvironment(environment = process.env) {
   const path = boundedText(String(environment.PATH ?? ''), 'docker_runtime_path', 16_384);
   return { PATH: path, CI: 'true' };
 }
 
-function normalizeRuntimeRecipes(value) {
+export function normalizeRuntimeRecipes(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || !Array.isArray(value.recipes)) throw new Error('runtime_recipe_config_invalid');
   const seen = new Set();
   const recipes = value.recipes.map((candidate) => {
@@ -40,7 +51,8 @@ function normalizeRuntimeRecipes(value) {
     const dockerfile = safeRelativePath(candidate.dockerfile, 'runtime_recipe_dockerfile');
     const dockerfileSha256 = boundedText(candidate.dockerfileSha256, 'runtime_recipe_sha256', 64).toLowerCase();
     if (!sha256Pattern.test(dockerfileSha256)) throw new Error('runtime_recipe_sha256_invalid');
-    return { image, context, dockerfile, dockerfileSha256 };
+    const recipe = { image, context, dockerfile, dockerfileSha256 };
+    return { ...recipe, fingerprint: recipeFingerprint(recipe) };
   });
   return { version: 1, recipes };
 }
@@ -54,12 +66,16 @@ export async function loadRuntimeRecipes(file) {
   return normalizeRuntimeRecipes(parsed);
 }
 
-function recipeMap(runtimeRecipes) {
-  const normalized = normalizeRuntimeRecipes(runtimeRecipes ?? { version: 1, recipes: [] });
-  return new Map(normalized.recipes.map((recipe) => [recipe.image, recipe]));
+async function activeRuntimeRecipes(runtimeRecipes, repositoryRoot) {
+  if (runtimeRecipes !== undefined && runtimeRecipes !== null) return normalizeRuntimeRecipes(runtimeRecipes);
+  return loadRuntimeRecipes(resolve(repositoryRoot, 'config/runtime-images.json'));
 }
 
-function configuredImages(projects, recipes = new Map()) {
+function recipeMap(runtimeRecipes) {
+  return new Map(runtimeRecipes.recipes.map((recipe) => [recipe.image, recipe]));
+}
+
+function configuredImages(projects, recipes) {
   const images = new Map();
   for (const project of projects ?? []) {
     const image = project?.execution?.image;
@@ -71,7 +87,8 @@ function configuredImages(projects, recipes = new Map()) {
       image: normalized,
       projects: [],
       digestPinned: digestPinnedImagePattern.test(normalized),
-      recipeManaged: Boolean(recipe)
+      recipeManaged: Boolean(recipe),
+      recipeFingerprint: recipe?.fingerprint ?? null
     };
     if (typeof project.id === 'string' && project.id) entry.projects.push(project.id);
     images.set(normalized, entry);
@@ -95,10 +112,17 @@ async function dockerProbe(runner, dockerBinary, environment) {
   return { available: true, version: result.stdout.trim() || 'available' };
 }
 
-async function inspectImage(runner, dockerBinary, image, environment) {
+async function inspectImage(runner, dockerBinary, image, environment, expectedRecipeFingerprint = null) {
   const result = await dockerCommand(runner, dockerBinary, ['image', 'inspect', image, '--format', '{{.Id}}'], { environment, timeoutMs: 15_000, maxOutputBytes: 8_192 });
-  if (result.exitCode === 0 && result.stdout.trim()) return { available: true, imageId: result.stdout.trim() };
-  return { available: false };
+  if (result.exitCode !== 0 || !result.stdout.trim()) return { available: false };
+  const imageId = result.stdout.trim();
+  if (!expectedRecipeFingerprint) return { available: true, imageId };
+  const label = await dockerCommand(runner, dockerBinary, ['image', 'inspect', image, '--format', `{{ index .Config.Labels "${recipeLabel}" }}`], { environment, timeoutMs: 15_000, maxOutputBytes: 8_192 });
+  const observedRecipeFingerprint = label.exitCode === 0 ? label.stdout.trim() : '';
+  if (observedRecipeFingerprint !== expectedRecipeFingerprint) {
+    return { available: false, imageId, recipeVerified: false, observedRecipeFingerprint: observedRecipeFingerprint || null };
+  }
+  return { available: true, imageId, recipeVerified: true, observedRecipeFingerprint };
 }
 
 async function verifyRealPath(root, candidate, type, errorCode) {
@@ -149,9 +173,11 @@ export async function projectRuntimeStatus(projects, {
   environment = process.env,
   commandRunner = runLocalCommand,
   dockerBinary = 'docker',
-  runtimeRecipes = { version: 1, recipes: [] }
+  runtimeRecipes,
+  repositoryRoot = process.cwd()
 } = {}) {
-  const recipes = recipeMap(runtimeRecipes);
+  const normalizedRecipes = await activeRuntimeRecipes(runtimeRecipes, repositoryRoot);
+  const recipes = recipeMap(normalizedRecipes);
   const images = configuredImages(projects, recipes);
   const probe = await dockerProbe(commandRunner, dockerBinary, environment);
   if (!probe.available) {
@@ -165,8 +191,8 @@ export async function projectRuntimeStatus(projects, {
 
   const status = [];
   for (const entry of images) {
-    const inspected = await inspectImage(commandRunner, dockerBinary, entry.image, environment);
-    status.push({ ...entry, ...inspected, action: inspected.available ? 'present' : 'missing' });
+    const inspected = await inspectImage(commandRunner, dockerBinary, entry.image, environment, entry.recipeFingerprint);
+    status.push({ ...entry, ...inspected, action: inspected.available ? 'present' : entry.recipeManaged && inspected.imageId ? 'stale-recipe' : 'missing' });
   }
   return {
     docker: probe,
@@ -182,19 +208,20 @@ export async function syncProjectRuntimes(projects, {
   dockerBinary = 'docker',
   pullTimeoutMs = 180_000,
   buildTimeoutMs = 300_000,
-  runtimeRecipes = { version: 1, recipes: [] },
+  runtimeRecipes,
   repositoryRoot = process.cwd()
 } = {}) {
   if (!Number.isInteger(pullTimeoutMs) || pullTimeoutMs < 1_000 || pullTimeoutMs > 600_000) throw new Error('runtime_pull_timeout_invalid');
   if (!Number.isInteger(buildTimeoutMs) || buildTimeoutMs < 1_000 || buildTimeoutMs > 900_000) throw new Error('runtime_build_timeout_invalid');
-  const recipes = recipeMap(runtimeRecipes);
+  const normalizedRecipes = await activeRuntimeRecipes(runtimeRecipes, repositoryRoot);
+  const recipes = recipeMap(normalizedRecipes);
   const images = configuredImages(projects, recipes);
   const probe = await dockerProbe(commandRunner, dockerBinary, environment);
   if (!probe.available) throw new Error('docker_runtime_unavailable');
 
   const status = [];
   for (const entry of images) {
-    const before = await inspectImage(commandRunner, dockerBinary, entry.image, environment);
+    const before = await inspectImage(commandRunner, dockerBinary, entry.image, environment, entry.recipeFingerprint);
     if (before.available) {
       status.push({ ...entry, ...before, action: 'present' });
       continue;
@@ -223,6 +250,7 @@ export async function syncProjectRuntimes(projects, {
     const built = await withAnonymousDockerConfig((dockerConfig) => dockerCommand(commandRunner, dockerBinary, [
       '--config', dockerConfig,
       'build', '--pull=false',
+      '--label', `${recipeLabel}=${recipe.fingerprint}`,
       '--file', verified.dockerfile,
       '--tag', entry.image,
       verified.context
@@ -233,9 +261,9 @@ export async function syncProjectRuntimes(projects, {
       cwd: resolve(repositoryRoot)
     }));
     if (built.exitCode !== 0) throw new Error(`runtime_image_build_failed:${entry.image}`);
-    const after = await inspectImage(commandRunner, dockerBinary, entry.image, environment);
-    if (!after.available) throw new Error(`runtime_image_build_verification_failed:${entry.image}`);
-    status.push({ ...entry, ...after, action: 'built' });
+    const after = await inspectImage(commandRunner, dockerBinary, entry.image, environment, recipe.fingerprint);
+    if (!after.available || !after.recipeVerified) throw new Error(`runtime_image_build_verification_failed:${entry.image}`);
+    status.push({ ...entry, ...after, action: before.imageId ? 'rebuilt' : 'built' });
   }
 
   return {
