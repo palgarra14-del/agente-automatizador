@@ -364,7 +364,7 @@
         }
       },
       "commands": {
-        "test": "node --test",
+        "test": "node --test test/website.test.js",
         "typecheck": "node --check scripts/check-static.mjs",
         "lint": "node --check scripts/generate-services.mjs",
         "build": "node scripts/check-static.mjs",
