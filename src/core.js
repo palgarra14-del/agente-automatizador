@@ -4,7 +4,7 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
-import { URLSearchParams } from 'node:url';
+import { URL, URLSearchParams } from 'node:url';
 import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
