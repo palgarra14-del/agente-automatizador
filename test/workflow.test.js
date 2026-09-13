@@ -87,6 +87,15 @@ async function engine({ runner, projects, workspaceManager, localGit, skillExecu
   return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
+function fixtureEvidenceFingerprint(value) {
+  const canonical = (input) => {
+    if (Array.isArray(input)) return input.map(canonical);
+    if (input && typeof input === 'object') return Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])]));
+    return input;
+  };
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+
 function completeStep(plan, id) {
   const step = plan.steps.find((candidate) => candidate.id === id);
   if (!step) throw new Error(`Unknown workflow step fixture: ${id}`);
@@ -124,7 +133,20 @@ function completeStep(plan, id) {
     step.evidence = { ...capability, type: 'executor', ok: true, completedAt, result: { reviewEvidence: { verdict: 'PASS', summary: 'fixture review passed', findings: [] } }, reviewedChangeSetFingerprint: implementation?.evidence?.changeSetFingerprint ?? null };
   }
   else if (step.type === 'placeholder') step.evidence = { ...capability, type: 'executor', ok: true, completedAt };
-  else if (step.type === 'checkpoint') step.evidence = { ...capability, approvedAt: completedAt, approvedDependencyEvidenceFingerprint: humanApprovalDependencyFingerprint(plan, step.id) };
+  else if (step.type === 'checkpoint') {
+    const checkpointEvidence = { ...capability, approvedAt: completedAt };
+    if (plan.profile === 'app-improvement' && step.id === 'plan-change') {
+      const diagnosisStep = plan.steps.find((candidate) => candidate.id === 'diagnose');
+      diagnosisStep.evidence ??= { ...capability, type: 'executor', ok: true, completedAt };
+      diagnosisStep.evidence.result ??= {};
+      diagnosisStep.evidence.result.diagnosis ??= { summary: 'fixture diagnosis', cause: 'fixture cause' };
+      diagnosisStep.evidence.result.diagnosis.recommendedChange ??= 'fixture approved change';
+      checkpointEvidence.approvedRecommendedChange = diagnosisStep.evidence.result.diagnosis.recommendedChange;
+      checkpointEvidence.approvedDiagnosisFingerprint = fixtureEvidenceFingerprint(diagnosisStep.evidence.result.diagnosis);
+    }
+    checkpointEvidence.approvedDependencyEvidenceFingerprint = humanApprovalDependencyFingerprint(plan, step.id);
+    step.evidence = checkpointEvidence;
+  }
   else step.evidence = { ...capability, commands: step.commands.map((name) => ({ name, ok: true, exitCode: 0, stdout: '', stderr: '' })) };
   return step;
 }
@@ -1128,7 +1150,16 @@ test('human checkpoint wait time pauses the workflow execution deadline', async 
   const created = await instance.create({ profile: 'app-improvement', projectId: 'workflow-project', goal: 'Pause while waiting', budgets: { timeoutMs: 1_000 } });
   await instance.update(created.id, (plan) => {
     completeStep(plan, 'inspect-project');
-    completeStep(plan, 'diagnose');
+    const diagnosis = completeStep(plan, 'diagnose');
+    diagnosis.evidence.result = {
+      diagnosis: {
+        summary: 'fixture diagnosis',
+        cause: 'fixture cause',
+        relevantPaths: ['src/core.js'],
+        recommendedChange: 'fixture approved change',
+        risks: []
+      }
+    };
   });
   clock = 200;
   const waiting = await instance.run(created.id);
@@ -1393,6 +1424,16 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   assert.equal(waiting.outputBytes, 220);
   assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').evidence.codexThreadId, 'inspect-thread');
   assert.equal(waiting.steps.find((step) => step.id === 'diagnose').evidence.codexThreadId, 'diagnose-thread');
+
+  const approved = await instance.approve(created.id, 'plan-change');
+  const checkpoint = approved.steps.find((step) => step.id === 'plan-change');
+  assert.equal(checkpoint.evidence.approvedRecommendedChange, 'fixture change');
+  assert.match(checkpoint.evidence.approvedDiagnosisFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(instance.completedContext(approved)['plan-change'].recommendedChange, 'fixture change');
+  assert.equal(
+    instance.completedContext(approved)['plan-change'].approvedDependencyEvidenceFingerprint,
+    checkpoint.evidence.approvedDependencyEvidenceFingerprint
+  );
 });
 
 test('workflow fails closed if orchestrator repository context drifts during analysis', async () => {
@@ -3594,7 +3635,15 @@ test('completed human checkpoints remain bound to predecessor evidence', async (
   const plan = createWorkflowPlan({ profile: 'app-improvement', project: configured, goal: 'Bind human approval context' });
   completeStep(plan, 'inspect-project');
   const diagnosis = completeStep(plan, 'diagnose');
-  diagnosis.evidence.result = { diagnosis: 'original' };
+  diagnosis.evidence.result = {
+    diagnosis: {
+      summary: 'original',
+      cause: 'fixture cause',
+      relevantPaths: ['src/core.js'],
+      recommendedChange: 'fixture approved change',
+      risks: []
+    }
+  };
   const checkpoint = completeStep(plan, 'plan-change');
   assert.equal(
     checkpoint.evidence.approvedDependencyEvidenceFingerprint,
@@ -3602,7 +3651,7 @@ test('completed human checkpoints remain bound to predecessor evidence', async (
   );
   assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
 
-  diagnosis.evidence.result = { diagnosis: 'tampered later' };
+  diagnosis.evidence.result.diagnosis.summary = 'tampered later';
   assert.throws(
     () => validateWorkflowPlan(plan, new Map([[configured.id, configured]])),
     /checkpoint approval is not bound to its predecessor evidence/
