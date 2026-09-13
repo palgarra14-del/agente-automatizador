@@ -923,7 +923,7 @@ test('GitHub adapter bounds individual API requests so publication timeouts cann
     /github_request_timeout_invalid/
   );
 
-  const controller = new AbortController();
+  const controller = new globalThis.AbortController();
   const callerAbort = new GitHubAdapter({
     token: 'ghp_adapterToken',
     requestTimeoutMs: 30_000,
