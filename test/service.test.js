@@ -88,6 +88,10 @@ test('service install/status/restart/uninstall is managed and rollback-safe', as
     const unit = await readFile(installed.unitPath, 'utf8');
     assert.equal(unit.includes(secret), false);
     assert.ok(calls.some((entry) => entry.join(' ') === `systemctl --user enable --now ${INBOX_SERVICE_NAME}`));
+    await assert.rejects(
+      installInboxService({ repositoryRoot, nodePath, pathValue, home, platform: 'linux', commandRunner: runner, environment }),
+      /persistent_inbox_service_already_installed_use_restart/
+    );
 
     const restarted = await restartInboxService({ home, pathValue, commandRunner: runner });
     assert.equal(restarted.active, true);
