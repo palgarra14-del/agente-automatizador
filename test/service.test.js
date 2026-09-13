@@ -188,6 +188,8 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
     if (command === 'git') {
       const key = args.join(' ');
       if (key === 'rev-parse --show-toplevel') return { exitCode: 0, stdout: root + '\n', stderr: '' };
+      if (key === 'rev-parse --absolute-git-dir') return { exitCode: 0, stdout: join(root, '.git') + '\n', stderr: '' };
+      if (key.startsWith('config --get-regexp ')) return { exitCode: 1, stdout: '', stderr: '' };
       if (key === 'branch --show-current') return { exitCode: 0, stdout: 'main\n', stderr: '' };
       if (key === 'status --porcelain=v1 --untracked-files=normal') return { exitCode: 0, stdout: '', stderr: '' };
       if (key === 'remote get-url origin') return { exitCode: 0, stdout: 'https://github.com/palgarra14-del/agente-automatizador.git\n', stderr: '' };
@@ -238,7 +240,7 @@ test('operator upgrade verifies reviewed CI commits before fast-forwarding and r
     const result = await upgradeInboxService({
       repositoryRoot: root,
       expectedRepository: 'palgarra14-del/agente-automatizador',
-      state: { runs: {}, workflows: {}, requests: {} },
+      stateLoader: async () => ({ runs: {}, workflows: {}, requests: {} }),
       home,
       pathValue: '/usr/bin:/bin',
       commandRunner: fixture.runner,
@@ -260,6 +262,36 @@ test('operator upgrade verifies reviewed CI commits before fast-forwarding and r
   }
 });
 
+test('operator upgrade closes the watcher TOCTOU window before changing Git', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-race-home-'));
+  const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-race-repo-'));
+  try {
+    await prepareManagedUpgradeService(home, root);
+    const fixture = upgradeFixtureRunner({ root });
+    let reads = 0;
+    await assert.rejects(
+      upgradeInboxService({
+        repositoryRoot: root,
+        expectedRepository: 'palgarra14-del/agente-automatizador',
+        stateLoader: async () => {
+          reads += 1;
+          return reads === 1 ? {} : { requests: { q: { status: 'running', issueNumber: 42 } } };
+        },
+        home,
+        commandRunner: fixture.runner,
+        environment: { PATH: '/tmp/untrusted:/usr/bin', HOME: home, GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890' }
+      }),
+      /operator_upgrade_active_request:42/
+    );
+    assert.equal(fixture.calls.some((call) => call[0] === 'git' && call[1] === 'merge'), false);
+    assert.ok(fixture.calls.some((call) => call.join(' ') === `systemctl --user stop ${INBOX_SERVICE_NAME}`));
+    assert.ok(fixture.calls.some((call) => call.join(' ') === `systemctl --user restart ${INBOX_SERVICE_NAME}`));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('operator upgrade fails closed on unverified CI and rolls back a failed local dependency refresh', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-home-'));
   const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-repo-'));
@@ -270,7 +302,7 @@ test('operator upgrade fails closed on unverified CI and rolls back a failed loc
       upgradeInboxService({
         repositoryRoot: root,
         expectedRepository: 'palgarra14-del/agente-automatizador',
-        state: {},
+        stateLoader: async () => ({}),
         home,
         pathValue: '/usr/bin:/bin',
         commandRunner: unverified.runner,
@@ -285,7 +317,7 @@ test('operator upgrade fails closed on unverified CI and rolls back a failed loc
       upgradeInboxService({
         repositoryRoot: root,
         expectedRepository: 'palgarra14-del/agente-automatizador',
-        state: {},
+        stateLoader: async () => ({}),
         home,
         pathValue: '/usr/bin:/bin',
         commandRunner: rollback.runner,
