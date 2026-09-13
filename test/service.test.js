@@ -252,7 +252,7 @@ test('operator upgrade verifies reviewed CI commits before fast-forwarding and r
     assert.equal(result.commits, 1);
     const stopIndex = fixture.calls.findIndex((call) => call.join(' ') === `systemctl --user stop ${INBOX_SERVICE_NAME}`);
     const ciIndex = fixture.calls.findIndex((call) => call[0] === 'gh' && call.join(' ').includes('/actions/runs?'));
-    const mergeIndex = fixture.calls.findIndex((call) => call[0] === 'git' && call[1] === 'merge');
+    const mergeIndex = fixture.calls.findIndex((call) => call[0] === 'git' && call.includes('merge'));
     assert.ok(ciIndex >= 0 && stopIndex > ciIndex && mergeIndex > stopIndex);
     assert.ok(fixture.calls.some((call) => call[0] === 'npm' && call[1] === 'ci' && call[2] === '--ignore-scripts'));
     assert.ok(fixture.calls.some((call) => call[0] === process.execPath && call.at(-2) === 'service' && call.at(-1) === 'sync'));
@@ -283,7 +283,7 @@ test('operator upgrade closes the watcher TOCTOU window before changing Git', as
       }),
       /operator_upgrade_active_request:42/
     );
-    assert.equal(fixture.calls.some((call) => call[0] === 'git' && call[1] === 'merge'), false);
+    assert.equal(fixture.calls.some((call) => call[0] === 'git' && call.includes('merge')), false);
     assert.ok(fixture.calls.some((call) => call.join(' ') === `systemctl --user stop ${INBOX_SERVICE_NAME}`));
     assert.ok(fixture.calls.some((call) => call.join(' ') === `systemctl --user restart ${INBOX_SERVICE_NAME}`));
   } finally {
