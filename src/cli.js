@@ -4,7 +4,7 @@ import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProj
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
-import { ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
+import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 
@@ -191,16 +191,20 @@ try {
       console.log(JSON.stringify(await serviceStatus(), null, 2));
     } else if (action === 'restart') {
       console.log(JSON.stringify(await restartInboxService(), null, 2));
-    } else if (action === 'upgrade') {
+    } else if (action === 'upgrade' || action === 'auto-upgrade') {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
-      console.log(JSON.stringify(await upgradeInboxService({
+      const upgradeOptions = {
         repositoryRoot: resolve('.'),
         expectedRepository: `${queueConfig.repository.owner}/${queueConfig.repository.name}`,
         stateLoader: () => store.load()
-      }), null, 2));
+      };
+      const result = action === 'auto-upgrade'
+        ? await autoUpgradeInboxService(upgradeOptions)
+        : await upgradeInboxService(upgradeOptions);
+      console.log(JSON.stringify(result, null, 2));
     } else if (action === 'uninstall') {
       console.log(JSON.stringify(await uninstallInboxService(), null, 2));
-    } else throw new Error('Usage: agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall>');
+    } else throw new Error('Usage: agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall>');
   } else if (command === 'workflow') {
     const action = args[1];
     if (action === 'create') {
@@ -230,7 +234,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
