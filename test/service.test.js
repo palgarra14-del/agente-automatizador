@@ -184,7 +184,7 @@ const upgradeOptions = (home, root, runner, stateLoader = async () => ({})) => (
   environment: upgradeEnvironment(home)
 });
 
-function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, failFirstNpm = false } = {}) {
+function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repeat(40), ciSuccess = true, failFirstNpm = false, unsafeGitConfig = '' } = {}) {
   const calls = [];
   let npmCalls = 0;
   let head = oldSha;
@@ -200,7 +200,18 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       const key = args.join(' ');
       if (key === 'rev-parse --show-toplevel') return result(root + '\n');
       if (key === 'rev-parse --absolute-git-dir') return result(join(root, '.git') + '\n');
-      if (key.startsWith('config --get-regexp ')) return result('', 1);
+      if (key.startsWith('config --get-regexp ')) return unsafeGitConfig ? result(unsafeGitConfig) : result('', 1);
+      if (args.includes('fetch')) {
+        assert.equal(options.env.GITHUB_TOKEN, undefined);
+        assert.equal(options.env.GIT_TERMINAL_PROMPT, '0');
+        assert.equal(options.env.GIT_ASKPASS, '/bin/false');
+        assert.equal(options.env.SSH_ASKPASS, '/bin/false');
+        assert.equal(options.env.GCM_INTERACTIVE, 'Never');
+        assert.ok(args.includes('credential.helper='));
+        assert.ok(args.includes('credential.https://github.com.helper=!gh auth git-credential'));
+        assert.ok(args.includes('http.sslVerify=true'));
+        assert.ok(args.includes('http.https://github.com/.sslVerify=true'));
+      }
       if (key === 'branch --show-current') return result('main\n');
       if (key === 'status --porcelain=v1 --untracked-files=normal') return result();
       if (key === 'remote get-url origin') return result('https://github.com/palgarra14-del/agente-automatizador.git\n');
@@ -297,6 +308,10 @@ test('operator upgrade rejects unverified CI and rolls back failed dependency re
   const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-fail-repo-'));
   try {
     await prepareManagedUpgradeService(home, root);
+    const unsafeTls = upgradeFixtureRunner({ root, unsafeGitConfig: 'http.https://github.com/.sslCAInfo /tmp/attacker-ca.pem\n' });
+    await assert.rejects(upgradeInboxService(upgradeOptions(home, root, unsafeTls.runner)), /operator_upgrade_unsafe_git_transport_config/);
+    assert.equal(unsafeTls.calls.some((call) => call.includes('fetch')), false);
+
     const unverified = upgradeFixtureRunner({ root, ciSuccess: false });
     await assert.rejects(upgradeInboxService(upgradeOptions(home, root, unverified.runner)), /operator_upgrade_ci_not_verified/);
     assert.equal(unverified.calls.some((call) => call[1] === 'stop'), false);
