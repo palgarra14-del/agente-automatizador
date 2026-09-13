@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { INBOX_SERVICE_NAME, runLocalCommand, serviceStatus } from './service.js';
 
 export const WSL_WAKEUP_RUN_VALUE = 'EngineeringOrchestratorWSLWakeup';
@@ -114,6 +114,11 @@ async function guardianSnapshot(file) {
   try {
     const info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('wsl_guardian_must_be_regular_file');
+    if (Number(info.nlink) !== 1) throw new Error('wsl_guardian_must_not_be_hardlinked');
+    for (const directory of [dirname(dirname(file)), dirname(file)]) {
+      const directoryInfo = await lstat(directory);
+      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('wsl_guardian_ancestor_directory_invalid');
+    }
     const content = await readFile(file, 'utf8');
     if (!content.startsWith(`#!/bin/sh\n${guardianMarker}\n`)) throw new Error('wsl_guardian_not_managed_by_agent');
     return { content, mode: info.mode & 0o777 };
@@ -201,8 +206,10 @@ export async function syncWslWakeup({
 
   const { directory, guardianPath } = paths(home);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const directoryInfo = await lstat(directory);
-  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('wsl_guardian_directory_invalid');
+  for (const candidate of [dirname(directory), directory]) {
+    const directoryInfo = await lstat(candidate);
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('wsl_guardian_directory_invalid');
+  }
   const temporary = `${guardianPath}.tmp-${process.pid}`;
   try {
     await writeFile(temporary, desiredGuardian, { mode: 0o700, flag: 'wx' });
