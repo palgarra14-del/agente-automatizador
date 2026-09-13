@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -584,8 +584,10 @@ test('v0.5 revalidates repository identity before controlled commit and push and
   adapter.assertWorkingBranch = async () => {};
   adapter.inspectChangeSet = async () => changeSet;
   adapter.head = async () => 'commit-head';
-  adapter.git = async (args) => {
+  let commitGitOptions = null;
+  adapter.git = async (args, _project, options = {}) => {
     if (args[0] === 'diff' && args[1] === '--cached') return { exitCode: 1, stdout: '', stderr: '' };
+    if (args[0] === 'commit') commitGitOptions = options;
     observed.push(args);
     return { exitCode: 0, stdout: '', stderr: '' };
   };
@@ -600,6 +602,58 @@ test('v0.5 revalidates repository identity before controlled commit and push and
     { branch: 'agent/test', head: 'commit-head', remote: 'https://github.com/owner/repo.git' }
   ]);
   assert.deepEqual(observed.find((args) => Array.isArray(args) && args[0] === 'commit').slice(0, 2), ['commit', '--no-verify']);
+  assert.deepEqual(commitGitOptions?.env, {
+    GIT_AUTHOR_NAME: 'Engineering Orchestrator',
+    GIT_AUTHOR_EMAIL: 'engineering-orchestrator@localhost.invalid',
+    GIT_COMMITTER_NAME: 'Engineering Orchestrator',
+    GIT_COMMITTER_EMAIL: 'engineering-orchestrator@localhost.invalid'
+  });
+});
+
+test('managed commit succeeds without host git identity and does not write repository identity config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-managed-identity-'));
+  try {
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'one\n');
+    assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'base'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    const baseHead = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+    assert.equal((await runProcess('git', ['switch', '-c', 'agent/test'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'two\n');
+
+    const configDirectory = join(root, 'config');
+    await mkdir(configDirectory, { recursive: true });
+    const configured = configFrom({
+      id: 'fixture',
+      repository: { owner: 'owner', name: 'repo' },
+      defaultBranch: 'main',
+      protectedBranches: ['main'],
+      workspace: '..',
+      commands: { test: 'node --version' }
+    }, configDirectory);
+    const adapter = new LocalGitAdapter();
+    const changeSet = await adapter.inspectChangeSet(configured);
+    const beforeConfig = (await readFile(join(root, '.git', 'config'), 'utf8'));
+
+    const committed = await adapter.commit(configured, 'agent/test', 'identity fixture', {
+      expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
+      expectedHead: baseHead,
+      expectedRemote: 'https://github.com/owner/repo.git'
+    });
+
+    assert.match(committed.finalHead, /^[a-f0-9]{40}$/);
+    const identity = (await runProcess('git', ['log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce'], { cwd: root, timeoutMs: 5_000 })).stdout.trim().split('\0');
+    assert.deepEqual(identity, [
+      'Engineering Orchestrator',
+      'engineering-orchestrator@localhost.invalid',
+      'Engineering Orchestrator',
+      'engineering-orchestrator@localhost.invalid'
+    ]);
+    assert.equal(await readFile(join(root, '.git', 'config'), 'utf8'), beforeConfig);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
