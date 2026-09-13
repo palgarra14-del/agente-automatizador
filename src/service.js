@@ -148,10 +148,12 @@ export async function installInboxService({
   if (!cliInfo.isFile() || cliInfo.isSymbolicLink()) throw new Error('service_cli_entrypoint_invalid');
   const { unitDirectory, unitPath } = servicePaths(home);
   await mkdir(unitDirectory, { recursive: true, mode: 0o700 });
-  await assertManagedOrMissing(unitPath);
+  const directoryInfo = await lstat(unitDirectory);
+  if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('service_unit_directory_invalid');
+  if (await assertManagedOrMissing(unitPath)) throw new Error('persistent_inbox_service_already_installed_use_restart');
   const unit = renderInboxServiceUnit({ repositoryRoot, nodePath, pathValue, home });
   const temporary = `${unitPath}.tmp-${process.pid}`;
-  await writeFile(temporary, unit, { mode: 0o600 });
+  await writeFile(temporary, unit, { mode: 0o600, flag: 'wx' });
   await rename(temporary, unitPath);
   try {
     await systemctl(commandRunner, ['daemon-reload'], { home, pathValue });
