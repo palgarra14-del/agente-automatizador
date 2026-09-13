@@ -4245,12 +4245,20 @@ export class CodexReadOnlySkillExecutor {
   }
 }
 
-const managedGitCommitIdentity = Object.freeze({
-  GIT_AUTHOR_NAME: 'Engineering Orchestrator',
-  GIT_AUTHOR_EMAIL: 'engineering-orchestrator@localhost.invalid',
-  GIT_COMMITTER_NAME: 'Engineering Orchestrator',
-  GIT_COMMITTER_EMAIL: 'engineering-orchestrator@localhost.invalid'
-});
+function managedGitCommitEnvironment(identity) {
+  const name = String(identity?.name ?? '').trim();
+  const email = String(identity?.email ?? '').trim();
+  if (!name || name.length > 100 || /[\0\r\n]/.test(name)) throw new Error('managed_git_commit_identity_invalid');
+  if (!/^\d+\+[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?@users\.noreply\.github\.com$/i.test(email)) {
+    throw new Error('managed_git_commit_identity_invalid');
+  }
+  return {
+    GIT_AUTHOR_NAME: name,
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name,
+    GIT_COMMITTER_EMAIL: email
+  };
+}
 
 export class LocalGitAdapter {
   constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
@@ -4456,7 +4464,7 @@ export class LocalGitAdapter {
 
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
-  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote } = {}) {
+  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote, identity } = {}) {
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     let changeSet = await this.inspectChangeSet(project);
@@ -4472,7 +4480,7 @@ export class LocalGitAdapter {
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: managedGitCommitIdentity });
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: managedGitCommitEnvironment(identity) });
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
   }
 
@@ -4492,6 +4500,18 @@ function ciState(checkRuns, statuses = []) {
   if (checkRuns.some((check) => check.status !== 'completed') || statuses.some((status) => status.state === 'pending')) return 'pending';
   if (!checkRuns.length && !statuses.length) return 'pending';
   return 'success';
+}
+
+function isDeploymentCommitStatus(project, status) {
+  if (project.deployment?.provider !== 'vercel') return false;
+  const context = String(status?.context ?? '');
+  if (!/^Vercel\s*[–—-]\s*/i.test(context)) return false;
+  try {
+    const url = new URL(String(status?.target_url ?? ''));
+    return url.protocol === 'https:' && (url.hostname === 'vercel.com' || url.hostname.endsWith('.vercel.com'));
+  } catch {
+    return false;
+  }
 }
 
 export class GitHubAdapter {
@@ -4518,6 +4538,21 @@ export class GitHubAdapter {
     return {
       provider: 'github', status: 'ok', repository: repository.full_name, defaultBranch: repository.default_branch,
       defaultBranchProtected: typeof branch.protected === 'boolean' ? branch.protected : 'unknown', head: branch.commit.sha
+    };
+  }
+
+  async authenticatedCommitIdentity() {
+    const user = await this.request('/user');
+    const id = user?.id;
+    const login = typeof user?.login === 'string' ? user.login.trim() : '';
+    if (!Number.isInteger(id) || id <= 0 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(login)) {
+      throw new Error('github_authenticated_commit_identity_invalid');
+    }
+    return {
+      id,
+      login,
+      name: login,
+      email: `${id}+${login}@users.noreply.github.com`
     };
   }
 
@@ -4669,15 +4704,24 @@ export class GitHubAdapter {
       completedAt: check.completed_at,
       detailsUrl: check.details_url
     }));
-    const statuses = [...latestStatuses.values()].map((status) => ({
+    const observedStatuses = [...latestStatuses.values()];
+    const deploymentStatuses = observedStatuses.filter((status) => isDeploymentCommitStatus(project, status));
+    const ciStatuses = observedStatuses.filter((status) => !isDeploymentCommitStatus(project, status));
+    const normalizeStatus = (status) => ({
       context: status.context,
       state: status.state,
       description: status.description ?? null,
       targetUrl: status.target_url ?? null,
       createdAt: status.created_at ?? null,
       updatedAt: status.updated_at ?? null
-    }));
-    return { state: ciState(checks, statuses), checks, statuses };
+    });
+    const statuses = ciStatuses.map(normalizeStatus);
+    return {
+      state: ciState(checks, statuses),
+      checks,
+      statuses,
+      deploymentStatuses: deploymentStatuses.map(normalizeStatus)
+    };
   }
 
   async waitForCi(project, sha, { timeoutMs, pollIntervalMs }) {
@@ -4768,10 +4812,12 @@ export class WorkflowPublicationBridge {
   async inspectBase(project) { return this.github.inspect(project); }
 
   async commit(project, context) {
+    const identity = await this.github.authenticatedCommitIdentity();
     return this.localGit.commit(project, context.branch, `publish ${context.goal}`, {
       expectedChangeSetFingerprint: context.changeSetFingerprint,
       expectedHead: context.baseHead,
-      expectedRemote: context.remote
+      expectedRemote: context.remote,
+      identity
     });
   }
 
@@ -5179,10 +5225,12 @@ export class Orchestrator {
     if (!run.pullRequestNumber) this.requireSkill(project, 'release.publish-pr');
     const expectedChangeSetFingerprint = run.results.changePolicy.changeSetFingerprint;
     await this.updateRun(run.id, (saved) => transition(saved, RunStatus.PUSHING));
+    const identity = await this.github.authenticatedCommitIdentity();
     const commit = await this.localGit.commit(project, run.workingBranch, `implement ${run.goal}`, {
       expectedChangeSetFingerprint,
       expectedHead: run.results.branch.initialHead,
-      expectedRemote: run.results.branch.remote
+      expectedRemote: run.results.branch.remote,
+      identity
     });
     const expectedPaths = [...run.results.changePolicy.paths].sort();
     const committedPaths = [...(commit.committedPaths ?? [])].sort();
