@@ -4,7 +4,7 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename
 import { spawn } from 'node:child_process';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
-import { URLSearchParams } from 'node:url';
+import { URL, URLSearchParams } from 'node:url';
 import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
@@ -4343,6 +4343,84 @@ export class GitHubAdapter {
     };
   }
 
+  async deployments(project, { sha, ref, perPage = 100, maxPages = 5 } = {}) {
+    if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) throw new Error('github_deployment_sha_invalid');
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const query = new URLSearchParams({ sha, per_page: String(perPage), page: String(page) });
+      if (ref) query.set('ref', String(ref));
+      const batch = await this.request(this.path(project, `/deployments?${query}`));
+      if (!Array.isArray(batch)) throw new Error('github_deployments_response_invalid');
+      collected.push(...batch);
+      if (batch.length < perPage) return collected;
+    }
+    throw new Error('github_deployments_pagination_limit_exceeded');
+  }
+
+  async deploymentStatuses(project, deploymentId, { perPage = 100, maxPages = 5 } = {}) {
+    const id = String(deploymentId ?? '');
+    if (!/^\d+$/.test(id)) throw new Error('github_deployment_id_invalid');
+    const collected = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const batch = await this.request(this.path(project, `/deployments/${encodeURIComponent(id)}/statuses?per_page=${perPage}&page=${page}`));
+      if (!Array.isArray(batch)) throw new Error('github_deployment_statuses_response_invalid');
+      collected.push(...batch);
+      if (batch.length < perPage) return collected;
+    }
+    throw new Error('github_deployment_statuses_pagination_limit_exceeded');
+  }
+
+  async previewDeployment(project, { commitSha, branch }) {
+    const deployments = await this.deployments(project, { sha: commitSha, ref: branch });
+    const matching = deployments
+      .filter((deployment) =>
+        deployment?.sha === commitSha &&
+        (!branch || deployment?.ref === branch) &&
+        String(deployment?.environment ?? '').toLowerCase() === 'preview' &&
+        deployment?.production_environment === false
+      )
+      .sort((left, right) => {
+        const rightTime = Date.parse(right?.updated_at ?? right?.created_at ?? '') || 0;
+        const leftTime = Date.parse(left?.updated_at ?? left?.created_at ?? '') || 0;
+        return rightTime - leftTime || Number(right?.id ?? 0) - Number(left?.id ?? 0);
+      });
+    if (!matching.length) return { provider: 'vercel', source: 'github-deployments', state: 'NOT_FOUND', ok: false, commitSha, branch };
+
+    const deployment = matching[0];
+    const statuses = (await this.deploymentStatuses(project, deployment.id))
+      .sort((left, right) => {
+        const rightTime = Date.parse(right?.updated_at ?? right?.created_at ?? '') || 0;
+        const leftTime = Date.parse(left?.updated_at ?? left?.created_at ?? '') || 0;
+        return rightTime - leftTime || Number(right?.id ?? 0) - Number(left?.id ?? 0);
+      });
+    if (!statuses.length) {
+      return { provider: 'vercel', source: 'github-deployments', state: 'BUILDING', ok: false, deploymentId: String(deployment.id), commitSha, branch };
+    }
+    const latest = statuses[0];
+    const statusEnvironment = String(latest.environment ?? deployment.environment ?? '').toLowerCase();
+    const actor = String(latest.creator?.login ?? deployment.creator?.login ?? '').toLowerCase();
+    if (statusEnvironment !== 'preview' || !/^vercel(?:\[bot\])?$/.test(actor)) {
+      return { provider: 'vercel', source: 'github-deployments', state: 'INVALID', ok: false, reason: 'GitHub deployment evidence is not an exact Vercel Preview status', deploymentId: String(deployment.id), commitSha, branch };
+    }
+    const state = githubPreviewState(latest.state);
+    const url = normalizeVercelPreviewUrl(latest.environment_url);
+    if (state === 'READY' && !url) {
+      return { provider: 'vercel', source: 'github-deployments', state: 'INVALID', ok: false, reason: 'GitHub preview deployment succeeded without a trusted Vercel environment URL', deploymentId: String(deployment.id), commitSha, branch };
+    }
+    return {
+      provider: 'vercel',
+      source: 'github-deployments',
+      ok: state === 'READY',
+      deploymentId: String(deployment.id),
+      environment: 'preview',
+      commitSha,
+      branch,
+      state,
+      url: url ?? undefined,
+      createdAt: latest.created_at ?? deployment.created_at ?? undefined
+    };
+  }
+
   async checkRuns(project, sha, { perPage = 100, maxPages = 10 } = {}) {
     const collected = [];
     for (let page = 1; page <= maxPages; page += 1) {
@@ -4416,14 +4494,39 @@ function vercelState(state) {
   return 'BUILDING';
 }
 
+function githubPreviewState(state) {
+  if (state === 'success') return 'READY';
+  if (['error', 'failure'].includes(state)) return 'ERROR';
+  if (state === 'inactive') return 'INACTIVE';
+  if (['queued', 'pending', 'in_progress'].includes(state)) return 'BUILDING';
+  return 'INVALID';
+}
+
+function normalizeVercelPreviewUrl(value) {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || !url.hostname.toLowerCase().endsWith('.vercel.app')) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 export class VercelDeploymentProvider {
-  constructor({ token = process.env.VERCEL_TOKEN, fetchImpl = fetch, sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)), now = () => Date.now() } = {}) {
-    Object.assign(this, { token, fetch: fetchImpl, sleep, now });
+  constructor({ token = process.env.VERCEL_TOKEN, github = new GitHubAdapter(), fetchImpl = fetch, sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)), now = () => Date.now() } = {}) {
+    Object.assign(this, { token, github, fetch: fetchImpl, sleep, now });
   }
 
   async latest(project, { commitSha, branch }) {
     if (project.deployment?.provider !== 'vercel') return { provider: 'none', state: 'NOT_REQUIRED', ok: true };
-    if (!this.token) return { provider: 'vercel', state: 'NOT_CONFIGURED', ok: false, reason: 'VERCEL_TOKEN is required for read-only preview observation' };
+    if (!this.token) {
+      try {
+        return await this.github.previewDeployment(project, { commitSha, branch });
+      } catch (error) {
+        return { provider: 'vercel', source: 'github-deployments', state: 'NOT_CONFIGURED', ok: false, reason: `GitHub deployment observation unavailable: ${clip(error.message, 300)}` };
+      }
+    }
     const query = new URLSearchParams({ projectId: project.deployment.projectId, limit: '20', teamId: project.deployment.teamId });
     const response = await this.fetch(`https://api.vercel.com/v13/deployments?${query}`, { headers: { Authorization: `Bearer ${this.token}` } });
     if (!response.ok) throw new Error(`Vercel API request failed: ${response.status}`);
@@ -4447,7 +4550,7 @@ export class VercelDeploymentProvider {
     const startedAt = this.now();
     for (;;) {
       const latest = await this.latest(project, context);
-      if (['READY', 'ERROR', 'NOT_CONFIGURED'].includes(latest.state)) return { ...latest, durationMs: this.now() - startedAt };
+      if (['READY', 'ERROR', 'INACTIVE', 'INVALID', 'NOT_CONFIGURED'].includes(latest.state)) return { ...latest, durationMs: this.now() - startedAt };
       if (this.now() - startedAt >= timeoutMs) return { ...latest, state: 'TIMEOUT', ok: false, durationMs: this.now() - startedAt };
       await this.sleep(pollIntervalMs);
     }
@@ -4582,6 +4685,13 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
     commandsConfigured: Object.keys(project.commands),
     vercelConfigured: vercelConfigured ? 'YES' : 'NO',
     vercelToken: environment.VERCEL_TOKEN ? 'YES' : 'NO',
+    previewObservation: project.deployment?.provider !== 'vercel'
+      ? 'NOT_REQUIRED'
+      : environment.VERCEL_TOKEN
+        ? 'VERCEL_API'
+        : repository
+          ? 'GITHUB_DEPLOYMENTS_FALLBACK'
+          : 'UNAVAILABLE',
     branchProtection: repository?.defaultBranchProtected === true ? 'YES' : repository?.defaultBranchProtected === false ? 'NO' : 'UNKNOWN',
     modelCallBudget: project.budgets.maxModelCalls,
     capabilities: {
@@ -4598,7 +4708,7 @@ export async function doctor(project, { github = new GitHubAdapter(), codexAvail
 export function formatDoctor(result) {
   const execution = result.execution ?? {};
   const capabilities = result.capabilities ?? {};
-  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nMODEL CALL BUDGET\n${result.modelCallBudget ?? 'UNKNOWN'}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
+  return `PROJECT\n${result.project} (${result.projectId})\n\nREPOSITORY\n${result.repository}\n\nDEFAULT BRANCH\n${result.defaultBranch}\n\nGITHUB CONNECTIVITY\n${result.githubConnectivity}${result.githubError ? ` (${result.githubError})` : ''}\n\nCODEX AVAILABILITY\n${result.codexAvailable}\n\nMODEL CALL BUDGET\n${result.modelCallBudget ?? 'UNKNOWN'}\n\nWORKSPACE ROOT\n${result.workspaceRoot}\n\nCOMMANDS CONFIGURED\n${result.commandsConfigured.join(', ')}\n\nVERCEL CONFIGURED\n${result.vercelConfigured}\n\nVERCEL_TOKEN\n${result.vercelToken}\n\nPREVIEW OBSERVATION\n${result.previewObservation ?? 'UNKNOWN'}\n\nBRANCH PROTECTION\n${result.branchProtection}\n\nCAPABILITY REGISTRY\n${capabilities.registryFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nPROJECT SKILL POLICY\n${capabilities.projectPolicyFingerprint?.slice(0, 12) ?? 'UNKNOWN'}\n\nORCHESTRATOR SKILLS AVAILABLE\n${capabilities.orchestratorAvailable?.join(', ') || 'none'}\n\nORCHESTRATOR SKILLS UNAVAILABLE\n${capabilities.orchestratorUnavailable?.join(', ') || 'none'}\n\nWORKFLOW SKILLS AVAILABLE\n${capabilities.workflowAvailable?.join(', ') || 'none'}\n\nEXECUTION PROVIDER\n${execution.configuredProvider ?? 'unknown'} -> ${execution.selectedProvider ?? 'unknown'}\n\nEXECUTION SANDBOX AVAILABLE\n${execution.sandboxAvailable ?? 'UNKNOWN'}\n\nDOCKER AVAILABLE\n${execution.dockerAvailable ?? execution.containerAvailable ?? 'UNKNOWN'}\n\nIMAGE AVAILABLE\n${execution.imageAvailable ?? 'UNKNOWN'}\n\nIMAGE PINNED\n${execution.imagePinned ?? 'UNKNOWN'}\n\nPROJECT TOOLCHAIN\n${execution.projectToolchain ?? 'UNKNOWN'}\n\nRUNTIME USER\n${execution.runtimeUser ?? 'UNKNOWN'}\n\nGIT METADATA\n${execution.gitMetadata ?? 'UNKNOWN'}\n\nPOST-WORKER NETWORK\n${execution.postWorkerNetwork ?? 'UNKNOWN'}\n\nHOST FALLBACK\n${execution.hostFallback ?? 'UNKNOWN'}${execution.reason ? `\n\nEXECUTION DETAIL\n${execution.reason}` : ''}`;
 }
 
 export class Orchestrator {

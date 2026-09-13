@@ -1,4 +1,4 @@
-# Engineering Orchestrator — v0.15.1
+# Engineering Orchestrator — v0.16
 
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
@@ -13,7 +13,7 @@ A CLI-first, policy-governed engineering loop for registered repositories. It tu
 
 ## Quick start
 
-Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository and pull-request permissions, and a clean checkout. The governed Codex worker is supported only on verified Linux/macOS isolation paths; on a Windows host, run the agent inside WSL/Linux. Native Windows execution fails closed instead of weakening filesystem isolation. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. Projects that require preview observation additionally need `VERCEL_TOKEN` only in the orchestrator process. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
+Requires Node 22+, an already authenticated local Codex installation, `GITHUB_TOKEN` with repository, pull-request, CI, and deployment-read access, and a clean checkout. The governed Codex worker is supported only on verified Linux/macOS isolation paths; on a Windows host, run the agent inside WSL/Linux. Native Windows execution fails closed instead of weakening filesystem isolation. Projects are configured as `container-required` and also require a locally available Docker daemon plus the configured image; the orchestrator never pulls an image automatically. For Vercel projects, preview observation uses the Vercel API when `VERCEL_TOKEN` is available and otherwise falls back to read-only GitHub Deployments evidence for the exact commit/branch. The fallback accepts only an explicit non-production `Preview` deployment, a Vercel bot status, and a trusted HTTPS `*.vercel.app` environment URL. This implementation deliberately injects neither token nor `CODEX_API_KEY` into the worker environment. Before creating its branch, it fetches `origin/main` and verifies that exact SHA against GitHub.
 
 v0.14 also supports a supervised GitHub-issue inbox. GitHub is only the control/approval channel; the agent process and Codex authentication stay local. Start with `agent inbox once` while validating the setup, then `agent inbox watch` for a persistent operator.
 

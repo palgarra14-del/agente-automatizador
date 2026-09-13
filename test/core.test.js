@@ -252,10 +252,12 @@ test('doctor reports governed project readiness without exposing configuration s
   assert.equal(result.codexAvailable, 'YES');
   assert.equal(result.vercelConfigured, 'YES');
   assert.equal(result.vercelToken, 'NO');
+  assert.equal(result.previewObservation, 'GITHUB_DEPLOYMENTS_FALLBACK');
   assert.equal(result.branchProtection, 'NO');
   assert.equal(result.modelCallBudget, 6);
   assert.match(formatDoctor(result), /MODEL CALL BUDGET\n6/);
   assert.match(formatDoctor(result), /COMMANDS CONFIGURED\ninstall, test, lint, build/);
+  assert.match(formatDoctor(result), /PREVIEW OBSERVATION\nGITHUB_DEPLOYMENTS_FALLBACK/);
   assert.match(formatDoctor(result), /CAPABILITY REGISTRY\n[0-9a-f]{12}/);
   assert.match(formatDoctor(result), /ORCHESTRATOR SKILLS AVAILABLE/);
   assert.match(formatDoctor(result), /EXECUTION SANDBOX AVAILABLE\nYES/);
@@ -1131,6 +1133,89 @@ test('Vercel adapter accepts only an exact non-production commit and branch matc
   const timeout = new VercelDeploymentProvider({ token: 'vercel_test', now: () => now, sleep: async () => { now += 2; }, fetchImpl: async () => ({ ok: true, json: async () => ({ deployments: [] }) }) });
   const timed = await timeout.waitForPreview(leadfinderProject(), { commitSha: 'sha', branch: 'agent/run' }, { timeoutMs: 1, pollIntervalMs: 1 });
   assert.equal(timed.state, 'TIMEOUT');
+});
+
+test('GitHub deployment observer accepts only exact Preview evidence and trusted Vercel URLs', async () => {
+  const sha = 'a'.repeat(40);
+  const branch = 'agent/run';
+  const requests = [];
+  let environmentUrl = 'https://callflow-preview-abc.vercel.app';
+  let statusActor = 'vercel[bot]';
+  const adapter = new GitHubAdapter({
+    token: 'github-test-token',
+    fetchImpl: async (url) => {
+      requests.push(url);
+      const body = url.includes('/statuses?')
+        ? [
+            { id: 1, state: 'pending', environment: 'Preview', creator: { login: 'vercel[bot]' }, created_at: '2026-09-13T00:00:00Z' },
+            { id: 2, state: 'success', environment: 'Preview', creator: { login: statusActor }, environment_url: environmentUrl, created_at: '2026-09-13T00:01:00Z' }
+          ]
+        : [
+            { id: 10, sha, ref: branch, environment: 'Production', production_environment: true, created_at: '2026-09-13T00:02:00Z' },
+            { id: 11, sha, ref: 'agent/other', environment: 'Preview', production_environment: false, created_at: '2026-09-13T00:02:00Z' },
+            { id: 12, sha, ref: branch, environment: 'Preview', production_environment: false, created_at: '2026-09-13T00:03:00Z' }
+          ];
+      return { ok: true, json: async () => body };
+    }
+  });
+  const ready = await adapter.previewDeployment(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(ready.state, 'READY');
+  assert.equal(ready.deploymentId, '12');
+  assert.equal(ready.url, environmentUrl + '/');
+  assert.equal(ready.source, 'github-deployments');
+  assert.ok(requests[0].includes(`sha=${sha}`));
+  assert.ok(requests[0].includes('ref=agent%2Frun'));
+
+  environmentUrl = 'https://attacker.example/preview';
+  const invalid = await adapter.previewDeployment(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(invalid.state, 'INVALID');
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.url, undefined);
+
+  environmentUrl = 'https://valid-again.vercel.app';
+  statusActor = 'other-bot[bot]';
+  const wrongActor = await adapter.previewDeployment(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(wrongActor.state, 'INVALID');
+  assert.match(wrongActor.reason, /not an exact Vercel Preview status/);
+});
+
+test('GitHub deployment observer uses the latest status and Vercel adapter falls back without a Vercel token', async () => {
+  const sha = 'b'.repeat(40);
+  const branch = 'agent/run';
+  const github = new GitHubAdapter({
+    token: 'github-test-token',
+    fetchImpl: async (url) => ({ ok: true, json: async () => url.includes('/statuses?')
+      ? [
+          { id: 20, state: 'success', environment: 'Preview', creator: { login: 'vercel[bot]' }, environment_url: 'https://older.vercel.app', created_at: '2026-09-13T00:00:00Z' },
+          { id: 21, state: 'failure', environment: 'Preview', creator: { login: 'vercel[bot]' }, environment_url: 'https://failed.vercel.app', created_at: '2026-09-13T00:02:00Z' }
+        ]
+      : [{ id: 19, sha, ref: branch, environment: 'Preview', production_environment: false, created_at: '2026-09-13T00:01:00Z' }] })
+  });
+  const failed = await github.previewDeployment(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(failed.state, 'ERROR');
+  assert.equal(failed.ok, false);
+
+  let fallbackCalls = 0;
+  const fallback = new VercelDeploymentProvider({
+    token: '',
+    github: { previewDeployment: async (_project, context) => {
+      fallbackCalls += 1;
+      assert.deepEqual(context, { commitSha: sha, branch });
+      return { provider: 'vercel', source: 'github-deployments', state: 'READY', ok: true, url: 'https://fallback.vercel.app/' };
+    } },
+    fetchImpl: async () => { throw new Error('Vercel API must not be called without a token'); }
+  });
+  const observed = await fallback.latest(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(observed.state, 'READY');
+  assert.equal(observed.source, 'github-deployments');
+  assert.equal(fallbackCalls, 1);
+
+  const unavailable = await new VercelDeploymentProvider({
+    token: '',
+    github: { previewDeployment: async () => { throw new Error('GitHub API request failed: 403'); } }
+  }).latest(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(unavailable.state, 'NOT_CONFIGURED');
+  assert.match(unavailable.reason, /GitHub deployment observation unavailable/);
 });
 
 test('happy path persists branch, commit, push, PR, CI, evaluation, and report state', async () => {
