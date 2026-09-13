@@ -1376,6 +1376,37 @@ test('Vercel adapter accepts only an exact non-production commit and branch matc
   assert.equal(timed.state, 'TIMEOUT');
 });
 
+test('Vercel adapter bounds each direct API request and rejects invalid timeout configuration', async () => {
+  assert.throws(
+    () => new VercelDeploymentProvider({ token: 'vercel_test', requestTimeoutMs: 0 }),
+    /vercel_request_timeout_invalid/
+  );
+  assert.throws(
+    () => new VercelDeploymentProvider({ token: 'vercel_test', requestTimeoutMs: 120_001 }),
+    /vercel_request_timeout_invalid/
+  );
+
+  let observedSignal = null;
+  const adapter = new VercelDeploymentProvider({
+    token: 'vercel_test',
+    requestTimeoutMs: 5,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      observedSignal = options.signal;
+      assert.ok(observedSignal, 'direct Vercel request must be abortable');
+      if (observedSignal.aborted) {
+        reject(observedSignal.reason);
+        return;
+      }
+      observedSignal.addEventListener('abort', () => reject(observedSignal.reason), { once: true });
+    })
+  });
+  await assert.rejects(
+    adapter.latest(leadfinderProject(), { commitSha: 'sha', branch: 'agent/run' }),
+    /vercel_api_request_timeout/
+  );
+  assert.equal(observedSignal.aborted, true);
+});
+
 test('GitHub deployment observer accepts only exact Preview evidence and trusted Vercel URLs', async () => {
   const sha = 'a'.repeat(40);
   const branch = 'agent/run';

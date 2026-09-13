@@ -476,14 +476,24 @@ export class GitHubIssueChannel {
   }
 
   async request(path, options = {}) {
-    const response = await this.fetch(`https://api.github.com${path}`, {
-      ...options,
-      signal: options.signal ?? globalThis.AbortSignal.timeout(this.requestTimeoutMs),
-      headers: { ...this.headers(), ...(options.headers ?? {}) }
-    });
-    if (!response.ok) throw new Error(`GitHub issue queue request failed: ${response.status}`);
-    if (response.status === 204) return null;
-    return response.json();
+    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    const signal = options.signal
+      ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
+    let response;
+    try {
+      response = await this.fetch(`https://api.github.com${path}`, {
+        ...options,
+        signal,
+        headers: { ...this.headers(), ...(options.headers ?? {}) }
+      });
+      if (!response.ok) throw new Error(`GitHub issue queue request failed: ${response.status}`);
+      if (response.status === 204) return null;
+      return await response.json();
+    } catch (error) {
+      if (timeoutSignal.aborted) throw new Error('github_issue_queue_request_timeout', { cause: error });
+      throw error;
+    }
   }
 
   async openIssues({ perPage = 100, maxPages = 5 } = {}) {

@@ -1299,6 +1299,51 @@ test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment
   assert.equal(JSON.parse(calls[2].options.body).body, 'status');
 });
 
+test('GitHubIssueChannel combines caller cancellation with its own request deadline', async () => {
+  const caller = new globalThis.AbortController();
+  let observedSignal = null;
+  const timeoutChannel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    requestTimeoutMs: 1_000,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      observedSignal = options.signal;
+      assert.ok(observedSignal, 'issue request must carry a combined abort signal');
+      if (observedSignal.aborted) {
+        reject(observedSignal.reason);
+        return;
+      }
+      observedSignal.addEventListener('abort', () => reject(new Error('caller_abort_fixture')), { once: true });
+      caller.abort();
+    })
+  });
+  await assert.rejects(
+    timeoutChannel.request('/repos/x/y/issues', { signal: caller.signal }),
+    /caller_abort_fixture/
+  );
+  assert.equal(observedSignal.aborted, true);
+
+  const deadlineChannel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    requestTimeoutMs: 1_000,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      const signal = options.signal;
+      assert.ok(signal, 'issue deadline request must carry an abort signal');
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  });
+  deadlineChannel.requestTimeoutMs = 5;
+  await assert.rejects(
+    deadlineChannel.request('/repos/x/y/issues'),
+    /github_issue_queue_request_timeout/
+  );
+});
+
 test('approval fingerprints bind exact dry-run, project/control context, and all persisted workflow evidence', () => {
   const plan = workflowPlan();
   const base = {
