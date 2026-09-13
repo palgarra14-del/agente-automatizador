@@ -545,7 +545,9 @@ test('missing approval prompt is recovered after a transient GitHub comment fail
   assert.equal(recovered.status, 'awaiting_start_approval');
   assert.equal(channel.posted.length, 1);
   assert.ok(channel.posted[0].body.includes(`/agent approve ${persisted.pendingApproval.fingerprint}`));
-  assert.equal(workflowEngine.runCalls.length, 1);
+  assert.match(channel.posted[0].body, /dry-run approval instruction recovered/);
+  assert.match(channel.posted[0].body, /Planned steps:/);
+  assert.equal(workflowEngine.runCalls.length, 2);
 });
 
 test('unauthorized or malformed comments cannot start real execution', async () => {
@@ -770,6 +772,95 @@ test('authorized approvals drive workflow checkpoints without bypassing Workflow
   assert.equal(record.publication.pullRequest, 'https://github.com/owner/callflow/pull/7');
   assert.equal(record.publication.previewUrl, 'https://preview.example.test');
   assert.match(channel.posted.at(-1).body, /No merge or production deployment/);
+});
+
+test('workflow approval evidence remains complete and valid beyond the old 4 KiB boundary', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const start = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = {
+    result: {
+      padding: 'x'.repeat(5_000),
+      recommendedChange: 'KEEP_THIS_RECOMMENDATION_VISIBLE'
+    }
+  };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, {
+    id: 120,
+    login: 'palgarra14-del',
+    body: `/agent approve ${start.pendingApproval.fingerprint}`
+  });
+  const record = await queue.tick();
+
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  const body = channel.posted.at(-1).body;
+  assert.ok(Buffer.byteLength(body, 'utf8') > 4_000);
+  assert.match(body, /KEEP_THIS_RECOMMENDATION_VISIBLE/);
+  const match = body.match(/\`\`\`json\n([\s\S]*?)\n\`\`\`/);
+  assert.ok(match);
+  const evidence = JSON.parse(match[1]);
+  assert.equal(evidence.predecessors[0].result.recommendedChange, 'KEEP_THIS_RECOMMENDATION_VISIBLE');
+});
+
+test('oversized workflow approval evidence blocks instead of exposing a blind approval instruction', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const start = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { padding: 'x'.repeat(33 * 1024) } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, {
+    id: 121,
+    login: 'palgarra14-del',
+    body: `/agent approve ${start.pendingApproval.fingerprint}`
+  });
+  const blocked = await queue.tick();
+
+  assert.equal(blocked.status, 'blocked');
+  assert.match(blocked.reason, /^approval_evidence_unpublishable:/);
+  assert.deepEqual(workflowEngine.cancelCalls, ['issue_queue_blocked']);
+  assert.match(channel.posted.at(-1).body, /No further execution was authorized/i);
+  assert.equal(channel.posted.at(-1).body.includes('Approve exactly this persisted state'), false);
+});
+
+test('workflow approval recovery republishes the same bound evidence after a transient comment failure', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  const start = await queue.tick();
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { result: { basis: 'RECOVERED_EVIDENCE' } };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, {
+    id: 122,
+    login: 'palgarra14-del',
+    body: `/agent approve ${start.pendingApproval.fingerprint}`
+  });
+  channel.failNextPost = true;
+  await assert.rejects(() => queue.tick(), /fixture comment transport failure/);
+
+  const persisted = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(persisted.status, 'awaiting_workflow_approval');
+  const recovered = await queue.tick();
+
+  assert.equal(recovered.status, 'awaiting_workflow_approval');
+  const body = channel.posted.at(-1).body;
+  assert.match(body, /approval instruction recovered/);
+  assert.match(body, /Evidence bound to this approval fingerprint/);
+  assert.match(body, /RECOVERED_EVIDENCE/);
+  assert.ok(body.includes(`/agent approve ${persisted.pendingApproval.fingerprint}`));
 });
 
 test('checkpoint approval fingerprint binds completed dependency evidence', async () => {
