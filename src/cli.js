@@ -4,7 +4,7 @@ import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProj
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
-import { ensureGitHubToken, installInboxService, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
+import { ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 
@@ -138,12 +138,22 @@ try {
       } else if (action === 'watch') {
         const controller = new AbortController();
         const stop = () => controller.abort();
+        const watcherRepositoryRoot = resolve('.');
+        const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
+        let checkoutReloadRevision = null;
         process.once('SIGINT', stop);
         process.once('SIGTERM', stop);
         try {
           await watchIssueQueue(queue, {
             pollIntervalMs: queueConfig.pollIntervalMs,
             signal: controller.signal,
+            beforeTick: async () => {
+              const currentRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
+              if (currentRevision === loadedRevision) return true;
+              checkoutReloadRevision = currentRevision;
+              controller.abort();
+              return false;
+            },
             onTick: (record) => {
               if (record) console.log(JSON.stringify(view(record)));
             },
@@ -154,6 +164,9 @@ try {
         } finally {
           process.removeListener('SIGINT', stop);
           process.removeListener('SIGTERM', stop);
+        }
+        if (checkoutReloadRevision) {
+          console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
       } else throw new Error('Usage: agent inbox <once|watch|status>');
     }
