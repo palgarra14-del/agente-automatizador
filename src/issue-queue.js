@@ -124,7 +124,9 @@ function approvalEvidenceSummary(workflow, stepId) {
     .replaceAll('`', "'")
     .replace(/\/agent/gi, '[agent-command]')
     .replaceAll('@', '＠');
-  return Buffer.from(safe, 'utf8').subarray(0, 4_000).toString('utf8');
+  const bytes = Buffer.byteLength(safe, 'utf8');
+  if (bytes > 32 * 1024) throw new Error(`approval_evidence_summary_too_large:${bytes}>32768`);
+  return safe;
 }
 
 function assertObjectKeys(value, allowed, label) {
@@ -320,6 +322,44 @@ function compactDryRun(dryRun) {
     })),
     externalWrites: dryRun.plannedExternalWrites ?? []
   };
+}
+
+function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {}) {
+  const summary = compactDryRun(dryRun);
+  return [
+    recovered
+      ? 'Agent dry-run approval instruction recovered. No Codex call, project write, Git write, PR creation, or deployment was performed.'
+      : 'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+    '',
+    `Workflow: \`${workflow.id}\``,
+    `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
+    `Planned steps: ${summary.steps.map((step) => `${step.id}[${step.specialist}/${step.authority}]`).join(' → ')}`,
+    `Planned external writes: ${summary.externalWrites.length ? summary.externalWrites.map((write) => write.id).join(', ') : 'none'}`,
+    '',
+    'To authorize the first real execution transition, post exactly:',
+    `\`${approvalInstruction(token)}\``,
+    '',
+    'To reject this request, post exactly:',
+    `\`${rejectionInstruction(token)}\``
+  ].join('\n');
+}
+
+function workflowApprovalMessage(workflow, step, token, { recovered = false } = {}) {
+  return [
+    recovered
+      ? `Agent workflow approval instruction recovered for step \`${step.id}\` (skill \`${step.skill}\`).`
+      : `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
+    `Current workflow status: \`${workflow.status}\`.`,
+    '',
+    'Evidence bound to this approval fingerprint:',
+    `\`\`\`json\n${approvalEvidenceSummary(workflow, step.id)}\n\`\`\``,
+    '',
+    'Approve exactly this persisted state with:',
+    `\`${approvalInstruction(token)}\``,
+    '',
+    'Reject with:',
+    `\`${rejectionInstruction(token)}\``
+  ].join('\n');
 }
 
 const requestStatuses = new Set(['initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
@@ -825,21 +865,7 @@ export class SupervisedIssueQueue {
       lastProcessedCommentId: 0
     };
     await this.saveRecord(this.requestKey(issue), record);
-    const summary = compactDryRun(dryRun);
-    await this.post(issue.number, [
-      'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
-      '',
-      `Workflow: \`${workflow.id}\``,
-      `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
-      `Planned steps: ${summary.steps.map((step) => `${step.id}[${step.specialist}/${step.authority}]`).join(' → ')}`,
-      `Planned external writes: ${summary.externalWrites.length ? summary.externalWrites.map((write) => write.id).join(', ') : 'none'}`,
-      '',
-      'To authorize the first real execution transition, post exactly:',
-      `\`${approvalInstruction(token)}\``,
-      '',
-      'To reject this request, post exactly:',
-      `\`${rejectionInstruction(token)}\``
-    ].join('\n'));
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
     return record;
   }
 
@@ -928,6 +954,13 @@ export class SupervisedIssueQueue {
       stepId: step.id
     });
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
+    let approvalMessage = null;
+    if (!already) {
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+      }
+    }
     const next = {
       ...record,
       status: 'awaiting_workflow_approval',
@@ -937,21 +970,7 @@ export class SupervisedIssueQueue {
       activeApproval: null
     };
     await this.saveRecord(key, next);
-    if (!already) {
-      await this.post(issue.number, [
-        `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
-        `Current workflow status: \`${workflow.status}\`.`,
-        '',
-        'Evidence bound to this approval fingerprint:',
-        `\`\`\`json\n${approvalEvidenceSummary(workflow, step.id)}\n\`\`\``,
-        '',
-        'Approve exactly this persisted state with:',
-        `\`${approvalInstruction(token)}\``,
-        '',
-        'Reject with:',
-        `\`${rejectionInstruction(token)}\``
-      ].join('\n'));
-    }
+    if (approvalMessage) await this.post(issue.number, approvalMessage);
     return next;
   }
 
@@ -1063,13 +1082,55 @@ export class SupervisedIssueQueue {
       }
       if (!decision) {
         if (!instructionPresent) {
-          await this.post(issue.number, [
-            `Agent approval instruction recovered for \`${record.pendingApproval.kind}\` / \`${record.pendingApproval.stepId}\`.`,
-            'Approve exactly:',
-            `\`${approvalInstruction(record.pendingApproval.fingerprint)}\``,
-            'Or reject exactly:',
-            `\`${rejectionInstruction(record.pendingApproval.fingerprint)}\``
-          ].join('\n'));
+          const workflow = await this.workflowEngine.get(record.workflowId);
+          if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+            const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+            return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+          }
+          let recoveredMessage;
+          if (record.pendingApproval.kind === 'start') {
+            if (!this.workflowIsPristine(workflow)) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be recovered because the workflow is no longer pristine.');
+            }
+            const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
+            const expected = startApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              dryRun
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
+            }
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+          } else {
+            const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
+            if (!stepNeedsHumanApproval(targetStep)) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval cannot be recovered because the target step no longer requires approval.');
+            }
+            const expected = workflowApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              stepId: targetStep.id
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
+            }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            catch (error) {
+              return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+            }
+          }
+          await this.post(issue.number, recoveredMessage);
         }
         return record;
       }
