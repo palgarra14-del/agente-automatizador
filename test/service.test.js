@@ -525,7 +525,8 @@ test('operator upgrade rejects a relative systemd runtime directory before exter
           PATH: '/usr/bin:/bin',
           HOME: home,
           XDG_RUNTIME_DIR: 'relative/runtime',
-          DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus'
+          DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+          GITHUB_TOKEN: 'gho_abcdefghijklmnopqrstuvwxyz1234567890'
         }
       }),
       /XDG_RUNTIME_DIR must be absolute/
