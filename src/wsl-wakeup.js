@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -26,6 +26,41 @@ function identifier(value, label) {
 function paths(home) {
   const directory = join(resolve(home), '.config', 'engineering-orchestrator');
   return { directory, guardianPath: join(directory, 'wsl-guardian.sh') };
+}
+
+async function ensureGuardianDirectory(home) {
+  const root = resolve(home);
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('wsl_guardian_home_directory_invalid');
+  const candidates = [join(root, '.config'), join(root, '.config', 'engineering-orchestrator')];
+  for (const candidate of candidates) {
+    let info;
+    try {
+      info = await lstat(candidate);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      try {
+        await mkdir(candidate, { mode: 0o700 });
+      } catch (mkdirError) {
+        if (mkdirError.code !== 'EEXIST') throw mkdirError;
+      }
+      info = await lstat(candidate);
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('wsl_guardian_directory_invalid');
+  }
+  return paths(root);
+}
+
+async function writeGuardianAtomically(file, content, mode = 0o700) {
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, content, { mode, flag: 'wx' });
+    await rename(temporary, file);
+    await chmod(file, mode);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 export function renderWslGuardianScript() {
@@ -204,17 +239,9 @@ export async function syncWslWakeup({
     return { ...(await wslWakeupStatus({ home, platform, environment, commandRunner, regExecutable })), changed: false };
   }
 
-  const { directory, guardianPath } = paths(home);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  for (const candidate of [dirname(directory), directory]) {
-    const directoryInfo = await lstat(candidate);
-    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error('wsl_guardian_directory_invalid');
-  }
-  const temporary = `${guardianPath}.tmp-${process.pid}`;
+  const { guardianPath } = await ensureGuardianDirectory(home);
   try {
-    await writeFile(temporary, desiredGuardian, { mode: 0o700, flag: 'wx' });
-    await rename(temporary, guardianPath);
-    await chmod(guardianPath, 0o700);
+    await writeGuardianAtomically(guardianPath, desiredGuardian);
     await regSet(commandRunner, regExecutable, ownerKey, ownerValue, ownerMarker, { environment, home });
     await regSet(commandRunner, regExecutable, ownerKey, hashValue, expected.commandHash, { environment, home });
     await regSet(commandRunner, regExecutable, runKey, WSL_WAKEUP_RUN_VALUE, expected.command, { environment, home });
@@ -222,13 +249,10 @@ export async function syncWslWakeup({
     if (!status.healthy) throw new Error('wsl_wakeup_verification_failed');
     return { ...status, changed: true };
   } catch (error) {
-    await rm(temporary, { force: true });
     try {
       await restoreRegistry(commandRunner, regExecutable, registryBefore, { environment, home });
-      if (guardianBefore) {
-        await writeFile(guardianPath, guardianBefore.content, { mode: guardianBefore.mode || 0o700 });
-        await chmod(guardianPath, guardianBefore.mode || 0o700);
-      } else await rm(guardianPath, { force: true });
+      if (guardianBefore) await writeGuardianAtomically(guardianPath, guardianBefore.content, guardianBefore.mode || 0o700);
+      else await rm(guardianPath, { force: true });
     } catch {
       throw new Error('wsl_wakeup_failed_rollback_incomplete', { cause: error });
     }
@@ -262,8 +286,7 @@ export async function uninstallWslWakeup({
   } catch (error) {
     try {
       await restoreRegistry(commandRunner, regExecutable, registryBefore, { environment, home });
-      await writeFile(expected.guardianPath, guardianBefore.content, { mode: guardianBefore.mode || 0o700 });
-      await chmod(expected.guardianPath, guardianBefore.mode || 0o700);
+      await writeGuardianAtomically(expected.guardianPath, guardianBefore.content, guardianBefore.mode || 0o700);
     } catch {
       throw new Error('wsl_wakeup_uninstall_rollback_incomplete', { cause: error });
     }
