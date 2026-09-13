@@ -262,7 +262,7 @@ test('issue request protocol is strict, bounded, canonical, and redacts accident
   assert.match(parsed.requestFingerprint, /^[a-f0-9]{64}$/);
   assert.match(parsed.issueBodyFingerprint, /^[a-f0-9]{64}$/);
 
-  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'website-build', goal: 'x' }), /only app-improvement/);
+  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'data-analysis', goal: 'x', scope: { allowedPaths: ['app'] } }), /profile must be app-improvement or website-build/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x' }), /scope is required/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: [] } }), /at least one bounded path/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: ['.'] } }), /not the repository root/);
@@ -308,10 +308,11 @@ test('website-build request is strict, normalized, and forwarded to WorkflowEngi
 });
 
 test('website-build issue body accepts bounded briefs above the legacy 16 KiB limit', () => {
-  const facts = Array.from({ length: 40 }, (_, index) => `Dato ${index}: ${'x'.repeat(330)}`);
+  const facts = Array.from({ length: 40 }, (_, index) => `Dato ${index}: ${'x'.repeat(380)}`);
+  const contentRestrictions = Array.from({ length: 30 }, (_, index) => `Restricción ${index}: ${'y'.repeat(260)}`);
   const body = requestBody({
     profile: 'website-build',
-    input: { businessBrief: businessBrief({ facts }) }
+    input: { businessBrief: businessBrief({ facts, contentRestrictions }) }
   });
   assert.ok(Buffer.byteLength(body, 'utf8') > 16 * 1024);
   assert.equal(parseIssueRequestBody(body).request.input.businessBrief.facts.length, 40);
