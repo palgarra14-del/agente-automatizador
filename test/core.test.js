@@ -622,14 +622,16 @@ test('managed commit succeeds without host git identity and does not write repos
     assert.equal((await runProcess('git', ['switch', '-c', 'agent/test'], { cwd: root, timeoutMs: 5_000 })).ok, true);
     await writeFile(join(root, 'fixture.txt'), 'two\n');
 
-    const configured = {
-      workspace: root,
-      budgets: { commandTimeoutMs: 5_000 },
+    const configDirectory = join(root, 'config');
+    await mkdir(configDirectory, { recursive: true });
+    const configured = configFrom({
+      id: 'fixture',
       repository: { owner: 'owner', name: 'repo' },
       defaultBranch: 'main',
       protectedBranches: ['main'],
-      workingBranchPattern: 'agent/{runId}'
-    };
+      workspace: '..',
+      commands: { test: 'node --version' }
+    }, configDirectory);
     const adapter = new LocalGitAdapter();
     const changeSet = await adapter.inspectChangeSet(configured);
     const beforeConfig = (await readFile(join(root, '.git', 'config'), 'utf8'));
