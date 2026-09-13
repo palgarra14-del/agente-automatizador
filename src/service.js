@@ -104,7 +104,7 @@ export function renderInboxServiceUnit({ repositoryRoot, nodePath, home = homedi
     '',
     '[Service]',
     'Type=simple',
-    `WorkingDirectory=${systemdQuote(root)}`,
+    `WorkingDirectory=${root}`,
     `ExecStart=${systemdQuote(node)} ${systemdQuote(cli)} inbox watch`,
     `Environment=${systemdQuote(`PATH=${trustedServicePath(node)}`)}`,
     `Environment=${systemdQuote(`HOME=${resolve(home)}`)}`,
