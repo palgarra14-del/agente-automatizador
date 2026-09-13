@@ -18,7 +18,7 @@
       },
       "execution": {
         "provider": "container-required",
-        "image": "node:22-bookworm-slim",
+        "image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "resources": {
           "memoryMb": 1024,
           "cpuCount": 1,
@@ -228,7 +228,7 @@
       "commandEnvironment": {},
       "execution": {
         "provider": "container-required",
-        "image": "node:22-bookworm-slim",
+        "image": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
         "resources": {
           "memoryMb": 512,
           "cpuCount": 1,
