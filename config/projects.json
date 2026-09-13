@@ -32,7 +32,8 @@
         "forbiddenPaths": [],
         "sensitivePaths": [
           "config",
-          "src"
+          "src",
+          "scripts"
         ],
         "budgets": {
           "maxChangedFiles": 8,
