@@ -4825,8 +4825,18 @@ function normalizeVercelPreviewUrl(value) {
 }
 
 export class VercelDeploymentProvider {
-  constructor({ token = process.env.VERCEL_TOKEN, github = new GitHubAdapter(), fetchImpl = fetch, sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)), now = () => Date.now() } = {}) {
-    Object.assign(this, { token, github, fetch: fetchImpl, sleep, now });
+  constructor({
+    token = process.env.VERCEL_TOKEN,
+    github = new GitHubAdapter(),
+    fetchImpl = fetch,
+    sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)),
+    now = () => Date.now(),
+    requestTimeoutMs = 30_000
+  } = {}) {
+    if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 120_000) {
+      throw new Error('vercel_request_timeout_invalid');
+    }
+    Object.assign(this, { token, github, fetch: fetchImpl, sleep, now, requestTimeoutMs });
   }
 
   async latest(project, { commitSha, branch }) {
@@ -4839,8 +4849,18 @@ export class VercelDeploymentProvider {
       }
     }
     const query = new URLSearchParams({ projectId: project.deployment.projectId, limit: '20', teamId: project.deployment.teamId });
-    const response = await this.fetch(`https://api.vercel.com/v13/deployments?${query}`, { headers: { Authorization: `Bearer ${this.token}` } });
-    if (!response.ok) throw new Error(`Vercel API request failed: ${response.status}`);
+    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    let response;
+    try {
+      response = await this.fetch(`https://api.vercel.com/v13/deployments?${query}`, {
+        signal: timeoutSignal,
+        headers: { Authorization: `Bearer ${this.token}` }
+      });
+      if (!response.ok) throw new Error(`Vercel API request failed: ${response.status}`);
+    } catch (error) {
+      if (timeoutSignal.aborted) throw new Error('vercel_api_request_timeout', { cause: error });
+      throw error;
+    }
     const data = await response.json();
     const deployment = (data.deployments ?? []).find((item) => {
       const meta = item.meta ?? {};
