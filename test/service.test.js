@@ -10,6 +10,7 @@ import {
   renderInboxServiceUnit,
   restartInboxService,
   serviceStatus,
+  syncInboxService,
   uninstallInboxService
 } from '../src/service.js';
 
@@ -46,20 +47,28 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   const unit = renderInboxServiceUnit({
     repositoryRoot: '/home/pablo/projects/agente-automatizador',
     nodePath: '/home/pablo/.nvm/versions/node/v22.23.2/bin/node',
-    pathValue: '/home/pablo/.nvm/versions/node/v22.23.2/bin:/usr/bin',
-    home: '/home/pablo'
+    pathValue: '/tmp/untrusted-bin:/usr/bin',
+    home: '/home/pablo',
+    environment: {
+      GH_CONFIG_DIR: '/home/pablo/.config/gh-custom',
+      CODEX_HOME: '/home/pablo/.codex-custom',
+      GITHUB_TOKEN: 'must-never-be-rendered'
+    }
   });
   assert.match(unit, /managed-by=engineering-orchestrator:v1/);
   assert.match(unit, /ExecStart=.*src\/cli\.js.*inbox watch/);
   assert.match(unit, /Restart=always/);
   assert.match(unit, /WantedBy=default\.target/);
-  assert.doesNotMatch(unit, /GITHUB_TOKEN|gho_|ghp_/);
+  assert.match(unit, /PATH=\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin/);
+  assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
+  assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
+  assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|must-never-be-rendered|gho_|ghp_/);
 });
 
 test('service install/status/restart/uninstall is managed and rollback-safe', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-service-home-'));
   const repositoryRoot = await mkdtemp(join(tmpdir(), 'agent-service-repo-'));
-  const nodePath = '/usr/bin/node';
+  const nodePath = process.execPath;
   const pathValue = '/usr/bin:/bin';
   const secret = 'gho_abcdefghijklmnopqrstuvwxyz1234567890';
   const calls = [];
@@ -95,6 +104,16 @@ test('service install/status/restart/uninstall is managed and rollback-safe', as
 
     const restarted = await restartInboxService({ home, pathValue, commandRunner: runner });
     assert.equal(restarted.active, true);
+
+    const unchanged = await syncInboxService({ repositoryRoot, nodePath, pathValue, home, platform: 'linux', commandRunner: runner, environment });
+    assert.equal(unchanged.changed, false);
+    environment.GH_HOST = 'github.com';
+    const updated = await syncInboxService({ repositoryRoot, nodePath, pathValue, home, platform: 'linux', commandRunner: runner, environment });
+    assert.equal(updated.changed, true);
+    const syncedUnit = await readFile(updated.unitPath, 'utf8');
+    assert.match(syncedUnit, /GH_HOST=github\.com/);
+    assert.equal(syncedUnit.includes(secret), false);
+
     const removed = await uninstallInboxService({ home, pathValue, commandRunner: runner });
     assert.equal(removed.removed, true);
     assert.equal((await serviceStatus({ home, pathValue, commandRunner: runner })).installed, false);
