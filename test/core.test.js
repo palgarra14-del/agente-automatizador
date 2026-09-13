@@ -1140,14 +1140,15 @@ test('GitHub deployment observer accepts only exact Preview evidence and trusted
   const branch = 'agent/run';
   const requests = [];
   let environmentUrl = 'https://callflow-preview-abc.vercel.app';
+  let statusActor = 'vercel[bot]';
   const adapter = new GitHubAdapter({
     token: 'github-test-token',
     fetchImpl: async (url) => {
       requests.push(url);
       const body = url.includes('/statuses?')
         ? [
-            { id: 1, state: 'pending', created_at: '2026-09-13T00:00:00Z' },
-            { id: 2, state: 'success', environment_url: environmentUrl, created_at: '2026-09-13T00:01:00Z' }
+            { id: 1, state: 'pending', environment: 'Preview', creator: { login: 'vercel[bot]' }, created_at: '2026-09-13T00:00:00Z' },
+            { id: 2, state: 'success', environment: 'Preview', creator: { login: statusActor }, environment_url: environmentUrl, created_at: '2026-09-13T00:01:00Z' }
           ]
         : [
             { id: 10, sha, ref: branch, environment: 'Production', production_environment: true, created_at: '2026-09-13T00:02:00Z' },
@@ -1170,6 +1171,12 @@ test('GitHub deployment observer accepts only exact Preview evidence and trusted
   assert.equal(invalid.state, 'INVALID');
   assert.equal(invalid.ok, false);
   assert.equal(invalid.url, undefined);
+
+  environmentUrl = 'https://valid-again.vercel.app';
+  statusActor = 'other-bot[bot]';
+  const wrongActor = await adapter.previewDeployment(leadfinderProject(), { commitSha: sha, branch });
+  assert.equal(wrongActor.state, 'INVALID');
+  assert.match(wrongActor.reason, /not an exact Vercel Preview status/);
 });
 
 test('GitHub deployment observer uses the latest status and Vercel adapter falls back without a Vercel token', async () => {
@@ -1179,8 +1186,8 @@ test('GitHub deployment observer uses the latest status and Vercel adapter falls
     token: 'github-test-token',
     fetchImpl: async (url) => ({ ok: true, json: async () => url.includes('/statuses?')
       ? [
-          { id: 20, state: 'success', environment_url: 'https://older.vercel.app', created_at: '2026-09-13T00:00:00Z' },
-          { id: 21, state: 'failure', environment_url: 'https://failed.vercel.app', created_at: '2026-09-13T00:02:00Z' }
+          { id: 20, state: 'success', environment: 'Preview', creator: { login: 'vercel[bot]' }, environment_url: 'https://older.vercel.app', created_at: '2026-09-13T00:00:00Z' },
+          { id: 21, state: 'failure', environment: 'Preview', creator: { login: 'vercel[bot]' }, environment_url: 'https://failed.vercel.app', created_at: '2026-09-13T00:02:00Z' }
         ]
       : [{ id: 19, sha, ref: branch, environment: 'Preview', production_environment: false, created_at: '2026-09-13T00:01:00Z' }] })
   });
