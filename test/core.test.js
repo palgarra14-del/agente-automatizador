@@ -122,6 +122,10 @@ class FakeGitHub {
 
   async inspect(configured) { return { provider: 'github', status: 'ok', repository: `${configured.repository.owner}/${configured.repository.name}`, defaultBranch: 'main', head: 'initial-head' }; }
 
+  async authenticatedCommitIdentity() {
+    return { id: 123, login: 'owner', name: 'owner', email: '123+owner@users.noreply.github.com' };
+  }
+
   async createPullRequest() {
     this.pullRequests += 1;
     return { number: this.pullRequests, url: `https://example.test/pr/${this.pullRequests}`, state: 'open' };
@@ -594,7 +598,8 @@ test('v0.5 revalidates repository identity before controlled commit and push and
   await adapter.commit(configured, 'agent/test', 'safe change', {
     expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
     expectedHead: 'base-head',
-    expectedRemote: 'https://github.com/owner/repo.git'
+    expectedRemote: 'https://github.com/owner/repo.git',
+    identity: { name: 'owner', email: '123+owner@users.noreply.github.com' }
   });
   await adapter.push(configured, 'agent/test', { expectedHead: 'commit-head', expectedRemote: 'https://github.com/owner/repo.git' });
   assert.deepEqual(observed.filter((value) => !Array.isArray(value)), [
@@ -603,10 +608,10 @@ test('v0.5 revalidates repository identity before controlled commit and push and
   ]);
   assert.deepEqual(observed.find((args) => Array.isArray(args) && args[0] === 'commit').slice(0, 2), ['commit', '--no-verify']);
   assert.deepEqual(commitGitOptions?.env, {
-    GIT_AUTHOR_NAME: 'Engineering Orchestrator',
-    GIT_AUTHOR_EMAIL: 'engineering-orchestrator@localhost.invalid',
-    GIT_COMMITTER_NAME: 'Engineering Orchestrator',
-    GIT_COMMITTER_EMAIL: 'engineering-orchestrator@localhost.invalid'
+    GIT_AUTHOR_NAME: 'owner',
+    GIT_AUTHOR_EMAIL: '123+owner@users.noreply.github.com',
+    GIT_COMMITTER_NAME: 'owner',
+    GIT_COMMITTER_EMAIL: '123+owner@users.noreply.github.com'
   });
 });
 
@@ -639,21 +644,47 @@ test('managed commit succeeds without host git identity and does not write repos
     const committed = await adapter.commit(configured, 'agent/test', 'identity fixture', {
       expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
       expectedHead: baseHead,
-      expectedRemote: 'https://github.com/owner/repo.git'
+      expectedRemote: 'https://github.com/owner/repo.git',
+      identity: { name: 'owner', email: '123+owner@users.noreply.github.com' }
     });
 
     assert.match(committed.finalHead, /^[a-f0-9]{40}$/);
     const identity = (await runProcess('git', ['log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce'], { cwd: root, timeoutMs: 5_000 })).stdout.trim().split('\0');
     assert.deepEqual(identity, [
-      'Engineering Orchestrator',
-      'engineering-orchestrator@localhost.invalid',
-      'Engineering Orchestrator',
-      'engineering-orchestrator@localhost.invalid'
+      'owner',
+      '123+owner@users.noreply.github.com',
+      'owner',
+      '123+owner@users.noreply.github.com'
     ]);
     assert.equal(await readFile(join(root, '.git', 'config'), 'utf8'), beforeConfig);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('managed commit fails closed when GitHub-bound identity is missing or malformed', async () => {
+  const configured = project({ workingBranchPattern: 'agent/{runId}' });
+  const adapter = new LocalGitAdapter();
+  const changeSet = governedChangeSet();
+  adapter.assertRepositoryState = async () => ({ currentBranch: 'agent/test', initialHead: 'base-head', remote: 'https://github.com/owner/repo.git' });
+  adapter.assertWorkingBranch = async () => {};
+  adapter.inspectChangeSet = async () => changeSet;
+  adapter.git = async (args) => {
+    if (args[0] === 'diff' && args[1] === '--cached') return { exitCode: 1, stdout: '', stderr: '' };
+    if (args[0] === 'commit') throw new Error('commit subprocess must not run with invalid identity');
+    return { exitCode: 0, stdout: '', stderr: '' };
+  };
+
+  const base = {
+    expectedChangeSetFingerprint: changeSet.changeSetFingerprint,
+    expectedHead: 'base-head',
+    expectedRemote: 'https://github.com/owner/repo.git'
+  };
+  await assert.rejects(adapter.commit(configured, 'agent/test', 'missing identity', base), /managed_git_commit_identity_invalid/);
+  await assert.rejects(
+    adapter.commit(configured, 'agent/test', 'bad identity', { ...base, identity: { name: 'owner', email: 'owner@example.com' } }),
+    /managed_git_commit_identity_invalid/
+  );
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
@@ -837,6 +868,78 @@ test('default worker environment excludes GitHub, Vercel, and OpenAI credentials
       else process.env[name] = previous[name];
     }
   }
+});
+
+test('GitHub adapter derives a process-local commit identity from the authenticated user', async () => {
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async (url) => {
+      assert.match(url, /\/user$/);
+      return { ok: true, json: async () => ({ id: 277463323, login: 'palgarra14-del' }) };
+    }
+  });
+  assert.deepEqual(await adapter.authenticatedCommitIdentity(), {
+    id: 277463323,
+    login: 'palgarra14-del',
+    name: 'palgarra14-del',
+    email: '277463323+palgarra14-del@users.noreply.github.com'
+  });
+
+  for (const bad of [
+    { id: 0, login: 'owner' },
+    { id: 1, login: '' },
+    { id: 1, login: 'bad login' }
+  ]) {
+    const invalid = new GitHubAdapter({
+      token: 'ghp_adapterToken',
+      fetchImpl: async () => ({ ok: true, json: async () => bad })
+    });
+    await assert.rejects(invalid.authenticatedCommitIdentity(), /github_authenticated_commit_identity_invalid/);
+  }
+});
+
+test('GitHub adapter keeps Vercel preview statuses out of CI while retaining them as deployment evidence', async () => {
+  const responses = [
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [
+      {
+        context: 'Vercel – app-llamadas',
+        state: 'failure',
+        description: 'Deployment blocked',
+        target_url: 'https://vercel.com/team/project/deployment'
+      },
+      {
+        context: 'external-ci',
+        state: 'success',
+        description: 'ok',
+        target_url: 'https://example.test/ci'
+      }
+    ]
+  ];
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async () => ({ ok: true, json: async () => responses.shift() })
+  });
+  const configured = project({
+    deployment: { provider: 'vercel', projectId: 'prj_test', teamId: 'team_test', requirePreviewReady: true }
+  });
+  const result = await adapter.checks(configured, 'sha');
+  assert.equal(result.state, 'success');
+  assert.deepEqual(result.statuses.map((status) => status.context), ['external-ci']);
+  assert.deepEqual(result.deploymentStatuses.map((status) => status.context), ['Vercel – app-llamadas']);
+
+  const spoofedResponses = [
+    { total_count: 1, check_runs: [{ name: 'verify', status: 'completed', conclusion: 'success' }] },
+    [{ context: 'Vercel – spoofed', state: 'failure', target_url: 'https://attacker.example/deploy' }]
+  ];
+  const spoofed = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async () => ({ ok: true, json: async () => spoofedResponses.shift() })
+  });
+  const spoofedResult = await spoofed.checks(configured, 'sha');
+  assert.equal(spoofedResult.state, 'failure');
+  assert.equal(spoofedResult.statuses[0].context, 'Vercel – spoofed');
+  assert.deepEqual(spoofedResult.deploymentStatuses, []);
 });
 
 test('GitHub adapter requires both check runs and commit status contexts to be healthy', async () => {
