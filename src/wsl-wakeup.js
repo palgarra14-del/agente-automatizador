@@ -115,7 +115,7 @@ async function guardianSnapshot(file) {
     const info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('wsl_guardian_must_be_regular_file');
     const content = await readFile(file, 'utf8');
-    if (!content.includes(guardianMarker)) throw new Error('wsl_guardian_not_managed_by_agent');
+    if (!content.startsWith(`#!/bin/sh\n${guardianMarker}\n`)) throw new Error('wsl_guardian_not_managed_by_agent');
     return { content, mode: info.mode & 0o777 };
   } catch (error) {
     if (error.code === 'ENOENT') return null;
