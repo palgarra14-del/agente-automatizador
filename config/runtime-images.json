@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "builds": [
+    {
+      "image": "agent-node22-pnpm11:local",
+      "context": "docker/node22-pnpm11",
+      "files": [
+        {
+          "path": "Dockerfile",
+          "sha256": "78a2642e6e80bf6e4d74309f3a6f5bdbe71f52879a33b07f0d7b667b4ff1880a"
+        }
+      ]
+    }
+  ]
+}
