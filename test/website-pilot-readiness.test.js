@@ -17,6 +17,7 @@ test('website pilot is registered for the full governed website-build workflow',
     ['test', 'typecheck', 'lint', 'build'].map((name) => Boolean(project.commands[name])),
     [true, true, true, true]
   );
+  assert.equal(project.commands.test, 'node --test test/website.test.js');
   assert.equal(project.deployment.provider, 'vercel');
   assert.equal(project.deployment.projectId, 'prj_JWGFirkcQg3pmNFOdyoTRAArYCVK');
   assert.equal(project.deployment.requirePreviewReady, true);
