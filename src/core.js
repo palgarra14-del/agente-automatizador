@@ -220,9 +220,89 @@ function safeJson(value) {
 const readOnlyRepositoryContextDefaults = Object.freeze({
   maxFiles: 24,
   maxFileBytes: 64 * 1024,
+  maxSourceFileBytes: 2 * 1024 * 1024,
   maxTotalBytes: 256 * 1024,
+  maxSourceTotalBytes: 8 * 1024 * 1024,
   maxManifestBytes: 64 * 1024
 });
+
+function utf8BoundedSlice(value, start, maxBytes) {
+  if (!Number.isInteger(start) || start < 0 || !Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('repository_context_excerpt_bounds_invalid');
+  let normalizedStart = Math.min(start, value.length);
+  if (
+    normalizedStart > 0 &&
+    normalizedStart < value.length &&
+    value.charCodeAt(normalizedStart) >= 0xDC00 &&
+    value.charCodeAt(normalizedStart) <= 0xDFFF &&
+    value.charCodeAt(normalizedStart - 1) >= 0xD800 &&
+    value.charCodeAt(normalizedStart - 1) <= 0xDBFF
+  ) normalizedStart -= 1;
+  let low = normalizedStart;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(normalizedStart, mid)) <= maxBytes) low = mid;
+    else high = mid - 1;
+  }
+  let end = low;
+  if (
+    end > normalizedStart &&
+    end < value.length &&
+    value.charCodeAt(end - 1) >= 0xD800 &&
+    value.charCodeAt(end - 1) <= 0xDBFF &&
+    value.charCodeAt(end) >= 0xDC00 &&
+    value.charCodeAt(end) <= 0xDFFF
+  ) end -= 1;
+  return value.slice(normalizedStart, end);
+}
+
+function utf8BoundedSuffix(value, maxBytes) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('repository_context_excerpt_bounds_invalid');
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (Buffer.byteLength(value.slice(mid)) <= maxBytes) high = mid;
+    else low = mid + 1;
+  }
+  let start = low;
+  if (
+    start > 0 &&
+    start < value.length &&
+    value.charCodeAt(start) >= 0xDC00 &&
+    value.charCodeAt(start) <= 0xDFFF &&
+    value.charCodeAt(start - 1) >= 0xD800 &&
+    value.charCodeAt(start - 1) <= 0xDBFF
+  ) start -= 1;
+  return value.slice(start);
+}
+
+function excerptRepositoryText(value, maxBytes) {
+  const fullBytes = Buffer.byteLength(value);
+  if (fullBytes <= maxBytes) return { content: value, excerpted: false, excerptBytes: fullBytes };
+  const segmentCount = maxBytes >= 8 * 1024 ? 8 : 4;
+  const markers = Array.from({ length: segmentCount }, (_, index) => `/* repository context excerpt ${index + 1}/${segmentCount} */\n`);
+  const separator = '\n/* ... omitted ... */\n';
+  const overhead = markers.reduce((sum, marker) => sum + Buffer.byteLength(marker), 0) + Buffer.byteLength(separator) * (segmentCount - 1);
+  const segmentBudget = Math.floor((maxBytes - overhead) / segmentCount);
+  if (segmentBudget < 128) throw new Error('repository_context_excerpt_budget_too_small');
+
+  const pieces = [];
+  for (let index = 0; index < segmentCount; index += 1) {
+    let piece;
+    if (index === 0) piece = utf8BoundedSlice(value, 0, segmentBudget);
+    else if (index === segmentCount - 1) piece = utf8BoundedSuffix(value, segmentBudget);
+    else {
+      const start = Math.floor((value.length - 1) * index / (segmentCount - 1));
+      piece = utf8BoundedSlice(value, start, segmentBudget);
+    }
+    pieces.push(markers[index] + piece);
+  }
+  const content = pieces.join(separator);
+  const excerptBytes = Buffer.byteLength(content);
+  if (excerptBytes > maxBytes) throw new Error('repository_context_excerpt_budget_exceeded');
+  return { content, excerpted: true, excerptBytes };
+}
 
 function repositoryContextFingerprint(files, reviewDiff = null) {
   const fileMetadata = files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes }));
@@ -292,8 +372,12 @@ export async function collectReadOnlyRepositoryContext({
   if (!normalizedScope.allowedPaths.length) return null;
   const maxFiles = positiveInteger(limits.maxFiles, readOnlyRepositoryContextDefaults.maxFiles, 'repository context maxFiles');
   const maxFileBytes = positiveInteger(limits.maxFileBytes, readOnlyRepositoryContextDefaults.maxFileBytes, 'repository context maxFileBytes');
+  const maxSourceFileBytes = positiveInteger(limits.maxSourceFileBytes, readOnlyRepositoryContextDefaults.maxSourceFileBytes, 'repository context maxSourceFileBytes');
   const maxTotalBytes = positiveInteger(limits.maxTotalBytes, readOnlyRepositoryContextDefaults.maxTotalBytes, 'repository context maxTotalBytes');
+  const maxSourceTotalBytes = positiveInteger(limits.maxSourceTotalBytes, readOnlyRepositoryContextDefaults.maxSourceTotalBytes, 'repository context maxSourceTotalBytes');
   const maxManifestBytes = positiveInteger(limits.maxManifestBytes, readOnlyRepositoryContextDefaults.maxManifestBytes, 'repository context maxManifestBytes');
+  if (maxSourceFileBytes < maxFileBytes) throw new Error('repository context maxSourceFileBytes must be at least maxFileBytes');
+  if (maxSourceTotalBytes < maxTotalBytes) throw new Error('repository context maxSourceTotalBytes must be at least maxTotalBytes');
   const root = resolve(workspace);
   const manifest = await processRunner(
     'git',
@@ -309,6 +393,7 @@ export async function collectReadOnlyRepositoryContext({
   const policyForbidden = project.changePolicy?.forbiddenPaths ?? [];
   const files = [];
   let totalBytes = 0;
+  let sourceTotalBytes = 0;
   for (const path of candidatePaths) {
     if (!pathMatchesAnyRoot(path, normalizedScope.allowedPaths)) throw new Error(`repository_context_scope_violation:${path}`);
     if (
@@ -319,23 +404,27 @@ export async function collectReadOnlyRepositoryContext({
     ) throw new Error(`repository_context_forbidden_path:${path}`);
     const target = resolve(root, path);
     if (!isWithin(root, target)) throw new Error(`repository_context_path_escape:${path}`);
-    let content;
+    let source;
     try {
-      content = await readBoundedRegularFile(target, { maxBytes: maxFileBytes, label: `Repository context file ${path}`, requireSingleLink: true });
+      source = await readBoundedRegularFile(target, { maxBytes: maxSourceFileBytes, label: `Repository context source file ${path}`, requireSingleLink: true });
     } catch (error) {
       throw new Error(`repository_context_file_read_failed:${path}:${clip(error.message, 300)}`, { cause: error });
     }
-    totalBytes += content.byteLength;
-    if (totalBytes > maxTotalBytes) throw new Error(`repository_context_total_bytes_exceeded:${totalBytes}>${maxTotalBytes}`);
+    sourceTotalBytes += source.byteLength;
+    if (sourceTotalBytes > maxSourceTotalBytes) throw new Error(`repository_context_source_total_bytes_exceeded:${sourceTotalBytes}>${maxSourceTotalBytes}`);
     let text;
-    try { text = new TextDecoder('utf-8', { fatal: true }).decode(content); }
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(source); }
     catch (error) { throw new Error(`repository_context_non_utf8_file:${path}`, { cause: error }); }
     if (text.includes('\u0000')) throw new Error(`repository_context_non_text_file:${path}`);
+    const excerpt = excerptRepositoryText(maskSecrets(text), maxFileBytes);
+    totalBytes += excerpt.excerptBytes;
+    if (totalBytes > maxTotalBytes) throw new Error(`repository_context_total_bytes_exceeded:${totalBytes}>${maxTotalBytes}`);
     files.push({
       path,
-      sha256: createHash('sha256').update(content).digest('hex'),
-      bytes: content.byteLength,
-      content: maskSecrets(text)
+      sha256: createHash('sha256').update(source).digest('hex'),
+      bytes: source.byteLength,
+      content: excerpt.content,
+      ...(excerpt.excerpted ? { excerpted: true, excerptBytes: excerpt.excerptBytes } : {})
     });
   }
   return {
