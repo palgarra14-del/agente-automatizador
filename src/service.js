@@ -582,6 +582,18 @@ async function ghApiJson(commandRunner, endpoint, { cwd, env }) {
   catch { throw new Error('operator_upgrade_github_response_invalid'); }
 }
 
+const upgradeDependencyControlFiles = Object.freeze(['package.json', 'package-lock.json', 'npm-shrinkwrap.json']);
+
+async function upgradeDependencyFilesChanged(commandRunner, fromSha, toSha, { cwd, env }) {
+  const result = await checkedUpgradeCommand(
+    commandRunner,
+    'git',
+    ['diff', '--name-only', fromSha, toSha, '--', ...upgradeDependencyControlFiles],
+    { cwd, env, timeoutMs: 15_000, maxOutputBytes: 8_192 }
+  );
+  return result.stdout.split(/\r?\n/).some(Boolean);
+}
+
 async function verifyUpgradeCommit(commandRunner, repository, branch, commitSha, { cwd, env }) {
   const pulls = await ghApiJson(commandRunner, `repos/${repository}/commits/${commitSha}/pulls`, { cwd, env });
   if (!Array.isArray(pulls)) throw new Error('operator_upgrade_associated_prs_invalid');
@@ -785,6 +797,7 @@ async function performInboxServiceUpgrade({
     .stdout.split(/\r?\n/).filter(Boolean);
   if (!commits.length || commits.length > maxCommits) throw new Error('operator_upgrade_commit_range_out_of_bounds');
   for (const commit of commits) await verifyUpgradeCommit(commandRunner, expectedRepository, defaultBranch, commit, { cwd: root, env: githubEnv });
+  const dependencyFilesChanged = await upgradeDependencyFilesChanged(commandRunner, localSha, remoteSha, { cwd: root, env });
 
   await systemctl(commandRunner, ['stop', INBOX_SERVICE_NAME], { home, pathValue: trustedPath });
   try {
@@ -810,24 +823,47 @@ async function performInboxServiceUpgrade({
     const mergedHead = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', 'HEAD'], { cwd: root, env })).stdout.trim();
     if (mergedHead !== remoteSha) throw new Error('operator_upgrade_fast_forward_head_mismatch');
 
-    await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
-    const postInstallStatus = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
-    if (postInstallStatus) throw new Error('operator_upgrade_dependency_refresh_modified_repository');
+    if (dependencyFilesChanged) {
+      try {
+        await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      } catch (error) {
+        throw new Error('operator_upgrade_dependency_refresh_failed', { cause: error });
+      }
+      const postInstallStatus = (await checkedUpgradeCommand(commandRunner, 'git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, env })).stdout.trim();
+      if (postInstallStatus) throw new Error('operator_upgrade_dependency_refresh_modified_repository');
+    }
 
-    await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env: githubEnv, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    try {
+      await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env: githubEnv, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+    } catch (error) {
+      throw new Error('operator_upgrade_service_sync_failed', { cause: error });
+    }
     const finalStatus = await serviceStatus({ home, pathValue: trustedPath, commandRunner });
     if (!finalStatus.enabled || !finalStatus.active) throw new Error('operator_upgrade_service_not_active');
     return { ...finalStatus, upgraded: true, from: localSha, to: remoteSha, commits: commits.length };
   } catch (error) {
+    let rollbackStage = null;
     let rollbackError = null;
     try {
-      if (upgraded) await checkedUpgradeCommand(commandRunner, 'git', ['-c', 'core.hooksPath=/dev/null', 'reset', '--hard', localSha], { cwd: root, env, timeoutMs: 30_000 });
-      await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      if (upgraded) {
+        rollbackStage = 'reset';
+        await checkedUpgradeCommand(commandRunner, 'git', ['-c', 'core.hooksPath=/dev/null', 'reset', '--hard', localSha], { cwd: root, env, timeoutMs: 30_000 });
+      }
+      if (dependencyFilesChanged) {
+        rollbackStage = 'dependencies';
+        await checkedUpgradeCommand(commandRunner, 'npm', ['ci', '--ignore-scripts'], { cwd: root, env, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
+      }
+      rollbackStage = 'service_sync';
       await checkedUpgradeCommand(commandRunner, nodePath, [resolve(root, 'src', 'cli.js'), 'service', 'sync'], { cwd: root, env: githubEnv, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 });
+      rollbackStage = null;
     } catch (rollback) {
       rollbackError = rollback;
     }
-    if (rollbackError) throw new Error('operator_upgrade_failed_rollback_incomplete', { cause: error });
+    if (rollbackError) {
+      const primaryCode = String(error?.message ?? 'operator_upgrade_failed').replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 160);
+      const rollbackCode = String(rollbackError?.message ?? 'rollback_failed').replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 160);
+      throw new Error(`operator_upgrade_failed_rollback_incomplete:stage=${rollbackStage ?? 'unknown'}:primary=${primaryCode}:rollback=${rollbackCode}`, { cause: error });
+    }
     throw error;
   }
 }
