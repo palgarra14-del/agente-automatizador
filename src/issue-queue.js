@@ -443,7 +443,7 @@ export function workflowFailureSummary(workflow) {
     ?? null;
   const workerEvidence = step?.evidence?.workerEvidence;
   const workerDetail = workerEvidence?.diagnostics?.length
-    ? [workerEvidence.output ?? workerEvidence.summary ?? null, `Tool diagnostics: ${JSON.stringify(workerEvidence.diagnostics)}`].filter(Boolean).join('\n')
+    ? [`Tool diagnostics: ${JSON.stringify(workerEvidence.diagnostics)}`, workerEvidence.output ?? workerEvidence.summary ?? null].filter(Boolean).join('\n')
     : workerEvidence?.output ?? workerEvidence?.summary ?? null;
   const detail = step?.evidence?.error ?? workerDetail ?? workflow.result?.detail ?? null;
   return {
