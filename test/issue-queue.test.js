@@ -311,7 +311,7 @@ function persistedRequestFields(queue, issue, project, workflow = workflowPlan()
 }
 
 test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
-  const { store, channel, workflowEngine, project, projects } = await queueFixture();
+  const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'b'.repeat(40);
   const queue = new SupervisedIssueQueue({
     store,
