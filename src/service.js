@@ -507,7 +507,7 @@ export async function restartInboxService({ home = homedir(), pathValue = proces
 export async function uninstallInboxService({ home = homedir(), pathValue = process.env.PATH ?? '', commandRunner = runLocalCommand, environment = process.env } = {}) {
   const autoUpgrade = await uninstallAutoUpgradeTimer({ home, pathValue, commandRunner, environment });
   const { unitPath } = servicePaths(home);
-  if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath };
+  if (!await assertManagedOrMissing(unitPath)) return { service: INBOX_SERVICE_NAME, installed: false, removed: false, unitPath, autoUpgrade };
   await systemctl(commandRunner, ['disable', '--now', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
   const active = await systemctl(commandRunner, ['is-active', INBOX_SERVICE_NAME], { home, pathValue, allowFailure: true, environment });
   if (active.exitCode === 0 && active.stdout.trim() === 'active') throw new Error('persistent_inbox_service_still_active');
