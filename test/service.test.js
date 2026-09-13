@@ -220,9 +220,11 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
       if (endpoint.includes('/actions/runs?')) return result(JSON.stringify({ workflow_runs: ciSuccess ? [{ name: 'CI', event: 'pull_request', head_sha: 'c'.repeat(40), conclusion: 'success' }] : [] }));
     }
     if (command === 'npm') {
+      assert.equal(options.env.GITHUB_TOKEN, undefined);
       npmCalls += 1;
       return failFirstNpm && npmCalls === 1 ? result('', 1) : result();
     }
+    if (command === process.execPath) assert.match(options.env.GITHUB_TOKEN ?? '', /^gho_/);
     return result(command === process.execPath ? '{}\n' : '');
   };
   return { runner, calls, oldSha, newSha };
