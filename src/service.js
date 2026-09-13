@@ -541,7 +541,20 @@ function normalizedGitHubRepository(remote) {
 
 function upgradeEnvironment(environment = {}) {
   const allowed = ['HOME', 'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'LANG', 'LC_ALL'];
-  return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
+  const result = Object.fromEntries(
+    allowed
+      .filter((name) => environment[name] !== undefined)
+      .map((name) => [name, validateText(String(environment[name]), name)])
+  );
+  const runtimeDir = environment.XDG_RUNTIME_DIR;
+  if (runtimeDir !== undefined) {
+    const value = validateText(String(runtimeDir), 'XDG_RUNTIME_DIR');
+    if (!isAbsolute(value)) throw new Error('XDG_RUNTIME_DIR must be absolute');
+    result.XDG_RUNTIME_DIR = value;
+  }
+  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS;
+  if (busAddress !== undefined) result.DBUS_SESSION_BUS_ADDRESS = validateText(String(busAddress), 'DBUS_SESSION_BUS_ADDRESS');
+  return result;
 }
 
 function upgradeTrustedPath(nodePath) {
