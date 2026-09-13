@@ -3684,3 +3684,38 @@ test('approved-start deadline refresh works only for an untouched pristine workf
     /workflow_start_deadline_refresh_not_pristine/
   );
 });
+
+
+test('workflow cancellation terminalizes a pristine workflow without executing any step', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'cancel fixture'
+  });
+
+  const cancelled = await workflowEngine.cancel(created.id, { reason: 'fixture_cancelled' });
+  assert.equal(cancelled.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(cancelled.result.error, 'fixture_cancelled');
+  assert.equal(cancelled.result.stepId, 'inspect-project');
+  assert.equal(cancelled.steps[0].status, WorkflowStepStatus.BLOCKED);
+  assert.equal(cancelled.steps[0].error, 'fixture_cancelled');
+  assert.equal(cancelled.steps[0].attempts, 0);
+  assert.equal(cancelled.steps[1].status, WorkflowStepStatus.PENDING);
+  assert.equal(cancelled.pausedAt, null);
+  assert.deepEqual(validateWorkflowPlan(cancelled, workflowEngine.projects), { ok: true, stepCount: cancelled.steps.length, budgets: cancelled.budgets });
+
+  const repeated = await workflowEngine.cancel(created.id, { reason: 'different_reason' });
+  assert.equal(repeated.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(repeated.result.error, 'fixture_cancelled');
+});
+
+test('workflow cancellation reason is strictly bounded', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'cancel fixture'
+  });
+  await assert.rejects(() => workflowEngine.cancel(created.id, { reason: '../unsafe reason' }), /workflow cancellation reason is invalid/);
+});
