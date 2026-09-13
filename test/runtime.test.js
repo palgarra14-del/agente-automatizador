@@ -248,6 +248,27 @@ test('managed local runtime with a missing or wrong recipe label is rebuilt', as
   }
 });
 
+test('managed local build refuses mutable base images even when the recipe hash matches', async () => {
+  const mutable = 'FROM node:22-bookworm-slim\nRUN echo ok\n';
+  const repoFixture = await buildRepository(mutable);
+  const config = buildConfig(mutable);
+  const f = fixture({ present: [PINNED] });
+  try {
+    await assert.rejects(
+      syncProjectRuntimes(projects(), {
+        buildConfig: config,
+        repositoryRoot: repoFixture.root,
+        environment: { PATH: '/usr/bin:/bin' },
+        commandRunner: f.runner
+      }),
+      /runtime_build_base_image_not_pinned/
+    );
+    assert.equal(f.calls.some((call) => call.args.includes('build')), false);
+  } finally {
+    await rm(repoFixture.root, { recursive: true, force: true });
+  }
+});
+
 test('managed local build fails closed on context drift, extra files, or build failure', async () => {
   const repoFixture = await buildRepository();
   const config = buildConfig();
