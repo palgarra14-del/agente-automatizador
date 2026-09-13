@@ -1327,13 +1327,17 @@ test('GitHubIssueChannel combines caller cancellation with its own request deadl
     token: 'ghp_fixtureSecret',
     repository: { owner: 'x', name: 'y' },
     requestTimeoutMs: 1_000,
-    fetchImpl: async (_url, options = {}) => {
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
       const signal = options.signal;
-      Object.defineProperty(signal, 'aborted', { value: true, configurable: true });
-      throw signal.reason ?? new Error('timeout fixture');
-    }
+      assert.ok(signal, 'issue deadline request must carry an abort signal');
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
   });
-  deadlineChannel.requestTimeoutMs = 1;
+  deadlineChannel.requestTimeoutMs = 5;
   await assert.rejects(
     deadlineChannel.request('/repos/x/y/issues'),
     /github_issue_queue_request_timeout/
