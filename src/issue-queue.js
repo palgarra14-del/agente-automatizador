@@ -17,9 +17,11 @@ export function normalizeIssueQueueConfig(value) {
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000 || pollIntervalMs > 300_000) throw new Error('issue queue pollIntervalMs must be between 1000 and 300000');
   const cloudProjectIds = value.cloudProjectIds ?? [];
   if (!Array.isArray(cloudProjectIds) || cloudProjectIds.length > 20) throw new Error('issue queue cloudProjectIds must be an array with at most 20 project ids');
-  const normalizedCloudProjectIds = [...new Set(cloudProjectIds.map((projectId, index) =>
-    boundedString(projectId, `issue queue cloudProjectIds[${index}]`, { required: true, max: 80 })
-  ))].sort();
+  const normalizedCloudProjectIds = [...new Set(cloudProjectIds.map((projectId, index) => {
+    const normalized = boundedString(projectId, `issue queue cloudProjectIds[${index}]`, { required: true, max: 80 });
+    if (!/^[a-z0-9-]+$/.test(normalized)) throw new Error(`issue queue cloudProjectIds[${index}] is invalid`);
+    return normalized;
+  }))].sort();
   return { version: 1, repository: { owner, name }, allowedActors, pollIntervalMs, cloudProjectIds: normalizedCloudProjectIds };
 }
 
@@ -626,11 +628,11 @@ export class SupervisedIssueQueue {
     this.workflowEngine = workflowEngine;
     this.channel = channel;
     this.allowedActors = new Set(allowedActors.map((actor) => boundedString(actor, 'allowed actor', { required: true, max: 80 }).toLowerCase()));
-    if (includedProjectIds !== null && (!Array.isArray(includedProjectIds) || includedProjectIds.some((id) => typeof id !== 'string' || !id))) {
-      throw new Error('SupervisedIssueQueue includedProjectIds must be null or an array of project ids');
+    if (includedProjectIds !== null && (!Array.isArray(includedProjectIds) || includedProjectIds.some((id) => typeof id !== 'string' || !/^[a-z0-9-]+$/.test(id)))) {
+      throw new Error('SupervisedIssueQueue includedProjectIds must be null or an array of valid project ids');
     }
-    if (!Array.isArray(excludedProjectIds) || excludedProjectIds.some((id) => typeof id !== 'string' || !id)) {
-      throw new Error('SupervisedIssueQueue excludedProjectIds must be an array of project ids');
+    if (!Array.isArray(excludedProjectIds) || excludedProjectIds.some((id) => typeof id !== 'string' || !/^[a-z0-9-]+$/.test(id))) {
+      throw new Error('SupervisedIssueQueue excludedProjectIds must be an array of valid project ids');
     }
     this.includedProjectIds = includedProjectIds === null ? null : new Set(includedProjectIds);
     this.excludedProjectIds = new Set(excludedProjectIds);
