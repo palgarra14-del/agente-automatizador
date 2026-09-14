@@ -2717,7 +2717,9 @@ export class WorkflowEngine {
     let ciDispatch = evidence.ciDispatch ?? null;
     if (!ciDispatch) {
       try {
-        ciDispatch = await this.publicationBridge.dispatchCi(project, { branch: plan.workspace.workingBranch });
+        ciDispatch = typeof this.publicationBridge.dispatchCi === 'function'
+          ? await this.publicationBridge.dispatchCi(project, { branch: plan.workspace.workingBranch })
+          : { required: false, dispatched: false };
       } catch (error) {
         return this.stopPublication(id, next.id, 'workflow_publication_ci_dispatch_failed', { blocked: false, phase: 'ci-dispatch', patch: { error: clip(error.message, 1_000) } });
       }
