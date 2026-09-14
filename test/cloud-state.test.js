@@ -39,7 +39,7 @@ function fakeGitHub() {
     }
     if (method === 'GET' && path === '/contents/.agent/cloud-state.json') {
       const refName = url.searchParams.get('ref');
-      const commitSha = refs.get(`refs/tags/${refName}`);
+      const commitSha = refs.get(refName);
       const commit = commits.get(commitSha);
       const tree = commit && trees.get(commit.tree.sha);
       const blobSha = tree?.get('.agent/cloud-state.json');
@@ -111,8 +111,12 @@ test('cloud state rejects non-self ownership and secret-bearing keys without rej
     runs: {},
     approvals: {},
     events: [],
+    browser: { sessionId: 'visual-review-1' },
     workflows: { w: { projectId: 'self', modelUsage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } } }
   }));
+  assert.throws(() => validateCloudState({
+    runs: {}, approvals: {}, events: [], diagnostic: 'Authorization: Bearer ghp_exampletoken123'
+  }), /contains_secret_material/);
 });
 
 test('durable state bootstraps on a tag and resumes across ephemeral stores', async () => {
