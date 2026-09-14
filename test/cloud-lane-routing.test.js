@@ -6,15 +6,24 @@ import { URL } from 'node:url';
 const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
 const queueConfig = JSON.parse(readFileSync(new URL('../config/issue-queue.json', import.meta.url), 'utf8'));
 
-test('routing slice preserves self as the only cloud-owned project until worker activation', () => {
+test('routing activates exactly self and website-pilot as cloud-owned lanes', () => {
   assert.equal(Array.isArray(queueConfig.cloudLanes), true);
-  assert.deepEqual(queueConfig.cloudLanes, [{
-    id: 'self',
-    projectIds: ['self'],
-    tag: 'agent-cloud-state-v1',
-    statePath: '.agent/cloud-state.json'
-  }]);
+  assert.deepEqual(queueConfig.cloudLanes, [
+    {
+      id: 'self',
+      projectIds: ['self'],
+      tag: 'agent-cloud-state-v1',
+      statePath: '.agent/cloud-state.json'
+    },
+    {
+      id: 'website-pilot',
+      projectIds: ['website-pilot'],
+      tag: 'agent-cloud-state-website-pilot-v1',
+      statePath: '.agent/cloud-state-website-pilot.json'
+    }
+  ]);
   assert.equal(Object.hasOwn(queueConfig, 'cloudProjectIds'), false);
+  assert.equal(queueConfig.cloudLanes.some((lane) => lane.id === 'callflow'), false);
 });
 
 test('cloud-once resolves an explicit configured lane and binds state plus queue ownership to it', () => {
