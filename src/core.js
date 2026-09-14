@@ -1877,9 +1877,15 @@ export class WorkflowEngine {
     const retryFeedback = next.attempts > 0 && typeof next.evidence?.error === 'string' && next.evidence.error
       ? { previousAttempt: next.attempts, previousError: clip(next.evidence.error, 500) }
       : null;
-    const reservation = await this.reserveWorkflowModelCall(id, next.id);
-    if (!reservation.callId) return reservation.plan;
-    const modelCallId = reservation.callId;
+    const consumesModel = typeof this.skillExecutor.usesModel === 'function'
+      ? this.skillExecutor.usesModel(next.skill) !== false
+      : true;
+    let modelCallId = null;
+    if (consumesModel) {
+      const reservation = await this.reserveWorkflowModelCall(id, next.id);
+      if (!reservation.callId) return reservation.plan;
+      modelCallId = reservation.callId;
+    }
     await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
@@ -1975,7 +1981,9 @@ export class WorkflowEngine {
       try { validateWebsitePlanContext(execution.result.websitePlan, runningPlan.input.businessBrief); }
       catch (error) { websitePlanContextError = error; }
     }
-    await this.completeWorkflowModelCall(id, modelCallId, execution.usage, executionOk && !websitePlanContextError ? 'completed' : 'failed');
+    if (modelCallId) {
+      await this.completeWorkflowModelCall(id, modelCallId, execution.usage, executionOk && !websitePlanContextError ? 'completed' : 'failed');
+    }
     let after;
     let integrityError = null;
     try { after = await this.workspaceSnapshot(workspaceProject); }
@@ -4323,12 +4331,39 @@ function validateSkillOutput(contract, output, skillId = null, context = {}) {
   return normalized;
 }
 
+function deterministicDiagnosisResult(request) {
+  const rawInspection = request?.context?.priorEvidence?.['inspect-project']?.inspectionEvidence;
+  if (!rawInspection) throw new Error('deterministic_diagnosis_missing_validated_inspection');
+  let inspection;
+  try {
+    inspection = normalizeInspectionEvidence(rawInspection, request.context);
+  } catch (error) {
+    throw new Error(`deterministic_diagnosis_invalid_inspection:${clip(error.message, 500)}`, { cause: error });
+  }
+  const cause = clip(`Grounded inspection findings: ${inspection.findings.join(' | ')}`, 1_200);
+  const output = {
+    diagnosis: {
+      summary: clip(`Deterministic diagnosis from validated inspection: ${inspection.summary}`, 1_200),
+      cause,
+      relevantPaths: [...inspection.relevantPaths],
+      recommendedChange: String(request.goal ?? '').trim(),
+      risks: []
+    }
+  };
+  return validateSkillOutput(request.contract, output, 'code.diagnose', request.context);
+}
+
 export class CodexReadOnlySkillExecutor {
   constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform, contextProcessRunner = runProcess } = {}) {
     Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform, contextProcessRunner });
   }
 
   supports(skillId) { return readOnlySkillIds.has(skillId); }
+
+  usesModel(skillId) {
+    if (!this.supports(skillId)) throw new Error(`skill_executor_unsupported:${skillId}`);
+    return skillId !== 'code.diagnose';
+  }
 
   async prepareContext({ skill, project, scope }, { workspace, timeoutMs }) {
     if (!['code.inspect', 'code.diagnose', 'code.review'].includes(skill)) return null;
@@ -4383,6 +4418,31 @@ export class CodexReadOnlySkillExecutor {
 
   async execute(request, { workspace, timeoutMs }) {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
+    if (request.skill === 'code.diagnose') {
+      try {
+        const result = deterministicDiagnosisResult(request);
+        const outputBytes = Buffer.byteLength(JSON.stringify(result));
+        if (outputBytes > this.maxOutputBytes) throw new Error('skill_output_too_large');
+        return {
+          status: 'completed',
+          ok: true,
+          codexThreadId: null,
+          usage: null,
+          outputBytes,
+          result,
+          executionMode: 'deterministic'
+        };
+      } catch (error) {
+        return {
+          status: 'failed',
+          ok: false,
+          timedOut: false,
+          outputBytes: 0,
+          error: clip(error.message, 1_000),
+          executionMode: 'deterministic'
+        };
+      }
+    }
     const sourceEnvironment = this.environment();
     const security = codexWorkerSecurityConfig({ writeAccess: false, pathValue: sourceEnvironment.PATH ?? '', platform: this.platform });
     if (!security.supported) {
