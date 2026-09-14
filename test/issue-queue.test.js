@@ -636,6 +636,7 @@ test('issue queue config is strict and normalizes actor identity', () => {
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     allowedActors: ['palgarra14-del'],
     pollIntervalMs: 15_000,
+    cloudLanes: [],
     cloudProjectIds: []
   });
   assert.throws(() => normalizeIssueQueueConfig({ version: 1, repository: { owner: 'x', name: 'y' }, allowedActors: [] }), /between 1 and 20/);
