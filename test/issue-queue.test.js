@@ -217,6 +217,7 @@ class FakeChannel {
     this.posted = [];
     this.nextCommentId = 100;
     this.failNextPost = false;
+    this.commentAuthorLogin = 'palgarra14-del';
   }
 
   async openIssues() { return clone(this.issues); }
@@ -246,7 +247,7 @@ class FakeChannel {
     const entry = { id: this.nextCommentId++, number, body };
     this.posted.push(entry);
     const comments = this.commentsByIssue.get(number) ?? [];
-    comments.push({ id: entry.id, user: { login: 'palgarra14-del' }, body });
+    comments.push({ id: entry.id, user: { login: this.commentAuthorLogin }, body });
     this.commentsByIssue.set(number, comments);
     return { id: entry.id, url: `https://example.test/comment/${entry.id}` };
   }
@@ -608,6 +609,31 @@ test('new issue produces only a dry-run and fingerprinted start approval request
   const again = await queue.tick();
   assert.equal(again.status, 'awaiting_start_approval');
   assert.equal(workflowEngine.runCalls.length, 1);
+  assert.equal(channel.posted.length, 1);
+});
+
+test('cloud-authored approval instruction is recognized without granting the bot approval authority', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  channel.commentAuthorLogin = 'github-actions[bot]';
+
+  const record = await queue.tick();
+  assert.equal(record.status, 'awaiting_start_approval');
+  assert.equal(channel.posted.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  const unchanged = await queue.tick();
+  assert.equal(unchanged.status, 'awaiting_start_approval');
+  assert.equal(channel.posted.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  channel.addUserComment(issue.number, {
+    id: 500,
+    login: 'github-actions[bot]',
+    body: `/agent approve ${record.pendingApproval.fingerprint}`
+  });
+  const botCannotApprove = await queue.tick();
+  assert.equal(botCannotApprove.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
   assert.equal(channel.posted.length, 1);
 });
 
