@@ -5,7 +5,9 @@ import { URL } from 'node:url';
 
 const workflow = readFileSync(new URL('../.github/workflows/agent-cloud.yml', import.meta.url), 'utf8');
 const projects = JSON.parse(readFileSync(new URL('../config/projects.json', import.meta.url), 'utf8'));
+const queueConfig = JSON.parse(readFileSync(new URL('../config/issue-queue.json', import.meta.url), 'utf8'));
 const self = projects.projects.find((project) => project.id === 'self');
+const website = projects.projects.find((project) => project.id === 'website-pilot');
 
 test('cloud worker reacts to owner control-plane events with a scheduled fallback only', () => {
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
@@ -18,9 +20,33 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
 });
 
-test('cloud worker serializes execution and has bounded runtime', () => {
-  assert.match(workflow, /concurrency:\n\s+group: agent-self-cloud\n\s+cancel-in-progress: false/);
-  assert.match(workflow, /timeout-minutes: 20/);
+test('cloud worker uses a static reviewed lane matrix with independent concurrency groups', () => {
+  assert.match(workflow, /fail-fast: false[\s\S]*lane: \[self, website-pilot\]/);
+  assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
+  assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /timeout-minutes: 35/);
+  assert.doesNotMatch(workflow, /matrix\.lane:\s*\$\{\{\s*github\./);
+  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot']);
+});
+
+test('website and self lanes have distinct durable namespaces and non-overlapping ownership', () => {
+  const selfLane = queueConfig.cloudLanes.find((lane) => lane.id === 'self');
+  const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
+  assert.deepEqual(selfLane, {
+    id: 'self',
+    projectIds: ['self'],
+    tag: 'agent-cloud-state-v1',
+    statePath: '.agent/cloud-state.json'
+  });
+  assert.deepEqual(websiteLane, {
+    id: 'website-pilot',
+    projectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+  assert.notEqual(selfLane.tag, websiteLane.tag);
+  assert.notEqual(selfLane.statePath, websiteLane.statePath);
+  assert.equal(new Set([...selfLane.projectIds, ...websiteLane.projectIds]).size, 2);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
@@ -44,23 +70,26 @@ test('cloud worker checks out trusted main without persisting checkout credentia
   assert.deepEqual(thirdPartyUses, []);
 });
 
-test('cloud worker uses frozen dependencies and exact configured self runtime', () => {
+test('cloud worker uses frozen dependencies and the exact runtime shared by active lanes', () => {
   assert.ok(self);
+  assert.ok(website);
   assert.match(self.execution.image, /@sha256:[a-f0-9]{64}$/);
+  assert.equal(website.execution.image, self.execution.image);
   assert.match(workflow, /run: npm ci --ignore-scripts/);
   assert.ok(workflow.includes(`run: docker pull ${self.execution.image}`));
 });
 
-test('cloud credentials exist only at the governed queue step and are never put in command arguments', () => {
+test('cloud credentials and lane identity exist only at the governed queue step', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 1);
+  assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
+  assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
-  assert.match(workflow, /CODEX_API_KEY: \$\{\{ secrets\.OPENAI_API_KEY \}\}/);
-  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once/);
-  assert.doesNotMatch(workflow, /OPENAI_API_KEY repository secret is required/);
+  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once --lane "\$AGENT_CLOUD_LANE"/);
 });
 
 test('cloud worker has no merge or production deployment command surface', () => {
