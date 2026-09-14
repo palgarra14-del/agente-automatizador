@@ -124,7 +124,7 @@ export class GitHubStateStore extends JsonStore {
           'Content-Type': 'application/json'
         },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(30_000)
+        signal: globalThis.AbortSignal.timeout(30_000)
       });
     } catch (error) {
       throw new Error('cloud_state_github_request_failed', { cause: error });
