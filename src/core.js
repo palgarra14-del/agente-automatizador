@@ -1489,14 +1489,18 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     }
     if (step.skill === 'website.plan') {
       const normalizedPlan = validateWebsitePlanContext(step.evidence.result?.websitePlan, plan.input.businessBrief);
+      const expectedBlueprint = websiteBlueprintForBrief(plan.input.businessBrief);
+      const expectedBlueprintFingerprint = evidenceFingerprint(expectedBlueprint);
       if (
         JSON.stringify(step.evidence.result.websitePlan) !== JSON.stringify(normalizedPlan) ||
         step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
         step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
+        JSON.stringify(step.evidence.websiteBlueprint) !== JSON.stringify(expectedBlueprint) ||
+        step.evidence.websiteBlueprintFingerprint !== expectedBlueprintFingerprint ||
         !step.evidence.assetEvidence ||
         step.evidence.assetEvidenceFingerprint !== evidenceFingerprint(step.evidence.assetEvidence.assets ?? []) ||
         step.evidence.assetEvidenceFingerprint !== step.evidence.assetEvidence.fingerprint
-      ) throw new Error('Completed website plan is not bound to the business brief and verified assets');
+      ) throw new Error('Completed website plan is not bound to the business brief, blueprint, and verified assets');
     }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -1548,7 +1552,13 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     }
     if (plan.profile === 'website-build' && step.id === 'design') {
       const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
-      if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint || step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('Completed website design approval is not bound to the website plan');
+      if (
+        requirements?.status !== WorkflowStepStatus.COMPLETED ||
+        !requirements.evidence?.websitePlanFingerprint ||
+        !requirements.evidence?.websiteBlueprintFingerprint ||
+        step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint ||
+        step.evidence.approvedWebsiteBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint
+      ) throw new Error('Completed website design approval is not bound to the website plan and blueprint');
     }
     if (plan.profile === 'website-build' && step.id === 'visual-verification') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -3063,8 +3073,16 @@ export class WorkflowEngine {
             }
             if (plan.profile === 'website-build' && step.id === 'design') {
               const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
-              if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint) throw new Error('Website design cannot approve an unbound website plan');
-              return { approvedDependencyEvidenceFingerprint, approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint };
+              if (
+                requirements?.status !== WorkflowStepStatus.COMPLETED ||
+                !requirements.evidence?.websitePlanFingerprint ||
+                !requirements.evidence?.websiteBlueprintFingerprint
+              ) throw new Error('Website design cannot approve an unbound website plan');
+              return {
+                approvedDependencyEvidenceFingerprint,
+                approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
+                approvedWebsiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint
+              };
             }
             if (plan.profile === 'website-build' && step.id === 'visual-verification') {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
