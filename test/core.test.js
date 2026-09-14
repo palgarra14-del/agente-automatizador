@@ -28,6 +28,7 @@ import {
   evaluateChangePolicy,
   fingerprintChangeSet,
   formatDoctor,
+  githubGitNetworkEnvironment,
   imageIsPinned,
   loadProjects,
   maskSecrets,
@@ -1284,6 +1285,65 @@ test('command runner resolves pnpm through its JavaScript entrypoint without a s
     assert.equal(calls[0].binary, process.execPath);
     assert.match(calls[0].args[0], /pnpm\.mjs$/i);
   }
+});
+
+test('GitHub network Git credentials are environment-only and never embedded in arguments', () => {
+  const token = 'ghs_cloud_private_repo_fixture_1234567890';
+  const env = githubGitNetworkEnvironment({ GITHUB_TOKEN: token });
+  assert.equal(env.GH_TOKEN, token);
+  assert.equal(env.GH_HOST, 'github.com');
+  assert.equal(env.GIT_TERMINAL_PROMPT, '0');
+  assert.equal(env.GIT_CONFIG_COUNT, '1');
+  assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper');
+  assert.equal(env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false);
+  assert.equal(JSON.stringify(env).includes('https://x-access-token:'), false);
+  assert.deepEqual(githubGitNetworkEnvironment({}), {});
+  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'too short' }), /github_git_network_token_invalid/);
+  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_git_network_token_invalid/);
+});
+
+test('managed private clone gets GitHub credential helper only through subprocess environment', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'managed-private-clone-'));
+  const configured = configFrom({
+    id: 'self', repository: { owner: 'owner', name: 'private-repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { test: 'node --version' }, acceptance: { require: ['test'] }
+  }, join(root, 'host', 'config'));
+  const token = 'ghs_private_clone_fixture_123456789012345';
+  let observed = null;
+  const manager = new WorkspaceManager({
+    environment: { GITHUB_TOKEN: token },
+    processRunner: async (binary, args, options) => {
+      observed = { binary, args, options };
+      return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' };
+    }
+  });
+  await manager.prepare(configured, 'agent-20260914-cloudauth');
+  assert.equal(observed.binary, 'git');
+  assert.equal(observed.args[0], 'clone');
+  assert.equal(observed.args.some((arg) => String(arg).includes(token)), false);
+  assert.equal(observed.options.env.GH_TOKEN, token);
+  assert.equal(observed.options.env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(Object.hasOwn(observed.options.env, 'GITHUB_TOKEN'), false);
+});
+
+test('LocalGitAdapter injects GitHub credentials only when a Git operation is explicitly networked', async () => {
+  const token = 'ghs_private_git_fixture_1234567890123456';
+  const calls = [];
+  const configured = project();
+  const adapter = new LocalGitAdapter({
+    environment: { GITHUB_TOKEN: token },
+    processRunner: async (_binary, args, options) => {
+      calls.push({ args, options });
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' };
+    }
+  });
+  await adapter.git(['status', '--porcelain'], configured);
+  await adapter.git(['fetch', 'origin', 'main'], configured, { network: true });
+  assert.deepEqual(calls[0].options.env, {});
+  assert.equal(calls[1].options.env.GH_TOKEN, token);
+  assert.equal(calls[1].options.env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(calls[1].args.some((arg) => String(arg).includes(token)), false);
 });
 
 test('managed workspaces are isolated under the configured root and clone only the configured repository', async () => {
