@@ -16,6 +16,14 @@
       ],
       "tag": "agent-cloud-state-v1",
       "statePath": ".agent/cloud-state.json"
+    },
+    {
+      "id": "website-pilot",
+      "projectIds": [
+        "website-pilot"
+      ],
+      "tag": "agent-cloud-state-website-pilot-v1",
+      "statePath": ".agent/cloud-state-website-pilot.json"
     }
   ]
 }
