@@ -217,6 +217,7 @@ class FakeChannel {
     this.posted = [];
     this.nextCommentId = 100;
     this.failNextPost = false;
+    this.commentAuthorLogin = 'palgarra14-del';
   }
 
   async openIssues() { return clone(this.issues); }
@@ -246,7 +247,7 @@ class FakeChannel {
     const entry = { id: this.nextCommentId++, number, body };
     this.posted.push(entry);
     const comments = this.commentsByIssue.get(number) ?? [];
-    comments.push({ id: entry.id, user: { login: 'palgarra14-del' }, body });
+    comments.push({ id: entry.id, user: { login: this.commentAuthorLogin }, body });
     this.commentsByIssue.set(number, comments);
     return { id: entry.id, url: `https://example.test/comment/${entry.id}` };
   }
@@ -666,6 +667,31 @@ test('new issue produces only a dry-run and fingerprinted start approval request
   const again = await queue.tick();
   assert.equal(again.status, 'awaiting_start_approval');
   assert.equal(workflowEngine.runCalls.length, 1);
+  assert.equal(channel.posted.length, 1);
+});
+
+test('cloud-authored approval instruction is recognized without granting the bot approval authority', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  channel.commentAuthorLogin = 'github-actions[bot]';
+
+  const record = await queue.tick();
+  assert.equal(record.status, 'awaiting_start_approval');
+  assert.equal(channel.posted.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  const unchanged = await queue.tick();
+  assert.equal(unchanged.status, 'awaiting_start_approval');
+  assert.equal(channel.posted.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+
+  channel.addUserComment(issue.number, {
+    id: 500,
+    login: 'github-actions[bot]',
+    body: `/agent approve ${record.pendingApproval.fingerprint}`
+  });
+  const botCannotApprove = await queue.tick();
+  assert.equal(botCannotApprove.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 0);
   assert.equal(channel.posted.length, 1);
 });
 
@@ -1378,16 +1404,24 @@ test('concurrent watchers atomically reserve a new issue and create only one wor
   };
 
   const first = queue.processIssue(issue);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  let claimed = null;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    claimed = await queue.getRecord(queue.requestKey(issue));
+    if (claimed?.status === 'initializing') break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+  }
+  assert.equal(claimed?.status, 'initializing');
+
   const second = queue.processIssue(issue);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  const secondResult = await second;
+  assert.equal(secondResult.status, 'initializing');
+
   releaseCreate();
-  const [left, right] = await Promise.all([first, second]);
+  const left = await first;
 
   assert.equal(createCalls, 1);
   assert.equal(channel.posted.length, 1);
-  assert.ok([left.status, right.status].includes('initializing'));
-  assert.ok([left.status, right.status].includes('awaiting_start_approval'));
+  assert.equal(left.status, 'awaiting_start_approval');
   const persisted = await queue.getRecord(queue.requestKey(issue));
   assert.equal(persisted.status, 'awaiting_start_approval');
   assert.equal(persisted.initializationLease, null);
