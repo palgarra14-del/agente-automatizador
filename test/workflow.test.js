@@ -1654,6 +1654,94 @@ test('workflow rejects superficially successful but ungrounded inspect evidence 
   assert.equal(calls, 2);
 });
 
+test('read-only hard billing failure blocks after one model call without retrying', async () => {
+  const configured = configFrom({
+    id: 'readonly-hard-billing',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      calls += 1;
+      return {
+        ok: false,
+        status: 'failed',
+        timedOut: false,
+        outputBytes: 0,
+        error: 'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API.'
+      };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Block hard billing failure',
+    budgets: { maxAttempts: 2 }
+  });
+  const blocked = await instance.run(created.id);
+  const step = blocked.steps.find((item) => item.id === 'inspect-project');
+
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(step.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(step.attempts, 1);
+  assert.equal(step.error, 'model_billing_unavailable');
+  assert.equal(blocked.result.error, 'model_billing_unavailable');
+  assert.equal(calls, 1);
+  assert.equal(blocked.modelUsage.calls, 1);
+  assert.equal(blocked.modelUsage.entries[0].status, 'failed');
+});
+
+test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
+  const configured = configFrom({
+    id: 'readonly-transient-model',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  let calls = 0;
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.inspect',
+    async execute() {
+      calls += 1;
+      return {
+        ok: false,
+        status: 'failed',
+        timedOut: false,
+        outputBytes: 0,
+        error: 'rate limit exceeded, retry later'
+      };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retry transient failure',
+    budgets: { maxAttempts: 2 }
+  });
+  const failed = await instance.run(created.id);
+  const step = failed.steps.find((item) => item.id === 'inspect-project');
+
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.status, WorkflowStepStatus.FAILED);
+  assert.equal(step.attempts, 2);
+  assert.equal(step.error, 'skill_executor_attempt_budget_exhausted');
+  assert.equal(calls, 2);
+  assert.equal(failed.modelUsage.calls, 2);
+});
+
 test('read-only skill executor retries within workflow attempt budget and persists bounded failure evidence', async () => {
   const configured = configFrom({
     id: 'readonly-retry',
@@ -3274,6 +3362,80 @@ test('implementation forbidden path and budget excess fail closed before verific
     assert.match(failed.result.reason, fixture.expectedReason);
     assert.equal(verificationCalls, 0);
   }
+});
+
+test('implementation hard billing failure with a clean workspace blocks after one model call', async () => {
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return {
+        status: 'failed',
+        summary: 'billing unavailable',
+        output: 'You have no credits remaining. Add credits to continue using the API.',
+        outputBytes: 67
+      };
+    }
+  };
+  const instance = await engine({ localGit: stableLocalGit(), codingWorker });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Block clean hard billing implementation failure',
+    budgets: { maxAttempts: 2 }
+  });
+  await prepareImplementation(instance, created.id);
+  const blocked = await instance.run(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.attempts, 1);
+  assert.equal(implementation.error, 'model_billing_unavailable');
+  assert.equal(blocked.result.error, 'model_billing_unavailable');
+  assert.equal(workerCalls, 1);
+  assert.equal(blocked.modelUsage.calls, 1);
+});
+
+test('partial implementation changes still take precedence over hard billing classification', async () => {
+  let changeCalls = 0;
+  const partial = changedChangeSet(['src/partial-hard-billing.js']);
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : partial;
+    }
+  });
+  let workerCalls = 0;
+  const codingWorker = {
+    async execute() {
+      workerCalls += 1;
+      return {
+        status: 'failed',
+        summary: 'billing unavailable after partial edit',
+        output: 'You have no credits remaining. Add credits to continue using the API.',
+        outputBytes: 67
+      };
+    }
+  };
+  const instance = await engine({ localGit, codingWorker });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Protect partial changes on hard billing failure',
+    budgets: { maxAttempts: 2 }
+  });
+  await prepareImplementation(instance, created.id);
+  const blocked = await instance.run(created.id);
+  const implementation = blocked.steps.find((step) => step.id === 'implementation');
+
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(implementation.attempts, 1);
+  assert.equal(implementation.error, 'workflow_failed_implementation_left_changes');
+  assert.equal(blocked.result.error, 'workflow_failed_implementation_left_changes');
+  assert.equal(workerCalls, 1);
+  assert.equal(blocked.modelUsage.calls, 1);
 });
 
 test('failed implementation that leaves changes blocks instead of retrying', async () => {

@@ -33,6 +33,7 @@ import {
   imageIsPinned,
   loadProjects,
   maskSecrets,
+  nonRetryableModelFailureCode,
   policy,
   runCommand,
   runProcess,
@@ -749,6 +750,19 @@ test('managed commit fails closed when GitHub-bound identity is missing or malfo
     adapter.commit(configured, 'agent/test', 'bad identity', { ...base, identity: { name: 'owner', email: 'owner@example.com' } }),
     /managed_git_commit_identity_invalid/
   );
+});
+
+test('model billing/auth failures are fail-fast while transient transport failures remain retryable', () => {
+  assert.equal(nonRetryableModelFailureCode(
+    'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API.'
+  ), 'model_billing_unavailable');
+  assert.equal(nonRetryableModelFailureCode('insufficient_quota'), 'model_billing_unavailable');
+  assert.equal(nonRetryableModelFailureCode('billing_hard_limit_reached'), 'model_billing_unavailable');
+  assert.equal(nonRetryableModelFailureCode('Incorrect API key provided'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('invalid_api_key'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('rate limit exceeded, retry later'), null);
+  assert.equal(nonRetryableModelFailureCode('stream disconnected before completion'), null);
+  assert.equal(nonRetryableModelFailureCode(null), null);
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {

@@ -1969,6 +1969,7 @@ export class WorkflowEngine {
       }
     }
     const executionOk = execution.ok === true && !skillOutputValidationError && !repositoryContextValidationError;
+    const nonRetryableModelFailure = executionOk ? null : nonRetryableModelFailureCode(execution.error);
     let websitePlanContextError = null;
     if (executionOk && runningStep.skill === 'website.plan') {
       try { validateWebsitePlanContext(execution.result.websitePlan, runningPlan.input.businessBrief); }
@@ -2042,6 +2043,11 @@ export class WorkflowEngine {
         step.error = 'workflow_change_review_failed';
         saved.status = WorkflowStepStatus.FAILED;
         saved.result = { error: step.error, stepId: step.id, reviewEvidence: safeJson(execution.result?.reviewEvidence ?? null) };
+      } else if (nonRetryableModelFailure) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = nonRetryableModelFailure;
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id, detail: clip(execution.error, 1_000) };
       } else if (executionOk) {
         step.status = WorkflowStepStatus.COMPLETED;
         step.error = null;
@@ -2206,6 +2212,7 @@ export class WorkflowEngine {
       }
     }
     const workerCompleted = worker.status === 'completed';
+    const nonRetryableWorkerFailure = workerCompleted ? null : nonRetryableModelFailureCode(worker.output);
     const hasChanges = Boolean(changeSet?.paths?.length);
     const decision = changeSet ? evaluateChangePolicy(project, changeSet, runningPlan.scope) : null;
     return this.update(id, (saved) => {
@@ -2263,6 +2270,11 @@ export class WorkflowEngine {
         step.error = 'workflow_failed_implementation_left_changes';
         saved.status = WorkflowStepStatus.BLOCKED;
         saved.result = { error: step.error, stepId: step.id };
+      } else if (!workerCompleted && nonRetryableWorkerFailure) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = nonRetryableWorkerFailure;
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id, detail: clip(worker.output, 1_000) };
       } else if (!workerCompleted) {
         if (step.attempts >= saved.budgets.maxAttempts) {
           step.status = WorkflowStepStatus.FAILED;
@@ -3856,6 +3868,27 @@ export function codexApiKeyFromEnvironment(environment = {}) {
     throw new Error('codex_api_key_invalid');
   }
   return value;
+}
+
+export function nonRetryableModelFailureCode(message) {
+  const text = String(message ?? '').toLowerCase();
+  if (!text) return null;
+  if (
+    text.includes('no credits remaining') ||
+    text.includes('insufficient_quota') ||
+    text.includes('billing_hard_limit_reached') ||
+    text.includes('billing hard limit') ||
+    text.includes('account has insufficient credits')
+  ) return 'model_billing_unavailable';
+  if (
+    text.includes('invalid_api_key') ||
+    text.includes('incorrect api key') ||
+    text.includes('invalid api key') ||
+    text.includes('authentication failed') ||
+    text.includes('authentication error') ||
+    text.includes('unauthorized api key')
+  ) return 'model_authentication_unavailable';
+  return null;
 }
 
 const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
