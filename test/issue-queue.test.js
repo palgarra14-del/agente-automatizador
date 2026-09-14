@@ -404,6 +404,84 @@ test('GitHubIssueChannel reads and validates the configured branch head', async 
   await assert.rejects(malformed.branchHead('main'), /branch response is invalid/);
 });
 
+test('issue queue config binds self to cloud ownership and queue routing is mutually exclusive', async () => {
+  const normalized = normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    allowedActors: ['palgarra14-del'],
+    pollIntervalMs: 15_000,
+    cloudProjectIds: ['self', 'self']
+  });
+  assert.deepEqual(normalized.cloudProjectIds, ['self']);
+  assert.throws(() => normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'x', name: 'y' },
+    allowedActors: ['palgarra14-del'],
+    cloudProjectIds: 'self'
+  }), /cloudProjectIds must be an array/);
+
+  const localFixture = await queueFixture();
+  const localQueue = new SupervisedIssueQueue({
+    store: localFixture.store,
+    projects: localFixture.projects,
+    workflowEngine: localFixture.workflowEngine,
+    channel: localFixture.channel,
+    allowedActors: ['palgarra14-del'],
+    excludedProjectIds: ['callflow'],
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+  const localResult = await localQueue.tick();
+  assert.equal(localResult, null);
+  assert.equal(localFixture.workflowEngine.createCalls.length, 0);
+  assert.deepEqual((await localFixture.store.load()).requests ?? {}, {});
+
+  const cloudFixture = await queueFixture();
+  const cloudQueue = new SupervisedIssueQueue({
+    store: cloudFixture.store,
+    projects: cloudFixture.projects,
+    workflowEngine: cloudFixture.workflowEngine,
+    channel: cloudFixture.channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow'],
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+  const cloudResult = await cloudQueue.tick();
+  assert.equal(cloudResult.status, 'awaiting_start_approval');
+  assert.equal(cloudFixture.workflowEngine.createCalls.length, 1);
+  assert.notEqual(localQueue.controlPlaneFingerprint(), cloudQueue.controlPlaneFingerprint());
+
+  assert.throws(() => new SupervisedIssueQueue({
+    store: cloudFixture.store,
+    projects: cloudFixture.projects,
+    workflowEngine: cloudFixture.workflowEngine,
+    channel: cloudFixture.channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow'],
+    excludedProjectIds: ['callflow']
+  }), /routing overlaps/);
+});
+
+test('cloud-owned queue skips invalid or non-owned requests without creating state', async () => {
+  const fixture = await queueFixture();
+  fixture.channel.issues[0].body = requestBody({ projectId: 'callflow' });
+  const cloudOnlyOther = new SupervisedIssueQueue({
+    store: fixture.store,
+    projects: fixture.projects,
+    workflowEngine: fixture.workflowEngine,
+    channel: fixture.channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['self'],
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+  assert.equal(await cloudOnlyOther.tick(), null);
+  assert.equal(fixture.workflowEngine.createCalls.length, 0);
+
+  fixture.channel.issues[0].body = `${ISSUE_REQUEST_MARKER}\n{not-json}`;
+  assert.equal(await cloudOnlyOther.tick(), null);
+  assert.equal(fixture.workflowEngine.createCalls.length, 0);
+  assert.deepEqual((await fixture.store.load()).requests ?? {}, {});
+});
+
 test('issue request protocol is strict, bounded, canonical, and redacts accidental secrets', () => {
   const parsed = parseIssueRequestBody(requestBody({ goal: 'Use Authorization: Bearer abcdefghijklmnop safely' }));
   assert.equal(parsed.request.projectId, 'callflow');
@@ -500,7 +578,8 @@ test('issue queue config is strict and normalizes actor identity', () => {
     version: 1,
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     allowedActors: ['palgarra14-del'],
-    pollIntervalMs: 15_000
+    pollIntervalMs: 15_000,
+    cloudProjectIds: []
   });
   assert.throws(() => normalizeIssueQueueConfig({ version: 1, repository: { owner: 'x', name: 'y' }, allowedActors: [] }), /between 1 and 20/);
   assert.throws(() => normalizeIssueQueueConfig({ version: 1, repository: { owner: 'x', name: 'y' }, allowedActors: ['x'], pollIntervalMs: 100 }), /between 1000 and 300000/);

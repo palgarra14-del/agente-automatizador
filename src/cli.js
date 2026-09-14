@@ -115,6 +115,8 @@ try {
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
+      const cloudAction = action === 'cloud-once';
+      if (cloudAction && queueConfig.cloudProjectIds.length === 0) throw new Error('Cloud inbox has no configured project ownership');
       const queue = new SupervisedIssueQueue({
         store,
         projects,
@@ -122,7 +124,9 @@ try {
         channel,
         allowedActors: queueConfig.allowedActors,
         operatorRevision: loadedRevision,
-        operatorBranch: 'main'
+        operatorBranch: 'main',
+        includedProjectIds: cloudAction ? queueConfig.cloudProjectIds : null,
+        excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds
       });
       const view = (record) => record ? {
         issueNumber: record.issueNumber,
@@ -137,7 +141,7 @@ try {
         publication: record.publication ?? null,
         updatedAt: record.updatedAt
       } : null;
-      if (action === 'once') {
+      if (action === 'once' || action === 'cloud-once') {
         console.log(JSON.stringify(view(await queue.tick()), null, 2));
       } else if (action === 'watch') {
         const controller = new AbortController();
@@ -170,7 +174,7 @@ try {
         if (checkoutReloadRevision) {
           console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
-      } else throw new Error('Usage: agent inbox <once|watch|status>');
+      } else throw new Error('Usage: agent inbox <once|cloud-once|watch|status>');
     }
   } else if (command === 'service') {
     const action = args[1] ?? 'status';
@@ -236,7 +240,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));

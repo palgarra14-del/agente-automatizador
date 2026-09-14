@@ -2714,6 +2714,22 @@ export class WorkflowEngine {
       evidence = plan.steps.find((step) => step.id === next.id).evidence;
     }
 
+    let ciDispatch = evidence.ciDispatch ?? null;
+    if (!ciDispatch) {
+      try {
+        ciDispatch = typeof this.publicationBridge.dispatchCi === 'function'
+          ? await this.publicationBridge.dispatchCi(project, { branch: plan.workspace.workingBranch })
+          : { required: false, dispatched: false };
+      } catch (error) {
+        return this.stopPublication(id, next.id, 'workflow_publication_ci_dispatch_failed', { blocked: false, phase: 'ci-dispatch', patch: { error: clip(error.message, 1_000) } });
+      }
+      plan = await this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.evidence = { ...step.evidence, phase: 'ci-dispatched', ciDispatch: safeJson(ciDispatch) };
+      });
+      evidence = plan.steps.find((step) => step.id === next.id).evidence;
+    }
+
     let ci = evidence.ci ?? null;
     if (!ci || ci.state !== 'success') {
       let remaining = this.remainingMs(await this.get(id));
@@ -3802,7 +3818,7 @@ export class MockCodingWorker extends CodingWorker {
 }
 
 function workerEnvironment(environment = process.env) {
-  const allowed = ['CODEX_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'];
+  const allowed = ['CODEX_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'OPENAI_API_KEY'];
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
 }
 
@@ -3955,7 +3971,7 @@ async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
 
 function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   const environment = {};
-  for (const name of ['PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
+  for (const name of ['PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'OPENAI_API_KEY']) {
     if (sourceEnvironment[name] !== undefined) environment[name] = sourceEnvironment[name];
   }
   environment.CODEX_HOME = isolatedHome;
@@ -4635,6 +4651,7 @@ export class GitHubAdapter {
         headers: { ...this.headers(), ...(options.headers ?? {}) }
       });
       if (!response.ok) throw new Error(`GitHub API request failed: ${response.status}`);
+      if (response.status === 204) return null;
       return await response.json();
     } catch (error) {
       if (timeoutSignal.aborted) throw new Error('github_api_request_timeout', { cause: error });
@@ -4666,6 +4683,17 @@ export class GitHubAdapter {
       name: login,
       email: `${id}+${login}@users.noreply.github.com`
     };
+  }
+
+  async dispatchWorkflow(project, { workflow, ref }) {
+    if (typeof workflow !== 'string' || !/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflow)) throw new Error('github_workflow_dispatch_name_invalid');
+    if (typeof ref !== 'string' || !/^agent\/[A-Za-z0-9._/-]+$/.test(ref) || ref.includes('..')) throw new Error('github_workflow_dispatch_ref_invalid');
+    await this.request(this.path(project, `/actions/workflows/${encodeURIComponent(workflow)}/dispatches`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref })
+    });
+    return { workflow, ref, dispatched: true };
   }
 
   async createPullRequest(project, { branch, title, body }) {
@@ -4978,8 +5006,16 @@ export class VercelDeploymentProvider {
 }
 
 export class WorkflowPublicationBridge {
-  constructor({ localGit = new LocalGitAdapter(), github = new GitHubAdapter(), deploymentProvider = new VercelDeploymentProvider() } = {}) {
-    Object.assign(this, { localGit, github, deploymentProvider });
+  constructor({
+    localGit = new LocalGitAdapter(),
+    github = new GitHubAdapter(),
+    deploymentProvider = new VercelDeploymentProvider(),
+    ciWorkflow = process.env.AGENT_CLOUD_CI_WORKFLOW ?? null
+  } = {}) {
+    if (ciWorkflow !== null && (typeof ciWorkflow !== 'string' || !/^[A-Za-z0-9._-]+\.ya?ml$/.test(ciWorkflow))) {
+      throw new Error('workflow_publication_ci_workflow_invalid');
+    }
+    Object.assign(this, { localGit, github, deploymentProvider, ciWorkflow });
   }
 
   async inspectBase(project) { return this.github.inspect(project); }
@@ -5023,6 +5059,12 @@ export class WorkflowPublicationBridge {
         observed.headRef === context.branch &&
         observed.baseRef === project.defaultBranch
     };
+  }
+
+  async dispatchCi(project, { branch }) {
+    if (!this.ciWorkflow) return { required: false, dispatched: false };
+    const result = await this.github.dispatchWorkflow(project, { workflow: this.ciWorkflow, ref: branch });
+    return { required: true, ...result };
   }
 
   async waitForCi(project, sha, options) { return this.github.waitForCi(project, sha, options); }

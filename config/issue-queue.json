@@ -7,5 +7,8 @@
   "allowedActors": [
     "palgarra14-del"
   ],
-  "pollIntervalMs": 15000
+  "pollIntervalMs": 15000,
+  "cloudProjectIds": [
+    "self"
+  ]
 }
