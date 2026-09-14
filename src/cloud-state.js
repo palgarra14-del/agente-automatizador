@@ -45,6 +45,19 @@ function assertNoSensitiveKeys(value, path = 'state') {
   }
 }
 
+function sanitizeRemoteOnlyEvidence(value) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    value.forEach(sanitizeRemoteOnlyEvidence);
+    return;
+  }
+  if (value.workerEvidence && typeof value.workerEvidence === 'object') {
+    delete value.workerEvidence.output;
+    delete value.workerEvidence.diagnostics;
+  }
+  for (const child of Object.values(value)) sanitizeRemoteOnlyEvidence(child);
+}
+
 function assertSelfOnly(state) {
   for (const run of Object.values(state.runs ?? {})) {
     if (run?.projectId && run.projectId !== 'self') throw new Error('cloud_state_project_ownership_mismatch');
@@ -235,6 +248,7 @@ export class GitHubStateStore extends JsonStore {
       lease.expiresAt = new Date(this.now() + this.leaseTtlMs).toISOString();
     }
     const output = await mutator(data);
+    sanitizeRemoteOnlyEvidence(data);
     await this.writeSnapshot(data, snapshot);
     return output;
   }
