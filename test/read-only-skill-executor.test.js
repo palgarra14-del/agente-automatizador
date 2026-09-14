@@ -282,6 +282,8 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(prompt, /Do not use web research/);
   assert.match(prompt, /do not invent testimonials/i);
   assert.match(prompt, /missingInputs/);
+  assert.match(prompt, /design\.colors must be an array of at most 8 colors/);
+  assert.match(prompt, /exactly a seven-character #RRGGBB six-digit hex value/);
 
   response = JSON.stringify({
     websitePlan: {
