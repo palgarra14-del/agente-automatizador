@@ -137,8 +137,8 @@ test('auto-upgrade units are bounded, persistent, and never persist GitHub crede
 
   assert.match(timer, /managed-by=engineering-orchestrator:v1/);
   assert.match(timer, /OnBootSec=2min/);
-  assert.match(timer, /OnUnitActiveSec=10min/);
-  assert.match(timer, /RandomizedDelaySec=30s/);
+  assert.match(timer, /OnUnitActiveSec=2min/);
+  assert.match(timer, /RandomizedDelaySec=20s/);
   assert.match(timer, /Persistent=true/);
   assert.match(timer, new RegExp(`Unit=${AUTO_UPGRADE_SERVICE_NAME.replaceAll('.', '\\.')}\\b`));
   assert.doesNotMatch(timer, /GITHUB_TOKEN|gho_|ghp_/);
