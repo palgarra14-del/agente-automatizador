@@ -282,8 +282,19 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(prompt, /Do not use web research/);
   assert.match(prompt, /do not invent testimonials/i);
   assert.match(prompt, /missingInputs/);
-  assert.match(prompt, /design\.colors must be an array of at most 8 colors/);
+  assert.match(prompt, /summary non-empty <=1200 chars/);
   assert.match(prompt, /exactly a seven-character #RRGGBB six-digit hex value/);
+  assert.match(prompt, /priorities 1-30 items each <=240/);
+  assert.match(prompt, /missingInputs <=30 items each <=300/);
+
+  const retryPrompt = buildReadOnlySkillPrompt({
+    skill: 'website.plan',
+    goal: 'retry plan',
+    contract,
+    context: { retryFeedback: { previousAttempt: 1, previousError: 'websitePlan.implementation.priorities[0] exceeds 240 characters' } }
+  });
+  assert.match(retryPrompt, /retry after strict output validation failed/);
+  assert.match(retryPrompt, /websitePlan\.implementation\.priorities\[0\] exceeds 240 characters/);
 
   response = JSON.stringify({
     websitePlan: {
