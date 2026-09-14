@@ -1920,9 +1920,12 @@ export class WorkflowEngine {
       });
     }
     let websiteAssetEvidence = null;
+    let websiteBlueprint = null;
     if (next.skill === 'website.plan') {
       try {
-        websiteAssetEvidence = await this.websiteAssetEvidence(workspaceProject, (await this.get(id)).input?.businessBrief);
+        const websiteBrief = (await this.get(id)).input?.businessBrief;
+        websiteAssetEvidence = await this.websiteAssetEvidence(workspaceProject, websiteBrief);
+        websiteBlueprint = websiteBlueprintForBrief(websiteBrief);
       } catch (error) {
         return this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === next.id);
@@ -2010,6 +2013,8 @@ export class WorkflowEngine {
       ...(runningStep.skill === 'website.plan' ? {
         businessBrief: runningPlan.input.businessBrief,
         businessBriefFingerprint: runningPlan.inputFingerprint,
+        websiteBlueprint,
+        websiteBlueprintFingerprint: evidenceFingerprint(websiteBlueprint),
         assetEvidence: websiteAssetEvidence,
         configuredQualityCommands: Object.fromEntries(
           websiteQualityCommands.map((name) => [name, project.commands?.[name] ?? null])
@@ -2023,6 +2028,8 @@ export class WorkflowEngine {
             businessBriefFingerprint: runningPlan.inputFingerprint,
             websitePlan: requirements?.evidence?.result?.websitePlan ?? null,
             websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
+            websiteBlueprint: requirements?.evidence?.websiteBlueprint ?? null,
+            websiteBlueprintFingerprint: requirements?.evidence?.websiteBlueprintFingerprint ?? null,
             assetEvidence: requirements?.evidence?.assetEvidence ?? null
           }
         };
@@ -2096,6 +2103,8 @@ export class WorkflowEngine {
         repositoryContextPaths: repositoryContext?.files?.map((file) => file.path) ?? [],
         ...(step.skill === 'website.plan' && executionOk && !integrityChanged && !websitePlanContextError ? {
           businessBriefFingerprint: runningPlan.inputFingerprint,
+          websiteBlueprint: safeJson(websiteBlueprint),
+          websiteBlueprintFingerprint: evidenceFingerprint(websiteBlueprint),
           assetEvidence: safeJson(websiteAssetEvidence),
           assetEvidenceFingerprint: websiteAssetEvidence.fingerprint,
           websitePlanFingerprint: evidenceFingerprint(execution.result.websitePlan)
