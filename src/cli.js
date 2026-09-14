@@ -117,9 +117,19 @@ try {
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
       const cloudAction = action === 'cloud-once';
-      if (cloudAction && queueConfig.cloudProjectIds.length === 0) throw new Error('Cloud inbox has no configured project ownership');
+      const requestedLaneId = take('--lane') ?? 'self';
+      const cloudLane = cloudAction
+        ? queueConfig.cloudLanes.find((lane) => lane.id === requestedLaneId)
+        : null;
+      if (cloudAction && !cloudLane) throw new Error(`Cloud inbox lane is not configured: ${requestedLaneId}`);
       const activeStore = cloudAction
-        ? new GitHubStateStore({ repository: queueConfig.repository })
+        ? new GitHubStateStore({
+          repository: queueConfig.repository,
+          laneId: cloudLane.id,
+          allowedProjectIds: cloudLane.projectIds,
+          tag: cloudLane.tag,
+          statePath: cloudLane.statePath
+        })
         : store;
       const activeWorkflows = cloudAction
         ? new WorkflowEngine({ store: activeStore, projects })
@@ -132,7 +142,7 @@ try {
         allowedActors: queueConfig.allowedActors,
         operatorRevision: loadedRevision,
         operatorBranch: 'main',
-        includedProjectIds: cloudAction ? queueConfig.cloudProjectIds : null,
+        includedProjectIds: cloudAction ? cloudLane.projectIds : null,
         excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds
       });
       const view = (record) => record ? {
@@ -183,7 +193,7 @@ try {
         if (checkoutReloadRevision) {
           console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
-      } else throw new Error('Usage: agent inbox <once|cloud-once|watch|status>');
+      } else throw new Error('Usage: agent inbox <once|cloud-once [--lane <id>]|watch|status>');
     }
   } else if (command === 'service') {
     const action = args[1] ?? 'status';
