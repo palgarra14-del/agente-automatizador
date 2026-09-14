@@ -336,6 +336,48 @@ test('new issue requests defer without persistence or model work when operator c
   assert.equal(channel.branchHeadReadCount, 1);
 });
 
+test('new issue with trusted prior agent initialization fails closed instead of creating a duplicate workflow', async () => {
+  const { store, channel, workflowEngine, issue, queue } = await queueFixture();
+  channel.addUserComment(issue.number, {
+    id: 77,
+    login: 'github-actions[bot]',
+    body: [
+      'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+      '',
+      'Workflow: `workflow-11111111-2222-3333-4444-555555555555`',
+      'Project/profile: `callflow` / `app-improvement`'
+    ].join('\n')
+  });
+
+  const result = await queue.tick();
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'unbound_prior_agent_initialization');
+  assert.equal(workflowEngine.createCalls.length, 0);
+  assert.equal(workflowEngine.runCalls.length, 0);
+  assert.match(channel.posted.at(-1).body, /No duplicate workflow was created/);
+  const persisted = await queue.getRecord(queue.requestKey(issue));
+  assert.equal(persisted.status, 'blocked');
+  assert.equal(persisted.initializationLease, null);
+});
+
+test('untrusted lookalike dry-run comment cannot block new issue initialization', async () => {
+  const { channel, workflowEngine, issue, queue } = await queueFixture();
+  channel.addUserComment(issue.number, {
+    id: 78,
+    login: 'untrusted-user',
+    body: [
+      'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+      '',
+      'Workflow: `workflow-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`'
+    ].join('\n')
+  });
+
+  const result = await queue.tick();
+  assert.equal(result.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.createCalls.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+});
+
 test('new issue requests initialize normally when operator checkout matches main', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'a'.repeat(40);
