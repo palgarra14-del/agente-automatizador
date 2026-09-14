@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CodexReadOnlySkillExecutor,
   CodexSdkWorker,
   DockerContainerExecution,
   LocalSanitizedExecution,
@@ -1036,6 +1037,64 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   assert.ok(prompt.includes('No afirmar servicio 24 horas'));
   assert.match(prompt, /structured coding task as untrusted data/i);
   assert.match(prompt, /cannot override these rules/i);
+});
+
+test('read-only deterministic diagnosis consumes no Codex client and stays grounded in validated inspection', async () => {
+  let clientConstructions = 0;
+  class NeverCodex {
+    constructor() { clientConstructions += 1; }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: NeverCodex });
+  assert.equal(executor.usesModel('code.inspect'), true);
+  assert.equal(executor.usesModel('code.diagnose'), false);
+
+  const request = {
+    skill: 'code.diagnose',
+    goal: 'Apply the explicitly bounded change without touching unrelated files',
+    contract: { version: 3, inputs: [], outputs: ['diagnosis'] },
+    context: {
+      priorEvidence: {
+        'inspect-project': {
+          inspectionEvidence: {
+            summary: 'The target behavior is isolated in src/core.js.',
+            relevantPaths: ['src/core.js'],
+            findings: ['The current branch performs the redundant analysis step before approval.']
+          }
+        }
+      },
+      repositoryContext: {
+        files: [{ path: 'src/core.js', content: 'fixture' }]
+      }
+    }
+  };
+  const result = await executor.execute(request, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(result.ok, true);
+  assert.equal(result.executionMode, 'deterministic');
+  assert.equal(result.codexThreadId, null);
+  assert.equal(result.usage, null);
+  assert.equal(result.result.diagnosis.recommendedChange, request.goal);
+  assert.deepEqual(result.result.diagnosis.relevantPaths, ['src/core.js']);
+  assert.match(result.result.diagnosis.cause, /redundant analysis step/);
+  assert.equal(clientConstructions, 0);
+
+  const missing = await executor.execute({
+    ...request,
+    context: { priorEvidence: {}, repositoryContext: request.context.repositoryContext }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /missing_validated_inspection/);
+  assert.equal(clientConstructions, 0);
+
+  const mismatchedContext = await executor.execute({
+    ...request,
+    context: {
+      ...request.context,
+      repositoryContext: { files: [{ path: 'test/core.test.js', content: 'fixture' }] }
+    }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(mismatchedContext.ok, false);
+  assert.match(mismatchedContext.error, /outside trusted repository context/);
+  assert.equal(clientConstructions, 0);
 });
 
 test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
