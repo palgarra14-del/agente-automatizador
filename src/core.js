@@ -4015,6 +4015,15 @@ function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   return environment;
 }
 
+export function codexClientOptions(sourceEnvironment, isolatedHome, configOverrides) {
+  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  return {
+    ...(apiKey ? { apiKey } : {}),
+    env: isolatedWorkerEnvironment(sourceEnvironment, isolatedHome),
+    configOverrides
+  };
+}
+
 function diagnosticCommandExecutable(command) {
   const first = String(command ?? '').trim().split(/\s+/, 1)[0] ?? '';
   return clip(first, 300);
@@ -4079,13 +4088,7 @@ export class CodexSdkWorker extends CodingWorker {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
-      const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
-      const client = new this.CodexClient({
-        ...(apiKey ? { apiKey } : {}),
-        env,
-        configOverrides: security.configOverrides
-      });
+      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
@@ -4360,13 +4363,7 @@ export class CodexReadOnlySkillExecutor {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
-      const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
-      const client = new this.CodexClient({
-        ...(apiKey ? { apiKey } : {}),
-        env,
-        configOverrides: security.configOverrides
-      });
+      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
