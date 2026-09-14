@@ -223,7 +223,7 @@ test('read-only inspect and diagnose evidence fail closed when repository ground
       risks: []
     }
   });
-  const ungroundedDiagnosis = await executor.execute({
+  const groundedDeterministicDiagnosis = await executor.execute({
     skill: 'code.diagnose',
     goal: 'diagnose',
     contract: diagnoseContract,
@@ -239,8 +239,11 @@ test('read-only inspect and diagnose evidence fail closed when repository ground
       }
     }
   }, { workspace: '/safe/workspace', timeoutMs: 500 });
-  assert.equal(ungroundedDiagnosis.ok, false);
-  assert.match(ungroundedDiagnosis.error, /diagnosis_references_uninspected_path/);
+  assert.equal(groundedDeterministicDiagnosis.ok, true);
+  assert.equal(groundedDeterministicDiagnosis.executionMode, 'deterministic');
+  assert.deepEqual(groundedDeterministicDiagnosis.result.diagnosis.relevantPaths, ['src/core.js']);
+  assert.equal(groundedDeterministicDiagnosis.result.diagnosis.recommendedChange, 'diagnose');
+  assert.match(groundedDeterministicDiagnosis.result.diagnosis.cause, /Grounded finding/);
 });
 
 test('website planner is offline, anti-fabrication, and structurally validates its plan', async () => {
