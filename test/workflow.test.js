@@ -780,6 +780,13 @@ test('read-only workflow retries carry the previous validation error into the ne
   const waiting = await instance.run(created.id);
   assert.equal(calls, 2);
   assert.equal(contexts[0].retryFeedback, undefined);
+  assert.deepEqual(contexts[0].configuredQualityCommands, {
+    test: 'node --version',
+    typecheck: 'node --version',
+    lint: 'node --version',
+    build: 'node --version'
+  });
+  assert.deepEqual(contexts[1].configuredQualityCommands, contexts[0].configuredQualityCommands);
   assert.deepEqual(contexts[1].retryFeedback, {
     previousAttempt: 1,
     previousError: 'websitePlan.implementation.priorities[0] exceeds 240 characters'
