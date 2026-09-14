@@ -271,7 +271,13 @@ test('website planner is offline, anti-fabrication, and structurally validates i
     contract,
     context: {
       businessBrief: { businessName: 'Fontanería Ejemplo', locations: ['Madrid'], facts: [], contentRestrictions: ['No inventar reseñas'] },
-      assetEvidence: { assets: [] }
+      assetEvidence: { assets: [] },
+      configuredQualityCommands: {
+        test: 'node --test test/website.test.js',
+        typecheck: 'node --check assets/site.js',
+        lint: 'node --check test/website.test.js',
+        build: 'node --test test/website.test.js'
+      }
     }
   }, { workspace: '/safe/workspace', timeoutMs: 500 });
 
@@ -282,6 +288,9 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(prompt, /Do not use web research/);
   assert.match(prompt, /do not invent testimonials/i);
   assert.match(prompt, /missingInputs/);
+  assert.match(prompt, /configuredQualityCommands are authoritative orchestrator-side validation commands/);
+  assert.match(prompt, /node --test test\/website\.test\.js/);
+  assert.match(prompt, /do not treat missing package\.json scripts with the same names as missing inputs or blockers/);
   assert.match(prompt, /summary non-empty <=1200 chars/);
   assert.match(prompt, /exactly a seven-character #RRGGBB six-digit hex value/);
   assert.match(prompt, /priorities 1-30 items each <=240/);
