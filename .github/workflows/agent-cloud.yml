@@ -9,10 +9,6 @@ on:
   schedule:
     - cron: '*/15 * * * *'
 
-concurrency:
-  group: agent-self-cloud
-  cancel-in-progress: false
-
 permissions:
   actions: write
   checks: read
@@ -23,6 +19,7 @@ permissions:
 
 jobs:
   cloud-once:
+    name: cloud-once (${{ matrix.lane }})
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -31,8 +28,15 @@ jobs:
         github.actor == 'palgarra14-del' &&
         (github.event_name != 'issue_comment' || github.event.issue.pull_request == null)
       )
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [self, website-pilot]
+    concurrency:
+      group: agent-${{ matrix.lane }}-cloud
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -49,7 +53,7 @@ jobs:
       - name: Install frozen dependencies
         run: npm ci --ignore-scripts
 
-      - name: Prepare exact self runtime
+      - name: Prepare exact cloud runtime
         run: docker pull node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
       - name: Run one governed cloud queue tick
@@ -57,4 +61,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: exec node src/cli.js inbox cloud-once
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
