@@ -1080,9 +1080,14 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.equal(result.executionMode, 'deterministic');
   assert.equal(result.codexThreadId, null);
   assert.equal(result.usage, null);
-  assert.equal(result.result.diagnosis.recommendedChange, request.goal);
+  assert.notEqual(result.result.diagnosis.recommendedChange, request.goal);
+  assert.match(result.result.diagnosis.recommendedChange, /validated inspected paths \[src\/core\.js\]/);
+  assert.match(result.result.diagnosis.recommendedChange, /Apply the explicitly bounded change/);
   assert.deepEqual(result.result.diagnosis.relevantPaths, ['src/core.js']);
   assert.match(result.result.diagnosis.cause, /redundant analysis step/);
+  assert.equal(result.result.diagnosis.risks.length, 2);
+  assert.match(result.result.diagnosis.risks[0], /src\/core\.js/);
+  assert.match(result.result.diagnosis.risks[1], /approval, review, verification, publication/);
   assert.equal(clientConstructions, 0);
 
   const missing = await executor.execute({
@@ -1111,6 +1116,35 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   }, { workspace: process.cwd(), timeoutMs: 100 });
   assert.equal(mismatchedContext.ok, false);
   assert.match(mismatchedContext.error, /deterministic_diagnosis_invalid_inspection:inspection_references_unsupplied_path:src\/core\.js/);
+  assert.equal(clientConstructions, 0);
+
+  const rebound = await executor.execute({
+    ...request,
+    context: {
+      priorEvidence: {
+        'inspect-project': {
+          inspectionEvidence: {
+            summary: 'The target behavior is isolated in test/core.test.js.',
+            relevantPaths: ['test/core.test.js'],
+            findings: ['The regression fixture must change with the inspected path binding.']
+          }
+        }
+      },
+      repositoryContext: {
+        version: 1,
+        files: [{ path: 'test/core.test.js', sha256: otherSha, bytes: otherBytes, content: otherContent }],
+        fingerprint: otherFingerprint
+      }
+    }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(rebound.ok, true);
+  assert.deepEqual(rebound.result.diagnosis.relevantPaths, ['test/core.test.js']);
+  assert.match(rebound.result.diagnosis.recommendedChange, /validated inspected paths \[test\/core\.test\.js\]/);
+  assert.notEqual(rebound.result.diagnosis.recommendedChange, result.result.diagnosis.recommendedChange);
+  assert.notEqual(
+    createHash('sha256').update(JSON.stringify(rebound.result.diagnosis)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(result.result.diagnosis)).digest('hex')
+  );
   assert.equal(clientConstructions, 0);
 });
 
