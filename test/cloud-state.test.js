@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { URL } from 'node:url';
 import { GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
 
 function response(status, payload = null) {
