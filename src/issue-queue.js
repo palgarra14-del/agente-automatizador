@@ -6,7 +6,7 @@ const ISSUE_REQUEST_MAX_BYTES = 80 * 1024;
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
 
 export function normalizeIssueQueueConfig(value) {
-  assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs']), 'issue queue config');
+  assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs', 'cloudProjectIds']), 'issue queue config');
   if (value.version !== 1) throw new Error('issue queue config version must be 1');
   assertObjectKeys(value.repository, new Set(['owner', 'name']), 'issue queue config repository');
   const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 }).toLowerCase();
@@ -15,7 +15,12 @@ export function normalizeIssueQueueConfig(value) {
   const allowedActors = [...new Set(value.allowedActors.map((actor, index) => boundedString(actor, `issue queue allowedActors[${index}]`, { required: true, max: 80 }).toLowerCase()))].sort();
   const pollIntervalMs = value.pollIntervalMs ?? 15_000;
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000 || pollIntervalMs > 300_000) throw new Error('issue queue pollIntervalMs must be between 1000 and 300000');
-  return { version: 1, repository: { owner, name }, allowedActors, pollIntervalMs };
+  const cloudProjectIds = value.cloudProjectIds ?? [];
+  if (!Array.isArray(cloudProjectIds) || cloudProjectIds.length > 20) throw new Error('issue queue cloudProjectIds must be an array with at most 20 project ids');
+  const normalizedCloudProjectIds = [...new Set(cloudProjectIds.map((projectId, index) =>
+    boundedString(projectId, `issue queue cloudProjectIds[${index}]`, { required: true, max: 80 })
+  ))].sort();
+  return { version: 1, repository: { owner, name }, allowedActors, pollIntervalMs, cloudProjectIds: normalizedCloudProjectIds };
 }
 
 export async function loadIssueQueueConfig(file) {
@@ -604,6 +609,8 @@ export class SupervisedIssueQueue {
     allowedActors,
     operatorRevision = null,
     operatorBranch = 'main',
+    includedProjectIds = null,
+    excludedProjectIds = [],
     now = () => new Date().toISOString()
   } = {}) {
     if (!store || !projects || !workflowEngine || !channel) throw new Error('SupervisedIssueQueue requires store, projects, workflowEngine, and channel');
@@ -619,13 +626,39 @@ export class SupervisedIssueQueue {
     this.workflowEngine = workflowEngine;
     this.channel = channel;
     this.allowedActors = new Set(allowedActors.map((actor) => boundedString(actor, 'allowed actor', { required: true, max: 80 }).toLowerCase()));
+    if (includedProjectIds !== null && (!Array.isArray(includedProjectIds) || includedProjectIds.some((id) => typeof id !== 'string' || !id))) {
+      throw new Error('SupervisedIssueQueue includedProjectIds must be null or an array of project ids');
+    }
+    if (!Array.isArray(excludedProjectIds) || excludedProjectIds.some((id) => typeof id !== 'string' || !id)) {
+      throw new Error('SupervisedIssueQueue excludedProjectIds must be an array of project ids');
+    }
+    this.includedProjectIds = includedProjectIds === null ? null : new Set(includedProjectIds);
+    this.excludedProjectIds = new Set(excludedProjectIds);
+    if (this.includedProjectIds && [...this.includedProjectIds].some((id) => this.excludedProjectIds.has(id))) {
+      throw new Error('SupervisedIssueQueue project routing overlaps include/exclude sets');
+    }
     this.operatorRevision = operatorRevision?.toLowerCase() ?? null;
     this.operatorBranch = operatorBranch;
     this.now = now;
   }
 
+  ownsProject(projectId) {
+    if (typeof projectId !== 'string' || !projectId) return this.includedProjectIds === null;
+    if (this.excludedProjectIds.has(projectId)) return false;
+    return this.includedProjectIds === null || this.includedProjectIds.has(projectId);
+  }
+
+  ownsRecord(record) {
+    return this.ownsProject(record?.request?.projectId ?? null);
+  }
+
   controlPlaneFingerprint() {
-    return fingerprint({ repository: this.channel.repository, allowedActors: [...this.allowedActors].sort() });
+    return fingerprint({
+      repository: this.channel.repository,
+      allowedActors: [...this.allowedActors].sort(),
+      includedProjectIds: this.includedProjectIds ? [...this.includedProjectIds].sort() : null,
+      excludedProjectIds: [...this.excludedProjectIds].sort()
+    });
   }
 
   async claimWatcherLease() {
@@ -1396,6 +1429,7 @@ export class SupervisedIssueQueue {
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     for (const [key, record] of Object.entries(state.requests ?? {})) {
       if (!key.startsWith(keyPrefix) ||
+          !this.ownsRecord(record) ||
           !['completed', 'failed', 'blocked', 'rejected'].includes(record.status) ||
           !record.terminalNotification ||
           record.terminalNotification.sentAt) continue;
@@ -1408,6 +1442,7 @@ export class SupervisedIssueQueue {
     }
     for (const [key, record] of Object.entries(state.requests ?? {})) {
       if (!key.startsWith(keyPrefix) ||
+          !this.ownsRecord(record) ||
           ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
@@ -1428,7 +1463,14 @@ export class SupervisedIssueQueue {
     let remoteOperatorRevision = null;
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      let routingRequest = null;
+      try { routingRequest = parseIssueRequestBody(issue.body).request; }
+      catch {
+        if (this.includedProjectIds !== null) continue;
+      }
+      if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
       const existing = await this.getRecord(this.requestKey(issue));
+      if (existing && !this.ownsRecord(existing)) continue;
       if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
       if (!existing && this.operatorRevision) {
         remoteOperatorRevision ??= await this.channel.branchHead(this.operatorBranch);
