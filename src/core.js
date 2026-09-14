@@ -4340,14 +4340,24 @@ function deterministicDiagnosisResult(request) {
   } catch (error) {
     throw new Error(`deterministic_diagnosis_invalid_inspection:${clip(error.message, 500)}`, { cause: error });
   }
+  const authorizedGoal = boundedText(request.goal, 'deterministic diagnosis goal', { required: true, max: 1_000 });
+  const pathBinding = inspection.relevantPaths.join(', ');
   const cause = clip(`Grounded inspection findings: ${inspection.findings.join(' | ')}`, 1_200);
+  const recommendedChange = clip(
+    `Apply the authorized goal only within validated inspected paths [${pathBinding}]: ${authorizedGoal}`,
+    1_500
+  );
+  const risks = [
+    clip(`Scope drift: implementation must remain within validated inspected paths [${pathBinding}] and the request scope.`, 400),
+    'Governance drift: preserve existing approval, review, verification, publication, secret, merge, and deployment gates.'
+  ];
   const output = {
     diagnosis: {
       summary: clip(`Deterministic diagnosis from validated inspection: ${inspection.summary}`, 1_200),
       cause,
       relevantPaths: [...inspection.relevantPaths],
-      recommendedChange: String(request.goal ?? '').trim(),
-      risks: []
+      recommendedChange,
+      risks
     }
   };
   return validateSkillOutput(request.contract, output, 'code.diagnose', request.context);
