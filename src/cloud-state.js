@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { JsonStore, maskSecrets } from './core.js';
+import { JsonStore } from './core.js';
 
 const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
@@ -7,7 +7,12 @@ const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-  return /(^|_)(api_key|access_token|refresh_token|auth_token|github_token|vercel_token|secret|password|credential|authorization|cookie|session)($|_)/.test(normalized);
+  return /(^|_)(api_key|access_token|refresh_token|auth_token|github_token|vercel_token|secret|password|credential|authorization|cookie)($|_)/.test(normalized);
+}
+
+function containsKnownSecret(value) {
+  return /\b(?:gh[pousr]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|vcp_[A-Za-z0-9_-]+)\b/i.test(value) ||
+    /\bAuthorization\s*:\s*(?:Basic|Bearer)\s+[^\s,;}"'\]]+/i.test(value);
 }
 
 function emptyState() {
@@ -59,7 +64,7 @@ export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES } = {})
   assertNoSensitiveKeys(state);
   const serialized = JSON.stringify(state);
   if (Buffer.byteLength(serialized, 'utf8') > maxBytes) throw new Error('cloud_state_too_large');
-  if (maskSecrets(serialized) !== serialized) throw new Error('cloud_state_contains_secret_material');
+  if (containsKnownSecret(serialized)) throw new Error('cloud_state_contains_secret_material');
   return state;
 }
 
@@ -85,6 +90,7 @@ export class GitHubStateStore extends JsonStore {
   } = {}) {
     super('.agent/cloud-state-unused.json');
     if (!repository?.owner || !repository?.name) throw new Error('cloud_state_repository_required');
+    if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes('..')) throw new Error('cloud_state_base_branch_invalid');
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
@@ -140,7 +146,7 @@ export class GitHubStateStore extends JsonStore {
     const refSha = await this.refSha(`tags/${encodeURIComponent(this.tag)}`);
     if (!refSha) return { refSha: null, generation: 0, state: emptyState() };
     const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
-    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(this.tag)}`);
+    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(`refs/tags/${this.tag}`)}`);
     if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
     const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
     if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
