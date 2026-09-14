@@ -6,7 +6,7 @@ const ISSUE_REQUEST_MAX_BYTES = 80 * 1024;
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
 
 export function normalizeIssueQueueConfig(value) {
-  assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs', 'cloudProjectIds']), 'issue queue config');
+  assertObjectKeys(value, new Set(['version', 'repository', 'allowedActors', 'pollIntervalMs', 'cloudProjectIds', 'cloudLanes']), 'issue queue config');
   if (value.version !== 1) throw new Error('issue queue config version must be 1');
   assertObjectKeys(value.repository, new Set(['owner', 'name']), 'issue queue config repository');
   const owner = boundedString(value.repository.owner, 'issue queue repository owner', { required: true, max: 100 }).toLowerCase();
@@ -15,14 +15,80 @@ export function normalizeIssueQueueConfig(value) {
   const allowedActors = [...new Set(value.allowedActors.map((actor, index) => boundedString(actor, `issue queue allowedActors[${index}]`, { required: true, max: 80 }).toLowerCase()))].sort();
   const pollIntervalMs = value.pollIntervalMs ?? 15_000;
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000 || pollIntervalMs > 300_000) throw new Error('issue queue pollIntervalMs must be between 1000 and 300000');
-  const cloudProjectIds = value.cloudProjectIds ?? [];
-  if (!Array.isArray(cloudProjectIds) || cloudProjectIds.length > 20) throw new Error('issue queue cloudProjectIds must be an array with at most 20 project ids');
-  const normalizedCloudProjectIds = [...new Set(cloudProjectIds.map((projectId, index) => {
-    const normalized = boundedString(projectId, `issue queue cloudProjectIds[${index}]`, { required: true, max: 80 });
-    if (!/^[a-z0-9-]+$/.test(normalized)) throw new Error(`issue queue cloudProjectIds[${index}] is invalid`);
-    return normalized;
-  }))].sort();
-  return { version: 1, repository: { owner, name }, allowedActors, pollIntervalMs, cloudProjectIds: normalizedCloudProjectIds };
+
+  if (value.cloudProjectIds !== undefined && value.cloudLanes !== undefined) {
+    throw new Error('issue queue config cannot define both cloudProjectIds and cloudLanes');
+  }
+
+  const normalizeProjectIds = (projectIds, label) => {
+    if (!Array.isArray(projectIds) || projectIds.length < 1 || projectIds.length > 20) throw new Error(`${label} must contain between 1 and 20 project ids`);
+    return [...new Set(projectIds.map((projectId, index) => {
+      const normalized = boundedString(projectId, `${label}[${index}]`, { required: true, max: 80 });
+      if (!/^[a-z0-9-]+$/.test(normalized)) throw new Error(`${label}[${index}] is invalid`);
+      return normalized;
+    }))].sort();
+  };
+
+  let cloudLanes;
+  if (value.cloudLanes !== undefined) {
+    if (!Array.isArray(value.cloudLanes) || value.cloudLanes.length < 1 || value.cloudLanes.length > 20) {
+      throw new Error('issue queue cloudLanes must contain between 1 and 20 lanes');
+    }
+    cloudLanes = value.cloudLanes.map((lane, index) => {
+      assertObjectKeys(lane, new Set(['id', 'projectIds', 'tag', 'statePath']), `issue queue cloudLanes[${index}]`);
+      const id = boundedString(lane.id, `issue queue cloudLanes[${index}].id`, { required: true, max: 80 });
+      if (!/^[a-z0-9-]+$/.test(id)) throw new Error(`issue queue cloudLanes[${index}].id is invalid`);
+      const projectIds = normalizeProjectIds(lane.projectIds, `issue queue cloudLanes[${index}].projectIds`);
+      const tag = boundedString(lane.tag, `issue queue cloudLanes[${index}].tag`, { required: true, max: 80 });
+      if (!/^[A-Za-z0-9._-]+$/.test(tag)) throw new Error(`issue queue cloudLanes[${index}].tag is invalid`);
+      const statePath = boundedString(lane.statePath, `issue queue cloudLanes[${index}].statePath`, { required: true, max: 200 }).replaceAll('\\', '/');
+      if (statePath.startsWith('/') || statePath.includes('..') || /[\r\n\0]/.test(statePath) || !/^[A-Za-z0-9._/-]+$/.test(statePath)) {
+        throw new Error(`issue queue cloudLanes[${index}].statePath is invalid`);
+      }
+      return { id, projectIds, tag, statePath };
+    }).sort((left, right) => left.id.localeCompare(right.id));
+  } else {
+    const legacy = value.cloudProjectIds ?? [];
+    if (!Array.isArray(legacy) || legacy.length > 20) throw new Error('issue queue cloudProjectIds must be an array with at most 20 project ids');
+    const projectIds = legacy.length ? normalizeProjectIds(legacy, 'issue queue cloudProjectIds') : [];
+    cloudLanes = projectIds.length ? [{
+      id: 'self',
+      projectIds,
+      tag: 'agent-cloud-state-v1',
+      statePath: '.agent/cloud-state.json'
+    }] : [];
+  }
+
+  const laneIds = new Set();
+  const tags = new Set();
+  const statePaths = new Set();
+  const ownedProjects = new Set();
+  for (const lane of cloudLanes) {
+    if (laneIds.has(lane.id)) throw new Error(`issue queue duplicate cloud lane id: ${lane.id}`);
+    if (tags.has(lane.tag)) throw new Error(`issue queue duplicate cloud lane tag: ${lane.tag}`);
+    if (statePaths.has(lane.statePath)) throw new Error(`issue queue duplicate cloud lane statePath: ${lane.statePath}`);
+    laneIds.add(lane.id);
+    tags.add(lane.tag);
+    statePaths.add(lane.statePath);
+    for (const projectId of lane.projectIds) {
+      if (ownedProjects.has(projectId)) throw new Error(`issue queue cloud project is owned by multiple lanes: ${projectId}`);
+      ownedProjects.add(projectId);
+    }
+  }
+
+  const selfLane = cloudLanes.find((lane) => lane.id === 'self');
+  if (selfLane && (selfLane.tag !== 'agent-cloud-state-v1' || selfLane.statePath !== '.agent/cloud-state.json')) {
+    throw new Error('issue queue self lane must preserve the legacy cloud state tag and path');
+  }
+
+  return {
+    version: 1,
+    repository: { owner, name },
+    allowedActors,
+    pollIntervalMs,
+    cloudLanes,
+    cloudProjectIds: [...ownedProjects].sort()
+  };
 }
 
 export async function loadIssueQueueConfig(file) {

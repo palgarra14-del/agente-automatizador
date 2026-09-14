@@ -404,21 +404,78 @@ test('GitHubIssueChannel reads and validates the configured branch head', async 
   await assert.rejects(malformed.branchHead('main'), /branch response is invalid/);
 });
 
-test('issue queue config binds self to cloud ownership and queue routing is mutually exclusive', async () => {
-  const normalized = normalizeIssueQueueConfig({
+test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
+  const legacy = normalizeIssueQueueConfig({
     version: 1,
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     allowedActors: ['palgarra14-del'],
     pollIntervalMs: 15_000,
     cloudProjectIds: ['self', 'self']
   });
-  assert.deepEqual(normalized.cloudProjectIds, ['self']);
+  assert.deepEqual(legacy.cloudProjectIds, ['self']);
+  assert.deepEqual(legacy.cloudLanes, [{
+    id: 'self',
+    projectIds: ['self'],
+    tag: 'agent-cloud-state-v1',
+    statePath: '.agent/cloud-state.json'
+  }]);
+
+  const normalized = normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    allowedActors: ['palgarra14-del'],
+    pollIntervalMs: 15_000,
+    cloudLanes: [
+      {
+        id: 'website-pilot',
+        projectIds: ['website-pilot'],
+        tag: 'agent-cloud-state-website-pilot-v1',
+        statePath: '.agent/cloud-state-website-pilot.json'
+      },
+      {
+        id: 'self',
+        projectIds: ['self'],
+        tag: 'agent-cloud-state-v1',
+        statePath: '.agent/cloud-state.json'
+      }
+    ]
+  });
+  assert.deepEqual(normalized.cloudProjectIds, ['self', 'website-pilot']);
+  assert.deepEqual(normalized.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot']);
+
   assert.throws(() => normalizeIssueQueueConfig({
     version: 1,
     repository: { owner: 'x', name: 'y' },
     allowedActors: ['palgarra14-del'],
-    cloudProjectIds: 'self'
-  }), /cloudProjectIds must be an array/);
+    cloudProjectIds: ['self'],
+    cloudLanes: [{ id: 'self', projectIds: ['self'], tag: 'agent-cloud-state-v1', statePath: '.agent/cloud-state.json' }]
+  }), /cannot define both/);
+  assert.throws(() => normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'x', name: 'y' },
+    allowedActors: ['palgarra14-del'],
+    cloudLanes: [
+      { id: 'a', projectIds: ['same'], tag: 'lane-a', statePath: '.agent/a.json' },
+      { id: 'b', projectIds: ['same'], tag: 'lane-b', statePath: '.agent/b.json' }
+    ]
+  }), /owned by multiple lanes/);
+  assert.throws(() => normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'x', name: 'y' },
+    allowedActors: ['palgarra14-del'],
+    cloudLanes: [
+      { id: 'a', projectIds: ['a'], tag: 'duplicate', statePath: '.agent/a.json' },
+      { id: 'b', projectIds: ['b'], tag: 'duplicate', statePath: '.agent/b.json' }
+    ]
+  }), /duplicate cloud lane tag/);
+  assert.throws(() => normalizeIssueQueueConfig({
+    version: 1,
+    repository: { owner: 'x', name: 'y' },
+    allowedActors: ['palgarra14-del'],
+    cloudLanes: [
+      { id: 'self', projectIds: ['self'], tag: 'moved-self', statePath: '.agent/cloud-state.json' }
+    ]
+  }), /self lane must preserve/);
 
   const localFixture = await queueFixture();
   const localQueue = new SupervisedIssueQueue({
@@ -579,6 +636,7 @@ test('issue queue config is strict and normalizes actor identity', () => {
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     allowedActors: ['palgarra14-del'],
     pollIntervalMs: 15_000,
+    cloudLanes: [],
     cloudProjectIds: []
   });
   assert.throws(() => normalizeIssueQueueConfig({ version: 1, repository: { owner: 'x', name: 'y' }, allowedActors: [] }), /between 1 and 20/);
