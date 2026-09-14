@@ -1571,6 +1571,100 @@ test('workflow model-call budget stops before invoking another specialist', asyn
   assert.equal(failed.modelUsage.entries[0].status, 'completed');
 });
 
+test('deterministic diagnose does not consume model budget and approval remains fingerprint-bound', async () => {
+  const configured = configFrom({
+    id: 'deterministic-diagnose-workflow',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: 6 },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const goal = 'Apply the bounded deterministic diagnosis change';
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    usesModel: (skill) => skill !== 'code.diagnose',
+    async execute(request) {
+      if (request.skill === 'code.inspect') {
+        return {
+          ok: true,
+          status: 'completed',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          outputBytes: 10,
+          result: {
+            inspectionEvidence: {
+              summary: 'The requested change is isolated to src/core.js.',
+              relevantPaths: ['src/core.js'],
+              findings: ['The current workflow has a separate diagnosis stage after validated inspection.']
+            }
+          }
+        };
+      }
+      assert.equal(request.skill, 'code.diagnose');
+      const inspection = request.context.priorEvidence['inspect-project'].inspectionEvidence;
+      const pathBinding = inspection.relevantPaths.join(', ');
+      return {
+        ok: true,
+        status: 'completed',
+        usage: null,
+        outputBytes: 10,
+        executionMode: 'deterministic',
+        result: {
+          diagnosis: {
+            summary: 'Deterministic diagnosis from validated inspection',
+            cause: inspection.findings.join(' | '),
+            relevantPaths: [...inspection.relevantPaths],
+            recommendedChange: `Apply the authorized goal only within validated inspected paths [${pathBinding}]: ${request.goal}`,
+            risks: [
+              `Scope drift: implementation must remain within validated inspected paths [${pathBinding}] and the request scope.`,
+              'Governance drift: preserve existing approval, review, verification, publication, secret, merge, and deployment gates.'
+            ]
+          }
+        }
+      };
+    }
+  };
+
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal });
+  const waiting = await instance.run(created.id);
+  const inspect = waiting.steps.find((step) => step.id === 'inspect-project');
+  const diagnose = waiting.steps.find((step) => step.id === 'diagnose');
+  const checkpoint = waiting.steps.find((step) => step.id === 'plan-change');
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(inspect.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(diagnose.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(diagnose.attempts, 1);
+  assert.match(diagnose.evidence.result.diagnosis.recommendedChange, /validated inspected paths \[src\/core\.js\]/);
+  assert.match(diagnose.evidence.result.diagnosis.recommendedChange, new RegExp(goal));
+  assert.deepEqual(diagnose.evidence.result.diagnosis.relevantPaths, ['src/core.js']);
+  assert.equal(diagnose.evidence.result.diagnosis.risks.length, 2);
+  assert.equal(waiting.modelUsage.calls, 1);
+  assert.equal(waiting.modelUsage.inputTokens, 10);
+  assert.equal(waiting.modelUsage.outputTokens, 5);
+  assert.equal(waiting.modelUsage.totalTokens, 15);
+  assert.deepEqual(waiting.modelUsage.entries.map((entry) => [entry.skill, entry.specialist, entry.status]), [
+    ['code.inspect', 'code-inspector', 'completed']
+  ]);
+  assert.equal(checkpoint.status, WorkflowStepStatus.AWAITING_APPROVAL);
+
+  const diagnosisFingerprint = fixtureEvidenceFingerprint(diagnose.evidence.result.diagnosis);
+  const approved = await instance.approve(created.id, 'plan-change');
+  const approvedCheckpoint = approved.steps.find((step) => step.id === 'plan-change');
+  assert.equal(approvedCheckpoint.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(
+    approvedCheckpoint.evidence.approvedRecommendedChange,
+    diagnose.evidence.result.diagnosis.recommendedChange
+  );
+  assert.notEqual(approvedCheckpoint.evidence.approvedRecommendedChange, goal);
+  assert.equal(approvedCheckpoint.evidence.approvedDiagnosisFingerprint, diagnosisFingerprint);
+  assert.equal(approved.modelUsage.calls, 1);
+});
+
 test('workflow model usage is attributed across read-only specialists', async () => {
   const configured = configFrom({
     id: 'model-usage-workflow',
