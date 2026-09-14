@@ -802,6 +802,12 @@ export class SupervisedIssueQueue {
     return typeof login === 'string' && this.allowedActors.has(login.toLowerCase());
   }
 
+  instructionPublisher(login) {
+    if (typeof login !== 'string') return false;
+    const normalized = login.toLowerCase();
+    return this.allowedActors.has(normalized) || normalized === 'github-actions[bot]';
+  }
+
   async post(number, text) {
     return this.channel.comment(number, text);
   }
@@ -975,7 +981,7 @@ export class SupervisedIssueQueue {
     const instruction = record.pendingApproval?.fingerprint ? approvalInstruction(record.pendingApproval.fingerprint) : null;
     const instructionPresent = Boolean(instruction && comments.some((comment) =>
       typeof comment.body === 'string' &&
-      this.authorized(comment.user?.login) &&
+      this.instructionPublisher(comment.user?.login) &&
       comment.body.includes(instruction)
     ));
     const eligible = comments
