@@ -8,7 +8,14 @@
     "palgarra14-del"
   ],
   "pollIntervalMs": 15000,
-  "cloudProjectIds": [
-    "self"
+  "cloudLanes": [
+    {
+      "id": "self",
+      "projectIds": [
+        "self"
+      ],
+      "tag": "agent-cloud-state-v1",
+      "statePath": ".agent/cloud-state.json"
+    }
   ]
 }
