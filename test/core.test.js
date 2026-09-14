@@ -653,6 +653,9 @@ test('v0.5 revalidates repository identity before controlled commit and push and
   adapter.head = async () => 'commit-head';
   let commitGitOptions = null;
   adapter.git = async (args, _project, options = {}) => {
+    if (args[0] === 'diff' && args[1] === '--cached' && args.includes('--name-only')) {
+      return { exitCode: 0, stdout: `${changeSet.paths.join('\n')}\n`, stderr: '' };
+    }
     if (args[0] === 'diff' && args[1] === '--cached') return { exitCode: 1, stdout: '', stderr: '' };
     if (args[0] === 'commit') commitGitOptions = options;
     observed.push(args);
