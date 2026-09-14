@@ -725,6 +725,94 @@ test('managed commit succeeds without host git identity and does not write repos
   }
 });
 
+test('managed commit preserves the reviewed change-set fingerprint when staging new files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-staging-invariant-'));
+  try {
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'one\n');
+    assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'base'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    const baseHead = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+    assert.equal((await runProcess('git', ['switch', '-c', 'agent/test'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'two\n');
+    await mkdir(join(root, 'test'), { recursive: true });
+    await writeFile(join(root, 'test/new.test.js'), "export const fresh = true;\n");
+
+    const configDirectory = join(root, 'config');
+    await mkdir(configDirectory, { recursive: true });
+    const configured = configFrom({
+      id: 'fixture',
+      repository: { owner: 'owner', name: 'repo' },
+      defaultBranch: 'main',
+      protectedBranches: ['main'],
+      workingBranchPattern: 'agent/{runId}',
+      workspace: '..',
+      commands: { test: 'node --version' }
+    }, configDirectory);
+    const adapter = new LocalGitAdapter();
+    const reviewed = await adapter.inspectChangeSet(configured);
+    assert.deepEqual([...reviewed.paths].sort(), ['fixture.txt', 'test/new.test.js']);
+
+    const committed = await adapter.commit(configured, 'agent/test', 'staging invariant fixture', {
+      expectedChangeSetFingerprint: reviewed.changeSetFingerprint,
+      expectedHead: baseHead,
+      expectedRemote: 'https://github.com/owner/repo.git',
+      identity: { name: 'owner', email: '123+owner@users.noreply.github.com' }
+    });
+
+    assert.equal(committed.committedChangeSetFingerprint, reviewed.changeSetFingerprint);
+    assert.deepEqual(committed.committedPaths, ['fixture.txt', 'test/new.test.js']);
+    assert.equal((await runProcess('git', ['status', '--porcelain'], { cwd: root, timeoutMs: 5_000 })).stdout, '');
+    const committedPaths = (await runProcess('git', ['show', '--pretty=', '--name-only', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout
+      .split(/\r?\n/).filter(Boolean).sort();
+    assert.deepEqual(committedPaths, ['fixture.txt', 'test/new.test.js']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('managed commit still rejects real content drift before staging', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-staging-drift-'));
+  try {
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'one\n');
+    assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'base'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    const baseHead = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+    assert.equal((await runProcess('git', ['switch', '-c', 'agent/test'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'new.txt'), 'reviewed\n');
+
+    const configDirectory = join(root, 'config');
+    await mkdir(configDirectory, { recursive: true });
+    const configured = configFrom({
+      id: 'fixture',
+      repository: { owner: 'owner', name: 'repo' },
+      defaultBranch: 'main',
+      protectedBranches: ['main'],
+      workingBranchPattern: 'agent/{runId}',
+      workspace: '..',
+      commands: { test: 'node --version' }
+    }, configDirectory);
+    const adapter = new LocalGitAdapter();
+    const reviewed = await adapter.inspectChangeSet(configured);
+    await writeFile(join(root, 'new.txt'), 'changed after review\n');
+
+    await assert.rejects(
+      adapter.commit(configured, 'agent/test', 'must fail closed', {
+        expectedChangeSetFingerprint: reviewed.changeSetFingerprint,
+        expectedHead: baseHead,
+        expectedRemote: 'https://github.com/owner/repo.git',
+        identity: { name: 'owner', email: '123+owner@users.noreply.github.com' }
+      }),
+      /changeset_changed_before_commit/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('managed commit fails closed when GitHub-bound identity is missing or malformed', async () => {
   const configured = project({ workingBranchPattern: 'agent/{runId}' });
   const adapter = new LocalGitAdapter();
