@@ -4677,6 +4677,11 @@ export class LocalGitAdapter {
     if (JSON.stringify(stagedPaths) !== JSON.stringify(paths)) throw new Error('changeset_changed_while_staging');
     const staged = await this.git(['diff', '--cached', '--quiet'], project, { allowExitCodes: [0, 1] });
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
+    const postStageUntracked = (await this.git(['ls-files', '--others', '--exclude-standard'], project)).stdout
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((path) => normalizeRepositoryPath(path, 'post-stage untracked path'));
+    if (postStageUntracked.length) throw new Error('changeset_changed_while_staging');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
     await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: commitEnvironment });
