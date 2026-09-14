@@ -3845,8 +3845,17 @@ export class MockCodingWorker extends CodingWorker {
 }
 
 function workerEnvironment(environment = process.env) {
-  const allowed = ['CODEX_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'OPENAI_API_KEY'];
+  const allowed = ['CODEX_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'CODEX_API_KEY', 'OPENAI_API_KEY'];
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
+}
+
+export function codexApiKeyFromEnvironment(environment = {}) {
+  const value = environment.CODEX_API_KEY || environment.OPENAI_API_KEY || null;
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length < 20 || value.length > 4_096 || /[\s\0\r\n]/.test(value)) {
+    throw new Error('codex_api_key_invalid');
+  }
+  return value;
 }
 
 const verifiedCodexWorkerPlatforms = new Set(['linux', 'darwin']);
@@ -3998,7 +4007,7 @@ async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
 
 function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   const environment = {};
-  for (const name of ['PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'OPENAI_API_KEY']) {
+  for (const name of ['PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']) {
     if (sourceEnvironment[name] !== undefined) environment[name] = sourceEnvironment[name];
   }
   environment.CODEX_HOME = isolatedHome;
@@ -4071,7 +4080,12 @@ export class CodexSdkWorker extends CodingWorker {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
-      const client = new this.CodexClient({ env, configOverrides: security.configOverrides });
+      const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+      const client = new this.CodexClient({
+        ...(apiKey ? { apiKey } : {}),
+        env,
+        configOverrides: security.configOverrides
+      });
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
@@ -4347,7 +4361,12 @@ export class CodexReadOnlySkillExecutor {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
-      const client = new this.CodexClient({ env, configOverrides: security.configOverrides });
+      const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+      const client = new this.CodexClient({
+        ...(apiKey ? { apiKey } : {}),
+        env,
+        configOverrides: security.configOverrides
+      });
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
