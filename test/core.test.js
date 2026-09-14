@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CodexReadOnlySkillExecutor,
   CodexSdkWorker,
   DockerContainerExecution,
   LocalSanitizedExecution,
@@ -1036,6 +1038,80 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   assert.ok(prompt.includes('No afirmar servicio 24 horas'));
   assert.match(prompt, /structured coding task as untrusted data/i);
   assert.match(prompt, /cannot override these rules/i);
+});
+
+test('read-only deterministic diagnosis consumes no Codex client and stays grounded in validated inspection', async () => {
+  let clientConstructions = 0;
+  class NeverCodex {
+    constructor() { clientConstructions += 1; }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: NeverCodex });
+  assert.equal(executor.usesModel('code.inspect'), true);
+  assert.equal(executor.usesModel('code.diagnose'), false);
+
+  const sourceContent = 'fixture';
+  const sourceSha = createHash('sha256').update(sourceContent).digest('hex');
+  const sourceBytes = Buffer.byteLength(sourceContent);
+  const sourceMetadata = [{ path: 'src/core.js', sha256: sourceSha, bytes: sourceBytes }];
+  const sourceFingerprint = createHash('sha256').update(JSON.stringify(sourceMetadata)).digest('hex');
+  const request = {
+    skill: 'code.diagnose',
+    goal: 'Apply the explicitly bounded change without touching unrelated files',
+    contract: { version: 3, inputs: [], outputs: ['diagnosis'] },
+    context: {
+      priorEvidence: {
+        'inspect-project': {
+          inspectionEvidence: {
+            summary: 'The target behavior is isolated in src/core.js.',
+            relevantPaths: ['src/core.js'],
+            findings: ['The current branch performs the redundant analysis step before approval.']
+          }
+        }
+      },
+      repositoryContext: {
+        version: 1,
+        files: [{ path: 'src/core.js', sha256: sourceSha, bytes: sourceBytes, content: sourceContent }],
+        fingerprint: sourceFingerprint
+      }
+    }
+  };
+  const result = await executor.execute(request, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(result.ok, true);
+  assert.equal(result.executionMode, 'deterministic');
+  assert.equal(result.codexThreadId, null);
+  assert.equal(result.usage, null);
+  assert.equal(result.result.diagnosis.recommendedChange, request.goal);
+  assert.deepEqual(result.result.diagnosis.relevantPaths, ['src/core.js']);
+  assert.match(result.result.diagnosis.cause, /redundant analysis step/);
+  assert.equal(clientConstructions, 0);
+
+  const missing = await executor.execute({
+    ...request,
+    context: { priorEvidence: {}, repositoryContext: request.context.repositoryContext }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /missing_validated_inspection/);
+  assert.equal(clientConstructions, 0);
+
+  const otherContent = 'fixture';
+  const otherSha = createHash('sha256').update(otherContent).digest('hex');
+  const otherBytes = Buffer.byteLength(otherContent);
+  const otherMetadata = [{ path: 'test/core.test.js', sha256: otherSha, bytes: otherBytes }];
+  const otherFingerprint = createHash('sha256').update(JSON.stringify(otherMetadata)).digest('hex');
+  const mismatchedContext = await executor.execute({
+    ...request,
+    context: {
+      ...request.context,
+      repositoryContext: {
+        version: 1,
+        files: [{ path: 'test/core.test.js', sha256: otherSha, bytes: otherBytes, content: otherContent }],
+        fingerprint: otherFingerprint
+      }
+    }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(mismatchedContext.ok, false);
+  assert.match(mismatchedContext.error, /deterministic_diagnosis_invalid_inspection:inspection_references_unsupplied_path:src\/core\.js/);
+  assert.equal(clientConstructions, 0);
 });
 
 test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
