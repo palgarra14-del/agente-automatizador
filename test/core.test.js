@@ -1024,8 +1024,8 @@ test('GitHub adapter dispatches an allowlisted CI workflow and accepts 204 respo
   assert.match(calls[0].url, /\/actions\/workflows\/ci\.yml\/dispatches$/);
   assert.equal(calls[0].options.method, 'POST');
   assert.deepEqual(JSON.parse(calls[0].options.body), { ref: 'agent/workflow-123' });
-  assert.throws(() => adapter.dispatchWorkflow(configured, { workflow: '../ci.yml', ref: 'agent/workflow-123' }), /workflow_dispatch_name_invalid/);
-  assert.throws(() => adapter.dispatchWorkflow(configured, { workflow: 'ci.yml', ref: 'main' }), /workflow_dispatch_ref_invalid/);
+  await assert.rejects(adapter.dispatchWorkflow(configured, { workflow: '../ci.yml', ref: 'agent/workflow-123' }), /workflow_dispatch_name_invalid/);
+  await assert.rejects(adapter.dispatchWorkflow(configured, { workflow: 'ci.yml', ref: 'main' }), /workflow_dispatch_ref_invalid/);
 });
 
 test('publication bridge dispatches CI only when cloud workflow is explicitly configured', async () => {
