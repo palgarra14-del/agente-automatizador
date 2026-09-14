@@ -4575,6 +4575,33 @@ export class LocalGitAdapter {
     return { paths: entries.map((entry) => entry.path), fingerprint };
   }
 
+  async workingTreeChangeFingerprint(project, paths) {
+    const root = resolve(project.workspace);
+    const digest = createHash('sha256');
+    const normalizedPaths = [...new Set(paths.map((path) => normalizeRepositoryPath(path, 'changed path'))) ].sort();
+    for (const path of normalizedPaths) {
+      const target = resolve(root, path);
+      if (!isWithin(root, target)) throw new Error(`Changed path escaped workspace during staging: ${path}`);
+      await assertSafePathChain(target);
+      digest.update(path).update('\0');
+      let info;
+      try { info = await lstat(target); }
+      catch (error) {
+        if (error.code === 'ENOENT') {
+          digest.update('deleted\0');
+          continue;
+        }
+        throw error;
+      }
+      if (info.isSymbolicLink()) throw new Error(`Changed path cannot be a symlink during staging: ${path}`);
+      if (!info.isFile()) throw new Error(`Changed path must be a regular file during staging: ${path}`);
+      digest.update('file\0').update((info.mode & 0o111) === 0 ? 'nonexec\0' : 'exec\0');
+      for await (const chunk of createReadStream(target)) digest.update(chunk);
+      digest.update('\0');
+    }
+    return digest.digest('hex');
+  }
+
   async inspectChangeSet(project) {
     const paths = await this.assertSafeChangedPaths(project);
     const trackedStats = (await this.git(['diff', 'HEAD', '--numstat'], project)).stdout.split(/\r?\n/).filter(Boolean);
@@ -4627,23 +4654,33 @@ export class LocalGitAdapter {
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
   async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote, identity } = {}) {
+    const commitEnvironment = managedGitCommitEnvironment(identity);
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
-    let changeSet = await this.inspectChangeSet(project);
-    let { paths } = changeSet;
-    if (expectedChangeSetFingerprint && changeSet.changeSetFingerprint !== expectedChangeSetFingerprint) throw new Error('changeset_changed_before_commit');
+    const changeSet = await this.inspectChangeSet(project);
+    const reviewedFingerprint = changeSet.changeSetFingerprint;
+    const paths = [...changeSet.paths].sort();
+    if (expectedChangeSetFingerprint && reviewedFingerprint !== expectedChangeSetFingerprint) throw new Error('changeset_changed_before_commit');
     const unsafe = paths.find((path) => protectedFilePattern.test(path) || immutableForbiddenPathPattern.test(path));
     if (unsafe) throw new Error(`Worker changed a protected path: ${unsafe}`);
+    const preStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
     await this.git(['add', '--all'], project);
-    changeSet = await this.inspectChangeSet(project);
-    paths = changeSet.paths;
-    if (expectedChangeSetFingerprint && changeSet.changeSetFingerprint !== expectedChangeSetFingerprint) throw new Error('changeset_changed_while_staging');
+    const postStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
+    if (postStageWorkingTreeFingerprint !== preStageWorkingTreeFingerprint) throw new Error('changeset_changed_while_staging');
+    const unstaged = await this.git(['diff', '--quiet'], project, { allowExitCodes: [0, 1] });
+    if (unstaged.exitCode !== 0) throw new Error('changeset_changed_while_staging');
+    const stagedPaths = (await this.git(['diff', '--cached', '--name-only'], project)).stdout
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((path) => normalizeRepositoryPath(path, 'staged path'))
+      .sort();
+    if (JSON.stringify(stagedPaths) !== JSON.stringify(paths)) throw new Error('changeset_changed_while_staging');
     const staged = await this.git(['diff', '--cached', '--quiet'], project, { allowExitCodes: [0, 1] });
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: managedGitCommitEnvironment(identity) });
-    return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: changeSet.changeSetFingerprint };
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: commitEnvironment });
+    return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: expectedChangeSetFingerprint ?? reviewedFingerprint };
   }
 
   async push(project, branch, { expectedHead, expectedRemote } = {}) {
