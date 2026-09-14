@@ -5,7 +5,10 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
-const sensitiveKeyPattern = /(api[_-]?key|token|secret|password|credential|authorization|cookie|session)/i;
+function sensitiveKey(key) {
+  const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return /(^|_)(api_key|access_token|refresh_token|auth_token|github_token|vercel_token|secret|password|credential|authorization|cookie|session)($|_)/.test(normalized);
+}
 
 function emptyState() {
   return { runs: {}, approvals: {}, events: [] };
@@ -30,7 +33,7 @@ function assertNoSensitiveKeys(value, path = 'state') {
     return;
   }
   for (const [key, child] of Object.entries(value)) {
-    if (sensitiveKeyPattern.test(key) && child !== null && child !== undefined && child !== '') {
+    if (sensitiveKey(key) && child !== null && child !== undefined && child !== '') {
       throw new Error(`cloud_state_sensitive_key:${path}.${key}`);
     }
     assertNoSensitiveKeys(child, `${path}.${key}`);
