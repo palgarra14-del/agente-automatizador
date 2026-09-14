@@ -366,9 +366,9 @@
       },
       "commands": {
         "test": "node --test test/website.test.js",
-        "typecheck": "node --check scripts/check-static.mjs",
-        "lint": "node --check scripts/generate-services.mjs",
-        "build": "node scripts/check-static.mjs",
+        "typecheck": "node --check assets/site.js",
+        "lint": "node --check test/website.test.js",
+        "build": "node --test test/website.test.js",
         "dependencyRefresh": "npm ci --ignore-scripts"
       },
       "acceptance": {
