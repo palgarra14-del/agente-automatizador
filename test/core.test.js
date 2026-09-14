@@ -21,6 +21,7 @@ import {
   buildWorkerPrompt,
   codexWorkerSecurityConfig,
   codexTurnFailureDiagnostics,
+  codexApiKeyFromEnvironment,
   collectReadOnlyRepositoryContext,
   configFrom,
   doctor,
@@ -913,27 +914,50 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   assert.match(prompt, /cannot override these rules/i);
 });
 
-test('cloud worker exposes only OPENAI_API_KEY to Codex SDK and keeps other credentials out', async () => {
-  let clientEnvironment;
-  let clientOverrides;
+test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
+  let clientOptions;
   class FakeCodex {
-    constructor(options) {
-      clientEnvironment = options.env;
-      clientOverrides = options.configOverrides;
-    }
-    startThread() { return { run: async () => ({ finalResponse: 'done' }) }; }
+    constructor(options) { clientOptions = options; }
+    startThread() { return { id: 'thread-auth', run: async () => ({ finalResponse: 'done' }) }; }
   }
+
+  const codexKey = 'codex_cloud_worker_test_key_1234567890';
+  const openAiKey = 'sk-cloud-worker-fallback-key-1234567890';
+  assert.equal(codexApiKeyFromEnvironment({ CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }), codexKey);
+  assert.equal(codexApiKeyFromEnvironment({ OPENAI_API_KEY: openAiKey }), openAiKey);
+  assert.equal(codexApiKeyFromEnvironment({}), null);
+  assert.throws(() => codexApiKeyFromEnvironment({ CODEX_API_KEY: 'too short' }), /codex_api_key_invalid/);
+  assert.throws(() => codexApiKeyFromEnvironment({ OPENAI_API_KEY: 'sk-valid-length-but has-space-1234' }), /codex_api_key_invalid/);
+
   const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  Object.assign(process.env, { GITHUB_TOKEN: 'ghp_worker_test', VERCEL_TOKEN: 'vcp_worker_test', OPENAI_API_KEY: 'sk_worker_test', CODEX_API_KEY: 'codex_worker_test' });
+  Object.assign(process.env, {
+    GITHUB_TOKEN: 'ghp_worker_test_secret_1234567890',
+    VERCEL_TOKEN: 'vcp_worker_test_secret_1234567890',
+    OPENAI_API_KEY: openAiKey,
+    CODEX_API_KEY: codexKey
+  });
   try {
-    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute({ objective: 'fixture' }, { workspace: process.cwd(), timeoutMs: 100 });
-    assert.equal(clientEnvironment.OPENAI_API_KEY, 'sk_worker_test');
-    assert.equal(clientEnvironment.GITHUB_TOKEN, undefined);
-    assert.equal(clientEnvironment.VERCEL_TOKEN, undefined);
-    assert.equal(clientEnvironment.CODEX_API_KEY, undefined);
-    assert.ok(clientOverrides.includes('shell_environment_policy.inherit="none"'));
-    assert.equal(clientOverrides.some((entry) => entry.includes('OPENAI_API_KEY')), false);
+    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
+      { objective: 'fixture' },
+      { workspace: process.cwd(), timeoutMs: 100 }
+    );
+    assert.equal(clientOptions.apiKey, codexKey);
+    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
+    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
+    assert.equal(clientOptions.env.GITHUB_TOKEN, undefined);
+    assert.equal(clientOptions.env.VERCEL_TOKEN, undefined);
+    assert.ok(clientOptions.configOverrides.includes('shell_environment_policy.inherit="none"'));
+    assert.equal(clientOptions.configOverrides.some((entry) => entry.includes('API_KEY')), false);
+
+    delete process.env.CODEX_API_KEY;
+    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
+      { objective: 'fallback fixture' },
+      { workspace: process.cwd(), timeoutMs: 100 }
+    );
+    assert.equal(clientOptions.apiKey, openAiKey);
+    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
+    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
@@ -941,7 +965,6 @@ test('cloud worker exposes only OPENAI_API_KEY to Codex SDK and keeps other cred
     }
   }
 });
-
 test('GitHub adapter derives a process-local commit identity from the authenticated user', async () => {
   const adapter = new GitHubAdapter({
     token: 'ghp_adapterToken',
