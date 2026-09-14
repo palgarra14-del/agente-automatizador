@@ -766,6 +766,47 @@ test('managed commit preserves the reviewed change-set fingerprint when staging 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('managed commit rejects a new untracked file created after staging', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-post-stage-untracked-'));
+  try {
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'one\n');
+    assert.equal((await runProcess('git', ['add', 'fixture.txt'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'base'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    const baseHead = (await runProcess('git', ['rev-parse', 'HEAD'], { cwd: root, timeoutMs: 5_000 })).stdout.trim();
+    assert.equal((await runProcess('git', ['switch', '-c', 'agent/test'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    await writeFile(join(root, 'fixture.txt'), 'reviewed\n');
+    const configDirectory = join(root, 'config');
+    await mkdir(configDirectory, { recursive: true });
+    const configured = configFrom({
+      id: 'fixture', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main',
+      protectedBranches: ['main'], workingBranchPattern: 'agent/{runId}', workspace: '..',
+      commands: { test: 'node --version' }
+    }, configDirectory);
+    const adapter = new LocalGitAdapter();
+    const reviewed = await adapter.inspectChangeSet(configured);
+    const realGit = adapter.git.bind(adapter);
+    let injected = false;
+    adapter.git = async (args, project, options = {}) => {
+      const result = await realGit(args, project, options);
+      if (!injected && args[0] === 'add' && args[1] === '--all') {
+        injected = true;
+        await writeFile(join(root, 'late-untracked.txt'), 'appeared after staging\n');
+      }
+      return result;
+    };
+    await assert.rejects(adapter.commit(configured, 'agent/test', 'must reject post-stage drift', {
+      expectedChangeSetFingerprint: reviewed.changeSetFingerprint, expectedHead: baseHead,
+      expectedRemote: 'https://github.com/owner/repo.git',
+      identity: { name: 'owner', email: '123+owner@users.noreply.github.com' }
+    }), /changeset_changed_while_staging/);
+    assert.equal(injected, true);
+    assert.equal((await realGit(['rev-parse', 'HEAD'], configured)).stdout.trim(), baseHead);
+    assert.equal((await realGit(['ls-files', '--others', '--exclude-standard'], configured)).stdout.trim(), 'late-untracked.txt');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('managed commit still rejects real content drift before staging', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-staging-drift-'));
   try {
