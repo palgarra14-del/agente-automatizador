@@ -7,6 +7,7 @@ import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIs
 import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
+import { GitHubStateStore } from './cloud-state.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -117,10 +118,16 @@ try {
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
       const cloudAction = action === 'cloud-once';
       if (cloudAction && queueConfig.cloudProjectIds.length === 0) throw new Error('Cloud inbox has no configured project ownership');
+      const activeStore = cloudAction
+        ? new GitHubStateStore({ repository: queueConfig.repository })
+        : store;
+      const activeWorkflows = cloudAction
+        ? new WorkflowEngine({ store: activeStore, projects })
+        : workflows;
       const queue = new SupervisedIssueQueue({
-        store,
+        store: activeStore,
         projects,
-        workflowEngine: workflows,
+        workflowEngine: activeWorkflows,
         channel,
         allowedActors: queueConfig.allowedActors,
         operatorRevision: loadedRevision,
@@ -141,8 +148,10 @@ try {
         publication: record.publication ?? null,
         updatedAt: record.updatedAt
       } : null;
-      if (action === 'once' || action === 'cloud-once') {
+      if (action === 'once') {
         console.log(JSON.stringify(view(await queue.tick()), null, 2));
+      } else if (action === 'cloud-once') {
+        console.log(JSON.stringify(view(await activeStore.withGlobalLease(() => queue.tick())), null, 2));
       } else if (action === 'watch') {
         const controller = new AbortController();
         const stop = () => controller.abort();
