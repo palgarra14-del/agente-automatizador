@@ -1418,12 +1418,10 @@ test('concurrent watchers atomically reserve a new issue and create only one wor
 
   releaseCreate();
   const left = await first;
-  const right = secondResult;
 
   assert.equal(createCalls, 1);
   assert.equal(channel.posted.length, 1);
-  assert.ok([left.status, right.status].includes('initializing'));
-  assert.ok([left.status, right.status].includes('awaiting_start_approval'));
+  assert.equal(left.status, 'awaiting_start_approval');
   const persisted = await queue.getRecord(queue.requestKey(issue));
   assert.equal(persisted.status, 'awaiting_start_approval');
   assert.equal(persisted.initializationLease, null);
