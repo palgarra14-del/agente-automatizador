@@ -136,6 +136,40 @@ test('durable state bootstraps on a tag and resumes across ephemeral stores', as
   assert.equal(loaded.cloudExecutionLease, null);
 });
 
+test('durable writes strip worker shell output but keep bounded status/summary evidence', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:12:1' });
+  await store.withGlobalLease(async () => {
+    await store.mutate((state) => {
+      state.workflows = {
+        w1: {
+          id: 'w1',
+          projectId: 'self',
+          status: 'pending',
+          executionLease: null,
+          steps: [{
+            id: 'implementation',
+            evidence: {
+              workerEvidence: {
+                status: 'completed',
+                summary: 'bounded safe summary',
+                output: 'raw shell output that must not persist',
+                diagnostics: ['raw diagnostic output']
+              }
+            }
+          }]
+        }
+      };
+    });
+  });
+  const loaded = await store.load();
+  const evidence = loaded.workflows.w1.steps[0].evidence.workerEvidence;
+  assert.equal(evidence.status, 'completed');
+  assert.equal(evidence.summary, 'bounded safe summary');
+  assert.equal(Object.hasOwn(evidence, 'output'), false);
+  assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
+});
+
 test('global lease excludes concurrent runners and recovers after expiry', async () => {
   const fake = fakeGitHub();
   let clock = Date.parse('2026-09-14T12:00:00Z');
