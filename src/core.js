@@ -563,6 +563,22 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
+export function githubGitNetworkEnvironment(environment = process.env) {
+  const token = environment?.GITHUB_TOKEN;
+  if (token === undefined || token === null || token === '') return {};
+  if (typeof token !== 'string' || token.length < 20 || token.length > 4_096 || /[\s\0\r\n]/.test(token)) {
+    throw new Error('github_git_network_token_invalid');
+  }
+  return {
+    GH_TOKEN: token,
+    GH_HOST: 'github.com',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '!gh auth git-credential'
+  };
+}
+
 function toolchainFrom(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('toolchain must be an object');
   const command = input.command ?? 'npm';
@@ -3728,7 +3744,10 @@ function validateWorkflowBootstrap(bootstrap, workspace, project) {
 }
 
 export class WorkspaceManager {
-  constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
+  constructor({ processRunner = runProcess, environment = process.env } = {}) {
+    this.processRunner = processRunner;
+    this.environment = environment;
+  }
 
   describe(project, runId) {
     if (project.workspaceStrategy !== 'managed') return { workspace: project.workspace, managed: false, retained: false };
@@ -3757,7 +3776,8 @@ export class WorkspaceManager {
     await assertSafePathChain(details.workspace);
     const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--branch', project.defaultBranch, remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
-      timeoutMs
+      timeoutMs,
+      env: githubGitNetworkEnvironment(this.environment)
     });
     if (clone.timedOut) {
       const error = new Error('workspace_clone_timeout');
@@ -4374,10 +4394,20 @@ function managedGitCommitEnvironment(identity) {
 }
 
 export class LocalGitAdapter {
-  constructor({ processRunner = runProcess } = {}) { this.processRunner = processRunner; }
+  constructor({ processRunner = runProcess, environment = process.env } = {}) {
+    this.processRunner = processRunner;
+    this.environment = environment;
+  }
 
-  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {} } = {}) {
-    const result = await this.processRunner('git', args, { cwd: project.workspace, timeoutMs: project.budgets.commandTimeoutMs, outputLimit, captureOutputDigest, env });
+  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {}, network = false } = {}) {
+    const networkEnvironment = network ? githubGitNetworkEnvironment(this.environment) : {};
+    const result = await this.processRunner('git', args, {
+      cwd: project.workspace,
+      timeoutMs: project.budgets.commandTimeoutMs,
+      outputLimit,
+      captureOutputDigest,
+      env: { ...networkEnvironment, ...env }
+    });
     if (!allowExitCodes.includes(result.exitCode) || result.timedOut) throw new Error(`Git ${args[0]} failed: ${clip(result.stderr || result.stdout)}`);
     return result;
   }
@@ -4409,7 +4439,7 @@ export class LocalGitAdapter {
     if (inspection.status.trim()) throw new Error('Working tree must be clean before an engineering run');
     const workingBranch = buildWorkingBranch(project, runId);
     assertAllowedWorkingBranch(project, workingBranch);
-    await this.git(['fetch', 'origin', project.defaultBranch], project);
+    await this.git(['fetch', 'origin', project.defaultBranch], project, { network: true });
     const remoteBaseHead = (await this.git(['rev-parse', `refs/remotes/origin/${project.defaultBranch}`], project)).stdout.trim();
     if (remoteBaseHead !== expectedBaseHead) throw new Error('base_head_changed');
     const exists = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${workingBranch}`], project, { allowExitCodes: [0, 1] });
@@ -4601,7 +4631,7 @@ export class LocalGitAdapter {
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     assertAllowedWorkingBranch(project, branch);
-    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project);
+    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project, { network: true });
     return { branch, finalHead: await this.head(project) };
   }
 }
