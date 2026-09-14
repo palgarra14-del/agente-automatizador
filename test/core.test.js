@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -1048,6 +1049,11 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.equal(executor.usesModel('code.inspect'), true);
   assert.equal(executor.usesModel('code.diagnose'), false);
 
+  const sourceContent = 'fixture';
+  const sourceSha = createHash('sha256').update(sourceContent).digest('hex');
+  const sourceBytes = Buffer.byteLength(sourceContent);
+  const sourceMetadata = [{ path: 'src/core.js', sha256: sourceSha, bytes: sourceBytes }];
+  const sourceFingerprint = createHash('sha256').update(JSON.stringify(sourceMetadata)).digest('hex');
   const request = {
     skill: 'code.diagnose',
     goal: 'Apply the explicitly bounded change without touching unrelated files',
@@ -1063,7 +1069,9 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
         }
       },
       repositoryContext: {
-        files: [{ path: 'src/core.js', content: 'fixture' }]
+        version: 1,
+        files: [{ path: 'src/core.js', sha256: sourceSha, bytes: sourceBytes, content: sourceContent }],
+        fingerprint: sourceFingerprint
       }
     }
   };
@@ -1085,15 +1093,24 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.match(missing.error, /missing_validated_inspection/);
   assert.equal(clientConstructions, 0);
 
+  const otherContent = 'fixture';
+  const otherSha = createHash('sha256').update(otherContent).digest('hex');
+  const otherBytes = Buffer.byteLength(otherContent);
+  const otherMetadata = [{ path: 'test/core.test.js', sha256: otherSha, bytes: otherBytes }];
+  const otherFingerprint = createHash('sha256').update(JSON.stringify(otherMetadata)).digest('hex');
   const mismatchedContext = await executor.execute({
     ...request,
     context: {
       ...request.context,
-      repositoryContext: { files: [{ path: 'test/core.test.js', content: 'fixture' }] }
+      repositoryContext: {
+        version: 1,
+        files: [{ path: 'test/core.test.js', sha256: otherSha, bytes: otherBytes, content: otherContent }],
+        fingerprint: otherFingerprint
+      }
     }
   }, { workspace: process.cwd(), timeoutMs: 100 });
   assert.equal(mismatchedContext.ok, false);
-  assert.match(mismatchedContext.error, /outside trusted repository context/);
+  assert.match(mismatchedContext.error, /deterministic_diagnosis_invalid_inspection:inspection_references_unsupplied_path:src\/core\.js/);
   assert.equal(clientConstructions, 0);
 });
 
