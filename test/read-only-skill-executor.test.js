@@ -242,7 +242,10 @@ test('read-only inspect and diagnose evidence fail closed when repository ground
   assert.equal(groundedDeterministicDiagnosis.ok, true);
   assert.equal(groundedDeterministicDiagnosis.executionMode, 'deterministic');
   assert.deepEqual(groundedDeterministicDiagnosis.result.diagnosis.relevantPaths, ['src/core.js']);
-  assert.equal(groundedDeterministicDiagnosis.result.diagnosis.recommendedChange, 'diagnose');
+  assert.match(groundedDeterministicDiagnosis.result.diagnosis.recommendedChange, /validated inspected paths \[src\/core\.js\]/);
+  assert.match(groundedDeterministicDiagnosis.result.diagnosis.recommendedChange, /diagnose/);
+  assert.equal(groundedDeterministicDiagnosis.result.diagnosis.risks.length, 2);
+  assert.match(groundedDeterministicDiagnosis.result.diagnosis.risks[0], /src\/core\.js/);
   assert.match(groundedDeterministicDiagnosis.result.diagnosis.cause, /Grounded finding/);
 });
 
