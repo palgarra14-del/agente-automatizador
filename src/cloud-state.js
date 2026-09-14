@@ -58,22 +58,29 @@ function sanitizeRemoteOnlyEvidence(value) {
   for (const child of Object.values(value)) sanitizeRemoteOnlyEvidence(child);
 }
 
-function assertSelfOnly(state) {
-  for (const run of Object.values(state.runs ?? {})) {
-    if (run?.projectId && run.projectId !== 'self') throw new Error('cloud_state_project_ownership_mismatch');
+function normalizeAllowedProjectIds(value = ['self']) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new Error('cloud_state_allowed_projects_invalid');
+  const normalized = [...new Set(value.map((projectId) => String(projectId ?? '').trim()))].sort();
+  if (normalized.length < 1 || normalized.some((projectId) => !/^[a-z0-9-]{1,80}$/.test(projectId))) {
+    throw new Error('cloud_state_allowed_projects_invalid');
   }
-  for (const workflow of Object.values(state.workflows ?? {})) {
-    if (workflow?.projectId && workflow.projectId !== 'self') throw new Error('cloud_state_project_ownership_mismatch');
-  }
-  for (const record of Object.values(state.requests ?? {})) {
-    const projectId = record?.request?.projectId ?? record?.projectId ?? null;
-    if (projectId && projectId !== 'self') throw new Error('cloud_state_project_ownership_mismatch');
-  }
+  return normalized;
 }
 
-export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+function assertProjectOwnership(state, allowedProjectIds) {
+  const allowed = new Set(allowedProjectIds);
+  const check = (projectId) => {
+    if (projectId && !allowed.has(projectId)) throw new Error('cloud_state_project_ownership_mismatch');
+  };
+  for (const run of Object.values(state.runs ?? {})) check(run?.projectId);
+  for (const workflow of Object.values(state.workflows ?? {})) check(workflow?.projectId);
+  for (const record of Object.values(state.requests ?? {})) check(record?.request?.projectId ?? record?.projectId ?? null);
+}
+
+export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES, allowedProjectIds = ['self'] } = {}) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('cloud_state_invalid');
-  assertSelfOnly(state);
+  const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
+  assertProjectOwnership(state, normalizedAllowedProjectIds);
   assertNoSensitiveKeys(state);
   const serialized = JSON.stringify(state);
   if (Buffer.byteLength(serialized, 'utf8') > maxBytes) throw new Error('cloud_state_too_large');
@@ -93,6 +100,8 @@ export class GitHubStateStore extends JsonStore {
     fetchImpl = fetch,
     tag = DEFAULT_TAG,
     statePath = DEFAULT_PATH,
+    laneId = 'self',
+    allowedProjectIds = ['self'],
     baseBranch = 'main',
     maxBytes = DEFAULT_MAX_BYTES,
     leaseTtlMs = DEFAULT_LEASE_TTL_MS,
@@ -106,7 +115,9 @@ export class GitHubStateStore extends JsonStore {
     if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes('..')) throw new Error('cloud_state_base_branch_invalid');
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
+    if (!/^[a-z0-9-]{1,80}$/.test(laneId)) throw new Error('cloud_state_lane_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
+    const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
     if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
     if (!Number.isInteger(leaseTtlMs) || leaseTtlMs < 60_000 || leaseTtlMs > 60 * 60 * 1000) throw new Error('cloud_state_lease_ttl_invalid');
     this.repository = repository;
@@ -114,6 +125,8 @@ export class GitHubStateStore extends JsonStore {
     this.fetchImpl = fetchImpl;
     this.tag = tag;
     this.statePath = statePath;
+    this.laneId = laneId;
+    this.allowedProjectIds = normalizedAllowedProjectIds;
     this.baseBranch = baseBranch;
     this.maxBytes = maxBytes;
     this.leaseTtlMs = leaseTtlMs;
@@ -172,16 +185,19 @@ export class GitHubStateStore extends JsonStore {
         !/^[a-f0-9]{64}$/.test(envelope.stateHash ?? '')) {
       throw new Error('cloud_state_envelope_invalid');
     }
-    validateCloudState(envelope.state, { maxBytes: this.maxBytes });
+    const persistedLaneId = envelope.laneId ?? 'self';
+    if (persistedLaneId !== this.laneId) throw new Error('cloud_state_lane_mismatch');
+    validateCloudState(envelope.state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     if (stateHash(envelope.state) !== envelope.stateHash) throw new Error('cloud_state_integrity_mismatch');
     return { refSha, generation: envelope.generation, state: envelope.state };
   }
 
   async writeSnapshot(state, snapshot) {
-    validateCloudState(state, { maxBytes: this.maxBytes });
+    validateCloudState(state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     const envelope = {
       version: 1,
       repository: `${this.repository.owner}/${this.repository.name}`,
+      laneId: this.laneId,
       generation: snapshot.generation + 1,
       stateHash: stateHash(state),
       updatedAt: new Date(this.now()).toISOString(),

@@ -38,12 +38,13 @@ function fakeGitHub() {
       const value = commits.get(path.slice('/git/commits/'.length));
       return value ? response(200, value) : response(404, {});
     }
-    if (method === 'GET' && path === '/contents/.agent/cloud-state.json') {
+    if (method === 'GET' && path.startsWith('/contents/')) {
+      const contentPath = decodeURIComponent(path.slice('/contents/'.length));
       const refName = url.searchParams.get('ref');
       const commitSha = refs.get(refName);
       const commit = commits.get(commitSha);
       const tree = commit && trees.get(commit.tree.sha);
-      const blobSha = tree?.get('.agent/cloud-state.json');
+      const blobSha = tree?.get(contentPath);
       const content = blobSha && blobs.get(blobSha);
       return content
         ? response(200, { type: 'file', encoding: 'base64', content: Buffer.from(content).toString('base64'), sha: blobSha })
@@ -82,10 +83,10 @@ function fakeGitHub() {
     throw new Error(`unexpected fake GitHub request: ${method} ${path}`);
   };
 
-  const tamperCurrentStateHash = () => {
-    const commit = commits.get(refs.get('refs/tags/agent-cloud-state-v1'));
+  const tamperCurrentStateHash = ({ tag = 'agent-cloud-state-v1', statePath = '.agent/cloud-state.json' } = {}) => {
+    const commit = commits.get(refs.get(`refs/tags/${tag}`));
     const tree = trees.get(commit.tree.sha);
-    const blobSha = tree.get('.agent/cloud-state.json');
+    const blobSha = tree.get(statePath);
     const envelope = JSON.parse(blobs.get(blobSha));
     envelope.stateHash = '0'.repeat(64);
     blobs.set(blobSha, JSON.stringify(envelope));
@@ -94,19 +95,39 @@ function fakeGitHub() {
   return { fetchImpl, tamperCurrentStateHash };
 }
 
-function storeFor(fake, { ownerId = 'github:1:1', now = () => Date.now(), leaseTtlMs = 60_000 } = {}) {
+function storeFor(fake, {
+  ownerId = 'github:1:1',
+  now = () => Date.now(),
+  leaseTtlMs = 60_000,
+  laneId = 'self',
+  allowedProjectIds = ['self'],
+  tag = 'agent-cloud-state-v1',
+  statePath = '.agent/cloud-state.json'
+} = {}) {
   return new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     token: 'test-token-not-a-real-secret',
     fetchImpl: fake.fetchImpl,
     ownerId,
     now,
-    leaseTtlMs
+    leaseTtlMs,
+    laneId,
+    allowedProjectIds,
+    tag,
+    statePath
   });
 }
 
-test('cloud state rejects non-self ownership and secret-bearing keys without rejecting token counters', () => {
+test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
+  assert.doesNotThrow(() => validateCloudState(
+    { runs: { r: { projectId: 'website-pilot' } }, approvals: {}, events: [] },
+    { allowedProjectIds: ['website-pilot'] }
+  ));
+  assert.throws(() => validateCloudState(
+    { workflows: { w: { projectId: 'self' } }, approvals: {}, events: [] },
+    { allowedProjectIds: ['website-pilot'] }
+  ), /ownership_mismatch/);
   assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], nested: { apiToken: 'value' } }), /sensitive_key/);
   assert.doesNotThrow(() => validateCloudState({
     runs: {},
@@ -168,6 +189,65 @@ test('durable writes strip worker shell output but keep bounded status/summary e
   assert.equal(evidence.summary, 'bounded safe summary');
   assert.equal(Object.hasOwn(evidence, 'output'), false);
   assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
+});
+
+test('independent cloud lanes use separate refs and durable namespaces without clobbering', async () => {
+  const fake = fakeGitHub();
+  const selfStore = storeFor(fake, { ownerId: 'github:self:1' });
+  const websiteStore = storeFor(fake, {
+    ownerId: 'github:website:1',
+    laneId: 'website-pilot',
+    allowedProjectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+
+  await Promise.all([
+    selfStore.withGlobalLease(async () => {
+      await selfStore.mutate((state) => {
+        state.workflows = { self1: { id: 'self1', projectId: 'self', status: 'pending', executionLease: null } };
+      });
+    }),
+    websiteStore.withGlobalLease(async () => {
+      await websiteStore.mutate((state) => {
+        state.workflows = { web1: { id: 'web1', projectId: 'website-pilot', status: 'pending', executionLease: null } };
+      });
+    })
+  ]);
+
+  const selfState = await selfStore.load();
+  const websiteState = await websiteStore.load();
+  assert.equal(selfState.workflows.self1.projectId, 'self');
+  assert.equal(Object.hasOwn(selfState.workflows, 'web1'), false);
+  assert.equal(websiteState.workflows.web1.projectId, 'website-pilot');
+  assert.equal(Object.hasOwn(websiteState.workflows, 'self1'), false);
+  assert.equal(selfState.cloudExecutionLease, null);
+  assert.equal(websiteState.cloudExecutionLease, null);
+});
+
+test('lane envelope binding rejects reading another lane through the wrong store', async () => {
+  const fake = fakeGitHub();
+  const websiteStore = storeFor(fake, {
+    ownerId: 'github:website:2',
+    laneId: 'website-pilot',
+    allowedProjectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+  await websiteStore.withGlobalLease(async () => {
+    await websiteStore.mutate((state) => {
+      state.workflows = { web1: { id: 'web1', projectId: 'website-pilot', status: 'pending', executionLease: null } };
+    });
+  });
+
+  const wrongLane = storeFor(fake, {
+    ownerId: 'github:wrong:1',
+    laneId: 'callflow',
+    allowedProjectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+  await assert.rejects(wrongLane.load(), /cloud_state_lane_mismatch/);
 });
 
 test('global lease excludes concurrent runners and recovers after expiry', async () => {
