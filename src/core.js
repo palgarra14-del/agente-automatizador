@@ -4332,9 +4332,13 @@ function validateSkillOutput(contract, output, skillId = null, context = {}) {
 }
 
 function deterministicDiagnosisResult(request) {
-  const inspection = request?.context?.priorEvidence?.['inspect-project']?.inspectionEvidence;
-  if (!inspection || !Array.isArray(inspection.relevantPaths) || inspection.relevantPaths.length < 1 || !Array.isArray(inspection.findings) || inspection.findings.length < 1) {
-    throw new Error('deterministic_diagnosis_missing_validated_inspection');
+  const rawInspection = request?.context?.priorEvidence?.['inspect-project']?.inspectionEvidence;
+  if (!rawInspection) throw new Error('deterministic_diagnosis_missing_validated_inspection');
+  let inspection;
+  try {
+    inspection = normalizeInspectionEvidence(rawInspection, request.context);
+  } catch (error) {
+    throw new Error(`deterministic_diagnosis_invalid_inspection:${clip(error.message, 500)}`, { cause: error });
   }
   const cause = clip(`Grounded inspection findings: ${inspection.findings.join(' | ')}`, 1_200);
   const output = {
