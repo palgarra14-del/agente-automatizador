@@ -1605,6 +1605,7 @@ test('deterministic diagnose does not consume model budget and approval remains 
       }
       assert.equal(request.skill, 'code.diagnose');
       const inspection = request.context.priorEvidence['inspect-project'].inspectionEvidence;
+      const pathBinding = inspection.relevantPaths.join(', ');
       return {
         ok: true,
         status: 'completed',
@@ -1616,8 +1617,11 @@ test('deterministic diagnose does not consume model budget and approval remains 
             summary: 'Deterministic diagnosis from validated inspection',
             cause: inspection.findings.join(' | '),
             relevantPaths: [...inspection.relevantPaths],
-            recommendedChange: request.goal,
-            risks: []
+            recommendedChange: `Apply the authorized goal only within validated inspected paths [${pathBinding}]: ${request.goal}`,
+            risks: [
+              `Scope drift: implementation must remain within validated inspected paths [${pathBinding}] and the request scope.`,
+              'Governance drift: preserve existing approval, review, verification, publication, secret, merge, and deployment gates.'
+            ]
           }
         }
       };
@@ -1635,8 +1639,10 @@ test('deterministic diagnose does not consume model budget and approval remains 
   assert.equal(inspect.status, WorkflowStepStatus.COMPLETED);
   assert.equal(diagnose.status, WorkflowStepStatus.COMPLETED);
   assert.equal(diagnose.attempts, 1);
-  assert.equal(diagnose.evidence.result.diagnosis.recommendedChange, goal);
+  assert.match(diagnose.evidence.result.diagnosis.recommendedChange, /validated inspected paths \[src\/core\.js\]/);
+  assert.match(diagnose.evidence.result.diagnosis.recommendedChange, new RegExp(goal));
   assert.deepEqual(diagnose.evidence.result.diagnosis.relevantPaths, ['src/core.js']);
+  assert.equal(diagnose.evidence.result.diagnosis.risks.length, 2);
   assert.equal(waiting.modelUsage.calls, 1);
   assert.equal(waiting.modelUsage.inputTokens, 10);
   assert.equal(waiting.modelUsage.outputTokens, 5);
@@ -1650,7 +1656,11 @@ test('deterministic diagnose does not consume model budget and approval remains 
   const approved = await instance.approve(created.id, 'plan-change');
   const approvedCheckpoint = approved.steps.find((step) => step.id === 'plan-change');
   assert.equal(approvedCheckpoint.status, WorkflowStepStatus.COMPLETED);
-  assert.equal(approvedCheckpoint.evidence.approvedRecommendedChange, goal);
+  assert.equal(
+    approvedCheckpoint.evidence.approvedRecommendedChange,
+    diagnose.evidence.result.diagnosis.recommendedChange
+  );
+  assert.notEqual(approvedCheckpoint.evidence.approvedRecommendedChange, goal);
   assert.equal(approvedCheckpoint.evidence.approvedDiagnosisFingerprint, diagnosisFingerprint);
   assert.equal(approved.modelUsage.calls, 1);
 });
