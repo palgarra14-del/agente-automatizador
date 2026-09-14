@@ -732,6 +732,63 @@ test('website-build dry-run exposes the full governed factory path with zero pro
   assert.equal((await instance.get(created.id)).steps[0].status, WorkflowStepStatus.READY);
 });
 
+test('read-only workflow retries carry the previous validation error into the next model context', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-readonly-retry-feedback-'));
+  const configured = managedProject('readonly-retry-feedback', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+  });
+  const contexts = [];
+  let calls = 0;
+  const skillExecutor = {
+    supports: () => true,
+    async prepareContext() { return null; },
+    async execute(request) {
+      contexts.push(request.context);
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 'failed',
+          ok: false,
+          timedOut: false,
+          outputBytes: 0,
+          usage: {},
+          error: 'websitePlan.implementation.priorities[0] exceeds 240 characters'
+        };
+      }
+      return {
+        status: 'completed',
+        ok: true,
+        timedOut: false,
+        outputBytes: 64,
+        usage: {},
+        result: { websitePlan: websitePlanFixture() }
+      };
+    }
+  };
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: new FakeWorkflowWorkspaceManager(),
+    skillExecutor
+  });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Plan a valid website',
+    input: { businessBrief: businessBrief() },
+    budgets: { maxAttempts: 2 }
+  });
+  const waiting = await instance.run(created.id);
+  assert.equal(calls, 2);
+  assert.equal(contexts[0].retryFeedback, undefined);
+  assert.deepEqual(contexts[1].retryFeedback, {
+    previousAttempt: 1,
+    previousError: 'websitePlan.implementation.priorities[0] exceeds 240 characters'
+  });
+  assert.equal(waiting.steps.find((step) => step.id === 'requirements').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'requirements').attempts, 2);
+  assert.equal(waiting.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
 test('workflow limits retries and persists failure evidence', async () => {
   const instance = await engine({ runner: async (project, name) => ({ name, ok: false, exitCode: 1, stdout: '', stderr: `${project.id}:${name}` }) });
   const created = await instance.create({ profile: 'data-analysis', projectId: 'workflow-project', goal: 'Fail safely', budgets: { maxAttempts: 2 } });
