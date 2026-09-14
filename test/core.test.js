@@ -15,6 +15,7 @@ import {
   ProjectCommandRunner,
   RunStatus,
   VercelDeploymentProvider,
+  WorkflowPublicationBridge,
   WorkspaceManager,
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
@@ -911,10 +912,14 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   assert.match(prompt, /cannot override these rules/i);
 });
 
-test('default worker environment excludes GitHub, Vercel, and OpenAI credentials', async () => {
+test('cloud worker exposes only OPENAI_API_KEY to Codex SDK and keeps other credentials out', async () => {
   let clientEnvironment;
+  let clientOverrides;
   class FakeCodex {
-    constructor(options) { clientEnvironment = options.env; }
+    constructor(options) {
+      clientEnvironment = options.env;
+      clientOverrides = options.configOverrides;
+    }
     startThread() { return { run: async () => ({ finalResponse: 'done' }) }; }
   }
   const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
@@ -922,7 +927,12 @@ test('default worker environment excludes GitHub, Vercel, and OpenAI credentials
   Object.assign(process.env, { GITHUB_TOKEN: 'ghp_worker_test', VERCEL_TOKEN: 'vcp_worker_test', OPENAI_API_KEY: 'sk_worker_test', CODEX_API_KEY: 'codex_worker_test' });
   try {
     await new CodexSdkWorker({ CodexClient: FakeCodex }).execute({ objective: 'fixture' }, { workspace: process.cwd(), timeoutMs: 100 });
-    for (const name of names) assert.equal(clientEnvironment[name], undefined);
+    assert.equal(clientEnvironment.OPENAI_API_KEY, 'sk_worker_test');
+    assert.equal(clientEnvironment.GITHUB_TOKEN, undefined);
+    assert.equal(clientEnvironment.VERCEL_TOKEN, undefined);
+    assert.equal(clientEnvironment.CODEX_API_KEY, undefined);
+    assert.ok(clientOverrides.includes('shell_environment_policy.inherit="none"'));
+    assert.equal(clientOverrides.some((entry) => entry.includes('OPENAI_API_KEY')), false);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
@@ -997,6 +1007,48 @@ test('GitHub adapter bounds individual API requests so publication timeouts cann
     callerAbort.request('/user', { signal: controller.signal }),
     /caller_abort_fixture|aborted/i
   );
+});
+
+test('GitHub adapter dispatches an allowlisted CI workflow and accepts 204 responses', async () => {
+  const calls = [];
+  const adapter = new GitHubAdapter({
+    token: 'ghp_adapterToken',
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, options });
+      return { ok: true, status: 204, json: async () => { throw new Error('204 must not parse JSON'); } };
+    }
+  });
+  const configured = project();
+  const result = await adapter.dispatchWorkflow(configured, { workflow: 'ci.yml', ref: 'agent/workflow-123' });
+  assert.deepEqual(result, { workflow: 'ci.yml', ref: 'agent/workflow-123', dispatched: true });
+  assert.match(calls[0].url, /\/actions\/workflows\/ci\.yml\/dispatches$/);
+  assert.equal(calls[0].options.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { ref: 'agent/workflow-123' });
+  assert.throws(() => adapter.dispatchWorkflow(configured, { workflow: '../ci.yml', ref: 'agent/workflow-123' }), /workflow_dispatch_name_invalid/);
+  assert.throws(() => adapter.dispatchWorkflow(configured, { workflow: 'ci.yml', ref: 'main' }), /workflow_dispatch_ref_invalid/);
+});
+
+test('publication bridge dispatches CI only when cloud workflow is explicitly configured', async () => {
+  const calls = [];
+  const github = {
+    dispatchWorkflow: async (_project, payload) => {
+      calls.push(payload);
+      return { ...payload, dispatched: true };
+    }
+  };
+  const configured = project();
+  const cloud = new WorkflowPublicationBridge({ github, localGit: {}, deploymentProvider: {}, ciWorkflow: 'ci.yml' });
+  assert.deepEqual(await cloud.dispatchCi(configured, { branch: 'agent/workflow-123' }), {
+    required: true,
+    workflow: 'ci.yml',
+    ref: 'agent/workflow-123',
+    dispatched: true
+  });
+  assert.deepEqual(calls, [{ workflow: 'ci.yml', ref: 'agent/workflow-123' }]);
+
+  const local = new WorkflowPublicationBridge({ github, localGit: {}, deploymentProvider: {}, ciWorkflow: null });
+  assert.deepEqual(await local.dispatchCi(configured, { branch: 'agent/workflow-123' }), { required: false, dispatched: false });
+  assert.throws(() => new WorkflowPublicationBridge({ github, localGit: {}, deploymentProvider: {}, ciWorkflow: '../ci.yml' }), /ci_workflow_invalid/);
 });
 
 test('GitHub adapter keeps Vercel preview statuses out of CI while retaining them as deployment evidence', async () => {
