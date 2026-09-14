@@ -4638,6 +4638,7 @@ export class LocalGitAdapter {
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
   async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote, identity } = {}) {
+    const commitEnvironment = managedGitCommitEnvironment(identity);
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     const changeSet = await this.inspectChangeSet(project);
@@ -4648,9 +4649,7 @@ export class LocalGitAdapter {
     if (unsafe) throw new Error(`Worker changed a protected path: ${unsafe}`);
     const preStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
     await this.git(['add', '--all'], project);
-    const postStagePaths = (await this.assertSafeChangedPaths(project)).sort();
-    if (JSON.stringify(postStagePaths) !== JSON.stringify(paths)) throw new Error('changeset_changed_while_staging');
-    const postStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, postStagePaths);
+    const postStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
     if (postStageWorkingTreeFingerprint !== preStageWorkingTreeFingerprint) throw new Error('changeset_changed_while_staging');
     const unstaged = await this.git(['diff', '--quiet'], project, { allowExitCodes: [0, 1] });
     if (unstaged.exitCode !== 0) throw new Error('changeset_changed_while_staging');
@@ -4664,7 +4663,7 @@ export class LocalGitAdapter {
     if (staged.exitCode === 0) throw new Error('No staged change to commit');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: managedGitCommitEnvironment(identity) });
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: commitEnvironment });
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: expectedChangeSetFingerprint ?? reviewedFingerprint };
   }
 
