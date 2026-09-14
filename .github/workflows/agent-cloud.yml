@@ -57,9 +57,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::OPENAI_API_KEY repository secret is required for the cloud agent worker"
-            exit 1
-          fi
-          exec node src/cli.js inbox cloud-once
+        run: exec node src/cli.js inbox cloud-once
