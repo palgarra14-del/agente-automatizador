@@ -1117,6 +1117,92 @@ export function normalizeBusinessBrief(value) {
   });
 }
 
+const websiteBlueprintRegistry = Object.freeze({
+  'beauty-salon': Object.freeze({
+    version: 1,
+    id: 'beauty-salon',
+    summary: 'Editorial appointment-led structure for beauty, hair and grooming businesses.',
+    sectionPriorities: ['hero', 'services', 'inspiration', 'experience', 'faq', 'contact'],
+    conversion: Object.freeze({
+      primaryPattern: 'Keep one appointment-or-contact CTA prominent from the hero through the final contact section.',
+      mobilePattern: 'Keep the primary CTA easy to reach on mobile without inventing a destination that the brief does not supply.'
+    }),
+    design: Object.freeze({
+      composition: 'Editorial, spacious hierarchy with strong typography and restrained components.',
+      media: 'Use verified business imagery when supplied; otherwise generic imagery may be decorative only and must not imply completed client work.',
+      density: 'Prefer breathing room, a small number of high-impact sections, and clear mobile rhythm.'
+    }),
+    constraints: [
+      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.',
+      'Never infer testimonials, ratings, prices, staff, awards, opening hours, addresses, contact details or other business facts from this blueprint.'
+    ]
+  }),
+  'home-services': Object.freeze({
+    version: 1,
+    id: 'home-services',
+    summary: 'Service-and-contact-led structure for trades, repairs, maintenance and home-improvement businesses.',
+    sectionPriorities: ['hero', 'services', 'verified-trust-facts', 'service-area-if-supplied', 'work-gallery-if-verified', 'faq', 'contact'],
+    conversion: Object.freeze({
+      primaryPattern: 'Lead with the strongest supplied call, WhatsApp or contact action; if none is supplied, route to an on-page contact section.',
+      mobilePattern: 'Keep the verified primary contact action easy to reach on mobile.'
+    }),
+    design: Object.freeze({
+      composition: 'Clear service hierarchy, fast scanning, strong CTA contrast and restrained proof elements.',
+      media: 'Use project or team imagery only when verified by supplied assets; otherwise keep imagery decorative and non-attributed.',
+      density: 'Prioritize clarity, service discovery and contact speed over decorative complexity.'
+    }),
+    constraints: [
+      'Show service areas, guarantees, response times, reviews or credentials only when explicitly supplied by the business brief.',
+      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.'
+    ]
+  }),
+  'generic-local': Object.freeze({
+    version: 1,
+    id: 'generic-local',
+    summary: 'Neutral conversion-led structure for a local business when no reviewed niche blueprint matches.',
+    sectionPriorities: ['hero', 'services', 'verified-business-facts', 'faq', 'contact'],
+    conversion: Object.freeze({
+      primaryPattern: 'Use the business brief primary goal to choose one clear CTA and repeat it at natural decision points.',
+      mobilePattern: 'Keep the primary action visible and easy to reach on mobile without fabricating contact destinations.'
+    }),
+    design: Object.freeze({
+      composition: 'Simple professional hierarchy with clear navigation, readable sections and strong responsive behavior.',
+      media: 'Prefer verified supplied assets; generic imagery must remain decorative and non-attributed.',
+      density: 'Keep content concise and prioritize service understanding and conversion.'
+    }),
+    constraints: [
+      'Business-specific claims must come only from the business brief.',
+      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.'
+    ]
+  })
+});
+
+function normalizeWebsiteBlueprintCategory(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function websiteBlueprintIdForCategory(category) {
+  const normalized = normalizeWebsiteBlueprintCategory(category);
+  const beautySignals = ['peluquer', 'salon de belleza', 'barber', 'barberia', 'estetica', 'beauty', 'hair'];
+  if (beautySignals.some((signal) => normalized.includes(signal))) return 'beauty-salon';
+  const homeSignals = ['fontaner', 'reforma', 'pintor', 'pintura', 'electric', 'cerrajer', 'desatasc', 'climatiz', 'albanil', 'multiservicio'];
+  if (homeSignals.some((signal) => normalized.includes(signal))) return 'home-services';
+  return 'generic-local';
+}
+
+export function websiteBlueprintForBrief(businessBrief) {
+  if (!businessBrief || typeof businessBrief !== 'object' || Array.isArray(businessBrief)) throw new Error('website_blueprint_business_brief_invalid');
+  const id = websiteBlueprintIdForCategory(businessBrief.category);
+  const blueprint = websiteBlueprintRegistry[id];
+  if (!blueprint) throw new Error('website_blueprint_registry_invalid');
+  return safeJson(blueprint);
+}
+
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
