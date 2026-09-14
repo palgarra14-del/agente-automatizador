@@ -53,10 +53,12 @@ test('cloud worker uses frozen dependencies and exact configured self runtime', 
 
 test('cloud credentials exist only at the governed queue step and are never put in command arguments', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.doesNotMatch(workflow, /VERCEL_TOKEN|CODEX_API_KEY/);
+  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
+  assert.match(workflow, /CODEX_API_KEY: \$\{\{ secrets\.OPENAI_API_KEY \}\}/);
   assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once/);
   assert.doesNotMatch(workflow, /OPENAI_API_KEY repository secret is required/);
 });
