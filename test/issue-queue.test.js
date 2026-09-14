@@ -1404,11 +1404,21 @@ test('concurrent watchers atomically reserve a new issue and create only one wor
   };
 
   const first = queue.processIssue(issue);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  let claimed = null;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    claimed = await queue.getRecord(queue.requestKey(issue));
+    if (claimed?.status === 'initializing') break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1));
+  }
+  assert.equal(claimed?.status, 'initializing');
+
   const second = queue.processIssue(issue);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+  const secondResult = await second;
+  assert.equal(secondResult.status, 'initializing');
+
   releaseCreate();
-  const [left, right] = await Promise.all([first, second]);
+  const left = await first;
+  const right = secondResult;
 
   assert.equal(createCalls, 1);
   assert.equal(channel.posted.length, 1);
