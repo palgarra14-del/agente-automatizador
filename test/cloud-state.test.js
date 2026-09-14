@@ -104,9 +104,15 @@ function storeFor(fake, { ownerId = 'github:1:1', now = () => Date.now(), leaseT
   });
 }
 
-test('cloud state rejects non-self ownership and secret-bearing keys', () => {
+test('cloud state rejects non-self ownership and secret-bearing keys without rejecting token counters', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], nested: { apiToken: 'value' } }), /sensitive_key/);
+  assert.doesNotThrow(() => validateCloudState({
+    runs: {},
+    approvals: {},
+    events: [],
+    workflows: { w: { projectId: 'self', modelUsage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } } }
+  }));
 });
 
 test('durable state bootstraps on a tag and resumes across ephemeral stores', async () => {
