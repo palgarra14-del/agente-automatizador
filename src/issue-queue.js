@@ -832,7 +832,7 @@ export class SupervisedIssueQueue {
       Number.isInteger(comment.id) &&
       typeof comment.body === 'string' &&
       comment.body === notification.body &&
-      this.authorized(comment.user?.login)
+      this.instructionPublisher(comment.user?.login)
     );
     const posted = existing ? { id: existing.id } : await this.post(issue.number, notification.body);
     const next = {
