@@ -279,12 +279,19 @@ test('website planner is offline, anti-fabrication, and structurally validates i
       businessBrief: { businessName: 'Fontanería Ejemplo', locations: ['Madrid'], facts: [], contentRestrictions: ['No inventar reseñas'] },
       websiteBlueprint: {
         version: 1,
-        id: 'home-services',
-        summary: 'Structural guidance only.',
-        sectionPriorities: ['hero', 'services', 'contact'],
-        conversion: { primaryPattern: 'Verified contact CTA', mobilePattern: 'Reachable verified CTA' },
-        design: { composition: 'Clear hierarchy', media: 'Verified or decorative only', density: 'Concise' },
-        constraints: ['No business facts from blueprint']
+        profileId: 'home-services',
+        sourceBriefFingerprint: 'b'.repeat(64),
+        pages: [{ id: 'home', route: '/', source: 'businessBrief.website.requiredPages[0]', sections: ['hero', 'services', 'contact'] }],
+        requiredFeatures: [],
+        contentSources: { services: [], facts: [], locations: ['businessBrief.locations[0]'] },
+        ctas: [{ id: 'primary', kind: 'section', destination: '#contact', source: null, goalSource: 'businessBrief.website.primaryGoal' }],
+        navigation: { routes: [{ id: 'home', route: '/' }], homeAnchors: ['#hero', '#services', '#contact'] },
+        responsiveRequirements: ['No horizontal overflow at supported mobile viewport.'],
+        accessibilityRequirements: ['Interactive elements require accessible names and keyboard reachability.'],
+        seoRequirements: { locationSources: ['businessBrief.locations[0]'], serviceSources: [], requirements: ['Use supplied facts only.'] },
+        assets: { allowedProvenance: ['provided', 'generic-decorative', 'generated-safe', 'missing'], slots: [] },
+        forbiddenClaims: [],
+        missingFactSources: []
       },
       websiteBlueprintFingerprint: 'a'.repeat(64),
       assetEvidence: { assets: [] },
@@ -302,9 +309,10 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.equal(threadOptions.webSearchMode, 'disabled');
   assert.equal(threadOptions.approvalPolicy, 'never');
   assert.match(prompt, /Do not use web research/);
-  assert.match(prompt, /websiteBlueprint is trusted orchestrator-selected structural\/conversion\/design guidance only/);
+  assert.match(prompt, /websiteBlueprint is a trusted deterministic requirements contract/);
   assert.match(prompt, /businessBrief is the complete authoritative source of business facts/);
-  assert.match(prompt, /"id": "home-services"/);
+  assert.match(prompt, /"profileId": "home-services"/);
+  assert.match(prompt, /page\/section inventory, CTA source mapping, navigation, responsive\/accessibility, SEO-source, asset-provenance/);
   assert.match(prompt, /do not invent testimonials/i);
   assert.match(prompt, /missingInputs/);
   assert.match(prompt, /configuredQualityCommands are authoritative orchestrator-side validation commands/);
@@ -356,7 +364,7 @@ test('website change critic independently checks the diff against authoritative 
           contentRestrictions: ['No afirmar servicio 24 horas']
         },
         websitePlan: { missingInputs: ['Años de experiencia', 'Precios'] },
-        websiteBlueprint: { version: 1, id: 'home-services', summary: 'Structural guidance only.' },
+        websiteBlueprint: { version: 1, profileId: 'home-services', pages: [{ route: '/', sections: ['hero', 'services', 'contact'] }] },
         websiteBlueprintFingerprint: 'c'.repeat(64),
         assetEvidence: { assets: [{ path: 'public/logo.png', sha256: 'b'.repeat(64) }] }
       }
@@ -364,9 +372,9 @@ test('website change critic independently checks the diff against authoritative 
   });
   for (const required of [
     'Independently compare all business-specific claims',
-    'websiteReview.websiteBlueprint only as structural/conversion/design guidance',
+    'websiteReview.websiteBlueprint as the deterministic requirements contract',
     'businessBrief as the factual source of truth',
-    'material unexplained divergence',
+    'bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance',
     'testimonials',
     'prices',
     'guarantees',
