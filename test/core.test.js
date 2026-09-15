@@ -1734,7 +1734,7 @@ test('workflow publication routes target GitHub API and preview fallback through
   await bridge.waitForPreview(crossRepo, { commitSha: 'commit', branch: 'agent/run' }, { timeoutMs: 1, pollIntervalMs: 1 });
   await bridge.inspectBase(selfProject);
 
-  const crossRepoCalls = calls.filter((call) => call.projectId === 'website-pilot' || call.op === 'preview');
+  const crossRepoCalls = calls.filter((call) => call.projectId === 'website-pilot' || ['identity', 'preview'].includes(call.op));
   assert.ok(crossRepoCalls.length >= 7);
   assert.ok(crossRepoCalls.every((call) => call.token === agentToken));
   const selfCalls = calls.filter((call) => call.projectId === 'self');
