@@ -277,6 +277,16 @@ test('website planner is offline, anti-fabrication, and structurally validates i
     contract,
     context: {
       businessBrief: { businessName: 'Fontanería Ejemplo', locations: ['Madrid'], facts: [], contentRestrictions: ['No inventar reseñas'] },
+      websiteBlueprint: {
+        version: 1,
+        id: 'home-services',
+        summary: 'Structural guidance only.',
+        sectionPriorities: ['hero', 'services', 'contact'],
+        conversion: { primaryPattern: 'Verified contact CTA', mobilePattern: 'Reachable verified CTA' },
+        design: { composition: 'Clear hierarchy', media: 'Verified or decorative only', density: 'Concise' },
+        constraints: ['No business facts from blueprint']
+      },
+      websiteBlueprintFingerprint: 'a'.repeat(64),
       assetEvidence: { assets: [] },
       configuredQualityCommands: {
         test: 'node --test test/website.test.js',
@@ -292,6 +302,9 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.equal(threadOptions.webSearchMode, 'disabled');
   assert.equal(threadOptions.approvalPolicy, 'never');
   assert.match(prompt, /Do not use web research/);
+  assert.match(prompt, /websiteBlueprint is trusted orchestrator-selected structural\/conversion\/design guidance only/);
+  assert.match(prompt, /businessBrief is the complete authoritative source of business facts/);
+  assert.match(prompt, /"id": "home-services"/);
   assert.match(prompt, /do not invent testimonials/i);
   assert.match(prompt, /missingInputs/);
   assert.match(prompt, /configuredQualityCommands are authoritative orchestrator-side validation commands/);
@@ -343,12 +356,17 @@ test('website change critic independently checks the diff against authoritative 
           contentRestrictions: ['No afirmar servicio 24 horas']
         },
         websitePlan: { missingInputs: ['Años de experiencia', 'Precios'] },
+        websiteBlueprint: { version: 1, id: 'home-services', summary: 'Structural guidance only.' },
+        websiteBlueprintFingerprint: 'c'.repeat(64),
         assetEvidence: { assets: [{ path: 'public/logo.png', sha256: 'b'.repeat(64) }] }
       }
     }
   });
   for (const required of [
     'Independently compare all business-specific claims',
+    'websiteReview.websiteBlueprint only as structural/conversion/design guidance',
+    'businessBrief as the factual source of truth',
+    'material unexplained divergence',
     'testimonials',
     'prices',
     'guarantees',
