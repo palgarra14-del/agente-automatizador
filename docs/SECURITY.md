@@ -75,6 +75,12 @@ A completed publication requires exact commit-path/fingerprint evidence, remote-
 - Git control state is fingerprinted independently: configuration, HEAD/control files, refs, reflogs, hooks and `.git/info` are covered while mutable cache/index/object data that can legitimately change during reads is excluded. Temporary ref manipulation that restores the final HEAD is still detectable through reflogs.
 - Protected/sensitive changed files are rejected by change policy before any publication path.
 
+## Cross-repository Git credential boundary
+
+Cloud orchestration may receive an optional `AGENT_GITHUB_TOKEN` solely for orchestrator-owned network Git operations against configured private repositories. The fixed Git credential helper prefers that token when present and otherwise falls back to the workflow-scoped `GITHUB_TOKEN`. Neither secret is embedded in clone/fetch/push arguments, repository URLs, Git config files, prompts, project commands, workflow state, reports, Vercel requests, or GitHub comments.
+
+The credential is translated only into the ephemeral `GH_TOKEN` environment consumed by `gh auth git-credential` for the individual network Git subprocess. Non-network Git receives no GitHub credential environment. The CodingWorker and read-only model executors retain their explicit environment allowlists and never receive `AGENT_GITHUB_TOKEN` or `GITHUB_TOKEN`. Invalid preferred credentials fail closed instead of silently falling back to a different token.
+
 ## Commands, budgets, and logs
 
 Install and validation commands come only from `config/projects.json`, reject shell metacharacters, run with `shell: false`, time out, and have output capped. They start from a system-only environment allowlist and may add only literal project variables whose names do not contain `TOKEN`, `SECRET`, `PASSWORD`, `KEY`, `CREDENTIAL`, or `AUTH`; they never inherit orchestration credentials. The worker cannot supply commands or change the execution provider. Active budgets include `maxTasks`, `maxRuntimeMinutes`, `maxModelCalls`, `commandTimeoutMs`, `ciTimeoutMs`, `ciPollIntervalMs`, `deploymentTimeoutMs`, `deploymentPollIntervalMs`, and `maxWorkerAttempts`. `maxModelCalls` is enforced before model invocation on both Orchestrator and WorkflowEngine paths. Each reserved call is persisted with attribution and remains consumed after interruption; missing SDK token usage is recorded as unknown rather than treated as zero-cost evidence.
