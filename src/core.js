@@ -563,8 +563,8 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
-export function githubGitNetworkEnvironment(environment = process.env) {
-  const agentToken = environment?.AGENT_GITHUB_TOKEN;
+export function githubGitNetworkEnvironment(environment = process.env, { preferAgentToken = false } = {}) {
+  const agentToken = preferAgentToken ? environment?.AGENT_GITHUB_TOKEN : null;
   const fallbackToken = environment?.GITHUB_TOKEN;
   const token = agentToken === undefined || agentToken === null || agentToken === '' ? fallbackToken : agentToken;
   if (token === undefined || token === null || token === '') return {};
@@ -4045,7 +4045,7 @@ export class WorkspaceManager {
     const clone = await this.processRunner('git', ['clone', '--origin', 'origin', '--branch', project.defaultBranch, remoteUrl, details.workspace], {
       cwd: details.projectDirectory,
       timeoutMs,
-      env: githubGitNetworkEnvironment(this.environment)
+      env: githubGitNetworkEnvironment(this.environment, { preferAgentToken: project.id !== 'self' })
     });
     if (clone.timedOut) {
       const error = new Error('workspace_clone_timeout');
@@ -4768,7 +4768,7 @@ export class LocalGitAdapter {
   }
 
   async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {}, network = false } = {}) {
-    const networkEnvironment = network ? githubGitNetworkEnvironment(this.environment) : {};
+    const networkEnvironment = network ? githubGitNetworkEnvironment(this.environment, { preferAgentToken: project.id !== 'self' }) : {};
     const result = await this.processRunner('git', args, {
       cwd: project.workspace,
       timeoutMs: project.budgets.commandTimeoutMs,
