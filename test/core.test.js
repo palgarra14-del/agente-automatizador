@@ -45,6 +45,8 @@ import {
   resolveExecutionUser,
   safeCommandEnvironment,
   transition,
+  websiteBlueprintForBrief,
+  websiteBlueprintIdForCategory,
   managedWorkspacePath
 } from '../src/core.js';
 
@@ -1146,6 +1148,135 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
     createHash('sha256').update(JSON.stringify(result.result.diagnosis)).digest('hex')
   );
   assert.equal(clientConstructions, 0);
+});
+
+test('website blueprint selection is deterministic, fact-bound, accent-insensitive, and has a generic fallback', () => {
+  assert.equal(websiteBlueprintIdForCategory('Peluquería y salón de belleza'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('PELUQUERIA PREMIUM'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('Barbería urbana'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('Fontanería 24 horas'), 'home-services');
+  assert.equal(websiteBlueprintIdForCategory('Reformas integrales'), 'home-services');
+  assert.equal(websiteBlueprintIdForCategory('Estudio jurídico local'), 'generic-local');
+  assert.equal(websiteBlueprintIdForCategory('Wheelchair repair'), 'generic-local');
+
+  const brief = {
+    category: 'Salón de Belleza',
+    locations: ['Madrid'],
+    services: [{ name: 'Corte' }],
+    facts: ['Solo con cita.'],
+    contentRestrictions: ['No inventar precios.'],
+    contact: {},
+    assets: {},
+    website: {
+      primaryGoal: 'solicitar cita',
+      requiredPages: ['home', 'servicios', 'contacto'],
+      requiredFeatures: ['CTA de cita']
+    }
+  };
+  const beauty = websiteBlueprintForBrief(brief);
+  const beautyAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(brief)));
+  const home = websiteBlueprintForBrief({ ...brief, category: 'Fontanería' });
+  const generic = websiteBlueprintForBrief({ ...brief, category: 'Consultoría' });
+
+  assert.equal(beauty.profileId, 'beauty-salon');
+  assert.equal(home.profileId, 'home-services');
+  assert.equal(generic.profileId, 'generic-local');
+  assert.deepEqual(beauty, beautyAgain);
+  assert.notDeepEqual(beauty, home);
+  assert.deepEqual(beauty.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
+  assert.ok(beauty.pages.find((page) => page.route === '/')?.sections.includes('hero'));
+  assert.deepEqual(beauty.contentSources.services, ['businessBrief.services[0]']);
+  assert.deepEqual(beauty.seoRequirements.locationSources, ['businessBrief.locations[0]']);
+  assert.equal(beauty.ctas[0].kind, 'route');
+  assert.equal(beauty.ctas[0].destination, '/contacto');
+  assert.equal(beauty.pages.find((page) => page.route === '/')?.sections.includes('contact'), false);
+  const dedicatedContactAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(brief)));
+  assert.deepEqual(dedicatedContactAgain.ctas, beauty.ctas);
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(dedicatedContactAgain)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(beauty)).digest('hex')
+  );
+
+  const homeContactBrief = {
+    ...brief,
+    website: { ...brief.website, requiredPages: ['home'] }
+  };
+  const homeContact = websiteBlueprintForBrief(homeContactBrief);
+  const homeContactAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(homeContactBrief)));
+  assert.equal(homeContact.pages.find((page) => page.route === '/')?.sections.includes('contact'), true);
+  assert.equal(homeContact.ctas[0].kind, 'section');
+  assert.equal(homeContact.ctas[0].destination, '#contact');
+  assert.deepEqual(homeContactAgain.ctas, homeContact.ctas);
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(homeContactAgain)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(homeContact)).digest('hex')
+  );
+
+  const assertBlueprintCtasResolve = (blueprint) => {
+    const routes = new Set(blueprint.navigation.routes.map((entry) => entry.route));
+    const homeAnchors = new Set(blueprint.navigation.homeAnchors);
+    for (const cta of blueprint.ctas) {
+      if (cta.destination === 'provided-contact') continue;
+      if (cta.destination.startsWith('#')) {
+        assert.equal(homeAnchors.has(cta.destination), true, `unresolved CTA anchor: ${cta.destination}`);
+      } else {
+        assert.equal(routes.has(cta.destination), true, `unresolved CTA route: ${cta.destination}`);
+      }
+    }
+  };
+  assertBlueprintCtasResolve(beauty);
+  assertBlueprintCtasResolve(homeContact);
+
+  const explicitWhatsapp = websiteBlueprintForBrief({
+    ...brief,
+    contact: { whatsapp: '34600000000', phone: '600000000' },
+    website: { ...brief.website, primaryGoal: 'contacto por WhatsApp' }
+  });
+  assert.equal(explicitWhatsapp.ctas[0].kind, 'whatsapp');
+  assert.equal(explicitWhatsapp.ctas[0].source, 'businessBrief.contact.whatsapp');
+  assert.equal(explicitWhatsapp.ctas[1].kind, 'route');
+  assert.equal(explicitWhatsapp.ctas[1].destination, '/contacto');
+  assertBlueprintCtasResolve(explicitWhatsapp);
+  const formGoal = websiteBlueprintForBrief({
+    ...brief,
+    contact: { whatsapp: '34600000000', phone: '600000000' },
+    website: { ...brief.website, primaryGoal: 'enviar formulario' }
+  });
+  assert.equal(formGoal.ctas[0].kind, 'route');
+  assert.equal(formGoal.ctas[0].destination, '/contacto');
+  assertBlueprintCtasResolve(formGoal);
+  assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
+  assert.deepEqual([...beauty.missingFactSources].sort(), [
+    'businessBrief.contact.address',
+    'businessBrief.contact.email',
+    'businessBrief.contact.phone',
+    'businessBrief.contact.whatsapp'
+  ].sort());
+  assert.equal(beauty.forbiddenClaims[0].value, 'No inventar precios.');
+  assert.equal(beauty.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
+
+  const serialized = JSON.stringify(beauty).toLowerCase();
+  for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'tel:', '€']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+
+  const fingerprintA = createHash('sha256').update(JSON.stringify(beauty)).digest('hex');
+  const fingerprintB = createHash('sha256').update(JSON.stringify(beautyAgain)).digest('hex');
+  assert.equal(fingerprintA, fingerprintB);
+
+  const factChanged = websiteBlueprintForBrief({ ...brief, facts: ['Solo con cita.', 'Aparcamiento concertado.'] });
+  const restrictionChanged = websiteBlueprintForBrief({ ...brief, contentRestrictions: ['No inventar precios.', 'No inventar testimonios.'] });
+  assert.notEqual(factChanged.sourceBriefFingerprint, beauty.sourceBriefFingerprint);
+  assert.notEqual(restrictionChanged.sourceBriefFingerprint, beauty.sourceBriefFingerprint);
+  assert.notEqual(
+    createHash('sha256').update(JSON.stringify(factChanged)).digest('hex'),
+    fingerprintA
+  );
+  assert.notEqual(
+    createHash('sha256').update(JSON.stringify(restrictionChanged)).digest('hex'),
+    fingerprintA
+  );
+  assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
 });
 
 test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
