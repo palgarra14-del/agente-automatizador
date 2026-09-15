@@ -1117,64 +1117,10 @@ export function normalizeBusinessBrief(value) {
   });
 }
 
-const websiteBlueprintRegistry = Object.freeze({
-  'beauty-salon': Object.freeze({
-    version: 1,
-    id: 'beauty-salon',
-    summary: 'Editorial appointment-led structure for beauty, hair and grooming businesses.',
-    sectionPriorities: ['hero', 'services', 'inspiration', 'experience', 'faq', 'contact'],
-    conversion: Object.freeze({
-      primaryPattern: 'Keep one appointment-or-contact CTA prominent from the hero through the final contact section.',
-      mobilePattern: 'Keep the primary CTA easy to reach on mobile without inventing a destination that the brief does not supply.'
-    }),
-    design: Object.freeze({
-      composition: 'Editorial, spacious hierarchy with strong typography and restrained components.',
-      media: 'Use verified business imagery when supplied; otherwise generic imagery may be decorative only and must not imply completed client work.',
-      density: 'Prefer breathing room, a small number of high-impact sections, and clear mobile rhythm.'
-    }),
-    constraints: [
-      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.',
-      'Never infer testimonials, ratings, prices, staff, awards, opening hours, addresses, contact details or other business facts from this blueprint.'
-    ]
-  }),
-  'home-services': Object.freeze({
-    version: 1,
-    id: 'home-services',
-    summary: 'Service-and-contact-led structure for trades, repairs, maintenance and home-improvement businesses.',
-    sectionPriorities: ['hero', 'services', 'verified-trust-facts', 'service-area-if-supplied', 'work-gallery-if-verified', 'faq', 'contact'],
-    conversion: Object.freeze({
-      primaryPattern: 'Lead with the strongest supplied call, WhatsApp or contact action; if none is supplied, route to an on-page contact section.',
-      mobilePattern: 'Keep the verified primary contact action easy to reach on mobile.'
-    }),
-    design: Object.freeze({
-      composition: 'Clear service hierarchy, fast scanning, strong CTA contrast and restrained proof elements.',
-      media: 'Use project or team imagery only when verified by supplied assets; otherwise keep imagery decorative and non-attributed.',
-      density: 'Prioritize clarity, service discovery and contact speed over decorative complexity.'
-    }),
-    constraints: [
-      'Show service areas, guarantees, response times, reviews or credentials only when explicitly supplied by the business brief.',
-      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.'
-    ]
-  }),
-  'generic-local': Object.freeze({
-    version: 1,
-    id: 'generic-local',
-    summary: 'Neutral conversion-led structure for a local business when no reviewed niche blueprint matches.',
-    sectionPriorities: ['hero', 'services', 'verified-business-facts', 'faq', 'contact'],
-    conversion: Object.freeze({
-      primaryPattern: 'Use the business brief primary goal to choose one clear CTA and repeat it at natural decision points.',
-      mobilePattern: 'Keep the primary action visible and easy to reach on mobile without fabricating contact destinations.'
-    }),
-    design: Object.freeze({
-      composition: 'Simple professional hierarchy with clear navigation, readable sections and strong responsive behavior.',
-      media: 'Prefer verified supplied assets; generic imagery must remain decorative and non-attributed.',
-      density: 'Keep content concise and prioritize service understanding and conversion.'
-    }),
-    constraints: [
-      'Business-specific claims must come only from the business brief.',
-      'Adapt section order to requiredPages and requiredFeatures; this blueprint is guidance, not a rigid template.'
-    ]
-  })
+const websiteBlueprintSectionProfiles = Object.freeze({
+  'beauty-salon': Object.freeze(['hero', 'services', 'inspiration-media', 'experience', 'faq', 'contact']),
+  'home-services': Object.freeze(['hero', 'services', 'verified-facts', 'verified-work-media', 'faq', 'contact']),
+  'generic-local': Object.freeze(['hero', 'services', 'verified-facts', 'faq', 'contact'])
 });
 
 function normalizeWebsiteBlueprintCategory(value) {
@@ -1196,12 +1142,168 @@ export function websiteBlueprintIdForCategory(category) {
   return 'generic-local';
 }
 
+function websiteBlueprintPage(value, index) {
+  const label = boundedText(value, `businessBrief.website.requiredPages[${index}]`, { required: true, max: 120 });
+  const normalized = normalizeWebsiteBlueprintCategory(label).replace(/\s+/g, '-');
+  const home = ['home', 'inicio', 'principal'].includes(normalized);
+  const id = home ? 'home' : (normalized || `page-${index + 1}`);
+  return {
+    id,
+    route: home ? '/' : `/${id}`,
+    source: `businessBrief.website.requiredPages[${index}]`
+  };
+}
+
+function websiteBlueprintPages(brief, profileId) {
+  const requested = Array.isArray(brief?.website?.requiredPages) && brief.website.requiredPages.length
+    ? brief.website.requiredPages
+    : ['home'];
+  const seen = new Set();
+  const pages = [];
+  for (let index = 0; index < requested.length; index += 1) {
+    const page = websiteBlueprintPage(requested[index], index);
+    if (seen.has(page.route)) continue;
+    seen.add(page.route);
+    pages.push(page);
+  }
+  if (!pages.some((page) => page.route === '/')) pages.unshift({ id: 'home', route: '/', source: 'blueprint.default-home' });
+
+  const hasServicesPage = pages.some((page) => /servic/.test(page.id));
+  const hasContactPage = pages.some((page) => /contact/.test(page.id));
+  const hasMediaPage = pages.some((page) => /(galer|portfolio|look|inspir)/.test(page.id));
+  const profileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
+
+  return pages.map((page) => {
+    let sections;
+    if (page.route === '/') {
+      sections = profileSections.filter((section) =>
+        !(section === 'services' && hasServicesPage) &&
+        !(section === 'contact' && hasContactPage) &&
+        !(['inspiration-media', 'verified-work-media'].includes(section) && hasMediaPage)
+      );
+    } else if (/servic/.test(page.id)) sections = ['services', 'primary-cta'];
+    else if (/contact/.test(page.id)) sections = ['contact'];
+    else if (/(galer|portfolio|look|inspir)/.test(page.id)) sections = ['media', 'primary-cta'];
+    else if (/faq|pregunt/.test(page.id)) sections = ['faq', 'primary-cta'];
+    else sections = ['required-page-content', 'primary-cta'];
+    return { ...page, sections };
+  });
+}
+
+function websiteBlueprintPrimaryCta(brief) {
+  const goal = normalizeWebsiteBlueprintCategory(brief?.website?.primaryGoal);
+  const contact = brief?.contact ?? {};
+  const candidates = [];
+  if (goal.includes('whatsapp')) candidates.push(['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp]);
+  if (goal.includes('llam') || goal.includes('telefon')) candidates.push(['phone', 'businessBrief.contact.phone', contact.phone]);
+  if (goal.includes('email') || goal.includes('correo')) candidates.push(['email', 'businessBrief.contact.email', contact.email]);
+  candidates.push(
+    ['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp],
+    ['phone', 'businessBrief.contact.phone', contact.phone],
+    ['email', 'businessBrief.contact.email', contact.email]
+  );
+  const selected = candidates.find(([, , value]) => typeof value === 'string' && value.trim());
+  if (selected) {
+    return {
+      id: 'primary',
+      kind: selected[0],
+      destination: 'provided-contact',
+      source: selected[1],
+      goalSource: 'businessBrief.website.primaryGoal'
+    };
+  }
+  return {
+    id: 'primary',
+    kind: 'section',
+    destination: '#contact',
+    source: null,
+    goalSource: 'businessBrief.website.primaryGoal'
+  };
+}
+
 export function websiteBlueprintForBrief(businessBrief) {
   if (!businessBrief || typeof businessBrief !== 'object' || Array.isArray(businessBrief)) throw new Error('website_blueprint_business_brief_invalid');
-  const id = websiteBlueprintIdForCategory(businessBrief.category);
-  const blueprint = websiteBlueprintRegistry[id];
-  if (!blueprint) throw new Error('website_blueprint_registry_invalid');
-  return safeJson(blueprint);
+  const profileId = websiteBlueprintIdForCategory(businessBrief.category);
+  const pages = websiteBlueprintPages(businessBrief, profileId);
+  const primaryCta = websiteBlueprintPrimaryCta(businessBrief);
+  const services = Array.isArray(businessBrief.services) ? businessBrief.services : [];
+  const facts = Array.isArray(businessBrief.facts) ? businessBrief.facts : [];
+  const restrictions = Array.isArray(businessBrief.contentRestrictions) ? businessBrief.contentRestrictions : [];
+  const locations = Array.isArray(businessBrief.locations) ? businessBrief.locations : [];
+  const photoPaths = Array.isArray(businessBrief?.assets?.photoPaths) ? businessBrief.assets.photoPaths : [];
+  const assetSlots = [];
+  if (businessBrief?.assets?.logoPath) {
+    assetSlots.push({ slot: 'logo', provenance: 'provided', source: 'businessBrief.assets.logoPath', path: businessBrief.assets.logoPath, required: false });
+  } else {
+    assetSlots.push({ slot: 'logo', provenance: 'missing', source: null, path: null, required: false });
+  }
+  for (let index = 0; index < photoPaths.length; index += 1) {
+    assetSlots.push({ slot: `photo-${index + 1}`, provenance: 'provided', source: `businessBrief.assets.photoPaths[${index}]`, path: photoPaths[index], required: false });
+  }
+  if (!photoPaths.length) {
+    assetSlots.push({ slot: 'decorative-media', provenance: 'generic-decorative', source: null, path: null, required: false });
+  }
+
+  const missingContactSources = ['phone', 'whatsapp', 'email', 'address']
+    .filter((field) => !businessBrief?.contact?.[field])
+    .map((field) => `businessBrief.contact.${field}`);
+
+  const requiredFeatures = Array.isArray(businessBrief?.website?.requiredFeatures)
+    ? businessBrief.website.requiredFeatures.map((value, index) => ({
+        value,
+        source: `businessBrief.website.requiredFeatures[${index}]`
+      }))
+    : [];
+
+  return safeJson({
+    version: 1,
+    profileId,
+    sourceBriefFingerprint: evidenceFingerprint(businessBrief),
+    pages,
+    requiredFeatures,
+    contentSources: {
+      services: services.map((_service, index) => `businessBrief.services[${index}]`),
+      facts: facts.map((_fact, index) => `businessBrief.facts[${index}]`),
+      locations: locations.map((_location, index) => `businessBrief.locations[${index}]`)
+    },
+    ctas: [
+      primaryCta,
+      ...(primaryCta.destination === '#contact' ? [] : [{ id: 'secondary-contact', kind: 'section', destination: '#contact', source: null, goalSource: null }])
+    ],
+    navigation: {
+      routes: pages.map((page) => ({ id: page.id, route: page.route })),
+      homeAnchors: (pages.find((page) => page.route === '/')?.sections ?? []).map((section) => `#${section}`)
+    },
+    responsiveRequirements: [
+      'No horizontal overflow at supported mobile viewport.',
+      'Primary navigation and primary CTA remain usable on small screens.',
+      'Content order remains understandable without desktop-only positioning.'
+    ],
+    accessibilityRequirements: [
+      'One clear page-level heading hierarchy.',
+      'Interactive elements require accessible names and keyboard reachability.',
+      'Meaningful images require appropriate alternative text; decorative imagery must be marked decorative.',
+      'Text and interactive controls require usable contrast and visible focus.'
+    ],
+    seoRequirements: {
+      locationSources: locations.map((_location, index) => `businessBrief.locations[${index}]`),
+      serviceSources: services.map((_service, index) => `businessBrief.services[${index}]`),
+      requirements: [
+        'Title and meta description must use only supplied business facts.',
+        'Local terms may use only supplied location and service sources.',
+        'Do not fabricate ratings, opening hours, addresses, service areas or credentials for structured or visible metadata.'
+      ]
+    },
+    assets: {
+      allowedProvenance: ['provided', 'generic-decorative', 'generated-safe', 'missing'],
+      slots: assetSlots
+    },
+    forbiddenClaims: restrictions.map((value, index) => ({
+      value,
+      source: `businessBrief.contentRestrictions[${index}]`
+    })),
+    missingFactSources: missingContactSources
+  });
 }
 
 function canonicalValue(value) {
