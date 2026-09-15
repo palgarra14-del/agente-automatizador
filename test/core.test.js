@@ -1188,6 +1188,20 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.deepEqual(beauty.contentSources.services, ['businessBrief.services[0]']);
   assert.deepEqual(beauty.seoRequirements.locationSources, ['businessBrief.locations[0]']);
   assert.equal(beauty.ctas[0].destination, '#contact');
+  const explicitWhatsapp = websiteBlueprintForBrief({
+    ...brief,
+    contact: { whatsapp: '34600000000', phone: '600000000' },
+    website: { ...brief.website, primaryGoal: 'contacto por WhatsApp' }
+  });
+  assert.equal(explicitWhatsapp.ctas[0].kind, 'whatsapp');
+  assert.equal(explicitWhatsapp.ctas[0].source, 'businessBrief.contact.whatsapp');
+  const formGoal = websiteBlueprintForBrief({
+    ...brief,
+    contact: { whatsapp: '34600000000', phone: '600000000' },
+    website: { ...brief.website, primaryGoal: 'enviar formulario' }
+  });
+  assert.equal(formGoal.ctas[0].kind, 'section');
+  assert.equal(formGoal.ctas[0].destination, '#contact');
   assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
   assert.deepEqual(beauty.missingFactSources.sort(), [
     'businessBrief.contact.address',
