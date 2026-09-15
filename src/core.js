@@ -1197,11 +1197,6 @@ function websiteBlueprintPrimaryCta(brief) {
   if (goal.includes('whatsapp')) candidates.push(['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp]);
   if (goal.includes('llam') || goal.includes('telefon')) candidates.push(['phone', 'businessBrief.contact.phone', contact.phone]);
   if (goal.includes('email') || goal.includes('correo')) candidates.push(['email', 'businessBrief.contact.email', contact.email]);
-  candidates.push(
-    ['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp],
-    ['phone', 'businessBrief.contact.phone', contact.phone],
-    ['email', 'businessBrief.contact.email', contact.email]
-  );
   const selected = candidates.find(([, , value]) => typeof value === 'string' && value.trim());
   if (selected) {
     return {
