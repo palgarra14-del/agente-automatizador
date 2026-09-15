@@ -319,8 +319,12 @@ test('website planner verifies repository assets before spending a model call', 
       calls += 1;
       assert.equal(request.context.businessBrief.businessName, 'Fontanería Ejemplo');
       assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
-      assert.equal(request.context.websiteBlueprint.id, 'home-services');
+      assert.equal(request.context.websiteBlueprint.profileId, 'home-services');
       assert.match(request.context.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
+      assert.match(request.context.websiteBlueprint.sourceBriefFingerprint, /^[a-f0-9]{64}$/);
+      assert.deepEqual(request.context.websiteBlueprint.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
+      assert.equal(request.context.websiteBlueprint.ctas[0].kind, 'whatsapp');
+      assert.equal(request.context.websiteBlueprint.ctas[0].source, 'businessBrief.contact.whatsapp');
       assert.equal(request.context.assetEvidence.assets.length, 2);
       assert.ok(request.context.assetEvidence.assets.every((asset) => /^[a-f0-9]{64}$/.test(asset.sha256)));
       return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
@@ -343,13 +347,15 @@ test('website planner verifies repository assets before spending a model call', 
   assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.equal(requirements.evidence.businessBriefFingerprint, waiting.inputFingerprint);
-  assert.equal(requirements.evidence.websiteBlueprint.id, 'home-services');
+  assert.equal(requirements.evidence.websiteBlueprint.profileId, 'home-services');
   assert.match(requirements.evidence.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(requirements.evidence.websiteBlueprint.assets.allowedProvenance.includes('missing'), true);
+  assert.equal(requirements.evidence.websiteBlueprint.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
   assert.match(requirements.evidence.assetEvidenceFingerprint, /^[a-f0-9]{64}$/);
   assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
 
   const tamperedBlueprint = JSON.parse(JSON.stringify(waiting));
-  tamperedBlueprint.steps.find((step) => step.id === 'requirements').evidence.websiteBlueprint.id = 'beauty-salon';
+  tamperedBlueprint.steps.find((step) => step.id === 'requirements').evidence.websiteBlueprint.profileId = 'beauty-salon';
   assert.throws(
     () => validateWorkflowPlan(tamperedBlueprint, new Map([[configured.id, configured]])),
     /business brief, blueprint, and verified assets/
@@ -2524,7 +2530,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       if (request.skill === 'website.plan') {
         assert.equal(request.context.businessBrief.businessName, brief.businessName);
         assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
-        assert.equal(request.context.websiteBlueprint.id, 'home-services');
+        assert.equal(request.context.websiteBlueprint.profileId, 'home-services');
         assert.match(request.context.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
         assert.deepEqual(request.context.assetEvidence.assets, []);
         return { ok: true, status: 'completed', usage: { input_tokens: 50, output_tokens: 30 }, outputBytes: 50, result: { websitePlan } };
@@ -2533,7 +2539,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       assert.equal(request.context.websiteReview.businessBrief.businessName, brief.businessName);
       assert.deepEqual(request.context.websiteReview.websitePlan, websitePlan);
       assert.equal(request.context.websiteReview.websitePlanFingerprint, requirementsPlanFingerprint);
-      assert.equal(request.context.websiteReview.websiteBlueprint.id, 'home-services');
+      assert.equal(request.context.websiteReview.websiteBlueprint.profileId, 'home-services');
       assert.equal(request.context.websiteReview.websiteBlueprintFingerprint, requirementsBlueprintFingerprint);
       assert.deepEqual(request.context.websiteReview.assetEvidence.assets, []);
       return { ok: true, status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, outputBytes: 30, result: { reviewEvidence: { verdict: 'PASS', summary: 'No blocking issue.', findings: [] } } };
@@ -2545,7 +2551,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       assert.equal(task.websiteBuild.businessBrief.businessName, brief.businessName);
       assert.deepEqual(task.websiteBuild.websitePlan, websitePlan);
       assert.equal(task.websiteBuild.approvedWebsitePlanFingerprint, task.websiteBuild.websitePlanFingerprint);
-      assert.equal(task.websiteBuild.websiteBlueprint.id, 'home-services');
+      assert.equal(task.websiteBuild.websiteBlueprint.profileId, 'home-services');
       assert.equal(task.websiteBuild.approvedWebsiteBlueprintFingerprint, task.websiteBuild.websiteBlueprintFingerprint);
       assert.equal(task.websiteBuild.assetEvidence.assets.length, 0);
       implemented = true;
@@ -2579,7 +2585,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.deepEqual(requirements.evidence.result.websitePlan, websitePlan);
   assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
-  assert.equal(requirements.evidence.websiteBlueprint.id, 'home-services');
+  assert.equal(requirements.evidence.websiteBlueprint.profileId, 'home-services');
   assert.match(requirements.evidence.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
   requirementsPlanFingerprint = requirements.evidence.websitePlanFingerprint;
   requirementsBlueprintFingerprint = requirements.evidence.websiteBlueprintFingerprint;
