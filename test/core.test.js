@@ -1634,10 +1634,18 @@ test('command runner resolves pnpm through its JavaScript entrypoint without a s
   }
 });
 
-test('GitHub network Git credentials prefer the orchestrator-only cross-repo token and remain environment-only', () => {
+test('GitHub network Git credentials use least authority: self fallback by default and cross-repo token only when requested', () => {
   const agentToken = 'ghs_agent_cross_repo_fixture_123456789012345';
   const fallbackToken = 'ghs_cloud_default_repo_fixture_123456789012345';
-  const env = githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken });
+
+  const selfEnv = githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken });
+  assert.equal(selfEnv.GH_TOKEN, fallbackToken);
+  assert.equal(JSON.stringify(selfEnv).includes(agentToken), false);
+
+  const env = githubGitNetworkEnvironment(
+    { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken },
+    { preferAgentToken: true }
+  );
   assert.equal(env.GH_TOKEN, agentToken);
   assert.equal(env.GH_HOST, 'github.com');
   assert.equal(env.GIT_TERMINAL_PROMPT, '0');
@@ -1649,12 +1657,19 @@ test('GitHub network Git credentials prefer the orchestrator-only cross-repo tok
   assert.equal(JSON.stringify(env).includes('https://x-access-token:'), false);
   assert.equal(JSON.stringify(env).includes(fallbackToken), false);
 
-  const fallback = githubGitNetworkEnvironment({ GITHUB_TOKEN: fallbackToken });
+  const fallback = githubGitNetworkEnvironment({ GITHUB_TOKEN: fallbackToken }, { preferAgentToken: true });
   assert.equal(fallback.GH_TOKEN, fallbackToken);
   assert.deepEqual(githubGitNetworkEnvironment({}), {});
   assert.throws(
-    () => githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }),
+    () => githubGitNetworkEnvironment(
+      { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken },
+      { preferAgentToken: true }
+    ),
     /github_git_network_token_invalid/
+  );
+  assert.equal(
+    githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }).GH_TOKEN,
+    fallbackToken
   );
   assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_git_network_token_invalid/);
   assert.equal(maskSecrets(`AGENT_GITHUB_TOKEN=${agentToken}`).includes(agentToken), false);
@@ -1663,7 +1678,7 @@ test('GitHub network Git credentials prefer the orchestrator-only cross-repo tok
 test('managed private clone gets GitHub credential helper only through subprocess environment', async () => {
   const root = await mkdtemp(join(tmpdir(), 'managed-private-clone-'));
   const configured = configFrom({
-    id: 'self', repository: { owner: 'owner', name: 'private-repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    id: 'website-pilot', repository: { owner: 'owner', name: 'private-repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
     workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { test: 'node --version' }, acceptance: { require: ['test'] }
   }, join(root, 'host', 'config'));
   const token = 'ghs_private_clone_fixture_123456789012345';
@@ -1691,7 +1706,7 @@ test('LocalGitAdapter injects GitHub credentials only when a Git operation is ex
   const token = 'ghs_private_git_fixture_1234567890123456';
   const fallbackToken = 'ghs_private_git_fallback_1234567890123456';
   const calls = [];
-  const configured = project();
+  const configured = project({ id: 'website-pilot' });
   const adapter = new LocalGitAdapter({
     environment: { AGENT_GITHUB_TOKEN: token, GITHUB_TOKEN: fallbackToken },
     processRunner: async (_binary, args, options) => {
@@ -1708,6 +1723,23 @@ test('LocalGitAdapter injects GitHub credentials only when a Git operation is ex
   assert.equal(Object.hasOwn(calls[1].options.env, 'GITHUB_TOKEN'), false);
   assert.equal(calls[1].args.some((arg) => String(arg).includes(token)), false);
   assert.equal(JSON.stringify(calls).includes(fallbackToken), false);
+});
+
+test('self network Git ignores the broader cross-repo credential even when it is present', async () => {
+  const agentToken = 'ghs_agent_self_must_ignore_123456789012345';
+  const fallbackToken = 'ghs_self_workflow_token_123456789012345';
+  const calls = [];
+  const configured = project({ id: 'self' });
+  const adapter = new LocalGitAdapter({
+    environment: { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken },
+    processRunner: async (_binary, args, options) => {
+      calls.push({ args, options });
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' };
+    }
+  });
+  await adapter.git(['fetch', 'origin', 'main'], configured, { network: true });
+  assert.equal(calls[0].options.env.GH_TOKEN, fallbackToken);
+  assert.equal(JSON.stringify(calls).includes(agentToken), false);
 });
 
 test('managed workspaces are isolated under the configured root and clone only the configured repository', async () => {
