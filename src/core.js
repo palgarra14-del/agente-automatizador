@@ -1190,7 +1190,15 @@ function websiteBlueprintPages(brief, profileId) {
   });
 }
 
-function websiteBlueprintPrimaryCta(brief) {
+function websiteBlueprintContactDestination(pages) {
+  const dedicated = pages.find((page) => page.route !== '/' && page.sections?.includes('contact'));
+  if (dedicated) return { kind: 'route', destination: dedicated.route };
+  const home = pages.find((page) => page.route === '/');
+  if (home?.sections?.includes('contact')) return { kind: 'section', destination: '#contact' };
+  throw new Error('website_blueprint_contact_destination_missing');
+}
+
+function websiteBlueprintPrimaryCta(brief, pages) {
   const goal = normalizeWebsiteBlueprintCategory(brief?.website?.primaryGoal);
   const contact = brief?.contact ?? {};
   const candidates = [];
@@ -1209,8 +1217,7 @@ function websiteBlueprintPrimaryCta(brief) {
   }
   return {
     id: 'primary',
-    kind: 'section',
-    destination: '#contact',
+    ...websiteBlueprintContactDestination(pages),
     source: null,
     goalSource: 'businessBrief.website.primaryGoal'
   };
@@ -1220,7 +1227,8 @@ export function websiteBlueprintForBrief(businessBrief) {
   if (!businessBrief || typeof businessBrief !== 'object' || Array.isArray(businessBrief)) throw new Error('website_blueprint_business_brief_invalid');
   const profileId = websiteBlueprintIdForCategory(businessBrief.category);
   const pages = websiteBlueprintPages(businessBrief, profileId);
-  const primaryCta = websiteBlueprintPrimaryCta(businessBrief);
+  const contactDestination = websiteBlueprintContactDestination(pages);
+  const primaryCta = websiteBlueprintPrimaryCta(businessBrief, pages);
   const services = Array.isArray(businessBrief.services) ? businessBrief.services : [];
   const facts = Array.isArray(businessBrief.facts) ? businessBrief.facts : [];
   const restrictions = Array.isArray(businessBrief.contentRestrictions) ? businessBrief.contentRestrictions : [];
@@ -1263,7 +1271,9 @@ export function websiteBlueprintForBrief(businessBrief) {
     },
     ctas: [
       primaryCta,
-      ...(primaryCta.destination === '#contact' ? [] : [{ id: 'secondary-contact', kind: 'section', destination: '#contact', source: null, goalSource: null }])
+      ...(primaryCta.destination === contactDestination.destination
+        ? []
+        : [{ id: 'secondary-contact', ...contactDestination, source: null, goalSource: null }])
     ],
     navigation: {
       routes: pages.map((page) => ({ id: page.id, route: page.route })),
