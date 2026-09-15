@@ -563,14 +563,24 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
   return environment;
 }
 
-export function githubGitNetworkEnvironment(environment = process.env, { preferAgentToken = false } = {}) {
+function githubOrchestratorToken(environment = process.env, { preferAgentToken = false } = {}) {
   const agentToken = preferAgentToken ? environment?.AGENT_GITHUB_TOKEN : null;
   const fallbackToken = environment?.GITHUB_TOKEN;
   const token = agentToken === undefined || agentToken === null || agentToken === '' ? fallbackToken : agentToken;
-  if (token === undefined || token === null || token === '') return {};
+  if (token === undefined || token === null || token === '') return null;
   if (typeof token !== 'string' || token.length < 20 || token.length > 4_096 || /[\s\0\r\n]/.test(token)) {
-    throw new Error('github_git_network_token_invalid');
+    throw new Error('github_orchestrator_token_invalid');
   }
+  return token;
+}
+
+export function githubApiTokenForProject(project, environment = process.env) {
+  return githubOrchestratorToken(environment, { preferAgentToken: project?.id !== 'self' });
+}
+
+export function githubGitNetworkEnvironment(environment = process.env, { preferAgentToken = false } = {}) {
+  const token = githubOrchestratorToken(environment, { preferAgentToken });
+  if (!token) return {};
   return {
     GH_TOKEN: token,
     GH_HOST: 'github.com',
@@ -5456,20 +5466,36 @@ export class VercelDeploymentProvider {
 export class WorkflowPublicationBridge {
   constructor({
     localGit = new LocalGitAdapter(),
-    github = new GitHubAdapter(),
-    deploymentProvider = new VercelDeploymentProvider(),
+    github = null,
+    githubFactory = (token) => new GitHubAdapter({ token }),
+    deploymentProvider = null,
+    deploymentProviderFactory = ({ github: targetGithub }) => new VercelDeploymentProvider({ github: targetGithub }),
+    environment = process.env,
     ciWorkflow = process.env.AGENT_CLOUD_CI_WORKFLOW ?? null
   } = {}) {
     if (ciWorkflow !== null && (typeof ciWorkflow !== 'string' || !/^[A-Za-z0-9._-]+\.ya?ml$/.test(ciWorkflow))) {
       throw new Error('workflow_publication_ci_workflow_invalid');
     }
-    Object.assign(this, { localGit, github, deploymentProvider, ciWorkflow });
+    if (github !== null && (typeof github !== 'object' || Array.isArray(github))) throw new Error('workflow_publication_github_invalid');
+    if (deploymentProvider !== null && (typeof deploymentProvider !== 'object' || Array.isArray(deploymentProvider))) throw new Error('workflow_publication_deployment_provider_invalid');
+    if (typeof githubFactory !== 'function' || typeof deploymentProviderFactory !== 'function') throw new Error('workflow_publication_factory_invalid');
+    Object.assign(this, { localGit, github, githubFactory, deploymentProvider, deploymentProviderFactory, environment, ciWorkflow });
   }
 
-  async inspectBase(project) { return this.github.inspect(project); }
+  githubForProject(project) {
+    if (this.github) return this.github;
+    return this.githubFactory(githubApiTokenForProject(project, this.environment), project);
+  }
+
+  deploymentProviderForProject(project) {
+    if (this.deploymentProvider) return this.deploymentProvider;
+    return this.deploymentProviderFactory({ github: this.githubForProject(project), project });
+  }
+
+  async inspectBase(project) { return this.githubForProject(project).inspect(project); }
 
   async commit(project, context) {
-    const identity = await this.github.authenticatedCommitIdentity();
+    const identity = await this.githubForProject(project).authenticatedCommitIdentity();
     return this.localGit.commit(project, context.branch, `publish ${context.goal}`, {
       expectedChangeSetFingerprint: context.changeSetFingerprint,
       expectedHead: context.baseHead,
@@ -5483,14 +5509,14 @@ export class WorkflowPublicationBridge {
   }
 
   async verifyRemoteBranch(project, branch, expectedHead) {
-    const observed = await this.github.branchHead(project, branch);
+    const observed = await this.githubForProject(project).branchHead(project, branch);
     return { ...observed, ok: observed.branch === branch && observed.head === expectedHead };
   }
 
   async createPullRequest(project, context) {
     const template = project.pullRequest?.titleTemplate ?? 'Agent: {objective}';
     const title = template.replaceAll('{project}', project.displayName ?? project.id).replaceAll('{objective}', clip(context.goal, 90));
-    return this.github.createPullRequest(project, {
+    return this.githubForProject(project).createPullRequest(project, {
       branch: context.branch,
       title,
       body: `Reviewed workflow ${context.workflowId}.\n\nThe change-set fingerprint ${context.changeSetFingerprint} passed the independent Change Critic, configured verification, and explicit release-readiness approval before publication.\n\nHuman review is required before merge. No merge or production deployment was performed.`
@@ -5498,7 +5524,7 @@ export class WorkflowPublicationBridge {
   }
 
   async verifyPullRequest(project, number, context) {
-    const observed = await this.github.pullRequest(project, number);
+    const observed = await this.githubForProject(project).pullRequest(project, number);
     return {
       ...observed,
       ok: observed.number === number &&
@@ -5511,13 +5537,15 @@ export class WorkflowPublicationBridge {
 
   async dispatchCi(project, { branch }) {
     if (!this.ciWorkflow) return { required: false, dispatched: false };
-    const result = await this.github.dispatchWorkflow(project, { workflow: this.ciWorkflow, ref: branch });
+    const result = await this.githubForProject(project).dispatchWorkflow(project, { workflow: this.ciWorkflow, ref: branch });
     return { required: true, ...result };
   }
 
-  async waitForCi(project, sha, options) { return this.github.waitForCi(project, sha, options); }
+  async waitForCi(project, sha, options) { return this.githubForProject(project).waitForCi(project, sha, options); }
 
-  async waitForPreview(project, context, options) { return this.deploymentProvider.waitForPreview(project, context, options); }
+  async waitForPreview(project, context, options) {
+    return this.deploymentProviderForProject(project).waitForPreview(project, context, options);
+  }
 }
 
 export class DeterministicPlanner {
