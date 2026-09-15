@@ -337,7 +337,7 @@ test('new issue requests defer without persistence or model work when operator c
 });
 
 test('new issue with trusted prior agent initialization fails closed instead of creating a duplicate workflow', async () => {
-  const { store, channel, workflowEngine, issue, queue } = await queueFixture();
+  const { channel, workflowEngine, issue, queue } = await queueFixture();
   channel.addUserComment(issue.number, {
     id: 77,
     login: 'github-actions[bot]',
