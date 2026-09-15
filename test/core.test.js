@@ -1187,7 +1187,31 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.ok(beauty.pages.find((page) => page.route === '/')?.sections.includes('hero'));
   assert.deepEqual(beauty.contentSources.services, ['businessBrief.services[0]']);
   assert.deepEqual(beauty.seoRequirements.locationSources, ['businessBrief.locations[0]']);
-  assert.equal(beauty.ctas[0].destination, '#contact');
+  assert.equal(beauty.ctas[0].kind, 'route');
+  assert.equal(beauty.ctas[0].destination, '/contacto');
+  assert.equal(beauty.pages.find((page) => page.route === '/')?.sections.includes('contact'), false);
+  const dedicatedContactAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(brief)));
+  assert.deepEqual(dedicatedContactAgain.ctas, beauty.ctas);
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(dedicatedContactAgain)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(beauty)).digest('hex')
+  );
+
+  const homeContactBrief = {
+    ...brief,
+    website: { ...brief.website, requiredPages: ['home'] }
+  };
+  const homeContact = websiteBlueprintForBrief(homeContactBrief);
+  const homeContactAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(homeContactBrief)));
+  assert.equal(homeContact.pages.find((page) => page.route === '/')?.sections.includes('contact'), true);
+  assert.equal(homeContact.ctas[0].kind, 'section');
+  assert.equal(homeContact.ctas[0].destination, '#contact');
+  assert.deepEqual(homeContactAgain.ctas, homeContact.ctas);
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(homeContactAgain)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(homeContact)).digest('hex')
+  );
+
   const explicitWhatsapp = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
@@ -1195,13 +1219,15 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   });
   assert.equal(explicitWhatsapp.ctas[0].kind, 'whatsapp');
   assert.equal(explicitWhatsapp.ctas[0].source, 'businessBrief.contact.whatsapp');
+  assert.equal(explicitWhatsapp.ctas[1].kind, 'route');
+  assert.equal(explicitWhatsapp.ctas[1].destination, '/contacto');
   const formGoal = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
     website: { ...brief.website, primaryGoal: 'enviar formulario' }
   });
-  assert.equal(formGoal.ctas[0].kind, 'section');
-  assert.equal(formGoal.ctas[0].destination, '#contact');
+  assert.equal(formGoal.ctas[0].kind, 'route');
+  assert.equal(formGoal.ctas[0].destination, '/contacto');
   assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
   assert.deepEqual([...beauty.missingFactSources].sort(), [
     'businessBrief.contact.address',
