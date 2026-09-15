@@ -1220,6 +1220,52 @@ test('terminal notification outbox retries after a GitHub comment failure withou
   assert.match(channel.posted.at(-1).body, /Definition of Done/);
 });
 
+test('cloud-authored terminal notification is recovered idempotently after sentAt persistence loss', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  channel.commentAuthorLogin = 'github-actions[bot]';
+
+  const start = await queue.tick();
+  const completed = workflowPlan();
+  completed.status = WorkflowStepStatus.COMPLETED;
+  completed.steps = completed.steps.map((step) => ({
+    ...step,
+    status: WorkflowStepStatus.COMPLETED,
+    error: null,
+    evidence: step.id === 'publication'
+      ? { pullRequest: { number: 16, url: 'https://github.com/owner/callflow/pull/16' }, commit: { finalHead: 'c'.repeat(40) }, preview: { state: 'READY', url: 'https://preview-16.example.test' } }
+      : { approvedAt: '2026-09-12T00:00:00.000Z' }
+  }));
+  workflowEngine.realRunResult = completed;
+
+  channel.addUserComment(issue.number, {
+    id: 121,
+    login: 'palgarra14-del',
+    body: `/agent approve ${start.pendingApproval.fingerprint}`
+  });
+  const delivered = await queue.tick();
+  assert.equal(delivered.status, 'completed');
+  const terminalBody = delivered.terminalNotification.body;
+  const terminalComment = channel.commentsByIssue.get(issue.number).find((comment) => comment.body === terminalBody);
+  assert.equal(terminalComment.user.login, 'github-actions[bot]');
+  const postsBeforeRecovery = channel.posted.length;
+
+  await queue.saveRecord(queue.requestKey(issue), {
+    ...delivered,
+    terminalNotification: {
+      ...delivered.terminalNotification,
+      commentId: null,
+      sentAt: null
+    }
+  });
+
+  const recovered = await queue.tick();
+  assert.equal(recovered.status, 'completed');
+  assert.equal(channel.posted.length, postsBeforeRecovery);
+  assert.equal(recovered.terminalNotification.commentId, terminalComment.id);
+  assert.ok(recovered.terminalNotification.sentAt);
+  assert.equal(workflowEngine.runCalls.filter((call) => !call.dryRun).length, 1);
+});
+
 test('terminal requests return their transition once and do not starve newer queue work', async () => {
   const { queue, channel, workflowEngine, issue } = await queueFixture();
   let record = await queue.tick();
