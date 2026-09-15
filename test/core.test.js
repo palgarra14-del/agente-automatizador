@@ -31,6 +31,7 @@ import {
   evaluateChangePolicy,
   fingerprintChangeSet,
   formatDoctor,
+  githubApiTokenForProject,
   githubGitNetworkEnvironment,
   imageIsPinned,
   loadProjects,
@@ -1668,14 +1669,78 @@ test('GitHub network Git credentials use least authority: self fallback by defau
       { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken },
       { preferAgentToken: true }
     ),
-    /github_git_network_token_invalid/
+    /github_orchestrator_token_invalid/
   );
   assert.equal(
     githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }).GH_TOKEN,
     fallbackToken
   );
-  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_git_network_token_invalid/);
+  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_orchestrator_token_invalid/);
   assert.equal(maskSecrets(`AGENT_GITHUB_TOKEN=${agentToken}`).includes(agentToken), false);
+});
+
+test('target-repository GitHub API token keeps self least-authority and prefers cross-repo credential only for non-self projects', () => {
+  const agentToken = 'ghs_api_cross_repo_fixture_123456789012345';
+  const fallbackToken = 'ghs_api_self_fixture_123456789012345';
+  const environment = { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken };
+  assert.equal(githubApiTokenForProject(project({ id: 'self' }), environment), fallbackToken);
+  assert.equal(githubApiTokenForProject(project({ id: 'website-pilot' }), environment), agentToken);
+  assert.equal(githubApiTokenForProject(project({ id: 'website-pilot' }), { GITHUB_TOKEN: fallbackToken }), fallbackToken);
+  assert.throws(
+    () => githubApiTokenForProject(project({ id: 'website-pilot' }), { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }),
+    /github_orchestrator_token_invalid/
+  );
+  assert.equal(
+    githubApiTokenForProject(project({ id: 'self' }), { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }),
+    fallbackToken
+  );
+});
+
+test('workflow publication routes target GitHub API and preview fallback through the cross-repo credential without changing self authority', async () => {
+  const agentToken = 'ghs_bridge_cross_repo_fixture_123456789012345';
+  const fallbackToken = 'ghs_bridge_self_fixture_123456789012345';
+  const environment = { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken };
+  const calls = [];
+  const githubFactory = (token) => ({
+    inspect: async (configured) => { calls.push({ op: 'inspect', projectId: configured.id, token }); return { provider: 'github', head: 'base' }; },
+    authenticatedCommitIdentity: async () => { calls.push({ op: 'identity', token }); return { name: 'fixture', email: '1+fixture@users.noreply.github.com' }; },
+    branchHead: async (configured, branch) => { calls.push({ op: 'branch', projectId: configured.id, token }); return { branch, head: 'commit' }; },
+    createPullRequest: async (configured) => { calls.push({ op: 'pr', projectId: configured.id, token }); return { number: 1, state: 'open' }; },
+    pullRequest: async (configured) => { calls.push({ op: 'pr-read', projectId: configured.id, token }); return { number: 1, state: 'open', headSha: 'commit', headRef: 'agent/run', baseRef: configured.defaultBranch }; },
+    dispatchWorkflow: async (configured) => { calls.push({ op: 'dispatch', projectId: configured.id, token }); return { workflow: 'ci.yml', ref: 'agent/run', dispatched: true }; },
+    waitForCi: async (configured) => { calls.push({ op: 'ci', projectId: configured.id, token }); return { state: 'success' }; },
+    previewDeployment: async (configured) => { calls.push({ op: 'preview', projectId: configured.id, token }); return { provider: 'vercel', state: 'READY', ok: true }; }
+  });
+  const localGit = {
+    commit: async () => ({ finalHead: 'commit' }),
+    push: async () => ({ finalHead: 'commit' })
+  };
+  const bridge = new WorkflowPublicationBridge({
+    localGit,
+    environment,
+    githubFactory,
+    deploymentProviderFactory: ({ github }) => new VercelDeploymentProvider({ token: '', github }),
+    ciWorkflow: 'ci.yml'
+  });
+  const crossRepo = project({ id: 'website-pilot', deployment: { provider: 'vercel', projectId: 'prj_test', teamId: 'team_test' } });
+  const selfProject = project({ id: 'self', deployment: { provider: 'vercel', projectId: 'prj_self', teamId: 'team_test' } });
+
+  assert.equal((await bridge.inspectBase(crossRepo)).head, 'base');
+  await bridge.verifyRemoteBranch(crossRepo, 'agent/run', 'commit');
+  await bridge.createPullRequest(crossRepo, { branch: 'agent/run', workflowId: 'workflow-1', changeSetFingerprint: 'a'.repeat(64), goal: 'fixture' });
+  await bridge.dispatchCi(crossRepo, { branch: 'agent/run' });
+  await bridge.waitForCi(crossRepo, 'commit', {});
+  await bridge.waitForPreview(crossRepo, { commitSha: 'commit', branch: 'agent/run' }, { timeoutMs: 1, pollIntervalMs: 1 });
+  await bridge.inspectBase(selfProject);
+
+  const crossRepoCalls = calls.filter((call) => call.projectId === 'website-pilot' || call.op === 'preview');
+  assert.ok(crossRepoCalls.length >= 6);
+  assert.ok(crossRepoCalls.every((call) => call.token === agentToken));
+  const selfCalls = calls.filter((call) => call.projectId === 'self');
+  assert.equal(selfCalls.length, 1);
+  assert.equal(selfCalls[0].token, fallbackToken);
+  assert.equal(JSON.stringify(calls).includes('AGENT_GITHUB_TOKEN'), false);
+  assert.equal(JSON.stringify(calls).includes('GITHUB_TOKEN'), false);
 });
 
 test('managed private clone gets GitHub credential helper only through subprocess environment', async () => {
