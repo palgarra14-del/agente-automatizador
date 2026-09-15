@@ -808,6 +808,17 @@ export class SupervisedIssueQueue {
     return this.allowedActors.has(normalized) || normalized === 'github-actions[bot]';
   }
 
+  priorAgentInitializationComment(comment) {
+    if (!comment || typeof comment.body !== 'string' || !this.instructionPublisher(comment.user?.login)) return false;
+    if (!/^(?:Agent dry-run prepared|Agent dry-run approval instruction recovered)\./.test(comment.body)) return false;
+    return /Workflow:\s*`workflow-[a-f0-9-]+`/i.test(comment.body);
+  }
+
+  async unboundPriorAgentInitialization(issueNumber) {
+    const comments = await this.channel.comments(issueNumber);
+    return comments.find((comment) => this.priorAgentInitializationComment(comment)) ?? null;
+  }
+
   async post(number, text) {
     return this.channel.comment(number, text);
   }
@@ -913,8 +924,24 @@ export class SupervisedIssueQueue {
     if (!this.authorized(issue.user?.login)) return null;
     const project = this.projects.get(parsed.request.projectId) ?? null;
     const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
+    const priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
     const claim = await this.claimInitialization(issue, parsed, activeProjectFingerprint);
     if (!claim.claimed) return claim.record;
+    if (priorInitialization) {
+      const blocked = {
+        ...claim.record,
+        status: 'blocked',
+        reason: 'unbound_prior_agent_initialization',
+        initializationLease: null,
+        updatedAt: this.now()
+      };
+      return this.finalizeTerminal(
+        issue,
+        this.requestKey(issue),
+        blocked,
+        'Agent request blocked because this issue already contains trusted evidence of a prior agent workflow, but the active durable queue state has no binding for it. No duplicate workflow was created. Submit a new request only after reconciling or intentionally retiring the prior workflow.'
+      );
+    }
     if (!project) {
       const rejected = {
         version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
