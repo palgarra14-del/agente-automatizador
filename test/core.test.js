@@ -1157,6 +1157,7 @@ test('website blueprint selection is deterministic, accent-insensitive, factual-
   assert.equal(websiteBlueprintIdForCategory('Fontanería 24 horas'), 'home-services');
   assert.equal(websiteBlueprintIdForCategory('Reformas integrales'), 'home-services');
   assert.equal(websiteBlueprintIdForCategory('Estudio jurídico local'), 'generic-local');
+  assert.equal(websiteBlueprintIdForCategory('Wheelchair repair'), 'generic-local');
 
   const beauty = websiteBlueprintForBrief({ category: 'Salón de Belleza' });
   const beautyAgain = websiteBlueprintForBrief({ category: 'salon de belleza' });
