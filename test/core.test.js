@@ -1212,6 +1212,21 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
     createHash('sha256').update(JSON.stringify(homeContact)).digest('hex')
   );
 
+  const assertBlueprintCtasResolve = (blueprint) => {
+    const routes = new Set(blueprint.navigation.routes.map((entry) => entry.route));
+    const homeAnchors = new Set(blueprint.navigation.homeAnchors);
+    for (const cta of blueprint.ctas) {
+      if (cta.destination === 'provided-contact') continue;
+      if (cta.destination.startsWith('#')) {
+        assert.equal(homeAnchors.has(cta.destination), true, `unresolved CTA anchor: ${cta.destination}`);
+      } else {
+        assert.equal(routes.has(cta.destination), true, `unresolved CTA route: ${cta.destination}`);
+      }
+    }
+  };
+  assertBlueprintCtasResolve(beauty);
+  assertBlueprintCtasResolve(homeContact);
+
   const explicitWhatsapp = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
@@ -1221,6 +1236,7 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.equal(explicitWhatsapp.ctas[0].source, 'businessBrief.contact.whatsapp');
   assert.equal(explicitWhatsapp.ctas[1].kind, 'route');
   assert.equal(explicitWhatsapp.ctas[1].destination, '/contacto');
+  assertBlueprintCtasResolve(explicitWhatsapp);
   const formGoal = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
@@ -1228,6 +1244,7 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   });
   assert.equal(formGoal.ctas[0].kind, 'route');
   assert.equal(formGoal.ctas[0].destination, '/contacto');
+  assertBlueprintCtasResolve(formGoal);
   assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
   assert.deepEqual([...beauty.missingFactSources].sort(), [
     'businessBrief.contact.address',
