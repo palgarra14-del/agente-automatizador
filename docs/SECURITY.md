@@ -77,7 +77,7 @@ A completed publication requires exact commit-path/fingerprint evidence, remote-
 
 ## Cross-repository Git credential boundary
 
-Cloud orchestration may receive an optional `AGENT_GITHUB_TOKEN` solely for orchestrator-owned network Git operations against configured private repositories. The fixed Git credential helper prefers that token when present and otherwise falls back to the workflow-scoped `GITHUB_TOKEN`. Neither secret is embedded in clone/fetch/push arguments, repository URLs, Git config files, prompts, project commands, workflow state, reports, Vercel requests, or GitHub comments.
+Cloud orchestration may receive an optional `AGENT_GITHUB_TOKEN` solely for orchestrator-owned network Git operations against configured private repositories. For configured non-`self` projects, the fixed Git credential helper prefers that token when present and otherwise falls back to the workflow-scoped `GITHUB_TOKEN`; the `self` project deliberately ignores the broader token and keeps using `GITHUB_TOKEN`. Neither secret is embedded in clone/fetch/push arguments, repository URLs, Git config files, prompts, project commands, workflow state, reports, Vercel requests, or GitHub comments.
 
 The credential is translated only into the ephemeral `GH_TOKEN` environment consumed by `gh auth git-credential` for the individual network Git subprocess. Non-network Git receives no GitHub credential environment. The CodingWorker and read-only model executors retain their explicit environment allowlists and never receive `AGENT_GITHUB_TOKEN` or `GITHUB_TOKEN`. Invalid preferred credentials fail closed instead of silently falling back to a different token.
 
