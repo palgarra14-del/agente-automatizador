@@ -882,7 +882,9 @@ test('model billing/auth failures are fail-fast while transient transport failur
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
   const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const agentGitToken = 'ghp_agent_command_environment_test_1234567890';
   Object.assign(process.env, {
+    AGENT_GITHUB_TOKEN: agentGitToken,
     GITHUB_TOKEN: 'ghp_command_environment_test', VERCEL_TOKEN: 'vcp_command_environment_test',
     OPENAI_API_KEY: 'sk-command_environment_test', CODEX_API_KEY: 'codex-command_environment_test'
   });
@@ -892,6 +894,7 @@ test('project subprocesses retain PATH but never inherit orchestrator credential
     assert.equal(result.ok, true);
     assert.equal(observed.pathAvailable, true);
     assert.deepEqual(observed.credentials, { github: false, vercel: false, openai: false, codex: false });
+    assert.equal(result.stdout.includes(agentGitToken), false);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
@@ -1251,7 +1254,7 @@ test('Codex API credentials use the SDK apiKey boundary and never enter the gene
   assert.throws(() => codexApiKeyFromEnvironment({ CODEX_API_KEY: 'too short' }), /codex_api_key_invalid/);
   assert.throws(() => codexApiKeyFromEnvironment({ OPENAI_API_KEY: 'sk-valid-length-but has-space-1234' }), /codex_api_key_invalid/);
 
-  const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
     AGENT_GITHUB_TOKEN: 'ghp_agent_worker_test_secret_1234567890',
