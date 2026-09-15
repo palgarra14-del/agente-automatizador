@@ -1187,7 +1187,8 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.ok(beauty.pages.find((page) => page.route === '/')?.sections.includes('hero'));
   assert.deepEqual(beauty.contentSources.services, ['businessBrief.services[0]']);
   assert.deepEqual(beauty.seoRequirements.locationSources, ['businessBrief.locations[0]']);
-  assert.equal(beauty.ctas[0].destination, '#contact');
+  assert.equal(beauty.ctas[0].kind, 'route');
+  assert.equal(beauty.ctas[0].destination, '/contacto');
   const explicitWhatsapp = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
@@ -1195,13 +1196,16 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   });
   assert.equal(explicitWhatsapp.ctas[0].kind, 'whatsapp');
   assert.equal(explicitWhatsapp.ctas[0].source, 'businessBrief.contact.whatsapp');
+  assert.equal(explicitWhatsapp.ctas[1].id, 'secondary-contact');
+  assert.equal(explicitWhatsapp.ctas[1].kind, 'route');
+  assert.equal(explicitWhatsapp.ctas[1].destination, '/contacto');
   const formGoal = websiteBlueprintForBrief({
     ...brief,
     contact: { whatsapp: '34600000000', phone: '600000000' },
     website: { ...brief.website, primaryGoal: 'enviar formulario' }
   });
-  assert.equal(formGoal.ctas[0].kind, 'section');
-  assert.equal(formGoal.ctas[0].destination, '#contact');
+  assert.equal(formGoal.ctas[0].kind, 'route');
+  assert.equal(formGoal.ctas[0].destination, '/contacto');
   assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
   assert.deepEqual([...beauty.missingFactSources].sort(), [
     'businessBrief.contact.address',
@@ -1216,6 +1220,38 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'tel:', '€']) {
     assert.equal(serialized.includes(forbidden), false);
   }
+
+  const homeContactBrief = {
+    ...brief,
+    website: { ...brief.website, requiredPages: ['home'] }
+  };
+  const homeContact = websiteBlueprintForBrief(homeContactBrief);
+  const homeContactAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(homeContactBrief)));
+  assert.deepEqual(homeContact.pages.map((page) => page.route), ['/']);
+  assert.ok(homeContact.pages[0].sections.includes('contact'));
+  assert.ok(homeContact.navigation.homeAnchors.includes('#contact'));
+  assert.equal(homeContact.ctas[0].kind, 'section');
+  assert.equal(homeContact.ctas[0].destination, '#contact');
+  assert.equal(homeContact.ctas.length, 1);
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(homeContact)).digest('hex'),
+    createHash('sha256').update(JSON.stringify(homeContactAgain)).digest('hex')
+  );
+
+  const assertBlueprintDestinationsResolve = (blueprint) => {
+    const routes = new Set(blueprint.navigation.routes.map(({ route }) => route));
+    const homeAnchors = new Set(blueprint.navigation.homeAnchors);
+    for (const cta of blueprint.ctas) {
+      if (cta.destination === 'provided-contact') continue;
+      if (cta.kind === 'route') assert.ok(routes.has(cta.destination), `missing CTA route: ${cta.destination}`);
+      else if (cta.kind === 'section') assert.ok(homeAnchors.has(cta.destination), `missing home CTA anchor: ${cta.destination}`);
+      else assert.fail(`unexpected CTA destination kind: ${cta.kind}`);
+    }
+  };
+  assertBlueprintDestinationsResolve(beauty);
+  assertBlueprintDestinationsResolve(explicitWhatsapp);
+  assertBlueprintDestinationsResolve(formGoal);
+  assertBlueprintDestinationsResolve(homeContact);
 
   const fingerprintA = createHash('sha256').update(JSON.stringify(beauty)).digest('hex');
   const fingerprintB = createHash('sha256').update(JSON.stringify(beautyAgain)).digest('hex');
