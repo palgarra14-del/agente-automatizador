@@ -1258,7 +1258,7 @@ export function websiteBlueprintForBrief(businessBrief) {
   return safeJson({
     version: 1,
     profileId,
-    sourceBriefFingerprint: evidenceFingerprint(businessBrief),
+    sourceBriefFingerprint: evidenceFingerprint({ businessBrief }),
     pages,
     requiredFeatures,
     contentSources: {
@@ -1603,6 +1603,7 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
         step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
         JSON.stringify(step.evidence.websiteBlueprint) !== JSON.stringify(expectedBlueprint) ||
         step.evidence.websiteBlueprintFingerprint !== expectedBlueprintFingerprint ||
+        step.evidence.websiteBlueprint.sourceBriefFingerprint !== plan.inputFingerprint ||
         !step.evidence.assetEvidence ||
         step.evidence.assetEvidenceFingerprint !== evidenceFingerprint(step.evidence.assetEvidence.assets ?? []) ||
         step.evidence.assetEvidenceFingerprint !== step.evidence.assetEvidence.fingerprint
