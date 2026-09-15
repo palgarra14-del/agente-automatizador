@@ -313,7 +313,8 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(prompt, /businessBrief is the complete authoritative source of business facts/);
   assert.match(prompt, /"profileId": "home-services"/);
   assert.match(prompt, /page\/section inventory, CTA source mapping, navigation, responsive\/accessibility, SEO-source, asset-provenance/);
-  assert.match(prompt, /do not invent testimonials/i);
+  assert.match(prompt, /do not invent facts absent from the brief/i);
+  assert.match(prompt, /contentRestrictions/);
   assert.match(prompt, /missingInputs/);
   assert.match(prompt, /configuredQualityCommands are authoritative orchestrator-side validation commands/);
   assert.match(prompt, /node --test test\/website\.test\.js/);
