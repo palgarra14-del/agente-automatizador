@@ -45,6 +45,8 @@ import {
   resolveExecutionUser,
   safeCommandEnvironment,
   transition,
+  websiteBlueprintForBrief,
+  websiteBlueprintIdForCategory,
   managedWorkspacePath
 } from '../src/core.js';
 
@@ -1146,6 +1148,39 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
     createHash('sha256').update(JSON.stringify(result.result.diagnosis)).digest('hex')
   );
   assert.equal(clientConstructions, 0);
+});
+
+test('website blueprint selection is deterministic, accent-insensitive, factual-safe, and has a generic fallback', () => {
+  assert.equal(websiteBlueprintIdForCategory('Peluquería y salón de belleza'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('PELUQUERIA PREMIUM'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('Barbería urbana'), 'beauty-salon');
+  assert.equal(websiteBlueprintIdForCategory('Fontanería 24 horas'), 'home-services');
+  assert.equal(websiteBlueprintIdForCategory('Reformas integrales'), 'home-services');
+  assert.equal(websiteBlueprintIdForCategory('Estudio jurídico local'), 'generic-local');
+
+  const beauty = websiteBlueprintForBrief({ category: 'Salón de Belleza' });
+  const beautyAgain = websiteBlueprintForBrief({ category: 'salon de belleza' });
+  const home = websiteBlueprintForBrief({ category: 'Fontanería' });
+  const generic = websiteBlueprintForBrief({ category: 'Consultoría' });
+
+  assert.equal(beauty.id, 'beauty-salon');
+  assert.equal(home.id, 'home-services');
+  assert.equal(generic.id, 'generic-local');
+  assert.deepEqual(beauty, beautyAgain);
+  assert.notDeepEqual(beauty, home);
+  assert.ok(beauty.sectionPriorities.includes('services'));
+  assert.ok(home.sectionPriorities.includes('contact'));
+
+  const serialized = JSON.stringify({ beauty, home, generic }).toLowerCase();
+  for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'c/ ', 'tel:', '€']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+  assert.match(serialized, /never infer|only when explicitly supplied|business-specific claims/);
+
+  const fingerprintA = createHash('sha256').update(JSON.stringify(beauty)).digest('hex');
+  const fingerprintB = createHash('sha256').update(JSON.stringify(beautyAgain)).digest('hex');
+  assert.equal(fingerprintA, fingerprintB);
+  assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
 });
 
 test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
