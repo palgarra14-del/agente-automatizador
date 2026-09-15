@@ -1466,6 +1466,9 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
           step.evidence.websitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
           step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
           design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
+          step.evidence.websiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
+          step.evidence.approvedWebsiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
+          design.evidence?.approvedWebsiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
           step.evidence.assetEvidenceFingerprint !== requirements.evidence?.assetEvidenceFingerprint
         ) throw new Error('Completed website implementation is not bound to the approved website plan and assets');
       }
@@ -2216,7 +2219,9 @@ export class WorkflowEngine {
         design?.status !== WorkflowStepStatus.COMPLETED ||
         !requirements.evidence?.result?.websitePlan ||
         !requirements.evidence?.websitePlanFingerprint ||
+        !requirements.evidence?.websiteBlueprintFingerprint ||
         design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint ||
+        design.evidence?.approvedWebsiteBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint ||
         requirements.evidence?.businessBriefFingerprint !== websitePlanState.inputFingerprint
       ) {
         return this.update(id, (saved) => {
@@ -2225,6 +2230,27 @@ export class WorkflowEngine {
           step.error = 'website_implementation_prerequisites_invalid';
           step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
           saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+      const observedBlueprint = websiteBlueprintForBrief(websitePlanState.input.businessBrief);
+      const observedBlueprintFingerprint = evidenceFingerprint(observedBlueprint);
+      if (
+        observedBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint ||
+        JSON.stringify(observedBlueprint) !== JSON.stringify(requirements.evidence.websiteBlueprint)
+      ) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'website_blueprint_changed_after_plan';
+          step.evidence = {
+            type: 'governance',
+            ok: false,
+            ...workflowEvidenceContext(saved, step),
+            expectedWebsiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+            observedWebsiteBlueprintFingerprint: observedBlueprintFingerprint
+          };
+          saved.status = WorkflowStepStatus.BLOCKED;
           saved.result = { error: step.error, stepId: step.id };
         });
       }
@@ -2262,6 +2288,9 @@ export class WorkflowEngine {
         websitePlan: requirements.evidence.result.websitePlan,
         websitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
         approvedWebsitePlanFingerprint: design.evidence.approvedWebsitePlanFingerprint,
+        websiteBlueprint: observedBlueprint,
+        websiteBlueprintFingerprint: observedBlueprintFingerprint,
+        approvedWebsiteBlueprintFingerprint: design.evidence.approvedWebsiteBlueprintFingerprint,
         assetEvidence: observedAssets
       };
     }
@@ -2344,6 +2373,8 @@ export class WorkflowEngine {
           businessBriefFingerprint: websiteBuildContext.businessBriefFingerprint,
           websitePlanFingerprint: websiteBuildContext.websitePlanFingerprint,
           approvedWebsitePlanFingerprint: websiteBuildContext.approvedWebsitePlanFingerprint,
+          websiteBlueprintFingerprint: websiteBuildContext.websiteBlueprintFingerprint,
+          approvedWebsiteBlueprintFingerprint: websiteBuildContext.approvedWebsiteBlueprintFingerprint,
           assetEvidenceFingerprint: websiteBuildContext.assetEvidence.fingerprint
         } : {}),
         workerEvidence: {
