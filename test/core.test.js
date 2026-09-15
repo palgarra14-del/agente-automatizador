@@ -1726,6 +1726,7 @@ test('workflow publication routes target GitHub API and preview fallback through
   const selfProject = project({ id: 'self', deployment: { provider: 'vercel', projectId: 'prj_self', teamId: 'team_test' } });
 
   assert.equal((await bridge.inspectBase(crossRepo)).head, 'base');
+  await bridge.commit(crossRepo, { branch: 'agent/run', goal: 'fixture', baseHead: 'base', remote: 'https://github.com/owner/repo.git', changeSetFingerprint: 'a'.repeat(64) });
   await bridge.verifyRemoteBranch(crossRepo, 'agent/run', 'commit');
   await bridge.createPullRequest(crossRepo, { branch: 'agent/run', workflowId: 'workflow-1', changeSetFingerprint: 'a'.repeat(64), goal: 'fixture' });
   await bridge.dispatchCi(crossRepo, { branch: 'agent/run' });
@@ -1734,7 +1735,7 @@ test('workflow publication routes target GitHub API and preview fallback through
   await bridge.inspectBase(selfProject);
 
   const crossRepoCalls = calls.filter((call) => call.projectId === 'website-pilot' || call.op === 'preview');
-  assert.ok(crossRepoCalls.length >= 6);
+  assert.ok(crossRepoCalls.length >= 7);
   assert.ok(crossRepoCalls.every((call) => call.token === agentToken));
   const selfCalls = calls.filter((call) => call.projectId === 'self');
   assert.equal(selfCalls.length, 1);
