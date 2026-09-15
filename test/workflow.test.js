@@ -319,6 +319,8 @@ test('website planner verifies repository assets before spending a model call', 
       calls += 1;
       assert.equal(request.context.businessBrief.businessName, 'Fontanería Ejemplo');
       assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(request.context.websiteBlueprint.id, 'home-services');
+      assert.match(request.context.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
       assert.equal(request.context.assetEvidence.assets.length, 2);
       assert.ok(request.context.assetEvidence.assets.every((asset) => /^[a-f0-9]{64}$/.test(asset.sha256)));
       return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: websitePlanFixture() } };
@@ -341,8 +343,22 @@ test('website planner verifies repository assets before spending a model call', 
   assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.equal(requirements.evidence.businessBriefFingerprint, waiting.inputFingerprint);
+  assert.equal(requirements.evidence.websiteBlueprint.id, 'home-services');
+  assert.match(requirements.evidence.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
   assert.match(requirements.evidence.assetEvidenceFingerprint, /^[a-f0-9]{64}$/);
   assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
+
+  const tamperedBlueprint = JSON.parse(JSON.stringify(waiting));
+  tamperedBlueprint.steps.find((step) => step.id === 'requirements').evidence.websiteBlueprint.id = 'beauty-salon';
+  assert.throws(
+    () => validateWorkflowPlan(tamperedBlueprint, new Map([[configured.id, configured]])),
+    /business brief, blueprint, and verified assets/
+  );
+
+  const approved = await instance.approve(created.id, 'design');
+  const design = approved.steps.find((step) => step.id === 'design');
+  assert.equal(design.evidence.approvedWebsiteBlueprintFingerprint, requirements.evidence.websiteBlueprintFingerprint);
+  assert.equal(design.evidence.approvedWebsitePlanFingerprint, requirements.evidence.websitePlanFingerprint);
   assert.equal(calls, 1);
   assert.equal(waiting.modelUsage.calls, 1);
 });
