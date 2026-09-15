@@ -1188,8 +1188,9 @@ function normalizeWebsiteBlueprintCategory(value) {
 
 export function websiteBlueprintIdForCategory(category) {
   const normalized = normalizeWebsiteBlueprintCategory(category);
-  const beautySignals = ['peluquer', 'salon de belleza', 'barber', 'barberia', 'estetica', 'beauty', 'hair'];
-  if (beautySignals.some((signal) => normalized.includes(signal))) return 'beauty-salon';
+  const beautySignals = ['peluquer', 'salon de belleza', 'barber', 'barberia', 'estetica'];
+  const words = new Set(normalized.split(' ').filter(Boolean));
+  if (beautySignals.some((signal) => normalized.includes(signal)) || words.has('beauty') || words.has('hair')) return 'beauty-salon';
   const homeSignals = ['fontaner', 'reforma', 'pintor', 'pintura', 'electric', 'cerrajer', 'desatasc', 'climatiz', 'albanil', 'multiservicio'];
   if (homeSignals.some((signal) => normalized.includes(signal))) return 'home-services';
   return 'generic-local';
