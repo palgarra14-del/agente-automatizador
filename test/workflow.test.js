@@ -321,7 +321,7 @@ test('website planner verifies repository assets before spending a model call', 
       assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
       assert.equal(request.context.websiteBlueprint.profileId, 'home-services');
       assert.match(request.context.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
-      assert.match(request.context.websiteBlueprint.sourceBriefFingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(request.context.websiteBlueprint.sourceBriefFingerprint, request.context.businessBriefFingerprint);
       assert.deepEqual(request.context.websiteBlueprint.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
       assert.equal(request.context.websiteBlueprint.ctas[0].kind, 'whatsapp');
       assert.equal(request.context.websiteBlueprint.ctas[0].source, 'businessBrief.contact.whatsapp');
@@ -348,6 +348,7 @@ test('website planner verifies repository assets before spending a model call', 
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.equal(requirements.evidence.businessBriefFingerprint, waiting.inputFingerprint);
   assert.equal(requirements.evidence.websiteBlueprint.profileId, 'home-services');
+  assert.equal(requirements.evidence.websiteBlueprint.sourceBriefFingerprint, waiting.inputFingerprint);
   assert.match(requirements.evidence.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(requirements.evidence.websiteBlueprint.assets.allowedProvenance.includes('missing'), true);
   assert.equal(requirements.evidence.websiteBlueprint.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
