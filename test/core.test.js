@@ -1150,7 +1150,7 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.equal(clientConstructions, 0);
 });
 
-test('website blueprint selection is deterministic, accent-insensitive, factual-safe, and has a generic fallback', () => {
+test('website blueprint selection is deterministic, fact-bound, accent-insensitive, and has a generic fallback', () => {
   assert.equal(websiteBlueprintIdForCategory('Peluquería y salón de belleza'), 'beauty-salon');
   assert.equal(websiteBlueprintIdForCategory('PELUQUERIA PREMIUM'), 'beauty-salon');
   assert.equal(websiteBlueprintIdForCategory('Barbería urbana'), 'beauty-salon');
@@ -1159,28 +1159,66 @@ test('website blueprint selection is deterministic, accent-insensitive, factual-
   assert.equal(websiteBlueprintIdForCategory('Estudio jurídico local'), 'generic-local');
   assert.equal(websiteBlueprintIdForCategory('Wheelchair repair'), 'generic-local');
 
-  const beauty = websiteBlueprintForBrief({ category: 'Salón de Belleza' });
-  const beautyAgain = websiteBlueprintForBrief({ category: 'salon de belleza' });
-  const home = websiteBlueprintForBrief({ category: 'Fontanería' });
-  const generic = websiteBlueprintForBrief({ category: 'Consultoría' });
+  const brief = {
+    category: 'Salón de Belleza',
+    locations: ['Madrid'],
+    services: [{ name: 'Corte' }],
+    facts: ['Solo con cita.'],
+    contentRestrictions: ['No inventar precios.'],
+    contact: {},
+    assets: {},
+    website: {
+      primaryGoal: 'solicitar cita',
+      requiredPages: ['home', 'servicios', 'contacto'],
+      requiredFeatures: ['CTA de cita']
+    }
+  };
+  const beauty = websiteBlueprintForBrief(brief);
+  const beautyAgain = websiteBlueprintForBrief(JSON.parse(JSON.stringify(brief)));
+  const home = websiteBlueprintForBrief({ ...brief, category: 'Fontanería' });
+  const generic = websiteBlueprintForBrief({ ...brief, category: 'Consultoría' });
 
-  assert.equal(beauty.id, 'beauty-salon');
-  assert.equal(home.id, 'home-services');
-  assert.equal(generic.id, 'generic-local');
+  assert.equal(beauty.profileId, 'beauty-salon');
+  assert.equal(home.profileId, 'home-services');
+  assert.equal(generic.profileId, 'generic-local');
   assert.deepEqual(beauty, beautyAgain);
   assert.notDeepEqual(beauty, home);
-  assert.ok(beauty.sectionPriorities.includes('services'));
-  assert.ok(home.sectionPriorities.includes('contact'));
+  assert.deepEqual(beauty.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
+  assert.ok(beauty.pages.find((page) => page.route === '/')?.sections.includes('hero'));
+  assert.deepEqual(beauty.contentSources.services, ['businessBrief.services[0]']);
+  assert.deepEqual(beauty.seoRequirements.locationSources, ['businessBrief.locations[0]']);
+  assert.equal(beauty.ctas[0].destination, '#contact');
+  assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
+  assert.deepEqual(beauty.missingFactSources.sort(), [
+    'businessBrief.contact.address',
+    'businessBrief.contact.email',
+    'businessBrief.contact.phone',
+    'businessBrief.contact.whatsapp'
+  ].sort());
+  assert.equal(beauty.forbiddenClaims[0].value, 'No inventar precios.');
+  assert.equal(beauty.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
 
-  const serialized = JSON.stringify({ beauty, home, generic }).toLowerCase();
-  for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'c/ ', 'tel:', '€']) {
+  const serialized = JSON.stringify(beauty).toLowerCase();
+  for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'tel:', '€']) {
     assert.equal(serialized.includes(forbidden), false);
   }
-  assert.match(serialized, /never infer|only when explicitly supplied|business-specific claims/);
 
   const fingerprintA = createHash('sha256').update(JSON.stringify(beauty)).digest('hex');
   const fingerprintB = createHash('sha256').update(JSON.stringify(beautyAgain)).digest('hex');
   assert.equal(fingerprintA, fingerprintB);
+
+  const factChanged = websiteBlueprintForBrief({ ...brief, facts: ['Solo con cita.', 'Aparcamiento concertado.'] });
+  const restrictionChanged = websiteBlueprintForBrief({ ...brief, contentRestrictions: ['No inventar precios.', 'No inventar testimonios.'] });
+  assert.notEqual(factChanged.sourceBriefFingerprint, beauty.sourceBriefFingerprint);
+  assert.notEqual(restrictionChanged.sourceBriefFingerprint, beauty.sourceBriefFingerprint);
+  assert.notEqual(
+    createHash('sha256').update(JSON.stringify(factChanged)).digest('hex'),
+    fingerprintA
+  );
+  assert.notEqual(
+    createHash('sha256').update(JSON.stringify(restrictionChanged)).digest('hex'),
+    fingerprintA
+  );
   assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
 });
 
