@@ -60,6 +60,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
