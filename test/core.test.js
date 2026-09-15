@@ -1203,7 +1203,7 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.equal(formGoal.ctas[0].kind, 'section');
   assert.equal(formGoal.ctas[0].destination, '#contact');
   assert.equal(beauty.assets.slots.some((slot) => slot.provenance === 'generic-decorative'), true);
-  assert.deepEqual(beauty.missingFactSources.sort(), [
+  assert.deepEqual([...beauty.missingFactSources].sort(), [
     'businessBrief.contact.address',
     'businessBrief.contact.email',
     'businessBrief.contact.phone',
