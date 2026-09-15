@@ -1117,6 +1117,190 @@ export function normalizeBusinessBrief(value) {
   });
 }
 
+const websiteBlueprintSectionProfiles = Object.freeze({
+  'beauty-salon': Object.freeze(['hero', 'services', 'inspiration-media', 'experience', 'faq', 'contact']),
+  'home-services': Object.freeze(['hero', 'services', 'verified-facts', 'verified-work-media', 'faq', 'contact']),
+  'generic-local': Object.freeze(['hero', 'services', 'verified-facts', 'faq', 'contact'])
+});
+
+function normalizeWebsiteBlueprintCategory(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function websiteBlueprintIdForCategory(category) {
+  const normalized = normalizeWebsiteBlueprintCategory(category);
+  const beautySignals = ['peluquer', 'salon de belleza', 'barber', 'barberia', 'estetica'];
+  const words = new Set(normalized.split(' ').filter(Boolean));
+  if (beautySignals.some((signal) => normalized.includes(signal)) || words.has('beauty') || words.has('hair')) return 'beauty-salon';
+  const homeSignals = ['fontaner', 'reforma', 'pintor', 'pintura', 'electric', 'cerrajer', 'desatasc', 'climatiz', 'albanil', 'multiservicio'];
+  if (homeSignals.some((signal) => normalized.includes(signal))) return 'home-services';
+  return 'generic-local';
+}
+
+function websiteBlueprintPage(value, index) {
+  const label = boundedText(value, `businessBrief.website.requiredPages[${index}]`, { required: true, max: 120 });
+  const normalized = normalizeWebsiteBlueprintCategory(label).replace(/\s+/g, '-');
+  const home = ['home', 'inicio', 'principal'].includes(normalized);
+  const id = home ? 'home' : (normalized || `page-${index + 1}`);
+  return {
+    id,
+    route: home ? '/' : `/${id}`,
+    source: `businessBrief.website.requiredPages[${index}]`
+  };
+}
+
+function websiteBlueprintPages(brief, profileId) {
+  const requested = Array.isArray(brief?.website?.requiredPages) && brief.website.requiredPages.length
+    ? brief.website.requiredPages
+    : ['home'];
+  const seen = new Set();
+  const pages = [];
+  for (let index = 0; index < requested.length; index += 1) {
+    const page = websiteBlueprintPage(requested[index], index);
+    if (seen.has(page.route)) continue;
+    seen.add(page.route);
+    pages.push(page);
+  }
+  if (!pages.some((page) => page.route === '/')) pages.unshift({ id: 'home', route: '/', source: 'blueprint.default-home' });
+
+  const hasServicesPage = pages.some((page) => /servic/.test(page.id));
+  const hasContactPage = pages.some((page) => /contact/.test(page.id));
+  const hasMediaPage = pages.some((page) => /(galer|portfolio|look|inspir)/.test(page.id));
+  const profileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
+
+  return pages.map((page) => {
+    let sections;
+    if (page.route === '/') {
+      sections = profileSections.filter((section) =>
+        !(section === 'services' && hasServicesPage) &&
+        !(section === 'contact' && hasContactPage) &&
+        !(['inspiration-media', 'verified-work-media'].includes(section) && hasMediaPage)
+      );
+    } else if (/servic/.test(page.id)) sections = ['services', 'primary-cta'];
+    else if (/contact/.test(page.id)) sections = ['contact'];
+    else if (/(galer|portfolio|look|inspir)/.test(page.id)) sections = ['media', 'primary-cta'];
+    else if (/faq|pregunt/.test(page.id)) sections = ['faq', 'primary-cta'];
+    else sections = ['required-page-content', 'primary-cta'];
+    return { ...page, sections };
+  });
+}
+
+function websiteBlueprintPrimaryCta(brief) {
+  const goal = normalizeWebsiteBlueprintCategory(brief?.website?.primaryGoal);
+  const contact = brief?.contact ?? {};
+  const candidates = [];
+  if (goal.includes('whatsapp')) candidates.push(['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp]);
+  if (goal.includes('llam') || goal.includes('telefon')) candidates.push(['phone', 'businessBrief.contact.phone', contact.phone]);
+  if (goal.includes('email') || goal.includes('correo')) candidates.push(['email', 'businessBrief.contact.email', contact.email]);
+  const selected = candidates.find(([, , value]) => typeof value === 'string' && value.trim());
+  if (selected) {
+    return {
+      id: 'primary',
+      kind: selected[0],
+      destination: 'provided-contact',
+      source: selected[1],
+      goalSource: 'businessBrief.website.primaryGoal'
+    };
+  }
+  return {
+    id: 'primary',
+    kind: 'section',
+    destination: '#contact',
+    source: null,
+    goalSource: 'businessBrief.website.primaryGoal'
+  };
+}
+
+export function websiteBlueprintForBrief(businessBrief) {
+  if (!businessBrief || typeof businessBrief !== 'object' || Array.isArray(businessBrief)) throw new Error('website_blueprint_business_brief_invalid');
+  const profileId = websiteBlueprintIdForCategory(businessBrief.category);
+  const pages = websiteBlueprintPages(businessBrief, profileId);
+  const primaryCta = websiteBlueprintPrimaryCta(businessBrief);
+  const services = Array.isArray(businessBrief.services) ? businessBrief.services : [];
+  const facts = Array.isArray(businessBrief.facts) ? businessBrief.facts : [];
+  const restrictions = Array.isArray(businessBrief.contentRestrictions) ? businessBrief.contentRestrictions : [];
+  const locations = Array.isArray(businessBrief.locations) ? businessBrief.locations : [];
+  const photoPaths = Array.isArray(businessBrief?.assets?.photoPaths) ? businessBrief.assets.photoPaths : [];
+  const assetSlots = [];
+  if (businessBrief?.assets?.logoPath) {
+    assetSlots.push({ slot: 'logo', provenance: 'provided', source: 'businessBrief.assets.logoPath', path: businessBrief.assets.logoPath, required: false });
+  } else {
+    assetSlots.push({ slot: 'logo', provenance: 'missing', source: null, path: null, required: false });
+  }
+  for (let index = 0; index < photoPaths.length; index += 1) {
+    assetSlots.push({ slot: `photo-${index + 1}`, provenance: 'provided', source: `businessBrief.assets.photoPaths[${index}]`, path: photoPaths[index], required: false });
+  }
+  if (!photoPaths.length) {
+    assetSlots.push({ slot: 'decorative-media', provenance: 'generic-decorative', source: null, path: null, required: false });
+  }
+
+  const missingContactSources = ['phone', 'whatsapp', 'email', 'address']
+    .filter((field) => !businessBrief?.contact?.[field])
+    .map((field) => `businessBrief.contact.${field}`);
+
+  const requiredFeatures = Array.isArray(businessBrief?.website?.requiredFeatures)
+    ? businessBrief.website.requiredFeatures.map((value, index) => ({
+        value,
+        source: `businessBrief.website.requiredFeatures[${index}]`
+      }))
+    : [];
+
+  return safeJson({
+    version: 1,
+    profileId,
+    sourceBriefFingerprint: evidenceFingerprint({ businessBrief }),
+    pages,
+    requiredFeatures,
+    contentSources: {
+      services: services.map((_service, index) => `businessBrief.services[${index}]`),
+      facts: facts.map((_fact, index) => `businessBrief.facts[${index}]`),
+      locations: locations.map((_location, index) => `businessBrief.locations[${index}]`)
+    },
+    ctas: [
+      primaryCta,
+      ...(primaryCta.destination === '#contact' ? [] : [{ id: 'secondary-contact', kind: 'section', destination: '#contact', source: null, goalSource: null }])
+    ],
+    navigation: {
+      routes: pages.map((page) => ({ id: page.id, route: page.route })),
+      homeAnchors: (pages.find((page) => page.route === '/')?.sections ?? []).map((section) => `#${section}`)
+    },
+    responsiveRequirements: [
+      'No horizontal overflow at supported mobile viewport.',
+      'Primary navigation and primary CTA remain usable on small screens.',
+      'Content order remains understandable without desktop-only positioning.'
+    ],
+    accessibilityRequirements: [
+      'One clear page-level heading hierarchy.',
+      'Interactive elements require accessible names and keyboard reachability.',
+      'Meaningful images require appropriate alternative text; decorative imagery must be marked decorative.',
+      'Text and interactive controls require usable contrast and visible focus.'
+    ],
+    seoRequirements: {
+      locationSources: locations.map((_location, index) => `businessBrief.locations[${index}]`),
+      serviceSources: services.map((_service, index) => `businessBrief.services[${index}]`),
+      requirements: [
+        'Title and meta description must use only supplied business facts.',
+        'Local terms may use only supplied location and service sources.',
+        'Do not fabricate ratings, opening hours, addresses, service areas or credentials for structured or visible metadata.'
+      ]
+    },
+    assets: {
+      allowedProvenance: ['provided', 'generic-decorative', 'generated-safe', 'missing'],
+      slots: assetSlots
+    },
+    forbiddenClaims: restrictions.map((value, index) => ({
+      value,
+      source: `businessBrief.contentRestrictions[${index}]`
+    })),
+    missingFactSources: missingContactSources
+  });
+}
+
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
@@ -1380,6 +1564,9 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
           step.evidence.websitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
           step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
           design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence?.websitePlanFingerprint ||
+          step.evidence.websiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
+          step.evidence.approvedWebsiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
+          design.evidence?.approvedWebsiteBlueprintFingerprint !== requirements.evidence?.websiteBlueprintFingerprint ||
           step.evidence.assetEvidenceFingerprint !== requirements.evidence?.assetEvidenceFingerprint
         ) throw new Error('Completed website implementation is not bound to the approved website plan and assets');
       }
@@ -1403,14 +1590,19 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     }
     if (step.skill === 'website.plan') {
       const normalizedPlan = validateWebsitePlanContext(step.evidence.result?.websitePlan, plan.input.businessBrief);
+      const expectedBlueprint = websiteBlueprintForBrief(plan.input.businessBrief);
+      const expectedBlueprintFingerprint = evidenceFingerprint(expectedBlueprint);
       if (
         JSON.stringify(step.evidence.result.websitePlan) !== JSON.stringify(normalizedPlan) ||
         step.evidence.businessBriefFingerprint !== plan.inputFingerprint ||
         step.evidence.websitePlanFingerprint !== evidenceFingerprint(normalizedPlan) ||
+        JSON.stringify(step.evidence.websiteBlueprint) !== JSON.stringify(expectedBlueprint) ||
+        step.evidence.websiteBlueprintFingerprint !== expectedBlueprintFingerprint ||
+        step.evidence.websiteBlueprint.sourceBriefFingerprint !== plan.inputFingerprint ||
         !step.evidence.assetEvidence ||
         step.evidence.assetEvidenceFingerprint !== evidenceFingerprint(step.evidence.assetEvidence.assets ?? []) ||
         step.evidence.assetEvidenceFingerprint !== step.evidence.assetEvidence.fingerprint
-      ) throw new Error('Completed website plan is not bound to the business brief and verified assets');
+      ) throw new Error('Completed website plan is not bound to the business brief, blueprint, and verified assets');
     }
     if (step.skill === 'code.review') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -1462,7 +1654,13 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
     }
     if (plan.profile === 'website-build' && step.id === 'design') {
       const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
-      if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint || step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint) throw new Error('Completed website design approval is not bound to the website plan');
+      if (
+        requirements?.status !== WorkflowStepStatus.COMPLETED ||
+        !requirements.evidence?.websitePlanFingerprint ||
+        !requirements.evidence?.websiteBlueprintFingerprint ||
+        step.evidence.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint ||
+        step.evidence.approvedWebsiteBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint
+      ) throw new Error('Completed website design approval is not bound to the website plan and blueprint');
     }
     if (plan.profile === 'website-build' && step.id === 'visual-verification') {
       const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -1834,9 +2032,12 @@ export class WorkflowEngine {
       });
     }
     let websiteAssetEvidence = null;
+    let websiteBlueprint = null;
     if (next.skill === 'website.plan') {
       try {
-        websiteAssetEvidence = await this.websiteAssetEvidence(workspaceProject, (await this.get(id)).input?.businessBrief);
+        const websiteBrief = (await this.get(id)).input?.businessBrief;
+        websiteAssetEvidence = await this.websiteAssetEvidence(workspaceProject, websiteBrief);
+        websiteBlueprint = websiteBlueprintForBrief(websiteBrief);
       } catch (error) {
         return this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === next.id);
@@ -1924,6 +2125,8 @@ export class WorkflowEngine {
       ...(runningStep.skill === 'website.plan' ? {
         businessBrief: runningPlan.input.businessBrief,
         businessBriefFingerprint: runningPlan.inputFingerprint,
+        websiteBlueprint,
+        websiteBlueprintFingerprint: evidenceFingerprint(websiteBlueprint),
         assetEvidence: websiteAssetEvidence,
         configuredQualityCommands: Object.fromEntries(
           websiteQualityCommands.map((name) => [name, project.commands?.[name] ?? null])
@@ -1937,6 +2140,8 @@ export class WorkflowEngine {
             businessBriefFingerprint: runningPlan.inputFingerprint,
             websitePlan: requirements?.evidence?.result?.websitePlan ?? null,
             websitePlanFingerprint: requirements?.evidence?.websitePlanFingerprint ?? null,
+            websiteBlueprint: requirements?.evidence?.websiteBlueprint ?? null,
+            websiteBlueprintFingerprint: requirements?.evidence?.websiteBlueprintFingerprint ?? null,
             assetEvidence: requirements?.evidence?.assetEvidence ?? null
           }
         };
@@ -2010,6 +2215,8 @@ export class WorkflowEngine {
         repositoryContextPaths: repositoryContext?.files?.map((file) => file.path) ?? [],
         ...(step.skill === 'website.plan' && executionOk && !integrityChanged && !websitePlanContextError ? {
           businessBriefFingerprint: runningPlan.inputFingerprint,
+          websiteBlueprint: safeJson(websiteBlueprint),
+          websiteBlueprintFingerprint: evidenceFingerprint(websiteBlueprint),
           assetEvidence: safeJson(websiteAssetEvidence),
           assetEvidenceFingerprint: websiteAssetEvidence.fingerprint,
           websitePlanFingerprint: evidenceFingerprint(execution.result.websitePlan)
@@ -2111,7 +2318,9 @@ export class WorkflowEngine {
         design?.status !== WorkflowStepStatus.COMPLETED ||
         !requirements.evidence?.result?.websitePlan ||
         !requirements.evidence?.websitePlanFingerprint ||
+        !requirements.evidence?.websiteBlueprintFingerprint ||
         design.evidence?.approvedWebsitePlanFingerprint !== requirements.evidence.websitePlanFingerprint ||
+        design.evidence?.approvedWebsiteBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint ||
         requirements.evidence?.businessBriefFingerprint !== websitePlanState.inputFingerprint
       ) {
         return this.update(id, (saved) => {
@@ -2120,6 +2329,27 @@ export class WorkflowEngine {
           step.error = 'website_implementation_prerequisites_invalid';
           step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
           saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+        });
+      }
+      const observedBlueprint = websiteBlueprintForBrief(websitePlanState.input.businessBrief);
+      const observedBlueprintFingerprint = evidenceFingerprint(observedBlueprint);
+      if (
+        observedBlueprintFingerprint !== requirements.evidence.websiteBlueprintFingerprint ||
+        JSON.stringify(observedBlueprint) !== JSON.stringify(requirements.evidence.websiteBlueprint)
+      ) {
+        return this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === next.id);
+          step.status = WorkflowStepStatus.BLOCKED;
+          step.error = 'website_blueprint_changed_after_plan';
+          step.evidence = {
+            type: 'governance',
+            ok: false,
+            ...workflowEvidenceContext(saved, step),
+            expectedWebsiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+            observedWebsiteBlueprintFingerprint: observedBlueprintFingerprint
+          };
+          saved.status = WorkflowStepStatus.BLOCKED;
           saved.result = { error: step.error, stepId: step.id };
         });
       }
@@ -2157,6 +2387,9 @@ export class WorkflowEngine {
         websitePlan: requirements.evidence.result.websitePlan,
         websitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
         approvedWebsitePlanFingerprint: design.evidence.approvedWebsitePlanFingerprint,
+        websiteBlueprint: observedBlueprint,
+        websiteBlueprintFingerprint: observedBlueprintFingerprint,
+        approvedWebsiteBlueprintFingerprint: design.evidence.approvedWebsiteBlueprintFingerprint,
         assetEvidence: observedAssets
       };
     }
@@ -2239,6 +2472,8 @@ export class WorkflowEngine {
           businessBriefFingerprint: websiteBuildContext.businessBriefFingerprint,
           websitePlanFingerprint: websiteBuildContext.websitePlanFingerprint,
           approvedWebsitePlanFingerprint: websiteBuildContext.approvedWebsitePlanFingerprint,
+          websiteBlueprintFingerprint: websiteBuildContext.websiteBlueprintFingerprint,
+          approvedWebsiteBlueprintFingerprint: websiteBuildContext.approvedWebsiteBlueprintFingerprint,
           assetEvidenceFingerprint: websiteBuildContext.assetEvidence.fingerprint
         } : {}),
         workerEvidence: {
@@ -2968,8 +3203,16 @@ export class WorkflowEngine {
             }
             if (plan.profile === 'website-build' && step.id === 'design') {
               const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
-              if (requirements?.status !== WorkflowStepStatus.COMPLETED || !requirements.evidence?.websitePlanFingerprint) throw new Error('Website design cannot approve an unbound website plan');
-              return { approvedDependencyEvidenceFingerprint, approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint };
+              if (
+                requirements?.status !== WorkflowStepStatus.COMPLETED ||
+                !requirements.evidence?.websitePlanFingerprint ||
+                !requirements.evidence?.websiteBlueprintFingerprint
+              ) throw new Error('Website design cannot approve an unbound website plan');
+              return {
+                approvedDependencyEvidenceFingerprint,
+                approvedWebsitePlanFingerprint: requirements.evidence.websitePlanFingerprint,
+                approvedWebsiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint
+              };
             }
             if (plan.profile === 'website-build' && step.id === 'visual-verification') {
               const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
@@ -3832,6 +4075,7 @@ export function buildWorkerPrompt(task) {
   const cleanTask = sanitizeCodingTask(task);
   const websiteRules = cleanTask?.websiteBuild ? [
     'This is a structured website build. Treat the supplied businessBrief as the complete authoritative source of business facts.',
+    'Treat websiteBuild.websiteBlueprint as a deterministic requirements contract, not art direction and never as evidence of new business facts. Satisfy its bound structural/CTA/navigation/accessibility/SEO/provenance requirements without overriding businessBrief, scope, content restrictions, or governance.',
     'Do not invent or imply testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands used, service areas, opening hours, addresses, contact details, legal claims, or any other factual business claim that is not explicitly present in businessBrief.',
     'Do not convert websitePlan.missingInputs into guessed content. Omit unsupported facts or use neutral non-factual wording instead.',
     'Honor every businessBrief.contentRestrictions item and use only the supplied verified asset paths for business-specific imagery or logos.'
@@ -4179,10 +4423,10 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
       : 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
-    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; or if it uses business-specific assets outside the verified asset evidence.'
+    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements while allowing creative/art-direction choices from the approved websitePlan. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; or if it uses business-specific assets outside the verified asset evidence.'
     : null;
   const websiteInstruction = skill === 'website.plan'
-    ? 'Use only the supplied businessBrief, verified asset evidence, repository context, and configuredQualityCommands. Do not use web research and do not invent testimonials, years in business, certifications, awards, clients, guarantees, prices, service areas, factual claims, or credentials that are absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
+    ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
     : null;
   return [
     'You are a read-only analysis worker in a controlled engineering workflow.',
