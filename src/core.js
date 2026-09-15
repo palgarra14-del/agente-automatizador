@@ -564,7 +564,9 @@ export function safeCommandEnvironment(commandEnvironment = {}) {
 }
 
 export function githubGitNetworkEnvironment(environment = process.env) {
-  const token = environment?.GITHUB_TOKEN;
+  const agentToken = environment?.AGENT_GITHUB_TOKEN;
+  const fallbackToken = environment?.GITHUB_TOKEN;
+  const token = agentToken === undefined || agentToken === null || agentToken === '' ? fallbackToken : agentToken;
   if (token === undefined || token === null || token === '') return {};
   if (typeof token !== 'string' || token.length < 20 || token.length > 4_096 || /[\s\0\r\n]/.test(token)) {
     throw new Error('github_git_network_token_invalid');
