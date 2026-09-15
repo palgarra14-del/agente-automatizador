@@ -2516,6 +2516,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
 
   const skillCalls = [];
   let requirementsPlanFingerprint = null;
+  let requirementsBlueprintFingerprint = null;
   const skillExecutor = {
     supports: (skill) => ['website.plan', 'code.review'].includes(skill),
     async execute(request) {
@@ -2523,6 +2524,8 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       if (request.skill === 'website.plan') {
         assert.equal(request.context.businessBrief.businessName, brief.businessName);
         assert.match(request.context.businessBriefFingerprint, /^[a-f0-9]{64}$/);
+        assert.equal(request.context.websiteBlueprint.id, 'home-services');
+        assert.match(request.context.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
         assert.deepEqual(request.context.assetEvidence.assets, []);
         return { ok: true, status: 'completed', usage: { input_tokens: 50, output_tokens: 30 }, outputBytes: 50, result: { websitePlan } };
       }
@@ -2530,6 +2533,8 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       assert.equal(request.context.websiteReview.businessBrief.businessName, brief.businessName);
       assert.deepEqual(request.context.websiteReview.websitePlan, websitePlan);
       assert.equal(request.context.websiteReview.websitePlanFingerprint, requirementsPlanFingerprint);
+      assert.equal(request.context.websiteReview.websiteBlueprint.id, 'home-services');
+      assert.equal(request.context.websiteReview.websiteBlueprintFingerprint, requirementsBlueprintFingerprint);
       assert.deepEqual(request.context.websiteReview.assetEvidence.assets, []);
       return { ok: true, status: 'completed', usage: { input_tokens: 20, output_tokens: 10 }, outputBytes: 30, result: { reviewEvidence: { verdict: 'PASS', summary: 'No blocking issue.', findings: [] } } };
     }
@@ -2540,6 +2545,8 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
       assert.equal(task.websiteBuild.businessBrief.businessName, brief.businessName);
       assert.deepEqual(task.websiteBuild.websitePlan, websitePlan);
       assert.equal(task.websiteBuild.approvedWebsitePlanFingerprint, task.websiteBuild.websitePlanFingerprint);
+      assert.equal(task.websiteBuild.websiteBlueprint.id, 'home-services');
+      assert.equal(task.websiteBuild.approvedWebsiteBlueprintFingerprint, task.websiteBuild.websiteBlueprintFingerprint);
       assert.equal(task.websiteBuild.assetEvidence.assets.length, 0);
       implemented = true;
       return { status: 'completed', summary: 'website implemented', output: 'done', outputBytes: 4, usage: { input_tokens: 100, output_tokens: 60 } };
@@ -2572,14 +2579,19 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(requirements.status, WorkflowStepStatus.COMPLETED);
   assert.deepEqual(requirements.evidence.result.websitePlan, websitePlan);
   assert.match(requirements.evidence.websitePlanFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(requirements.evidence.websiteBlueprint.id, 'home-services');
+  assert.match(requirements.evidence.websiteBlueprintFingerprint, /^[a-f0-9]{64}$/);
   requirementsPlanFingerprint = requirements.evidence.websitePlanFingerprint;
+  requirementsBlueprintFingerprint = requirements.evidence.websiteBlueprintFingerprint;
   assert.equal(waiting.steps.find((step) => step.id === 'design').status, WorkflowStepStatus.AWAITING_APPROVAL);
   assert.equal(waiting.modelUsage.calls, 1);
 
   waiting = await instance.approve(created.id, 'design');
-  assert.equal(waiting.steps.find((step) => step.id === 'design').evidence.approvedWebsitePlanFingerprint, requirements.evidence.websitePlanFingerprint);
+  const approvedDesign = waiting.steps.find((step) => step.id === 'design');
+  assert.equal(approvedDesign.evidence.approvedWebsitePlanFingerprint, requirements.evidence.websitePlanFingerprint);
+  assert.equal(approvedDesign.evidence.approvedWebsiteBlueprintFingerprint, requirements.evidence.websiteBlueprintFingerprint);
   const tamperedDesign = JSON.parse(JSON.stringify(waiting));
-  tamperedDesign.steps.find((step) => step.id === 'design').evidence.approvedWebsitePlanFingerprint = 'f'.repeat(64);
+  tamperedDesign.steps.find((step) => step.id === 'design').evidence.approvedWebsiteBlueprintFingerprint = 'f'.repeat(64);
   assert.throws(
     () => validateWorkflowPlan(tamperedDesign, new Map([[configured.id, configured]])),
     /website design approval is not bound/
