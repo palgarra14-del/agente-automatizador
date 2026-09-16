@@ -556,11 +556,9 @@ class ChromeCdpBrowser {
     }, sessionId);
 
     const offSecondaryTarget = this.connection.on('Target.attachedToTarget', async (params) => {
-      const childSessionId = params.sessionId;
       const info = params.targetInfo ?? {};
       secondaryTargetFailure = secondaryTargetFailure ?? new Error(`browser_qa_secondary_target_forbidden:${String(info.type ?? 'unknown')}`);
       if (info.targetId) await bestEffortCdp(this.connection, 'Target.closeTarget', { targetId: info.targetId }, undefined, 250);
-      void childSessionId;
     }, sessionId);
 
     try {
