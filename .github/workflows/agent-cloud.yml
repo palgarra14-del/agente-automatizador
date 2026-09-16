@@ -60,10 +60,7 @@ jobs:
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
-          if [[ ! "$LANES" =~ ^\["[a-z0-9-]+"(,"[a-z0-9-]+")*\]$ ]]; then
-            echo "invalid cloud lane routing result" >&2
-            exit 1
-          fi
+          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
           echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
 
   cloud-once:
