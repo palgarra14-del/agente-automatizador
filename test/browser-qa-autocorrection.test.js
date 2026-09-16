@@ -83,7 +83,7 @@ function passEvidence(request, observations = []) {
   return classifyBrowserQaSnapshot(request, snapshotFor(request, { observations }));
 }
 
-const allowedPaths = ['site/index.html', 'site/assets/site.css'];
+const allowedPaths = ['site/assets/site.css', 'site/index.html'];
 
 test('correction request is stable, canonical and preserves the original allowed paths exactly', () => {
   const request = requestFor();
