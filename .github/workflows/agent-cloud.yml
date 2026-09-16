@@ -53,10 +53,26 @@ jobs:
       - name: Install frozen dependencies
         run: npm ci --ignore-scripts
 
+      - name: Check lane for governed work
+        id: preflight
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: |
+          HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
+          if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
+            echo "invalid cloud preflight result" >&2
+            exit 1
+          fi
+          echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
+
       - name: Prepare exact cloud runtime
+        if: steps.preflight.outputs.has_work == 'true'
         run: docker pull node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
       - name: Run one governed cloud queue tick
+        if: steps.preflight.outputs.has_work == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
