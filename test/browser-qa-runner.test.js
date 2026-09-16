@@ -4,6 +4,7 @@ import { URL } from 'node:url';
 import {
   ChromeBrowserQaRunner,
   assertPublicNetworkUrl,
+  browserQaDocumentUrlMatches,
   isUnsafeNetworkAddress,
   resolvePublicNetworkUrl
 } from '../src/browser-qa-runner.js';
@@ -96,11 +97,31 @@ test('private, loopback, link-local and documentation addresses are rejected', (
     '::1',
     'fc00::1',
     'fe80::1',
+    'fec0::1',
     '2001:db8::1'
   ]) assert.equal(isUnsafeNetworkAddress(address), true, address);
-  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111']) {
+  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '2001:4860:4860::8888']) {
     assert.equal(isUnsafeNetworkAddress(address), false, address);
   }
+});
+
+test('document binding requires exact query while ignoring trailing slash equivalence', () => {
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route', 'https://preview.example.com/route'),
+    true
+  );
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route/', 'https://preview.example.com/route'),
+    true
+  );
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route?qa=1', 'https://preview.example.com/route'),
+    false
+  );
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route', 'https://preview.example.com/route?qa=1'),
+    false
+  );
 });
 
 test('network guard resolves DNS and fails closed on private answers', async () => {
