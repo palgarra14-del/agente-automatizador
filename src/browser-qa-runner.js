@@ -599,9 +599,10 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
 }
 
 const browserQaInteractiveAxRoles = new Set([
-  'button', 'checkbox', 'combobox', 'link', 'listbox', 'menuitem', 'menuitemcheckbox',
-  'menuitemradio', 'option', 'radio', 'searchbox', 'slider', 'spinbutton', 'switch',
-  'tab', 'textbox', 'treeitem'
+  'button', 'checkbox', 'combobox', 'grid', 'gridcell', 'link', 'listbox', 'menu',
+  'menubar', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio',
+  'radiogroup', 'scrollbar', 'searchbox', 'separator', 'slider', 'spinbutton',
+  'switch', 'tab', 'tablist', 'textbox', 'tree', 'treegrid', 'treeitem'
 ]);
 
 function browserQaInteractiveControlsFromAxTrees(trees) {
