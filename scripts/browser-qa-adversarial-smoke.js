@@ -34,6 +34,7 @@ const server = createServer((request, response) => {
   <input id="default-submit" type="submit">
   <input id="default-reset" type="reset">
   <input id="name" type="text" value="Jane">
+  <div id="programmatic-focus" tabindex="-1"></div>
 </body></html>`);
     return;
   }
@@ -176,6 +177,24 @@ root.innerHTML = '<button id="shadow-button"></button>';
 </head><body><section id="hero">Hero</section></body></html>`);
     return;
   }
+  if (request.url === '/client-nav') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Client navigation fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>setTimeout(() => { location.href = '/redirected'; }, 25);</script>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/frame-network') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Frame network fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<iframe srcdoc="<script>try { new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:9' }] }); } catch {}<\/script>"></iframe>
+</body></html>`);
+    return;
+  }
   if (request.url === '/worker') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -251,6 +270,11 @@ try {
   assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Submit'), 'default submit control should use Chrome accessible name');
   assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Reset'), 'default reset control should use Chrome accessible name');
   assert.ok(hiddenTextboxes.some((control) => !control.accessibleName), 'text input value must not become its accessible name');
+  assert.equal(
+    hiddenEvidence.interactiveControls.some((control) => control.role === 'generic'),
+    false,
+    'programmatic-only tabindex=-1 generic focus target must not be treated as an interactive control'
+  );
 
   const websocketRoute = '/websocket';
   const websocketUrl = `${origin}${websocketRoute}`;
@@ -440,6 +464,36 @@ try {
   assert.equal(preconnectEvidence.status, 200);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   assert.equal(speculativeConnections, 0, 'cross-origin preconnect must not establish a speculative socket');
+
+  const clientNavRoute = '/client-nav';
+  const clientNavUrl = `${origin}${clientNavRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(clientNavRoute),
+      pagePlan: { route: clientNavRoute, url: clientNavUrl },
+      routeUrls: { [clientNavRoute]: clientNavUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 150
+    }),
+    /browser_qa_document_navigation_forbidden/,
+    'blocked client-side top-frame navigation must fail Browser QA instead of leaving the original page eligible for PASS'
+  );
+
+  const frameNetworkRoute = '/frame-network';
+  const frameNetworkUrl = `${origin}${frameNetworkRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(frameNetworkRoute),
+      pagePlan: { route: frameNetworkRoute, url: frameNetworkUrl },
+      routeUrls: { [frameNetworkRoute]: frameNetworkUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 150
+    }),
+    /browser_qa_direct_network_forbidden/,
+    'direct-network attempt markers inside same-origin/srcdoc iframe must fail the whole run'
+  );
 
   const workerRoute = '/worker';
   const workerUrl = `${origin}${workerRoute}`;
