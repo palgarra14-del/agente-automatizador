@@ -8,6 +8,7 @@ export const BROWSER_QA_CORRECTION_SCHEMA_VERSION = 'browser-qa-correction/v1';
 const fingerprintPattern = /^[a-f0-9]{64}$/;
 const workflowPattern = /^workflow-[A-Za-z0-9-]{8,120}$/;
 const commitPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const correctionSensitivePathPattern = /(^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|npm-shrinkwrap\.json|\.npmrc|\.pnpmfile\.cjs|pnpm-workspace\.yaml|\.yarnrc(?:\.yml)?|vercel\.json|Dockerfile[^/]*|\.env(?:\..*)?)(?:$|\/)|(^|\/)(?:\.github\/workflows|deploy|deployment|secrets?|credentials?|creds?)(?:\/|$)/i;
 const forbiddenAuthority = Object.freeze([
   'dependency-change',
   'package-change',
@@ -36,6 +37,7 @@ function canonicalPaths(paths) {
       path.split('/').some((part) => !part || part === '.' || part === '..') ||
       /[\0\r\n]/.test(path)
     ) throw new Error('browser_qa_correction_scope_path_invalid');
+    if (correctionSensitivePathPattern.test(path)) throw new Error('browser_qa_correction_sensitive_path_forbidden');
     return path;
   });
   return [...new Set(normalized)].sort();
