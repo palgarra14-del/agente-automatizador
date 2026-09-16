@@ -5,6 +5,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
+import { URL } from 'node:url';
 
 const defaultChromeNames = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
 const defaultChromePaths = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
