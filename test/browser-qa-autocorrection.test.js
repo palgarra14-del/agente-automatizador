@@ -83,6 +83,10 @@ function passEvidence(request, observations = []) {
   return classifyBrowserQaSnapshot(request, snapshotFor(request, { observations }));
 }
 
+function mutableCopy(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 const allowedPaths = ['site/assets/site.css', 'site/index.html'];
 
 test('correction request is stable, canonical and preserves the original allowed paths exactly', () => {
@@ -137,19 +141,19 @@ test('correction fingerprint covers defects, authority and exact canonical paylo
   assert.equal(validateBrowserQaCorrectionRequest(correction), true);
   assert.deepEqual(correction.deterministicDefects, evidence.deterministicDefects);
 
-  const authorityTamper = structuredClone(correction);
+  const authorityTamper = mutableCopy(correction);
   authorityTamper.forbiddenAuthority = authorityTamper.forbiddenAuthority.filter((item) => item !== 'merge');
   assert.throws(() => validateBrowserQaCorrectionRequest(authorityTamper), /authority_invalid|fingerprint_mismatch/);
 
-  const defectTamper = structuredClone(correction);
+  const defectTamper = mutableCopy(correction);
   defectTamper.deterministicDefects[0].subject = 'tampered';
   assert.throws(() => validateBrowserQaCorrectionRequest(defectTamper), /defect_fingerprint_mismatch|fingerprint_mismatch/);
 
-  const extraField = structuredClone(correction);
+  const extraField = mutableCopy(correction);
   extraField.escalate = true;
   assert.throws(() => validateBrowserQaCorrectionRequest(extraField), /shape_invalid/);
 
-  const commitTamper = structuredClone(correction);
+  const commitTamper = mutableCopy(correction);
   commitTamper.sourcePublishedCommitSha = 'not-a-commit';
   assert.throws(() => validateBrowserQaCorrectionRequest(commitTamper), /source_commit_invalid/);
 });
@@ -224,7 +228,7 @@ test('forged correction fingerprint and stale preview binding fail closed', () =
   const coordinator = new BrowserQaAutocorrectionCoordinator();
   const scheduled = coordinator.considerInitial({ request, evidence, allowedPaths });
 
-  const forged = JSON.parse(JSON.stringify(scheduled.correctionRequest));
+  const forged = mutableCopy(scheduled.correctionRequest);
   forged.correctionFingerprint = 'f'.repeat(64);
   assert.throws(() => validateBrowserQaCorrectionRequest(forged), /fingerprint_mismatch/);
 
