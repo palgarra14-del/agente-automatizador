@@ -191,7 +191,7 @@ root.innerHTML = '<button id="shadow-button"></button>';
     response.end(`<!doctype html>
 <html><head><title>Frame network fixture</title><meta name="description" content="Fixture description"></head>
 <body><section id="hero">Hero</section>
-<iframe srcdoc="<script>try { new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:9' }] }); } catch {}<\/script>"></iframe>
+<iframe srcdoc="<script>try { new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:9' }] }); } catch {}</script>"></iframe>
 </body></html>`);
     return;
   }
