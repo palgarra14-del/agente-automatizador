@@ -57,6 +57,7 @@ jobs:
         shell: bash
         env:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+          AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
