@@ -4,7 +4,8 @@ import { URL } from 'node:url';
 import {
   ChromeBrowserQaRunner,
   assertPublicNetworkUrl,
-  isUnsafeNetworkAddress
+  isUnsafeNetworkAddress,
+  resolvePublicNetworkUrl
 } from '../src/browser-qa-runner.js';
 import {
   BrowserQaCoordinator,
@@ -103,6 +104,11 @@ test('private, loopback, link-local and documentation addresses are rejected', (
 });
 
 test('network guard resolves DNS and fails closed on private answers', async () => {
+  const resolved = await resolvePublicNetworkUrl('https://public.example/path', {
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }]
+  });
+  assert.equal(resolved.url.hostname, 'public.example');
+  assert.deepEqual(resolved.addresses, [{ address: '8.8.8.8', family: 4 }]);
   const publicUrl = await assertPublicNetworkUrl('https://public.example/path', {
     lookup: async () => [{ address: '8.8.8.8', family: 4 }]
   });
@@ -125,17 +131,24 @@ test('runner visits only coordinator-planned pages and never emits external navi
   const request = requestFor();
   const navigationPlan = browserQaNavigationPlan(request);
   const inspected = [];
-  const guarded = [];
+  const resolutions = [];
+  let browserOptions = null;
   let closed = false;
   const runner = new ChromeBrowserQaRunner({
-    networkGuard: async (url) => { guarded.push(url); },
-    browserFactory: async () => ({
-      async inspectPage(args) {
-        inspected.push({ route: args.pagePlan.route, url: args.pagePlan.url, routeUrls: args.routeUrls });
-        return fakePageEvidence(args.request, args.pagePlan);
-      },
-      async close() { closed = true; }
-    })
+    networkResolver: async (url) => {
+      resolutions.push(url);
+      return { url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] };
+    },
+    browserFactory: async (options) => {
+      browserOptions = options;
+      return {
+        async inspectPage(args) {
+          inspected.push({ route: args.pagePlan.route, url: args.pagePlan.url, routeUrls: args.routeUrls });
+          return fakePageEvidence(args.request, args.pagePlan);
+        },
+        async close() { closed = true; }
+      };
+    }
   });
 
   const snapshot = await runner.verify({
@@ -146,7 +159,9 @@ test('runner visits only coordinator-planned pages and never emits external navi
   });
 
   assert.deepEqual(inspected.map(({ route, url }) => ({ route, url })), navigationPlan.sameOriginPages);
-  assert.deepEqual(guarded, navigationPlan.sameOriginPages.map((page) => page.url));
+  assert.deepEqual(resolutions, [navigationPlan.previewBaseUrl]);
+  assert.deepEqual(browserOptions.hostPin, { hostname: 'preview.example.com', address: '8.8.8.8' });
+  assert.equal(browserOptions.allowedOrigin, 'https://preview.example.com');
   assert.deepEqual(snapshot.externalNavigations, []);
   assert.equal(snapshot.previewUrl, request.previewUrl);
   assert.equal(snapshot.publishedCommitSha, request.publishedCommitSha);
@@ -161,7 +176,7 @@ test('runner rejects plan entries that escape a non-root preview base path', asy
   plan.sameOriginPages[0].url = 'https://preview.example.com/';
   let factoryCalls = 0;
   const runner = new ChromeBrowserQaRunner({
-    networkGuard: async () => {},
+    networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] }),
     browserFactory: async () => {
       factoryCalls += 1;
       return { close: async () => {}, inspectPage: async () => ({}) };
@@ -180,7 +195,7 @@ test('runner rejects extra same-origin pages that are not in the request bluepri
   plan.sameOriginPages.push({ route: '/admin', url: 'https://preview.example.com/previews/build-1/admin' });
   let factoryCalls = 0;
   const runner = new ChromeBrowserQaRunner({
-    networkGuard: async () => {},
+    networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] }),
     browserFactory: async () => {
       factoryCalls += 1;
       return { close: async () => {}, inspectPage: async () => ({}) };
@@ -193,12 +208,34 @@ test('runner rejects extra same-origin pages that are not in the request bluepri
   assert.equal(factoryCalls, 0);
 });
 
+test('runner fails before browser creation when resolved preview address is private', async () => {
+  const request = requestFor();
+  let factoryCalls = 0;
+  const runner = new ChromeBrowserQaRunner({
+    networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '127.0.0.1', family: 4 }] }),
+    browserFactory: async () => {
+      factoryCalls += 1;
+      return { close: async () => {}, inspectPage: async () => ({}) };
+    }
+  });
+  await assert.rejects(
+    runner.verify({
+      request,
+      navigationPlan: browserQaNavigationPlan(request),
+      signal: new AbortController().signal,
+      timeoutMs: 5_000
+    }),
+    /private_network_forbidden/
+  );
+  assert.equal(factoryCalls, 0);
+});
+
 test('coordinator timeout aborts runner and closes the ephemeral browser', async () => {
   const request = requestFor();
   let closed = false;
   let sawAbort = false;
   const runner = new ChromeBrowserQaRunner({
-    networkGuard: async () => {},
+    networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] }),
     browserFactory: async () => ({
       async inspectPage({ signal }) {
         return new Promise((resolvePromise, reject) => {
