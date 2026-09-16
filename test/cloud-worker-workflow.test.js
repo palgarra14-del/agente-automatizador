@@ -26,8 +26,9 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /route:\n[\s\S]*name: route cloud lanes/);
   assert.match(workflow, /route:[\s\S]*permissions:\n\s+contents: read/);
   assert.match(workflow, /route:[\s\S]*uses: actions\/checkout@v5[\s\S]*ref: main[\s\S]*persist-credentials: false/);
-  assert.match(workflow, /route:[\s\S]*uses: actions\/setup-node@v4[\s\S]*node-version: 24/);
   assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
+  const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  cloud-once:'));
+  assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
   assert.match(workflow, /outputs:\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
   assert.match(workflow, /cloud-once:[\s\S]*needs: route/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
