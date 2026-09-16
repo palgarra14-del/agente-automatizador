@@ -6,6 +6,7 @@ import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { URL } from 'node:url';
+import { browserQaNavigationPlan } from './browser-qa.js';
 
 const defaultChromeNames = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
 const defaultChromePaths = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
@@ -27,20 +28,17 @@ function abortableDelay(ms, signal) {
   if (ms === 0) return Promise.resolve();
   return new Promise((resolvePromise, reject) => {
     throwIfAborted(signal);
-    const timer = setTimeout(resolvePromise, ms);
-    const onAbort = () => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(abortError());
+      signal?.removeEventListener('abort', onAbort);
+      fn(value);
     };
+    const timer = setTimeout(() => finish(resolvePromise), ms);
+    const onAbort = () => finish(reject, abortError());
     signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal) {
-      Promise.resolve().then(() => {
-        if (!signal.aborted) return;
-        clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
-        reject(abortError());
-      });
-    }
   });
 }
 
@@ -184,23 +182,28 @@ class CdpConnection {
     if (typeof WebSocketImpl !== 'function') throw new Error('browser_qa_websocket_unavailable');
     throwIfAborted(signal);
     const socket = new WebSocketImpl(url);
-    await waitWithDeadline(new Promise((resolvePromise, reject) => {
-      const onOpen = () => {
-        cleanup();
-        resolvePromise();
-      };
-      const onError = () => {
-        cleanup();
-        reject(new Error('browser_qa_cdp_connect_failed'));
-      };
-      const cleanup = () => {
-        socket.removeEventListener('open', onOpen);
-        socket.removeEventListener('error', onError);
-      };
-      socket.addEventListener('open', onOpen, { once: true });
-      socket.addEventListener('error', onError, { once: true });
-    }), { timeoutMs, signal, label: 'browser_qa_cdp_connect' });
-    return new CdpConnection(socket);
+    try {
+      await waitWithDeadline(new Promise((resolvePromise, reject) => {
+        const onOpen = () => {
+          cleanup();
+          resolvePromise();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error('browser_qa_cdp_connect_failed'));
+        };
+        const cleanup = () => {
+          socket.removeEventListener('open', onOpen);
+          socket.removeEventListener('error', onError);
+        };
+        socket.addEventListener('open', onOpen, { once: true });
+        socket.addEventListener('error', onError, { once: true });
+      }), { timeoutMs, signal, label: 'browser_qa_cdp_connect' });
+      return new CdpConnection(socket);
+    } catch (error) {
+      try { socket.close(); } catch {}
+      throw error;
+    }
   }
 
   #key(method, sessionId = '') {
@@ -248,14 +251,27 @@ class CdpConnection {
   }
 
   waitFor(method, { sessionId = '', predicate = () => true, timeoutMs = 10_000, signal } = {}) {
-    return waitWithDeadline(new Promise((resolvePromise) => {
-      const off = this.on(method, (params, message) => {
-        if (!predicate(params, message)) return;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error('browser_qa_runner_timeout_invalid'));
+    return new Promise((resolvePromise, reject) => {
+      throwIfAborted(signal);
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         off();
-        resolvePromise(params);
+        signal?.removeEventListener('abort', onAbort);
+        fn(value);
+      };
+      const off = this.on(method, (params, message) => {
+        let matches = false;
+        try { matches = predicate(params, message); } catch (error) { return finish(reject, error); }
+        if (matches) finish(resolvePromise, params);
       }, sessionId);
-      signal?.addEventListener('abort', off, { once: true });
-    }), { timeoutMs, signal, label: `browser_qa_cdp_event_${method.replaceAll('.', '_')}` });
+      const onAbort = () => finish(reject, abortError());
+      const timer = setTimeout(() => finish(reject, new Error(`browser_qa_cdp_event_${method.replaceAll('.', '_')}_timeout`)), timeoutMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   send(method, params = {}, sessionId = undefined) {
@@ -274,11 +290,8 @@ class CdpConnection {
   }
 
   close() {
-    try {
-      this.socket.close();
-    } catch {
-      this.#closed();
-    }
+    this.#closed();
+    try { this.socket.close(); } catch {}
   }
 }
 
@@ -363,6 +376,10 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         const value = clean(element.getAttribute?.(attr));
         if (value) return value.slice(0, 500);
       }
+      const descendantAlt = clean(element.querySelector?.('img[alt]')?.getAttribute('alt'));
+      if (descendantAlt) return descendantAlt.slice(0, 500);
+      const svgTitle = clean(element.querySelector?.('svg title')?.textContent);
+      if (svgTitle) return svgTitle.slice(0, 500);
       return clean(element.innerText || element.textContent).slice(0, 500);
     };
     const hrefElements = [...document.querySelectorAll('a[href], area[href]')];
@@ -404,8 +421,14 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => Boolean(document.getElementById(anchor)));
-    const interactive = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')]
-      .slice(0, 500)
+    const isInteractive = (element) => {
+      if (element.hidden || element.hasAttribute('disabled') || element.closest('[inert]') || element.getAttribute('aria-hidden') === 'true') return false;
+      const style = getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const interactiveNodes = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')].filter(isInteractive);
+    if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
+    const interactive = interactiveNodes
       .map((element, index) => ({ id: element.id ? 'id:' + String(element.id).slice(0, 100) : 'control-' + index, accessibleName: nameFor(element) }));
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
     return {
@@ -466,16 +489,22 @@ class ChromeCdpBrowser {
     const target = await this.connection.send('Target.createTarget', { url: 'about:blank', browserContextId: context.browserContextId });
     const attached = await this.connection.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
     const sessionId = attached.sessionId;
-    let documentStatus = 0;
+    const documentResponses = [];
     let interceptionFailure = null;
     const offResponse = this.connection.on('Network.responseReceived', (params) => {
-      if (params.type === 'Document' && Number.isFinite(params.response?.status)) documentStatus = Math.round(params.response.status);
+      if (params.type === 'Document' && Number.isFinite(params.response?.status)) {
+        documentResponses.push({
+          frameId: params.frameId ?? null,
+          loaderId: params.loaderId ?? null,
+          status: Math.round(params.response.status)
+        });
+      }
     }, sessionId);
     const offFetch = this.connection.on('Fetch.requestPaused', async (params) => {
       const requestData = params.request ?? {};
       const fail = async () => this.connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }, sessionId).catch(() => {});
       try {
-        if (!['GET', 'HEAD'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
         const url = new URL(requestData.url);
         if (params.resourceType === 'Document' && !samePhysicalDocumentUrl(url, pagePlan.url)) return fail();
         if (['http:', 'https:'].includes(url.protocol)) await this.#publicUrl(url);
@@ -508,7 +537,11 @@ class ChromeCdpBrowser {
       if (interceptionFailure) throw interceptionFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
-      return { route: pagePlan.route, status: documentStatus, ...probe };
+      const response = [...documentResponses].reverse().find((item) =>
+        (navigation.loaderId && item.loaderId === navigation.loaderId) ||
+        (!navigation.loaderId && navigation.frameId && item.frameId === navigation.frameId)
+      );
+      return { route: pagePlan.route, status: response?.status ?? 0, ...probe };
     } finally {
       offResponse();
       offFetch();
@@ -543,7 +576,7 @@ export async function launchChromeCdpBrowser({
   let connection = null;
   try {
     child = spawnImpl(executablePath, chromeArguments(userDataDir), {
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'ignore', 'ignore'],
       env: Object.fromEntries(Object.entries({
         PATH: environment.PATH,
         HOME: environment.HOME,
@@ -584,6 +617,8 @@ function validateRunnerPlan(request, navigationPlan) {
   if (!request || !navigationPlan || !Array.isArray(navigationPlan.sameOriginPages) || !navigationPlan.sameOriginPages.length) {
     throw new Error('browser_qa_runner_plan_invalid');
   }
+  const expectedPlan = browserQaNavigationPlan(request);
+  if (JSON.stringify(navigationPlan) !== JSON.stringify(expectedPlan)) throw new Error('browser_qa_runner_plan_binding_mismatch');
   const preview = new URL(navigationPlan.previewBaseUrl);
   if (preview.protocol !== 'https:' || preview.username || preview.password) throw new Error('browser_qa_runner_preview_invalid');
   const routeUrls = {};
