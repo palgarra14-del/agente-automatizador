@@ -514,6 +514,30 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       }
       return null;
     };
+    const hasPositiveVisibleArea = (element) => {
+      const rects = [...(element?.getClientRects?.() ?? [])]
+        .map((rect) => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }))
+        .filter((rect) => rect.right > rect.left && rect.bottom > rect.top);
+      if (!rects.length) return false;
+      let visibleRects = rects;
+      for (let current = composedParent(element); current && visibleRects.length; current = composedParent(current)) {
+        const style = styleFor(current);
+        const clipX = ['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowX);
+        const clipY = ['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowY);
+        if (!clipX && !clipY) continue;
+        const clip = current.getBoundingClientRect?.();
+        if (!clip) continue;
+        visibleRects = visibleRects
+          .map((rect) => ({
+            left: clipX ? Math.max(rect.left, clip.left) : rect.left,
+            right: clipX ? Math.min(rect.right, clip.right) : rect.right,
+            top: clipY ? Math.max(rect.top, clip.top) : rect.top,
+            bottom: clipY ? Math.min(rect.bottom, clip.bottom) : rect.bottom
+          }))
+          .filter((rect) => rect.right > rect.left && rect.bottom > rect.top);
+      }
+      return visibleRects.some((rect) => (rect.right - rect.left) * (rect.bottom - rect.top) > 0);
+    };
     const isRendered = (element) => {
       if (!element || (element.hasAttribute?.('disabled') ?? false)) return false;
       for (let current = element; current; current = composedParent(current)) {
@@ -527,7 +551,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
         if (Number.parseFloat(style.opacity || '1') === 0) return false;
       }
-      return element.getClientRects().length > 0;
+      return hasPositiveVisibleArea(element);
     };
     const hasRenderedComposedDescendant = (element) => {
       const stack = [];
@@ -757,10 +781,17 @@ class ChromeCdpBrowser {
       const requestData = params.request ?? {};
       const fail = async () => this.connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }, sessionId).catch(() => {});
       try {
-        if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
+        const method = String(requestData.method ?? '').toUpperCase();
         const url = new URL(requestData.url);
-        if (params.resourceType === 'Document') {
-          const isMainDocument = mainFrameId ? params.frameId === mainFrameId : browserQaDocumentUrlMatches(url, pagePlan.url);
+        const isDocument = params.resourceType === 'Document';
+        const isMainDocument = isDocument && (mainFrameId ? params.frameId === mainFrameId : browserQaDocumentUrlMatches(url, pagePlan.url));
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+          if (isMainDocument) {
+            interceptionFailure = interceptionFailure ?? new Error(`browser_qa_document_method_forbidden:${method || 'UNKNOWN'}`);
+          }
+          return fail();
+        }
+        if (isDocument) {
           if (isMainDocument && !browserQaDocumentUrlMatches(url, pagePlan.url)) {
             interceptionFailure = interceptionFailure ?? new Error(`browser_qa_document_navigation_forbidden:${url.pathname}`);
             return fail();
