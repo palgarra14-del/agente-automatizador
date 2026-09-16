@@ -408,14 +408,22 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         const value = [...element.labels].map((label) => clean(label.textContent)).filter(Boolean).join(' ');
         if (value) return value.slice(0, 500);
       }
-      for (const attr of ['alt', 'title', 'placeholder']) {
-        const value = clean(element.getAttribute?.(attr));
-        if (value) return value.slice(0, 500);
+      const tag = String(element.tagName ?? '').toUpperCase();
+      const type = String(element.type ?? '').toLowerCase();
+      if (tag === 'AREA' || (tag === 'INPUT' && type === 'image')) {
+        const alt = clean(element.getAttribute?.('alt'));
+        if (alt) return alt.slice(0, 500);
       }
-      if (element.tagName === 'INPUT' && ['button', 'reset', 'submit'].includes(String(element.type ?? '').toLowerCase())) {
+      if ((tag === 'INPUT' && !['button', 'reset', 'submit', 'image', 'hidden'].includes(type)) || tag === 'TEXTAREA') {
+        const placeholder = clean(element.getAttribute?.('placeholder'));
+        if (placeholder) return placeholder.slice(0, 500);
+      }
+      if (tag === 'INPUT' && ['button', 'reset', 'submit'].includes(type)) {
         const value = clean(element.value);
         if (value) return value.slice(0, 500);
       }
+      const title = clean(element.getAttribute?.('title'));
+      if (title) return title.slice(0, 500);
       const descendantAlt = clean(element.querySelector?.('img[alt]')?.getAttribute('alt'));
       if (descendantAlt) return descendantAlt.slice(0, 500);
       const svgTitle = clean(element.querySelector?.('svg title')?.textContent);
@@ -442,6 +450,8 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           } catch { return false; }
         }) ?? null;
       } else if (target.semantics === 'anchor') {
+        const destination = document.getElementById(target.destination.slice(1));
+        if (!isRendered(destination)) return null;
         element = hrefElements.find((candidate) => {
           try {
             const resolved = new URL(candidate.getAttribute('href'), location.href);
@@ -464,9 +474,9 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     };
     const sectionNodes = [...document.querySelectorAll('[id], [data-section], [data-section-id]')];
     const observedSections = expectedSections.filter((section) => sectionNodes.some((node) =>
-      node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section
+      isRendered(node) && (node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section)
     ));
-    const observedAnchors = expectedAnchors.filter((anchor) => Boolean(document.getElementById(anchor)));
+    const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
     const interactiveNodes = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')].filter(isRendered);
     if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
     const interactive = interactiveNodes
@@ -589,6 +599,7 @@ class ChromeCdpBrowser {
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
+      if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
         (navigation.loaderId && item.loaderId === navigation.loaderId) ||
