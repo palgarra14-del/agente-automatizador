@@ -473,7 +473,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       if (aria) return aria.slice(0, 500);
       const labelledBy = clean(element.getAttribute?.('aria-labelledby'));
       if (labelledBy) {
-        const value = labelledBy.split(/\s+/).map((id) => clean(labelledElementFor(element, id)?.textContent)).filter(Boolean).join(' ');
+        const value = labelledBy.split(/\\s+/).map((id) => clean(labelledElementFor(element, id)?.textContent)).filter(Boolean).join(' ');
         if (value) return value.slice(0, 500);
       }
       if (element.labels?.length) {
@@ -553,7 +553,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
             const destination = candidate.ownerDocument?.getElementById?.(target.destination.slice(1));
             return isRendered(destination) &&
               resolved.origin === base.origin &&
-              resolved.pathname.replace(/\/$/, '') === base.pathname.replace(/\/$/, '') &&
+              resolved.pathname.replace(/\\/$/, '') === base.pathname.replace(/\\/$/, '') &&
               resolved.search === base.search &&
               resolved.hash === target.destination;
           } catch { return false; }
