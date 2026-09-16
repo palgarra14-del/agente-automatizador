@@ -103,11 +103,7 @@ export function isUnsafeNetworkAddress(address) {
     ];
     return cidrs.some(([base, bits]) => inIpv4Cidr(value, ipv4Number(base), bits));
   }
-  if (version === 6) {
-    const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isUnsafeNetworkAddress(mapped[1]);
-    return !/^[23]/.test(normalized);
-  }
+  if (version === 6) return true;
   return true;
 }
 
@@ -129,8 +125,8 @@ export async function resolvePublicNetworkUrl(value, { lookup = dnsLookup } = {}
   if (hostnameLooksLocal(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
   const ipVersion = isIP(url.hostname);
   if (ipVersion) {
-    if (isUnsafeNetworkAddress(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
-    return { url, addresses: [{ address: url.hostname, family: ipVersion }] };
+    if (ipVersion !== 4 || isUnsafeNetworkAddress(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
+    return { url, addresses: [{ address: url.hostname, family: 4 }] };
   }
   let addresses;
   try {
@@ -138,10 +134,12 @@ export async function resolvePublicNetworkUrl(value, { lookup = dnsLookup } = {}
   } catch (error) {
     throw new Error('browser_qa_runner_dns_failed', { cause: error });
   }
-  if (!Array.isArray(addresses) || !addresses.length || addresses.some((entry) => isUnsafeNetworkAddress(entry.address))) {
-    throw new Error('browser_qa_runner_private_network_forbidden');
-  }
-  const normalized = addresses.map((entry) => ({ address: entry.address, family: Number(entry.family) }));
+  const normalized = Array.isArray(addresses)
+    ? addresses
+        .map((entry) => ({ address: entry.address, family: Number(entry.family) }))
+        .filter((entry) => entry.family === 4 && !isUnsafeNetworkAddress(entry.address))
+    : [];
+  if (!normalized.length) throw new Error('browser_qa_runner_private_network_forbidden');
   return { url, addresses: normalized };
 }
 
