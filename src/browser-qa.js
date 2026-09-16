@@ -227,10 +227,24 @@ function targetHrefAnchor(href, request, fromRoute) {
   }
 }
 function externalTargetSyntax(kind, href) {
-  if (kind === 'phone') return /^tel:\+?[0-9(). -]{3,80}$/i.test(href);
+  const validRecipient = (value) => /^[0-9]{7,15}$/.test(String(value ?? '').replace(/^\+/, ''));
+  if (kind === 'phone') {
+    if (!/^tel:\+?[0-9(). -]{3,80}$/i.test(href)) return false;
+    return validRecipient(href.slice(4).replace(/\D/g, ''));
+  }
   if (kind === 'email') return /^mailto:[^\s@]+@[^\s@]+$/i.test(href);
   if (kind === 'whatsapp') {
-    try { const url = new URL(href); return url.protocol === 'https:' && !url.username && !url.password && (url.hostname === 'wa.me' || url.hostname === 'whatsapp.com' || url.hostname.endsWith('.whatsapp.com')); } catch { return false; }
+    try {
+      const url = new URL(href);
+      if (url.protocol !== 'https:' || url.username || url.password) return false;
+      if (url.hostname === 'wa.me') return validRecipient(url.pathname.replace(/^\/+|\/+$/g, ''));
+      if (url.hostname === 'whatsapp.com' || url.hostname.endsWith('.whatsapp.com')) {
+        return validRecipient(url.searchParams.get('phone'));
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
   return false;
 }
@@ -343,27 +357,49 @@ export function browserQaNavigationPlan(request) {
   });
 }
 export class BrowserQaCoordinator {
-  constructor({ runner = null } = {}) {
+  constructor({ runner = null, timeoutMs = 30_000 } = {}) {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) throw new Error('browser_qa_runner_timeout_invalid');
     this.runner = runner;
+    this.timeoutMs = timeoutMs;
     this.latestByWorkflow = new Map();
   }
   record(request, evidence) {
     const normalizedRequest = normalizeBoundBrowserQaRequest(request);
     validateBrowserQaEvidence(normalizedRequest, evidence);
+    const retainedEvidence = deepFreeze(canonicalValue(evidence));
     const prior = this.latestByWorkflow.get(normalizedRequest.workflowId) ?? null;
-    if (prior?.evidenceFingerprint === evidence.evidenceFingerprint) return { evidence: prior, duplicate: true, invalidated: [] };
-    const invalidated = prior && prior.requestFingerprint !== evidence.requestFingerprint ? [prior.evidenceFingerprint] : [];
-    this.latestByWorkflow.set(normalizedRequest.workflowId, evidence);
-    return { evidence, duplicate: false, invalidated };
+    if (prior?.evidenceFingerprint === retainedEvidence.evidenceFingerprint) return { evidence: prior, duplicate: true, invalidated: [] };
+    const invalidated = prior && prior.requestFingerprint !== retainedEvidence.requestFingerprint ? [prior.evidenceFingerprint] : [];
+    this.latestByWorkflow.set(normalizedRequest.workflowId, retainedEvidence);
+    return { evidence: retainedEvidence, duplicate: false, invalidated };
   }
   async verify(request) {
     const normalizedRequest = normalizeBoundBrowserQaRequest(request);
     if (!this.runner || typeof this.runner.verify !== 'function') return this.record(normalizedRequest, unavailableBrowserQaEvidence(normalizedRequest));
+    const controller = new AbortController();
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        const error = new Error('browser_runner_timeout');
+        error.code = 'BROWSER_RUNNER_TIMEOUT';
+        reject(error);
+      }, this.timeoutMs);
+    });
     try {
-      const snapshot = await this.runner.verify({ request: normalizedRequest, navigationPlan: browserQaNavigationPlan(normalizedRequest) });
+      const runnerVerification = Promise.resolve().then(() => this.runner.verify({
+        request: normalizedRequest,
+        navigationPlan: browserQaNavigationPlan(normalizedRequest),
+        signal: controller.signal,
+        timeoutMs: this.timeoutMs
+      }));
+      const snapshot = await Promise.race([runnerVerification, timeout]);
       return this.record(normalizedRequest, classifyBrowserQaSnapshot(normalizedRequest, snapshot));
-    } catch {
-      return this.record(normalizedRequest, unavailableBrowserQaEvidence(normalizedRequest, 'browser_runner_error'));
+    } catch (error) {
+      const reason = error?.code === 'BROWSER_RUNNER_TIMEOUT' ? 'browser_runner_timeout' : 'browser_runner_error';
+      return this.record(normalizedRequest, unavailableBrowserQaEvidence(normalizedRequest, reason));
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 }
