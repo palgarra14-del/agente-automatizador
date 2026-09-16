@@ -278,7 +278,7 @@ export function parseIssueRequestBody(body) {
 
 export function parseApprovalComment(body) {
   if (typeof body !== 'string') return null;
-  const match = approvalPattern.exec(body.trim());
+  const match = approvalPattern.exec(body);
   if (!match) return null;
   return { decision: match[1].toLowerCase(), approvalFingerprint: match[2].toLowerCase() };
 }
@@ -1522,6 +1522,38 @@ export class SupervisedIssueQueue {
     const key = this.requestKey(issue);
     const existing = await this.getRecord(key);
     return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
+  }
+
+  async hasWork() {
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) || !this.ownsRecord(record)) continue;
+      if (!terminal.has(record.status)) return true;
+      if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
+    }
+
+    const issues = await this.channel.openIssues();
+    for (const issue of issues) {
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      let routingRequest;
+      try {
+        routingRequest = parseIssueRequestBody(issue.body).request;
+      } catch {
+        if (this.includedProjectIds !== null) continue;
+        if (this.authorized(issue.user?.login)) return true;
+        continue;
+      }
+      if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
+      const existing = state.requests?.[this.requestKey(issue)] ?? null;
+      if (existing && !this.ownsRecord(existing)) continue;
+      if (existing && terminal.has(existing.status)) continue;
+      if (!existing && !this.authorized(issue.user?.login)) continue;
+      return true;
+    }
+    return false;
   }
 
   async tick() {
