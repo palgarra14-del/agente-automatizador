@@ -28,10 +28,11 @@ function trustedRouting(config) {
   return { lanes: [...laneIds], projectToLane };
 }
 
-export function routeCloudLanes({ eventName, issueBody = '', config } = {}) {
+export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', config } = {}) {
   const { lanes, projectToLane } = trustedRouting(config);
   if (eventName === 'schedule' || eventName === 'workflow_dispatch') return lanes;
   if (!['issues', 'issue_comment'].includes(eventName)) return lanes;
+  if (eventName === 'issues' && eventAction !== 'opened') return lanes;
   if (typeof issueBody !== 'string') return lanes;
 
   const markerIndex = issueBody.indexOf(REQUEST_MARKER);
@@ -56,6 +57,7 @@ function main() {
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   const lanes = routeCloudLanes({
     eventName: process.env.AGENT_CLOUD_EVENT_NAME ?? '',
+    eventAction: process.env.AGENT_CLOUD_EVENT_ACTION ?? '',
     issueBody: process.env.AGENT_CLOUD_ISSUE_BODY ?? '',
     config
   });
