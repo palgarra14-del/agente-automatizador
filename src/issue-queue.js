@@ -278,7 +278,7 @@ export function parseIssueRequestBody(body) {
 
 export function parseApprovalComment(body) {
   if (typeof body !== 'string') return null;
-  const match = approvalPattern.exec(body.trim());
+  const match = approvalPattern.exec(body);
   if (!match) return null;
   return { decision: match[1].toLowerCase(), approvalFingerprint: match[2].toLowerCase() };
 }
