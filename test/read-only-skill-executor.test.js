@@ -120,6 +120,127 @@ test('supplied repository context removes discovery and binds inspection paths',
   assert.match(invalid.error, /inspection_references_unsupplied_path/);
 });
 
+test('exact-file app-improvement inspection can execute deterministically without Codex', async () => {
+  const content = 'export const exact = true;\n';
+  const file = { path: 'src/exact.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = {
+    version: 1,
+    files: [file],
+    fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex')
+  };
+  let codexConstructed = false;
+  class ForbiddenCodex { constructor() { codexConstructed = true; throw new Error('codex_must_not_run'); } }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: ForbiddenCodex, environment: () => ({}) });
+  const scope = { allowedPaths: ['src/exact.js'], forbiddenPaths: [] };
+  const deterministicInspection = executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope,
+    repositoryContext
+  });
+  assert.match(deterministicInspection.fingerprint, /^[a-f0-9]{64}$/);
+  assert.deepEqual(deterministicInspection.allowedPaths, ['src/exact.js']);
+
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Apply one bounded exact-file maintenance change',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: {
+      workflowProfile: 'app-improvement',
+      scope,
+      repositoryContext,
+      deterministicInspection
+    }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.executionMode, 'deterministic');
+  assert.equal(result.codexThreadId, null);
+  assert.equal(result.usage, null);
+  assert.equal(codexConstructed, false);
+  assert.deepEqual(result.result.inspectionEvidence.relevantPaths, ['src/exact.js']);
+  assert.match(result.result.inspectionEvidence.summary, /without inferring semantic conclusions/);
+  assert.match(result.result.inspectionEvidence.findings[0], /sha256/);
+  assert.equal(executor.usesModel('code.review'), true);
+});
+
+test('deterministic inspection fast path rejects broad, incomplete, oversized and website scopes', () => {
+  const makeContext = (paths) => {
+    const files = paths.map((path) => {
+      const content = `export const value = ${JSON.stringify(path)};\n`;
+      return { path, content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+    });
+    return {
+      version: 1,
+      files,
+      fingerprint: createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex')
+    };
+  };
+  const executor = new CodexReadOnlySkillExecutor({ environment: () => ({}) });
+  const one = makeContext(['src/a.js']);
+
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope: { allowedPaths: ['src'], forbiddenPaths: [] },
+    repositoryContext: one
+  }), null);
+
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope: { allowedPaths: ['src/a.js', 'src/missing.js'], forbiddenPaths: [] },
+    repositoryContext: one
+  }), null);
+
+  const ninePaths = Array.from({ length: 9 }, (_, index) => `src/file-${index}.js`);
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope: { allowedPaths: ninePaths, forbiddenPaths: [] },
+    repositoryContext: makeContext(ninePaths)
+  }), null);
+
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'website-build',
+    scope: { allowedPaths: ['src/a.js'], forbiddenPaths: [] },
+    repositoryContext: one
+  }), null);
+
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.review',
+    workflowProfile: 'app-improvement',
+    scope: { allowedPaths: ['src/a.js'], forbiddenPaths: [] },
+    repositoryContext: one
+  }), null);
+});
+
+test('deterministic inspection refuses a stale or forged fast-path binding', async () => {
+  const content = 'export const exact = true;\n';
+  const file = { path: 'src/exact.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = {
+    version: 1,
+    files: [file],
+    fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex')
+  };
+  const executor = new CodexReadOnlySkillExecutor({ environment: () => ({}) });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'inspect',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: {
+      workflowProfile: 'app-improvement',
+      scope: { allowedPaths: ['src/exact.js'], forbiddenPaths: [] },
+      repositoryContext,
+      deterministicInspection: { version: 1, fingerprint: 'f'.repeat(64), allowedPaths: ['src/exact.js'] }
+    }
+  }, { workspace: '/safe/workspace', timeoutMs: 500 });
+  assert.equal(result.ok, false);
+  assert.equal(result.executionMode, 'deterministic');
+  assert.match(result.error, /deterministic_inspection_binding_invalid/);
+});
+
 test('review context carries a bounded diff and detects diff drift', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'agent-review-context-'));
   let diff = 'diff --git a/src/core.js b/src/core.js\n-old\n+new\n';
