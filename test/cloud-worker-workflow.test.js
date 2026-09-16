@@ -100,15 +100,16 @@ test('routing job receives event data but no secrets or write credentials', () =
   assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
 
-test('cloud worker uses frozen dependencies and the exact runtime shared by active lanes', () => {
+test('cloud worker uses frozen dependencies and the managed Git-enabled runtime shared by active lanes', () => {
   assert.ok(self);
   assert.ok(website);
   assert.ok(callflow);
-  assert.match(self.execution.image, /@sha256:[a-f0-9]{64}$/);
+  assert.equal(self.execution.image, 'agent-node22-pnpm11:local');
   assert.equal(website.execution.image, self.execution.image);
   assert.equal(callflow.execution.image, self.execution.image);
   assert.match(workflow, /run: npm ci --ignore-scripts/);
-  assert.ok(workflow.includes(`run: docker pull ${self.execution.image}`));
+  assert.ok(workflow.includes(`docker build --pull=false --tag ${self.execution.image} docker/node22-pnpm11`));
+  assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
 test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
