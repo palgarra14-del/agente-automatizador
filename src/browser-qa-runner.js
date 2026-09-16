@@ -593,24 +593,32 @@ class ChromeCdpBrowser {
         this.connection.send('Network.enable', {}, sessionId),
         this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
           source: `(() => {
-            let attempted = false;
-            class BrowserQaBlockedWebSocket {
-              constructor() {
-                attempted = true;
-                throw new Error('browser_qa_websocket_forbidden');
+            const blockConstructor = (name, marker, errorCode) => {
+              let attempted = false;
+              class BrowserQaBlockedNetworkConstructor {
+                constructor() {
+                  attempted = true;
+                  throw new Error(errorCode);
+                }
               }
-            }
-            Object.defineProperty(globalThis, '__browserQaWebSocketAttempted', {
-              configurable: false,
-              enumerable: false,
-              get: () => attempted
-            });
-            Object.defineProperty(globalThis, 'WebSocket', {
-              configurable: false,
-              enumerable: false,
-              writable: false,
-              value: BrowserQaBlockedWebSocket
-            });
+              Object.defineProperty(globalThis, marker, {
+                configurable: false,
+                enumerable: false,
+                get: () => attempted
+              });
+              Object.defineProperty(globalThis, name, {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: BrowserQaBlockedNetworkConstructor
+              });
+            };
+            blockConstructor('WebSocket', '__browserQaWebSocketAttempted', 'browser_qa_websocket_forbidden');
+            blockConstructor('WebSocketStream', '__browserQaWebSocketStreamAttempted', 'browser_qa_websocket_stream_forbidden');
+            blockConstructor('RTCPeerConnection', '__browserQaRtcAttempted', 'browser_qa_webrtc_forbidden');
+            blockConstructor('webkitRTCPeerConnection', '__browserQaWebkitRtcAttempted', 'browser_qa_webrtc_forbidden');
+            blockConstructor('mozRTCPeerConnection', '__browserQaMozRtcAttempted', 'browser_qa_webrtc_forbidden');
+            blockConstructor('WebTransport', '__browserQaWebTransportAttempted', 'browser_qa_webtransport_forbidden');
           })();`
         }, sessionId),
         this.connection.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId),
@@ -627,10 +635,20 @@ class ChromeCdpBrowser {
         }, sessionId)
       ]);
 
-      const load = this.connection.waitFor('Page.loadEventFired', { sessionId, signal, timeoutMs });
-      const navigation = await this.connection.send('Page.navigate', { url: pagePlan.url, transitionType: 'typed' }, sessionId);
-      if (navigation.errorText) throw new Error(`browser_qa_navigation_failed:${navigation.errorText}`);
-      await load;
+      const loadController = new AbortController();
+      const forwardAbort = () => loadController.abort();
+      signal?.addEventListener('abort', forwardAbort, { once: true });
+      const load = this.connection.waitFor('Page.loadEventFired', { sessionId, signal: loadController.signal, timeoutMs });
+      load.catch(() => {});
+      let navigation;
+      try {
+        navigation = await this.connection.send('Page.navigate', { url: pagePlan.url, transitionType: 'typed' }, sessionId);
+        if (navigation.errorText) throw new Error(`browser_qa_navigation_failed:${navigation.errorText}`);
+        await load;
+      } finally {
+        loadController.abort();
+        signal?.removeEventListener('abort', forwardAbort);
+      }
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       if (websocketFailure) throw websocketFailure;
@@ -640,8 +658,15 @@ class ChromeCdpBrowser {
       if (websocketFailure) throw websocketFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
-      const websocketAttempted = await evaluateJson(this.connection, sessionId, 'Boolean(globalThis.__browserQaWebSocketAttempted)');
-      if (websocketAttempted || websocketFailure) throw websocketFailure ?? new Error('browser_qa_websocket_forbidden');
+      const directNetworkAttempt = await evaluateJson(this.connection, sessionId, `Boolean(
+        globalThis.__browserQaWebSocketAttempted ||
+        globalThis.__browserQaWebSocketStreamAttempted ||
+        globalThis.__browserQaRtcAttempted ||
+        globalThis.__browserQaWebkitRtcAttempted ||
+        globalThis.__browserQaMozRtcAttempted ||
+        globalThis.__browserQaWebTransportAttempted
+      )`);
+      if (directNetworkAttempt || websocketFailure) throw websocketFailure ?? new Error('browser_qa_direct_network_forbidden');
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
