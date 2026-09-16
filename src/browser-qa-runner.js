@@ -727,6 +727,7 @@ class ChromeCdpBrowser {
       await Promise.all([
         this.connection.send('Page.enable', {}, sessionId),
         this.connection.send('Runtime.enable', {}, sessionId),
+        this.connection.send('Accessibility.enable', {}, sessionId),
         this.connection.send('Network.enable', {}, sessionId),
         this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
           source: `(() => {
@@ -808,6 +809,12 @@ class ChromeCdpBrowser {
         isolatedWorld.executionContextId
       );
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
+      const currentFrameTree = await this.connection.send('Page.getFrameTree', {}, sessionId);
+      const accessibilityTrees = [];
+      for (const accessibilityFrameId of browserQaFrameIds(currentFrameTree?.frameTree)) {
+        accessibilityTrees.push(await this.connection.send('Accessibility.getFullAXTree', { frameId: accessibilityFrameId }, sessionId));
+      }
+      probe.interactiveControls = browserQaInteractiveControlsFromAxTrees(accessibilityTrees);
       const directNetworkAttempt = await evaluateJson(this.connection, sessionId, `!!(
         this.__browserQaWebSocketAttempted ||
         this.__browserQaWebSocketStreamAttempted ||
