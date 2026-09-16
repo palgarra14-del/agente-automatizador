@@ -196,6 +196,30 @@ root.innerHTML = '<button id="shadow-button"></button>';
 </body></html>`);
     return;
   }
+  if (request.url === '/zero-box-overlay') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Overlay fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><vite-error-overlay id="qa-overlay" style="display:contents"></vite-error-overlay>
+<script>
+const host = document.getElementById('qa-overlay');
+const root = host.attachShadow({ mode: 'open' });
+root.innerHTML = '<div style="position:fixed;inset:0;background:#000;color:#fff">Visible error overlay</div>';
+</script></body></html>`);
+    return;
+  }
+  if (request.url === '/hidden-overlay') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Hidden overlay fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><div hidden><vite-error-overlay id="qa-overlay"></vite-error-overlay></div>
+<script>
+const host = document.getElementById('qa-overlay');
+const root = host.attachShadow({ mode: 'open' });
+root.innerHTML = '<div style="position:fixed;inset:0">Hidden error overlay</div>';
+</script></body></html>`);
+    return;
+  }
   if (request.url === '/worker') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -468,6 +492,38 @@ try {
   assert.equal(preconnectEvidence.status, 200);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
   assert.equal(speculativeConnections, 0, 'cross-origin preconnect must not establish a speculative socket');
+
+  const zeroBoxOverlayRoute = '/zero-box-overlay';
+  const zeroBoxOverlayUrl = `${origin}${zeroBoxOverlayRoute}`;
+  const zeroBoxOverlayEvidence = await browser.inspectPage({
+    request: fixtureRequest(zeroBoxOverlayRoute),
+    pagePlan: { route: zeroBoxOverlayRoute, url: zeroBoxOverlayUrl },
+    routeUrls: { [zeroBoxOverlayRoute]: zeroBoxOverlayUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 100
+  });
+  assert.equal(
+    zeroBoxOverlayEvidence.errorOverlay,
+    true,
+    'visible framework overlay content inside a zero-box/display:contents host must be detected'
+  );
+
+  const hiddenOverlayRoute = '/hidden-overlay';
+  const hiddenOverlayUrl = `${origin}${hiddenOverlayRoute}`;
+  const hiddenOverlayEvidence = await browser.inspectPage({
+    request: fixtureRequest(hiddenOverlayRoute),
+    pagePlan: { route: hiddenOverlayRoute, url: hiddenOverlayUrl },
+    routeUrls: { [hiddenOverlayRoute]: hiddenOverlayUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 100
+  });
+  assert.equal(
+    hiddenOverlayEvidence.errorOverlay,
+    false,
+    'framework overlay hidden by an ancestor must not produce a false runtime-overlay defect'
+  );
 
   const clientNavRoute = '/client-nav';
   const clientNavUrl = `${origin}${clientNavRoute}`;
