@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [self, website-pilot]
+        lane: [self, website-pilot, callflow]
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
