@@ -169,7 +169,26 @@ test('runner rejects plan entries that escape a non-root preview base path', asy
   });
   await assert.rejects(
     runner.verify({ request, navigationPlan: plan, signal: new AbortController().signal, timeoutMs: 5_000 }),
-    /page_plan_invalid/
+    /plan_binding_mismatch/
+  );
+  assert.equal(factoryCalls, 0);
+});
+
+test('runner rejects extra same-origin pages that are not in the request blueprint', async () => {
+  const request = requestFor();
+  const plan = JSON.parse(JSON.stringify(browserQaNavigationPlan(request)));
+  plan.sameOriginPages.push({ route: '/admin', url: 'https://preview.example.com/previews/build-1/admin' });
+  let factoryCalls = 0;
+  const runner = new ChromeBrowserQaRunner({
+    networkGuard: async () => {},
+    browserFactory: async () => {
+      factoryCalls += 1;
+      return { close: async () => {}, inspectPage: async () => ({}) };
+    }
+  });
+  await assert.rejects(
+    runner.verify({ request, navigationPlan: plan, signal: new AbortController().signal, timeoutMs: 5_000 }),
+    /plan_binding_mismatch/
   );
   assert.equal(factoryCalls, 0);
 });
