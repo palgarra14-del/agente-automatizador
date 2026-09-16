@@ -687,9 +687,46 @@ async function evaluateJson(connection, sessionId, expression, contextId = null)
   return result.result?.value;
 }
 
+function optionalProtectionBypassSecret(environment = process.env) {
+  const value = environment?.VERCEL_AUTOMATION_BYPASS_SECRET;
+  if (value === undefined || value === null || value === '') return null;
+  if (
+    typeof value !== 'string' ||
+    value.length > 1_024 ||
+    value.trim() !== value ||
+    /[\0\r\n]/.test(value)
+  ) throw new Error('browser_qa_protection_bypass_secret_invalid');
+  return value;
+}
+
+export function browserQaContinuationHeaders({
+  requestUrl,
+  allowedOrigin,
+  headers = {},
+  protectionBypassSecret = null
+} = {}) {
+  const url = new URL(requestUrl);
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== allowedOrigin) {
+    throw new Error('browser_qa_cross_origin_resource_forbidden');
+  }
+  const entries = Object.entries(headers ?? {})
+    .filter(([name]) => {
+      const normalized = String(name).toLowerCase();
+      return normalized !== 'x-vercel-protection-bypass' && normalized !== 'x-vercel-set-bypass-cookie';
+    })
+    .map(([name, value]) => ({ name: String(name), value: String(value) }));
+  if (protectionBypassSecret) {
+    entries.push({ name: 'x-vercel-protection-bypass', value: protectionBypassSecret });
+  }
+  return entries;
+}
+
 class ChromeCdpBrowser {
-  constructor({ child, connection, userDataDir, allowedOrigin }) {
+  #protectionBypassSecret;
+
+  constructor({ child, connection, userDataDir, allowedOrigin, protectionBypassSecret = null }) {
     Object.assign(this, { child, connection, userDataDir, allowedOrigin });
+    this.#protectionBypassSecret = protectionBypassSecret;
     this.closed = false;
   }
 
@@ -766,9 +803,20 @@ class ChromeCdpBrowser {
             return fail();
           }
         }
-        if (['http:', 'https:'].includes(url.protocol)) this.#allowedUrl(url);
-        else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
-        await this.connection.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId);
+        let continuationHeaders = null;
+        if (['http:', 'https:'].includes(url.protocol)) {
+          this.#allowedUrl(url);
+          continuationHeaders = browserQaContinuationHeaders({
+            requestUrl: url,
+            allowedOrigin: this.allowedOrigin,
+            headers: requestData.headers,
+            protectionBypassSecret: this.#protectionBypassSecret
+          });
+        } else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
+        await this.connection.send('Fetch.continueRequest', {
+          requestId: params.requestId,
+          ...(continuationHeaders ? { headers: continuationHeaders } : {})
+        }, sessionId);
       } catch (error) {
         interceptionFailure = interceptionFailure ?? error;
         await fail();
@@ -944,7 +992,8 @@ export async function launchChromeCdpBrowser({
   spawnImpl = spawn,
   WebSocketImpl = globalThis.WebSocket,
   hostPin = null,
-  allowedOrigin = null
+  allowedOrigin = null,
+  protectionBypassSecret = null
 } = {}) {
   throwIfAborted(signal);
   const executablePath = await findChromeExecutable({ explicitPath: chromePath, environment });
@@ -979,7 +1028,7 @@ export async function launchChromeCdpBrowser({
     });
     const devtools = await waitForDevtoolsActivePort(userDataDir, child, { signal, timeoutMs });
     connection = await CdpConnection.connect(`ws://127.0.0.1:${devtools.port}${devtools.path}`, { WebSocketImpl, signal, timeoutMs });
-    const browser = new ChromeCdpBrowser({ child, connection, userDataDir, allowedOrigin });
+    const browser = new ChromeCdpBrowser({ child, connection, userDataDir, allowedOrigin, protectionBypassSecret });
     await waitWithDeadline(browser.version(), { timeoutMs, signal, label: 'browser_qa_browser_version' });
     return browser;
   } catch (error) {
@@ -1014,13 +1063,24 @@ function validateRunnerPlan(request, navigationPlan) {
 }
 
 export class ChromeBrowserQaRunner {
-  constructor({ browserFactory = launchChromeCdpBrowser, networkResolver = resolvePublicNetworkUrl, settleMs = 150 } = {}) {
+  constructor({
+    browserFactory = launchChromeCdpBrowser,
+    networkResolver = resolvePublicNetworkUrl,
+    settleMs = 150,
+    environment = process.env
+  } = {}) {
     if (typeof browserFactory !== 'function') throw new Error('browser_qa_runner_factory_invalid');
     if (typeof networkResolver !== 'function') throw new Error('browser_qa_runner_network_resolver_invalid');
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 2_000) throw new Error('browser_qa_runner_settle_invalid');
     this.browserFactory = browserFactory;
     this.networkResolver = networkResolver;
     this.settleMs = settleMs;
+    Object.defineProperty(this, 'protectionBypassSecret', {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: optionalProtectionBypassSecret(environment)
+    });
   }
 
   async verify({ request, navigationPlan, signal, timeoutMs }) {
@@ -1033,7 +1093,13 @@ export class ChromeBrowserQaRunner {
     const preferred = resolvedPreview.addresses.find((entry) => Number(entry.family) === 4) ?? resolvedPreview.addresses[0];
     if (!preferred || isUnsafeNetworkAddress(preferred.address)) throw new Error('browser_qa_runner_private_network_forbidden');
     const hostPin = { hostname: preview.hostname, address: preferred.address };
-    const browser = await this.browserFactory({ signal, timeoutMs, hostPin, allowedOrigin: preview.origin });
+    const browser = await this.browserFactory({
+      signal,
+      timeoutMs,
+      hostPin,
+      allowedOrigin: preview.origin,
+      protectionBypassSecret: this.protectionBypassSecret
+    });
     const onAbort = () => { Promise.resolve(browser.close()).catch(() => {}); };
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
