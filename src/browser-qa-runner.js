@@ -711,16 +711,41 @@ async function evaluateJson(connection, sessionId, expression, contextId = null)
   return result.result?.value;
 }
 
-function optionalProtectionBypassSecret(environment = process.env) {
-  const value = environment?.VERCEL_AUTOMATION_BYPASS_SECRET;
-  if (value === undefined || value === null || value === '') return null;
+function optionalProtectionBypassPolicy(environment = process.env) {
+  const secret = environment?.VERCEL_AUTOMATION_BYPASS_SECRET;
+  const configuredOrigins = environment?.VERCEL_AUTOMATION_BYPASS_ORIGINS;
+  const secretMissing = secret === undefined || secret === null || secret === '';
+  const originsMissing = configuredOrigins === undefined || configuredOrigins === null || configuredOrigins === '';
+  if (secretMissing && originsMissing) return null;
+  if (secretMissing || originsMissing) throw new Error('browser_qa_protection_bypass_policy_incomplete');
   if (
-    typeof value !== 'string' ||
-    value.length > 1_024 ||
-    value.trim() !== value ||
-    /[\0\r\n]/.test(value)
+    typeof secret !== 'string' ||
+    secret.length > 1_024 ||
+    secret.trim() !== secret ||
+    /[\0\r\n]/.test(secret)
   ) throw new Error('browser_qa_protection_bypass_secret_invalid');
-  return value;
+  if (
+    typeof configuredOrigins !== 'string' ||
+    configuredOrigins.length > 10_000 ||
+    /[\0\r\n]/.test(configuredOrigins)
+  ) throw new Error('browser_qa_protection_bypass_origins_invalid');
+  const rawOrigins = configuredOrigins.split(',').map((value) => value.trim()).filter(Boolean);
+  if (!rawOrigins.length || rawOrigins.length > 20) throw new Error('browser_qa_protection_bypass_origins_invalid');
+  const origins = [...new Set(rawOrigins.map((value) => {
+    let url;
+    try { url = new URL(value); } catch { throw new Error('browser_qa_protection_bypass_origin_invalid'); }
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      value.replace(/\/$/, '') !== url.origin
+    ) throw new Error('browser_qa_protection_bypass_origin_invalid');
+    return url.origin;
+  }))].sort();
+  return Object.freeze({ secret, origins: Object.freeze(origins) });
 }
 
 export function browserQaContinuationHeaders({
@@ -1106,11 +1131,11 @@ export class ChromeBrowserQaRunner {
     this.browserFactory = browserFactory;
     this.networkResolver = networkResolver;
     this.settleMs = settleMs;
-    Object.defineProperty(this, 'protectionBypassSecret', {
+    Object.defineProperty(this, 'protectionBypassPolicy', {
       configurable: false,
       enumerable: false,
       writable: false,
-      value: optionalProtectionBypassSecret(environment)
+      value: optionalProtectionBypassPolicy(environment)
     });
   }
 
@@ -1129,7 +1154,9 @@ export class ChromeBrowserQaRunner {
       timeoutMs,
       hostPin,
       allowedOrigin: preview.origin,
-      protectionBypassSecret: this.protectionBypassSecret
+      protectionBypassSecret: this.protectionBypassPolicy?.origins.includes(preview.origin)
+        ? this.protectionBypassPolicy.secret
+        : null
     });
     const onAbort = () => { Promise.resolve(browser.close()).catch(() => {}); };
     signal?.addEventListener('abort', onAbort, { once: true });
