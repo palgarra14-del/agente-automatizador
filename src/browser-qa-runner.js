@@ -436,16 +436,44 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       }
       return found;
     };
-    const idMap = new Map();
-    for (const element of queryAll('[id]')) {
-      if (!idMap.has(element.id)) idMap.set(element.id, element);
-    }
+    const styleFor = (element) => {
+      const styleWindow = element?.ownerDocument?.defaultView;
+      return styleWindow?.getComputedStyle ? styleWindow.getComputedStyle(element) : getComputedStyle(element);
+    };
+    const labelledElementFor = (element, id) => {
+      const root = element?.getRootNode?.();
+      if (root?.getElementById) return root.getElementById(id);
+      return element?.ownerDocument?.getElementById?.(id) ?? null;
+    };
+    const contentNameFor = (element) => {
+      let text = '';
+      const visit = (node) => {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+          text += ' ' + (node.nodeValue ?? '');
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const current = node;
+        if (
+          current.hidden ||
+          current.hasAttribute?.('hidden') ||
+          current.hasAttribute?.('inert') ||
+          current.getAttribute?.('aria-hidden') === 'true'
+        ) return;
+        const style = styleFor(current);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return;
+        for (const child of current.childNodes) visit(child);
+      };
+      for (const child of element?.childNodes ?? []) visit(child);
+      return clean(text);
+    };
     const nameFor = (element) => {
       const aria = clean(element.getAttribute?.('aria-label'));
       if (aria) return aria.slice(0, 500);
       const labelledBy = clean(element.getAttribute?.('aria-labelledby'));
       if (labelledBy) {
-        const value = labelledBy.split(/\\s+/).map((id) => clean(idMap.get(id)?.textContent)).filter(Boolean).join(' ');
+        const value = labelledBy.split(/\s+/).map((id) => clean(labelledElementFor(element, id)?.textContent)).filter(Boolean).join(' ');
         if (value) return value.slice(0, 500);
       }
       if (element.labels?.length) {
@@ -474,7 +502,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       if (descendantAlt) return descendantAlt.slice(0, 500);
       const svgTitle = clean(element.querySelector?.('svg title')?.textContent);
       if (svgTitle) return svgTitle.slice(0, 500);
-      return clean(element.innerText || element.textContent).slice(0, 500);
+      return contentNameFor(element).slice(0, 500);
     };
     const composedParent = (node) => {
       if (!node) return null;
@@ -495,8 +523,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           current.hasAttribute?.('inert') ||
           current.getAttribute?.('aria-hidden') === 'true'
         ) return false;
-        const styleWindow = current.ownerDocument?.defaultView;
-        const style = styleWindow?.getComputedStyle ? styleWindow.getComputedStyle(current) : getComputedStyle(current);
+        const style = styleFor(current);
         if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
         if (Number.parseFloat(style.opacity || '1') === 0) return false;
       }
@@ -509,7 +536,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         const expected = routeUrls[target.destination];
         element = hrefElements.find((candidate) => {
           try {
-            const resolved = new URL(candidate.getAttribute('href'), location.href);
+            const resolved = new URL(candidate.getAttribute('href'), candidate.ownerDocument?.baseURI ?? location.href);
             const wanted = new URL(expected);
             return resolved.protocol === wanted.protocol &&
               resolved.host === wanted.host &&
@@ -519,14 +546,15 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           } catch { return false; }
         }) ?? null;
       } else if (target.semantics === 'anchor') {
-        const destination = idMap.get(target.destination.slice(1));
-        if (!isRendered(destination)) return null;
         element = hrefElements.find((candidate) => {
           try {
-            const resolved = new URL(candidate.getAttribute('href'), location.href);
-            return resolved.origin === location.origin &&
-              resolved.pathname.replace(/\\/$/, '') === location.pathname.replace(/\\/$/, '') &&
-              resolved.search === location.search &&
+            const base = new URL(candidate.ownerDocument?.baseURI ?? location.href);
+            const resolved = new URL(candidate.getAttribute('href'), base);
+            const destination = candidate.ownerDocument?.getElementById?.(target.destination.slice(1));
+            return isRendered(destination) &&
+              resolved.origin === base.origin &&
+              resolved.pathname.replace(/\/$/, '') === base.pathname.replace(/\/$/, '') &&
+              resolved.search === base.search &&
               resolved.hash === target.destination;
           } catch { return false; }
         }) ?? null;
@@ -537,18 +565,21 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       } else if (target.destination === 'whatsapp') {
         element = hrefElements.find((candidate) => {
           try {
-            const resolved = new URL(candidate.getAttribute('href'), location.href);
+            const resolved = new URL(candidate.getAttribute('href'), candidate.ownerDocument?.baseURI ?? location.href);
             return resolved.hostname === 'wa.me' || resolved.hostname === 'whatsapp.com' || resolved.hostname.endsWith('.whatsapp.com');
           } catch { return false; }
         }) ?? null;
       }
-      return element ? { id: target.id, href: element.getAttribute('href'), accessibleName: nameFor(element) } : null;
+      if (!element) return null;
+      let href = element.getAttribute('href');
+      try { href = new URL(href, element.ownerDocument?.baseURI ?? location.href).href; } catch {}
+      return { id: target.id, href, accessibleName: nameFor(element) };
     };
     const sectionNodes = queryAll('[id], [data-section], [data-section-id]');
     const observedSections = expectedSections.filter((section) => sectionNodes.some((node) =>
       isRendered(node) && (node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section)
     ));
-    const observedAnchors = expectedAnchors.filter((anchor) => isRendered(idMap.get(anchor)));
+    const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
     const interactiveNodes = queryAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])').filter(isRendered);
     if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
     const interactive = interactiveNodes
