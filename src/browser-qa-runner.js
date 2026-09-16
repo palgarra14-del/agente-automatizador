@@ -203,7 +203,7 @@ class CdpConnection {
       }), { timeoutMs, signal, label: 'browser_qa_cdp_connect' });
       return new CdpConnection(socket);
     } catch (error) {
-      try { socket.close(); } catch {}
+      try { socket.close(); } catch { /* best-effort socket cleanup */ }
       throw error;
     }
   }
@@ -266,7 +266,7 @@ class CdpConnection {
         fn(value);
       };
       const off = this.on(method, (params, message) => {
-        let matches = false;
+        let matches;
         try { matches = predicate(params, message); } catch (error) { return finish(reject, error); }
         if (matches) finish(resolvePromise, params);
       }, sessionId);
@@ -294,7 +294,7 @@ class CdpConnection {
 
   close() {
     this.#closed();
-    try { this.socket.close(); } catch {}
+    try { this.socket.close(); } catch { /* best-effort socket cleanup */ }
   }
 }
 
