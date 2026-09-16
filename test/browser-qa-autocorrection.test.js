@@ -108,6 +108,52 @@ test('correction request is stable, canonical and preserves the original allowed
   }), /scope_path_invalid/);
 });
 
+test('correction request rejects sensitive package/deploy/control paths', () => {
+  const request = requestFor();
+  const evidence = defectEvidence(request);
+  for (const path of [
+    'package.json',
+    'package-lock.json',
+    'apps/site/package.json',
+    '.github/workflows/ci.yml',
+    'vercel.json',
+    'Dockerfile',
+    'deploy/release.sh',
+    '.env.production',
+    'secrets/token.txt'
+  ]) {
+    assert.throws(() => createBrowserQaCorrectionRequest({
+      request,
+      evidence,
+      allowedPaths: [path]
+    }), /sensitive_path_forbidden/, path);
+  }
+});
+
+test('correction fingerprint covers defects, authority and exact canonical payload shape', () => {
+  const request = requestFor();
+  const evidence = defectEvidence(request);
+  const correction = createBrowserQaCorrectionRequest({ request, evidence, allowedPaths });
+  assert.equal(validateBrowserQaCorrectionRequest(correction), true);
+  assert.deepEqual(correction.deterministicDefects, evidence.deterministicDefects);
+
+  const authorityTamper = structuredClone(correction);
+  authorityTamper.forbiddenAuthority = authorityTamper.forbiddenAuthority.filter((item) => item !== 'merge');
+  assert.throws(() => validateBrowserQaCorrectionRequest(authorityTamper), /authority_invalid|fingerprint_mismatch/);
+
+  const defectTamper = structuredClone(correction);
+  defectTamper.deterministicDefects[0].subject = 'tampered';
+  assert.throws(() => validateBrowserQaCorrectionRequest(defectTamper), /defect_fingerprint_mismatch|fingerprint_mismatch/);
+
+  const extraField = structuredClone(correction);
+  extraField.escalate = true;
+  assert.throws(() => validateBrowserQaCorrectionRequest(extraField), /shape_invalid/);
+
+  const commitTamper = structuredClone(correction);
+  commitTamper.sourcePublishedCommitSha = 'not-a-commit';
+  assert.throws(() => validateBrowserQaCorrectionRequest(commitTamper), /source_commit_invalid/);
+});
+
 test('PASS, unavailable and judgment-only initial evidence never schedule autocorrection', () => {
   const request = requestFor();
   const coordinator = new BrowserQaAutocorrectionCoordinator();
