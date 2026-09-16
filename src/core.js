@@ -2108,9 +2108,20 @@ export class WorkflowEngine {
     const retryFeedback = next.attempts > 0 && typeof next.evidence?.error === 'string' && next.evidence.error
       ? { previousAttempt: next.attempts, previousError: clip(next.evidence.error, 500) }
       : null;
-    const consumesModel = typeof this.skillExecutor.usesModel === 'function'
-      ? this.skillExecutor.usesModel(next.skill) !== false
-      : true;
+    const modelPlan = await this.get(id);
+    const deterministicInspection = typeof this.skillExecutor.deterministicInspectionContext === 'function'
+      ? this.skillExecutor.deterministicInspectionContext({
+          skill: next.skill,
+          workflowProfile: modelPlan.profile,
+          scope: modelPlan.scope,
+          repositoryContext
+        })
+      : null;
+    const consumesModel = deterministicInspection
+      ? false
+      : typeof this.skillExecutor.usesModel === 'function'
+        ? this.skillExecutor.usesModel(next.skill) !== false
+        : true;
     let modelCallId = null;
     if (consumesModel) {
       const reservation = await this.reserveWorkflowModelCall(id, next.id);
@@ -2149,9 +2160,12 @@ export class WorkflowEngine {
     if (remainingMs <= 0) return this.failDeadline(id);
     const skillContext = {
       projectId: project.id,
+      workflowProfile: runningPlan.profile,
+      scope: runningPlan.scope,
       priorEvidence,
       ...(retryFeedback ? { retryFeedback } : {}),
       ...(repositoryContext ? { repositoryContext } : {}),
+      ...(deterministicInspection ? { deterministicInspection } : {}),
       ...(runningStep.skill === 'website.plan' ? {
         businessBrief: runningPlan.input.businessBrief,
         businessBriefFingerprint: runningPlan.inputFingerprint,
@@ -4605,6 +4619,52 @@ function validateSkillOutput(contract, output, skillId = null, context = {}) {
   return normalized;
 }
 
+const deterministicInspectionMaxFiles = 8;
+
+function deterministicInspectionBinding({ skill, workflowProfile, scope, repositoryContext } = {}) {
+  if (skill !== 'code.inspect' || workflowProfile !== 'app-improvement' || !repositoryContext) return null;
+  const normalizedScope = normalizeRunScope(scope ?? {});
+  if (!normalizedScope.allowedPaths.length || normalizedScope.allowedPaths.length > deterministicInspectionMaxFiles) return null;
+  const contextPaths = repositoryContextPathSet({ repositoryContext });
+  const allowedPaths = [...normalizedScope.allowedPaths].sort();
+  if (contextPaths.size !== allowedPaths.length || allowedPaths.some((path) => !contextPaths.has(path))) return null;
+  const fingerprint = evidenceFingerprint({
+    version: 1,
+    mode: 'deterministic-exact-file-inspection',
+    workflowProfile,
+    allowedPaths,
+    repositoryContextFingerprint: repositoryContext.fingerprint
+  });
+  return { version: 1, fingerprint, allowedPaths };
+}
+
+function deterministicInspectionResult(request) {
+  const expected = request?.context?.deterministicInspection;
+  const binding = deterministicInspectionBinding({
+    skill: request?.skill,
+    workflowProfile: request?.context?.workflowProfile,
+    scope: request?.context?.scope,
+    repositoryContext: request?.context?.repositoryContext
+  });
+  if (!expected || !binding || expected.fingerprint !== binding.fingerprint) {
+    throw new Error('deterministic_inspection_binding_invalid');
+  }
+  const byPath = new Map(request.context.repositoryContext.files.map((file) => [file.path, file]));
+  const findings = binding.allowedPaths.map((path) => {
+    const file = byPath.get(path);
+    if (!file) throw new Error(`deterministic_inspection_file_missing:${path}`);
+    return `Verified exact scoped file ${path}: ${file.bytes} bytes, sha256 ${file.sha256}. Semantic diagnosis is deferred.`;
+  });
+  const output = {
+    inspectionEvidence: {
+      summary: `Deterministic exact-file inspection verified ${binding.allowedPaths.length} authorized repository file(s) without inferring semantic conclusions.`,
+      relevantPaths: [...binding.allowedPaths],
+      findings
+    }
+  };
+  return validateSkillOutput(request.contract, output, 'code.inspect', request.context);
+}
+
 function deterministicDiagnosisResult(request) {
   const rawInspection = request?.context?.priorEvidence?.['inspect-project']?.inspectionEvidence;
   if (!rawInspection) throw new Error('deterministic_diagnosis_missing_validated_inspection');
@@ -4647,6 +4707,10 @@ export class CodexReadOnlySkillExecutor {
   usesModel(skillId) {
     if (!this.supports(skillId)) throw new Error(`skill_executor_unsupported:${skillId}`);
     return skillId !== 'code.diagnose';
+  }
+
+  deterministicInspectionContext(input = {}) {
+    return deterministicInspectionBinding(input);
   }
 
   async prepareContext({ skill, project, scope }, { workspace, timeoutMs }) {
@@ -4702,6 +4766,31 @@ export class CodexReadOnlySkillExecutor {
 
   async execute(request, { workspace, timeoutMs }) {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
+    if (request.skill === 'code.inspect' && request.context?.deterministicInspection) {
+      try {
+        const result = deterministicInspectionResult(request);
+        const outputBytes = Buffer.byteLength(JSON.stringify(result));
+        if (outputBytes > this.maxOutputBytes) throw new Error('skill_output_too_large');
+        return {
+          status: 'completed',
+          ok: true,
+          codexThreadId: null,
+          usage: null,
+          outputBytes,
+          result,
+          executionMode: 'deterministic'
+        };
+      } catch (error) {
+        return {
+          status: 'failed',
+          ok: false,
+          timedOut: false,
+          outputBytes: 0,
+          error: clip(error.message, 1_000),
+          executionMode: 'deterministic'
+        };
+      }
+    }
     if (request.skill === 'code.diagnose') {
       try {
         const result = deterministicDiagnosisResult(request);
