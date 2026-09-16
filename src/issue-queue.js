@@ -1524,6 +1524,37 @@ export class SupervisedIssueQueue {
     return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
   }
 
+  async hasWork() {
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) || !this.ownsRecord(record)) continue;
+      if (!terminal.has(record.status)) return true;
+      if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
+    }
+
+    const issues = await this.channel.openIssues();
+    for (const issue of issues) {
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      let routingRequest = null;
+      try {
+        routingRequest = parseIssueRequestBody(issue.body).request;
+      } catch {
+        if (this.includedProjectIds !== null) continue;
+        if (this.authorized(issue.user?.login)) return true;
+        continue;
+      }
+      if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
+      const existing = state.requests?.[this.requestKey(issue)] ?? null;
+      if (existing && !this.ownsRecord(existing)) continue;
+      if (existing && terminal.has(existing.status)) continue;
+      return true;
+    }
+    return false;
+  }
+
   async tick() {
     let notificationError = null;
     const state = await this.store.load();
