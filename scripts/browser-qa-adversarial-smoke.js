@@ -39,6 +39,59 @@ try { window.__socket = new WebSocket('ws://127.0.0.1:9/private'); } catch {}
 </body></html>`);
     return;
   }
+  if (request.url === '/webrtc') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>WebRTC fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>
+try { window.__rtc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:9' }] }); } catch {}
+</script>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/webtransport') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>WebTransport fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>
+try { window.__transport = new WebTransport('https://127.0.0.1:9/private'); } catch {}
+</script>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/history-hash') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>History hash fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>history.replaceState({}, '', '/history-hash#qa');</script>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/route-link') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Route link fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><a href="/target?variant=1">Target</a></body></html>`);
+    return;
+  }
+  if (request.url === '/target') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Target</title><meta name="description" content="Fixture description"></head><body><section id="hero">Target</section></body></html>');
+    return;
+  }
+  if (request.url === '/redirect') {
+    response.writeHead(302, { location: '/redirected' });
+    response.end();
+    return;
+  }
+  if (request.url === '/redirected') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Redirected</title><meta name="description" content="Fixture description"></head><body><section id="hero">Redirected</section></body></html>');
+    return;
+  }
   if (request.url === '/history') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -139,6 +192,78 @@ try {
     }),
     /browser_qa_websocket_forbidden/
   );
+
+  const webrtcRoute = '/webrtc';
+  const webrtcUrl = `${origin}${webrtcRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(webrtcRoute),
+      pagePlan: { route: webrtcRoute, url: webrtcUrl },
+      routeUrls: { [webrtcRoute]: webrtcUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 50
+    }),
+    /browser_qa_direct_network_forbidden|browser_qa_webrtc_forbidden/
+  );
+
+  const webTransportRoute = '/webtransport';
+  const webTransportUrl = `${origin}${webTransportRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(webTransportRoute),
+      pagePlan: { route: webTransportRoute, url: webTransportUrl },
+      routeUrls: { [webTransportRoute]: webTransportUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 50
+    }),
+    /browser_qa_direct_network_forbidden|browser_qa_webtransport_forbidden/
+  );
+
+  const historyHashRoute = '/history-hash';
+  const historyHashUrl = `${origin}${historyHashRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(historyHashRoute),
+      pagePlan: { route: historyHashRoute, url: historyHashUrl },
+      routeUrls: { [historyHashRoute]: historyHashUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 50
+    }),
+    /browser_qa_final_url_mismatch/
+  );
+
+  const routeLinkRoute = '/route-link';
+  const routeLinkUrl = `${origin}${routeLinkRoute}`;
+  const targetUrl = `${origin}/target`;
+  const routeLinkEvidence = await browser.inspectPage({
+    request: fixtureRequest(routeLinkRoute, [
+      { id: 'route-target', fromRoute: routeLinkRoute, semantics: 'route', destination: '/target' }
+    ]),
+    pagePlan: { route: routeLinkRoute, url: routeLinkUrl },
+    routeUrls: { [routeLinkRoute]: routeLinkUrl, '/target': targetUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 50
+  });
+  assert.deepEqual(routeLinkEvidence.targets, [], 'query-bearing required route link must not match canonical target');
+
+  const redirectRoute = '/redirect';
+  const redirectUrl = `${origin}${redirectRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(redirectRoute),
+      pagePlan: { route: redirectRoute, url: redirectUrl },
+      routeUrls: { [redirectRoute]: redirectUrl },
+      signal: controller.signal,
+      timeoutMs: 250,
+      settleMs: 50
+    }),
+    /browser_qa_navigation_failed|browser_qa_final_url_mismatch|browser_qa_document_url_mismatch|browser_qa_runner_origin_forbidden/
+  );
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 
   const historyRoute = '/history';
   const historyUrl = `${origin}${historyRoute}`;
