@@ -11,6 +11,8 @@ jobs:
         with: { node-version: 24, cache: npm }
       - run: npm ci
       - run: npm test
+      - name: Smoke real Chrome/CDP Browser QA runtime
+        run: node scripts/browser-qa-chrome-smoke.js
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
