@@ -108,7 +108,7 @@ test('private, loopback, link-local and documentation addresses are rejected', (
   }
 });
 
-test('document binding requires exact query while ignoring trailing slash equivalence', () => {
+test('document binding requires exact query and hash while ignoring trailing slash equivalence', () => {
   assert.equal(
     browserQaDocumentUrlMatches('https://preview.example.com/route', 'https://preview.example.com/route'),
     true
@@ -123,6 +123,14 @@ test('document binding requires exact query while ignoring trailing slash equiva
   );
   assert.equal(
     browserQaDocumentUrlMatches('https://preview.example.com/route', 'https://preview.example.com/route?qa=1'),
+    false
+  );
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route#qa', 'https://preview.example.com/route'),
+    false
+  );
+  assert.equal(
+    browserQaDocumentUrlMatches('https://preview.example.com/route', 'https://preview.example.com/route#qa'),
     false
   );
 });
