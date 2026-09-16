@@ -3,6 +3,14 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { launchChromeCdpBrowser } from '../src/browser-qa-runner.js';
 
+let speculativeConnections = 0;
+let speculativeOrigin = 'http://127.0.0.1:1';
+const speculativeServer = createServer((request, response) => {
+  response.writeHead(204);
+  response.end();
+});
+speculativeServer.on('connection', () => { speculativeConnections += 1; });
+
 const server = createServer((request, response) => {
   if (request.url === '/hidden') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -101,6 +109,41 @@ try { window.__transport = new WebTransport('https://127.0.0.1:9/private'); } ca
 </body></html>`);
     return;
   }
+  if (request.url === '/monkey-patch') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Monkey patch fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><button id="monkey-button"></button>
+<script>
+Document.prototype.querySelectorAll = () => [];
+Document.prototype.querySelector = () => null;
+Element.prototype.querySelectorAll = () => [];
+Element.prototype.querySelector = () => null;
+Element.prototype.getClientRects = () => [];
+</script></body></html>`);
+    return;
+  }
+  if (request.url === '/shadow-frame') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Shadow frame fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><div id="shadow-host"></div>
+<iframe id="qa-frame" srcdoc="<button id='frame-button'></button>"></iframe>
+<script>
+const root = document.getElementById('shadow-host').attachShadow({ mode: 'open' });
+root.innerHTML = '<button id="shadow-button"></button>';
+</script></body></html>`);
+    return;
+  }
+  if (request.url === '/preconnect') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Preconnect fixture</title><meta name="description" content="Fixture description">
+<link rel="preconnect" href="${speculativeOrigin}">
+<link rel="dns-prefetch" href="//browser-qa-blocked.invalid">
+</head><body><section id="hero">Hero</section></body></html>`);
+    return;
+  }
   if (request.url === '/worker') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -116,6 +159,12 @@ window.__qaWorker = new Worker(URL.createObjectURL(blob));
   response.writeHead(404, { 'content-type': 'text/plain' });
   response.end('not found');
 });
+
+speculativeServer.listen(0, '127.0.0.1');
+await once(speculativeServer, 'listening');
+const speculativeAddress = speculativeServer.address();
+if (!speculativeAddress || typeof speculativeAddress === 'string') throw new Error('browser_qa_speculative_server_address_invalid');
+speculativeOrigin = `http://127.0.0.1:${speculativeAddress.port}`;
 
 server.listen(0, '127.0.0.1');
 await once(server, 'listening');
@@ -279,6 +328,52 @@ try {
     /browser_qa_final_url_mismatch/
   );
 
+  const monkeyRoute = '/monkey-patch';
+  const monkeyUrl = `${origin}${monkeyRoute}`;
+  const monkeyEvidence = await browser.inspectPage({
+    request: fixtureRequest(monkeyRoute),
+    pagePlan: { route: monkeyRoute, url: monkeyUrl },
+    routeUrls: { [monkeyRoute]: monkeyUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 50
+  });
+  const monkeyButton = monkeyEvidence.interactiveControls.find((control) => control.id === 'id:monkey-button');
+  assert.ok(monkeyButton, 'isolated-world audit must ignore page monkey patches of DOM APIs');
+  assert.equal(monkeyButton.accessibleName, '', 'monkey-patched page must not hide an unnamed rendered button');
+
+  const shadowFrameRoute = '/shadow-frame';
+  const shadowFrameUrl = `${origin}${shadowFrameRoute}`;
+  const shadowFrameEvidence = await browser.inspectPage({
+    request: fixtureRequest(shadowFrameRoute),
+    pagePlan: { route: shadowFrameRoute, url: shadowFrameUrl },
+    routeUrls: { [shadowFrameRoute]: shadowFrameUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 150
+  });
+  const shadowButton = shadowFrameEvidence.interactiveControls.find((control) => control.id === 'id:shadow-button');
+  const frameButton = shadowFrameEvidence.interactiveControls.find((control) => control.id === 'id:frame-button');
+  assert.ok(shadowButton, 'open shadow-root controls must be audited');
+  assert.equal(shadowButton.accessibleName, '');
+  assert.ok(frameButton, 'same-origin iframe controls must be audited');
+  assert.equal(frameButton.accessibleName, '');
+
+  const preconnectRoute = '/preconnect';
+  const preconnectUrl = `${origin}${preconnectRoute}`;
+  speculativeConnections = 0;
+  const preconnectEvidence = await browser.inspectPage({
+    request: fixtureRequest(preconnectRoute),
+    pagePlan: { route: preconnectRoute, url: preconnectUrl },
+    routeUrls: { [preconnectRoute]: preconnectUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 250
+  });
+  assert.equal(preconnectEvidence.status, 200);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  assert.equal(speculativeConnections, 0, 'cross-origin preconnect must not establish a speculative socket');
+
   const workerRoute = '/worker';
   const workerUrl = `${origin}${workerRoute}`;
   await assert.rejects(
@@ -298,4 +393,5 @@ try {
   clearTimeout(timer);
   await browser?.close();
   await new Promise((resolvePromise) => server.close(resolvePromise));
+  await new Promise((resolvePromise) => speculativeServer.close(resolvePromise));
 }
