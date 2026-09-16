@@ -13,13 +13,29 @@ const server = createServer((request, response) => {
   <section id="hero">Hero</section>
   <a id="visible-target" href="#contact">Contact</a>
   <section id="contact" hidden>Contact</section>
+  <a id="transparent-target" href="#transparent">Transparent</a>
+  <div style="opacity:0"><section id="transparent">Invisible by opacity</section></div>
   <div class="ancestor-hidden">
     <a id="hidden-target" href="#contact"></a>
     <input id="hidden-control" value="secret">
   </div>
   <div aria-hidden="true"><button id="aria-hidden-control"></button></div>
   <button id="alt-button" alt="Save"></button>
+  <input id="empty-button" type="button">
+  <input id="default-submit" type="submit">
+  <input id="default-reset" type="reset">
   <input id="name" type="text" value="Jane">
+</body></html>`);
+    return;
+  }
+  if (request.url === '/websocket') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>WebSocket fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>
+try { window.__socket = new WebSocket('ws://127.0.0.1:9/private'); } catch {}
+</script>
 </body></html>`);
     return;
   }
@@ -78,8 +94,9 @@ try {
   const hiddenRoute = '/hidden';
   const hiddenUrl = `${origin}${hiddenRoute}`;
   const hiddenRequest = fixtureRequest(hiddenRoute, [
-    { id: 'primary', fromRoute: hiddenRoute, semantics: 'anchor', destination: '#contact' }
-  ], ['hero', 'contact']);
+    { id: 'primary', fromRoute: hiddenRoute, semantics: 'anchor', destination: '#contact' },
+    { id: 'transparent', fromRoute: hiddenRoute, semantics: 'anchor', destination: '#transparent' }
+  ], ['hero', 'contact', 'transparent']);
   const hiddenEvidence = await browser.inspectPage({
     request: hiddenRequest,
     pagePlan: { route: hiddenRoute, url: hiddenUrl },
@@ -90,17 +107,38 @@ try {
   });
 
   assert.equal(hiddenEvidence.status, 200);
-  assert.deepEqual(hiddenEvidence.sections, ['hero'], 'hidden required section must not count as rendered');
-  assert.deepEqual(hiddenEvidence.anchors, [], 'hidden anchor destination must not count as reachable');
-  assert.deepEqual(hiddenEvidence.targets, [], 'visible CTA to hidden destination must not count as usable');
+  assert.deepEqual(hiddenEvidence.sections, ['hero'], 'hidden or fully transparent required sections must not count as rendered');
+  assert.deepEqual(hiddenEvidence.anchors, [], 'hidden or fully transparent anchor destinations must not count as reachable');
+  assert.deepEqual(hiddenEvidence.targets, [], 'visible CTA to hidden or fully transparent destination must not count as usable');
   assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:hidden-control'), false);
   assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:aria-hidden-control'), false);
   const altButton = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:alt-button');
   assert.ok(altButton, 'visible button should be audited');
   assert.equal(altButton.accessibleName, '', 'button alt attribute must not be treated as an accessible name');
+  const emptyButton = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:empty-button');
+  assert.ok(emptyButton, 'empty type=button should be audited');
+  assert.equal(emptyButton.accessibleName, '', 'empty type=button must remain unnamed');
+  const defaultSubmit = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:default-submit');
+  const defaultReset = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:default-reset');
+  assert.ok(defaultSubmit?.accessibleName, 'default submit control should have a UA default accessible name');
+  assert.ok(defaultReset?.accessibleName, 'default reset control should have a UA default accessible name');
   const textInput = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:name');
   assert.ok(textInput, 'visible text input should be audited');
   assert.equal(textInput.accessibleName, '', 'text input value must not be treated as an accessible name');
+
+  const websocketRoute = '/websocket';
+  const websocketUrl = `${origin}${websocketRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(websocketRoute),
+      pagePlan: { route: websocketRoute, url: websocketUrl },
+      routeUrls: { [websocketRoute]: websocketUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 50
+    }),
+    /browser_qa_websocket_forbidden/
+  );
 
   const historyRoute = '/history';
   const historyUrl = `${origin}${historyRoute}`;
