@@ -187,7 +187,7 @@ export function validateBrowserQaCorrectionRequest(value) {
   return true;
 }
 
-function initialDecision(request, evidence) {
+function initialDecision(evidence) {
   if (evidence.status === 'unavailable') {
     return freeze({ status: 'blocked', reason: 'browser_qa_unavailable', evidenceFingerprint: evidence.evidenceFingerprint });
   }
@@ -207,7 +207,7 @@ export class BrowserQaAutocorrectionCoordinator {
 
   considerInitial({ request, evidence, allowedPaths } = {}) {
     validateEvidence(request, evidence);
-    const trivial = initialDecision(request, evidence);
+    const trivial = initialDecision(evidence);
     if (trivial) return trivial;
 
     const correctionRequest = createBrowserQaCorrectionRequest({ request, evidence, allowedPaths });
