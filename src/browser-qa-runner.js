@@ -374,7 +374,8 @@ export function browserQaDocumentUrlMatches(candidate, expected) {
     return a.protocol === b.protocol &&
       a.host === b.host &&
       a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '') &&
-      a.search === b.search;
+      a.search === b.search &&
+      a.hash === b.hash;
   } catch {
     return false;
   }
@@ -449,9 +450,12 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         element = hrefElements.find((candidate) => {
           try {
             const resolved = new URL(candidate.getAttribute('href'), location.href);
-            resolved.search = ''; resolved.hash = '';
-            const wanted = new URL(expected); wanted.search = ''; wanted.hash = '';
-            return resolved.href.replace(/\\/$/, '') === wanted.href.replace(/\\/$/, '');
+            const wanted = new URL(expected);
+            return resolved.protocol === wanted.protocol &&
+              resolved.host === wanted.host &&
+              resolved.pathname.replace(/\\/$/, '') === wanted.pathname.replace(/\\/$/, '') &&
+              resolved.search === wanted.search &&
+              resolved.hash === wanted.hash;
           } catch { return false; }
         }) ?? null;
       } else if (target.semantics === 'anchor') {
@@ -460,7 +464,10 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         element = hrefElements.find((candidate) => {
           try {
             const resolved = new URL(candidate.getAttribute('href'), location.href);
-            return resolved.origin === location.origin && resolved.pathname.replace(/\\/$/, '') === location.pathname.replace(/\\/$/, '') && resolved.hash === target.destination;
+            return resolved.origin === location.origin &&
+              resolved.pathname.replace(/\\/$/, '') === location.pathname.replace(/\\/$/, '') &&
+              resolved.search === location.search &&
+              resolved.hash === target.destination;
           } catch { return false; }
         }) ?? null;
       } else if (target.destination === 'phone') {
