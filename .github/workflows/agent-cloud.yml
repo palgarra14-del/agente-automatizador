@@ -18,8 +18,8 @@ permissions:
   statuses: read
 
 jobs:
-  cloud-once:
-    name: cloud-once (${{ matrix.lane }})
+  route:
+    name: route cloud lanes
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -34,10 +34,38 @@ jobs:
           )
         )
       )
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lanes: ${{ steps.route.outputs.lanes }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Route event to trusted cloud lanes
+        id: route
+        shell: bash
+        env:
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+          AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
+          AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          LANES="$(node scripts/cloud-lane-route.js)"
+          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
+          echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+
+  cloud-once:
+    name: cloud-once (${{ matrix.lane }})
+    needs: route
     strategy:
       fail-fast: false
       matrix:
-        lane: [self, website-pilot, callflow]
+        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
