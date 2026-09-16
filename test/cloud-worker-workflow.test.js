@@ -22,12 +22,19 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
 });
 
-test('cloud worker uses a static reviewed lane matrix with independent concurrency groups', () => {
-  assert.match(workflow, /fail-fast: false[\s\S]*lane: \[self, website-pilot, callflow\]/);
+test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
+  assert.match(workflow, /route:\n[\s\S]*name: route cloud lanes/);
+  assert.match(workflow, /route:[\s\S]*permissions:\n\s+contents: read/);
+  assert.match(workflow, /route:[\s\S]*uses: actions\/checkout@v5[\s\S]*ref: main[\s\S]*persist-credentials: false/);
+  assert.match(workflow, /route:[\s\S]*uses: actions\/setup-node@v4[\s\S]*node-version: 24/);
+  assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
+  assert.match(workflow, /outputs:\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /cloud-once:[\s\S]*needs: route/);
+  assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /timeout-minutes: 35/);
-  assert.doesNotMatch(workflow, /matrix\.lane:\s*\$\{\{\s*github\./);
+  assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
   assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
 });
 
@@ -79,6 +86,16 @@ test('cloud worker checks out trusted main without persisting checkout credentia
     .map((match) => match[1])
     .filter((action) => !/^actions\/(checkout|setup-node)@/.test(action));
   assert.deepEqual(thirdPartyUses, []);
+});
+
+test('routing job receives event data but no secrets or write credentials', () => {
+  const routeStart = workflow.indexOf('  route:');
+  const cloudStart = workflow.indexOf('  cloud-once:');
+  assert.ok(routeStart >= 0 && cloudStart > routeStart);
+  const route = workflow.slice(routeStart, cloudStart);
+  assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(route, /AGENT_CLOUD_ISSUE_BODY: \$\{\{ github\.event\.issue\.body \}\}/);
+  assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
 
 test('cloud worker uses frozen dependencies and the exact runtime shared by active lanes', () => {
