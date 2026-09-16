@@ -4,6 +4,7 @@ import { SupervisedIssueQueue } from '../src/issue-queue.js';
 
 const repository = { owner: 'palgarra14-del', name: 'agente-automatizador' };
 const key = (number) => `${repository.owner}/${repository.name}#${number}`;
+const clone = (value) => JSON.parse(JSON.stringify(value));
 
 function requestBody(projectId = 'callflow') {
   return `<!-- agent-request:v1 -->
@@ -29,12 +30,12 @@ function issue(number, { projectId = 'callflow', body = requestBody(projectId), 
 
 function makeQueue({ state = { requests: {} }, issues = [], includedProjectIds = ['callflow'] } = {}) {
   const store = {
-    async load() { return structuredClone(state); },
+    async load() { return clone(state); },
     async mutate() { throw new Error('cloud preflight must remain read-only'); }
   };
   const channel = {
     repository,
-    async openIssues() { return structuredClone(issues); }
+    async openIssues() { return clone(issues); }
   };
   return new SupervisedIssueQueue({
     store,
