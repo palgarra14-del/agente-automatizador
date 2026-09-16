@@ -19,6 +19,7 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
+  assert.match(workflow, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
 });
 
 test('cloud worker uses a static reviewed lane matrix with independent concurrency groups', () => {
