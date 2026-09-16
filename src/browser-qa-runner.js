@@ -341,7 +341,7 @@ function chromeHostResolverRule(hostPin) {
   const address = String(hostPin.address ?? '').toLowerCase();
   if (!hostname || hostnameLooksLocal(hostname) || !isIP(address) || isUnsafeNetworkAddress(address)) throw new Error('browser_qa_host_pin_invalid');
   const target = isIP(address) === 6 ? `[${address}]` : address;
-  return `--host-resolver-rules=MAP ${hostname} ${target}`;
+  return `--host-resolver-rules=MAP ${hostname} ${target},MAP * ~NOTFOUND`;
 }
 
 function chromeArguments(userDataDir, hostPin = null) {
@@ -495,7 +495,8 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           current.hasAttribute?.('inert') ||
           current.getAttribute?.('aria-hidden') === 'true'
         ) return false;
-        const style = getComputedStyle(current);
+        const styleWindow = current.ownerDocument?.defaultView;
+        const style = styleWindow?.getComputedStyle ? styleWindow.getComputedStyle(current) : getComputedStyle(current);
         if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
         if (Number.parseFloat(style.opacity || '1') === 0) return false;
       }
