@@ -406,7 +406,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     const observedAnchors = expectedAnchors.filter((anchor) => Boolean(document.getElementById(anchor)));
     const interactive = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')]
       .slice(0, 500)
-      .map((element, index) => ({ id: element.id ? `id:${String(element.id).slice(0, 100)}` : `control-${index}`, accessibleName: nameFor(element) }));
+      .map((element, index) => ({ id: element.id ? 'id:' + String(element.id).slice(0, 100) : 'control-' + index, accessibleName: nameFor(element) }));
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
     return {
       finalUrl: location.href,
