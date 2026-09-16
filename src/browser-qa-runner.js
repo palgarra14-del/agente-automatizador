@@ -584,7 +584,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     return {
       finalUrl: location.href,
       bodyTextLength: clean(document.body?.innerText).length,
-      errorOverlay: overlaySelectors.some((selector) => queryAll(selector).length > 0),
+      errorOverlay: overlaySelectors.some((selector) => queryAll(selector).some(isRendered)),
       horizontalOverflow: Math.max(document.documentElement?.scrollWidth ?? 0, document.body?.scrollWidth ?? 0) > window.innerWidth + 1,
       sections: observedSections,
       anchors: observedAnchors,
@@ -599,11 +599,21 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
 }
 
 const browserQaInteractiveAxRoles = new Set([
+  // ARIA widget/control roles.
   'button', 'checkbox', 'combobox', 'grid', 'gridcell', 'link', 'listbox', 'menu',
   'menubar', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio',
-  'radiogroup', 'scrollbar', 'searchbox', 'separator', 'slider', 'spinbutton',
-  'switch', 'tab', 'tablist', 'textbox', 'tree', 'treegrid', 'treeitem'
+  'radiogroup', 'scrollbar', 'searchbox', 'slider', 'spinbutton', 'switch', 'tab',
+  'tablist', 'textbox', 'tree', 'treegrid', 'treeitem',
+  // Native Chromium AX roles used by rendered controls.
+  'colorwell', 'comboboxmenubutton', 'date', 'datetime', 'disclosuretriangle',
+  'inputtime', 'listboxoption', 'menulistoption', 'popupbutton', 'radiobutton',
+  'sliderthumb', 'textfield', 'textfieldwithcombobox', 'togglebutton'
 ]);
+
+function axPropertyBoolean(node, name) {
+  const property = Array.isArray(node?.properties) ? node.properties.find((item) => item?.name === name) : null;
+  return property?.value?.value === true;
+}
 
 function browserQaInteractiveControlsFromAxTrees(trees) {
   const controls = [];
@@ -613,7 +623,8 @@ function browserQaInteractiveControlsFromAxTrees(trees) {
     for (const node of tree.nodes) {
       if (!node || node.ignored) continue;
       const role = String(node.role?.value ?? '').toLowerCase();
-      if (!browserQaInteractiveAxRoles.has(role)) continue;
+      const isFocusableSeparator = role === 'separator' && axPropertyBoolean(node, 'focusable');
+      if (!browserQaInteractiveAxRoles.has(role) && !isFocusableSeparator) continue;
       const key = node.backendDOMNodeId
         ? `backend:${node.backendDOMNodeId}`
         : `ax:${treeIndex}:${node.nodeId ?? controls.length}`;
@@ -687,6 +698,7 @@ class ChromeCdpBrowser {
     let interceptionFailure = null;
     let secondaryTargetFailure = null;
     let websocketFailure = null;
+    let directNetworkFailure = null;
 
     const offResponse = this.connection.on('Network.responseReceived', (params) => {
       if (params.type === 'Document' && Number.isFinite(params.response?.status)) {
@@ -711,6 +723,12 @@ class ChromeCdpBrowser {
       for (const [frameId, contextId] of defaultExecutionContexts.entries()) {
         if (contextId === destroyedId) defaultExecutionContexts.delete(frameId);
       }
+    }, sessionId);
+
+    const offDirectNetworkBinding = this.connection.on('Runtime.bindingCalled', (params) => {
+      if (params.name !== '__browserQaReportDirectNetworkAttempt') return;
+      const payload = String(params.payload ?? 'unknown').replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 160) || 'unknown';
+      directNetworkFailure = directNetworkFailure ?? new Error(`browser_qa_direct_network_forbidden:${payload}`);
     }, sessionId);
 
     const offWebSocket = this.connection.on('Network.webSocketCreated', (params) => {
@@ -751,13 +769,18 @@ class ChromeCdpBrowser {
         this.connection.send('Runtime.enable', {}, sessionId),
         this.connection.send('Accessibility.enable', {}, sessionId),
         this.connection.send('Network.enable', {}, sessionId),
+        this.connection.send('Runtime.addBinding', { name: '__browserQaReportDirectNetworkAttempt' }, sessionId),
         this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
           source: `(() => {
+            const reportDirectNetworkAttempt = typeof globalThis.__browserQaReportDirectNetworkAttempt === 'function'
+              ? globalThis.__browserQaReportDirectNetworkAttempt
+              : null;
             const blockConstructor = (name, marker, errorCode) => {
               let attempted = false;
               class BrowserQaBlockedNetworkConstructor {
                 constructor() {
                   attempted = true;
+                  try { reportDirectNetworkAttempt?.(errorCode); } catch {}
                   throw new Error(errorCode);
                 }
               }
@@ -813,10 +836,12 @@ class ChromeCdpBrowser {
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       if (websocketFailure) throw websocketFailure;
+      if (directNetworkFailure) throw directNetworkFailure;
       await abortableDelay(settleMs, signal);
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       if (websocketFailure) throw websocketFailure;
+      if (directNetworkFailure) throw directNetworkFailure;
       const frameId = navigation.frameId ?? (await this.connection.send('Page.getFrameTree', {}, sessionId))?.frameTree?.frame?.id;
       if (!frameId) throw new Error('browser_qa_top_frame_missing');
       const isolatedWorld = await this.connection.send('Page.createIsolatedWorld', {
@@ -853,6 +878,7 @@ class ChromeCdpBrowser {
         if (attempted) throw new Error(`browser_qa_direct_network_forbidden:${networkFrameId}`);
       }
       if (websocketFailure) throw websocketFailure;
+      if (directNetworkFailure) throw directNetworkFailure;
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
@@ -864,6 +890,7 @@ class ChromeCdpBrowser {
       offResponse();
       offExecutionContext();
       offExecutionContextDestroyed();
+      offDirectNetworkBinding();
       offWebSocket();
       offFetch();
       offSecondaryTarget();
