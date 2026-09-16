@@ -100,8 +100,11 @@ test('private, loopback, link-local and documentation addresses are rejected', (
     'fec0::1',
     '2001:db8::1'
   ]) assert.equal(isUnsafeNetworkAddress(address), true, address);
-  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '2001:4860:4860::8888']) {
+  for (const address of ['8.8.8.8', '1.1.1.1']) {
     assert.equal(isUnsafeNetworkAddress(address), false, address);
+  }
+  for (const address of ['2606:4700:4700::1111', '2001:4860:4860::8888']) {
+    assert.equal(isUnsafeNetworkAddress(address), true, `IPv6 is deliberately unsupported in Browser QA v1: ${address}`);
   }
 });
 
@@ -130,6 +133,14 @@ test('network guard resolves DNS and fails closed on private answers', async () 
   });
   assert.equal(resolved.url.hostname, 'public.example');
   assert.deepEqual(resolved.addresses, [{ address: '8.8.8.8', family: 4 }]);
+
+  const mixed = await resolvePublicNetworkUrl('https://mixed.example/path', {
+    lookup: async () => [
+      { address: '2606:4700:4700::1111', family: 6 },
+      { address: '1.1.1.1', family: 4 }
+    ]
+  });
+  assert.deepEqual(mixed.addresses, [{ address: '1.1.1.1', family: 4 }]);
   const publicUrl = await assertPublicNetworkUrl('https://public.example/path', {
     lookup: async () => [{ address: '8.8.8.8', family: 4 }]
   });
@@ -146,6 +157,12 @@ test('network guard resolves DNS and fails closed on private answers', async () 
     /private_network_forbidden/
   );
   await assert.rejects(assertPublicNetworkUrl('file:///etc/passwd'), /url_unsafe/);
+  await assert.rejects(
+    resolvePublicNetworkUrl('https://ipv6-only.example/', {
+      lookup: async () => [{ address: '2001:4860:4860::8888', family: 6 }]
+    }),
+    /private_network_forbidden/
+  );
 });
 
 test('runner visits only coordinator-planned pages and never emits external navigations', async () => {
