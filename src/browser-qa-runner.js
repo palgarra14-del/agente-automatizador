@@ -580,10 +580,6 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       isRendered(node) && (node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section)
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
-    const interactiveNodes = queryAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])').filter(isRendered);
-    if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
-    const interactive = interactiveNodes
-      .map((element, index) => ({ id: element.id ? 'id:' + String(element.id).slice(0, 100) : 'control-' + index, accessibleName: nameFor(element) }));
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
     return {
       finalUrl: location.href,
@@ -596,10 +592,59 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         title: clean(document.title),
         description: clean(document.querySelector('meta[name="description"]')?.getAttribute('content'))
       },
-      interactiveControls: interactive,
+      interactiveControls: [],
       targets: expectedTargets.map(targetFor).filter(Boolean)
     };
   })()`;
+}
+
+const browserQaInteractiveAxRoles = new Set([
+  'button', 'checkbox', 'combobox', 'link', 'listbox', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'option', 'radio', 'searchbox', 'slider', 'spinbutton', 'switch',
+  'tab', 'textbox', 'treeitem'
+]);
+
+function axPropertyBoolean(node, name) {
+  const property = Array.isArray(node?.properties) ? node.properties.find((item) => item?.name === name) : null;
+  return property?.value?.value === true;
+}
+
+function browserQaInteractiveControlsFromAxTrees(trees) {
+  const controls = [];
+  const seen = new Set();
+  for (const [treeIndex, tree] of trees.entries()) {
+    if (!Array.isArray(tree?.nodes)) throw new Error('browser_qa_accessibility_tree_invalid');
+    for (const node of tree.nodes) {
+      if (!node || node.ignored) continue;
+      const role = String(node.role?.value ?? '').toLowerCase();
+      const focusable = axPropertyBoolean(node, 'focusable');
+      if (!browserQaInteractiveAxRoles.has(role) && !focusable) continue;
+      if (['rootwebarea', 'webarea', 'iframe'].includes(role)) continue;
+      const key = node.backendDOMNodeId
+        ? `backend:${node.backendDOMNodeId}`
+        : `ax:${treeIndex}:${node.nodeId ?? controls.length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      controls.push({
+        id: key,
+        accessibleName: String(node.name?.value ?? '').trim().slice(0, 500),
+        role
+      });
+      if (controls.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
+    }
+  }
+  return controls;
+}
+
+function browserQaFrameIds(frameTree) {
+  const ids = [];
+  const walk = (entry) => {
+    const id = entry?.frame?.id;
+    if (typeof id === 'string' && id) ids.push(id);
+    for (const child of entry?.childFrames ?? []) walk(child);
+  };
+  walk(frameTree);
+  return [...new Set(ids)];
 }
 
 async function evaluateJson(connection, sessionId, expression, contextId = null) {
