@@ -1550,6 +1550,7 @@ export class SupervisedIssueQueue {
       const existing = state.requests?.[this.requestKey(issue)] ?? null;
       if (existing && !this.ownsRecord(existing)) continue;
       if (existing && terminal.has(existing.status)) continue;
+      if (!existing && !this.authorized(issue.user?.login)) continue;
       return true;
     }
     return false;
