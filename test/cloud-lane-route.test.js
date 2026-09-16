@@ -25,23 +25,29 @@ test('scheduled and manual recovery route every trusted configured lane', () => 
 });
 
 test('issue events route a valid request to exactly its configured owning lane', () => {
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: body('self'), config }), ['self']);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: body('website-pilot'), config }), ['website-pilot']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('self'), config }), ['self']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('website-pilot'), config }), ['website-pilot']);
   assert.deepEqual(routeCloudLanes({ eventName: 'issue_comment', issueBody: body('callflow'), config }), ['callflow']);
+});
+
+test('issue edits and reopens conservatively wake every lane so prior ownership can invalidate', () => {
+  const all = ['self', 'website-pilot', 'callflow'];
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'edited', issueBody: body('self'), config }), all);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'reopened', issueBody: body('callflow'), config }), all);
 });
 
 test('ambiguous or malformed event bodies fall back to every trusted lane', () => {
   const all = ['self', 'website-pilot', 'callflow'];
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: '', config }), all);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: 'prefix\n' + body('self'), config }), all);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: '<!-- agent-request:v1 -->\n{bad json', config }), all);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: body('unknown-project'), config }), all);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: '', config }), all);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: 'prefix\n' + body('self'), config }), all);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: '<!-- agent-request:v1 -->\n{bad json', config }), all);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('unknown-project'), config }), all);
   assert.deepEqual(routeCloudLanes({ eventName: 'unexpected', issueBody: body('callflow'), config }), all);
 });
 
 test('untrusted issue content can never create a dynamic lane name', () => {
   const malicious = body('evil-lane').replace('"evil-lane"', '"agent-$' + '{{ github.actor }}"');
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', issueBody: malicious, config }), ['self', 'website-pilot', 'callflow']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: malicious, config }), ['self', 'website-pilot', 'callflow']);
 });
 
 test('trusted routing configuration rejects duplicate or invalid ownership', () => {
