@@ -421,6 +421,8 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       if (tag === 'INPUT' && ['button', 'reset', 'submit'].includes(type)) {
         const value = clean(element.value);
         if (value) return value.slice(0, 500);
+        if (type === 'submit') return 'Submit';
+        if (type === 'reset') return 'Reset';
       }
       const title = clean(element.getAttribute?.('title'));
       if (title) return title.slice(0, 500);
@@ -432,8 +434,11 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     };
     const isRendered = (element) => {
       if (!element || element.hidden || element.hasAttribute('disabled') || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
-      const style = getComputedStyle(element);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      for (let current = element; current; current = current.parentElement) {
+        const style = getComputedStyle(current);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+        if (Number.parseFloat(style.opacity || '1') === 0) return false;
+      }
       return element.getClientRects().length > 0;
     };
     const hrefElements = [...document.querySelectorAll('a[href], area[href]')].filter(isRendered);
@@ -536,6 +541,7 @@ class ChromeCdpBrowser {
     const documentResponses = [];
     let interceptionFailure = null;
     let secondaryTargetFailure = null;
+    let websocketFailure = null;
 
     const offResponse = this.connection.on('Network.responseReceived', (params) => {
       if (params.type === 'Document' && Number.isFinite(params.response?.status)) {
@@ -545,6 +551,10 @@ class ChromeCdpBrowser {
           status: Math.round(params.response.status)
         });
       }
+    }, sessionId);
+
+    const offWebSocket = this.connection.on('Network.webSocketCreated', (params) => {
+      websocketFailure = websocketFailure ?? new Error(`browser_qa_websocket_forbidden:${String(params.url ?? 'unknown')}`);
     }, sessionId);
 
     const offFetch = this.connection.on('Fetch.requestPaused', async (params) => {
@@ -574,6 +584,28 @@ class ChromeCdpBrowser {
         this.connection.send('Page.enable', {}, sessionId),
         this.connection.send('Runtime.enable', {}, sessionId),
         this.connection.send('Network.enable', {}, sessionId),
+        this.connection.send('Page.addScriptToEvaluateOnNewDocument', {
+          source: `(() => {
+            let attempted = false;
+            class BrowserQaBlockedWebSocket {
+              constructor() {
+                attempted = true;
+                throw new Error('browser_qa_websocket_forbidden');
+              }
+            }
+            Object.defineProperty(globalThis, '__browserQaWebSocketAttempted', {
+              configurable: false,
+              enumerable: false,
+              get: () => attempted
+            });
+            Object.defineProperty(globalThis, 'WebSocket', {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: BrowserQaBlockedWebSocket
+            });
+          })();`
+        }, sessionId),
         this.connection.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId),
         this.connection.send('Target.setAutoAttach', {
           autoAttach: true,
@@ -594,11 +626,15 @@ class ChromeCdpBrowser {
       await load;
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
+      if (websocketFailure) throw websocketFailure;
       await abortableDelay(settleMs, signal);
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
+      if (websocketFailure) throw websocketFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
+      const websocketAttempted = await evaluateJson(this.connection, sessionId, 'Boolean(globalThis.__browserQaWebSocketAttempted)');
+      if (websocketAttempted || websocketFailure) throw websocketFailure ?? new Error('browser_qa_websocket_forbidden');
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
@@ -608,6 +644,7 @@ class ChromeCdpBrowser {
       return { route: pagePlan.route, status: response?.status ?? 0, ...probe };
     } finally {
       offResponse();
+      offWebSocket();
       offFetch();
       offSecondaryTarget();
       await bestEffortCdp(this.connection, 'Target.setAutoAttach', {
