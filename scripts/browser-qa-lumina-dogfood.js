@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   BrowserQaCoordinator,
   browserQaFingerprint,
+  browserQaNavigationPlan,
   createBrowserQaRequest
 } from '../src/browser-qa.js';
 import { ChromeBrowserQaRunner } from '../src/browser-qa-runner.js';
@@ -46,8 +47,24 @@ const request = createBrowserQaRequest({
   websiteBlueprint
 });
 
+const runner = new ChromeBrowserQaRunner();
+const diagnosticController = new AbortController();
+const diagnosticTimer = setTimeout(() => diagnosticController.abort(), 30_000);
+try {
+  const rawSnapshot = await runner.verify({
+    request,
+    navigationPlan: browserQaNavigationPlan(request),
+    signal: diagnosticController.signal,
+    timeoutMs: 30_000
+  });
+  console.log('DIRECT_RUNNER_SNAPSHOT', JSON.stringify(rawSnapshot, null, 2));
+} catch (error) {
+  console.error('DIRECT_RUNNER_ERROR', error?.stack || error?.message || String(error));
+}
+clearTimeout(diagnosticTimer);
+
 const coordinator = new BrowserQaCoordinator({
-  runner: new ChromeBrowserQaRunner(),
+  runner,
   timeoutMs: 30_000
 });
 
