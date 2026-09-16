@@ -60,6 +60,13 @@ test('cloud preflight routes new requests to exactly their owned lane', async ()
   assert.equal(await foreign.hasWork(), false);
 });
 
+test('cloud preflight ignores unauthorized new requests in an owned lane', async () => {
+  const queue = makeQueue({
+    issues: [issue(6, { projectId: 'callflow', author: 'untrusted-user' })]
+  });
+  assert.equal(await queue.hasWork(), false);
+});
+
 test('cloud preflight keeps active lane state actionable without mutating it', async () => {
   const state = {
     requests: {
