@@ -29,6 +29,7 @@ const server = createServer((request, response) => {
   </div>
   <div aria-hidden="true"><button id="aria-hidden-control"></button></div>
   <button id="alt-button" alt="Save"></button>
+  <button id="hidden-text-button"><span aria-hidden="true">Save</span></button>
   <input id="empty-button" type="button">
   <input id="default-submit" type="submit">
   <input id="default-reset" type="reset">
@@ -107,6 +108,37 @@ try { window.__transport = new WebTransport('https://127.0.0.1:9/private'); } ca
 <body><section id="hero">Hero</section>
 <script>history.replaceState({}, '', '/history?qa=1');</script>
 </body></html>`);
+    return;
+  }
+  if (request.url === '/closed-shadow') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Closed shadow fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><div id="closed-host"></div>
+<script>
+const root = document.getElementById('closed-host').attachShadow({ mode: 'closed' });
+root.innerHTML = '<button></button>';
+</script></body></html>`);
+    return;
+  }
+  if (request.url === '/frame-host') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Frame host</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><iframe src="/nested/"></iframe></body></html>`);
+    return;
+  }
+  if (request.url === '/nested/' || request.url === '/nested') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Nested</title></head><body><a href="contact">Contact</a></body></html>');
+    return;
+  }
+  if (request.url === '/fragment-scope') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Fragment scope</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section><a href="#contact">Contact</a>
+<iframe srcdoc="<div id='contact'>Nested contact only</div>"></iframe></body></html>`);
     return;
   }
   if (request.url === '/monkey-patch') {
@@ -212,21 +244,13 @@ try {
   assert.deepEqual(hiddenEvidence.sections, ['hero'], 'hidden or fully transparent required sections must not count as rendered');
   assert.deepEqual(hiddenEvidence.anchors, [], 'hidden or fully transparent anchor destinations must not count as reachable');
   assert.deepEqual(hiddenEvidence.targets, [], 'visible CTA to hidden or fully transparent destination must not count as usable');
-  assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:hidden-control'), false);
-  assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:aria-hidden-control'), false);
-  const altButton = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:alt-button');
-  assert.ok(altButton, 'visible button should be audited');
-  assert.equal(altButton.accessibleName, '', 'button alt attribute must not be treated as an accessible name');
-  const emptyButton = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:empty-button');
-  assert.ok(emptyButton, 'empty type=button should be audited');
-  assert.equal(emptyButton.accessibleName, '', 'empty type=button must remain unnamed');
-  const defaultSubmit = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:default-submit');
-  const defaultReset = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:default-reset');
-  assert.ok(defaultSubmit?.accessibleName, 'default submit control should have a UA default accessible name');
-  assert.ok(defaultReset?.accessibleName, 'default reset control should have a UA default accessible name');
-  const textInput = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:name');
-  assert.ok(textInput, 'visible text input should be audited');
-  assert.equal(textInput.accessibleName, '', 'text input value must not be treated as an accessible name');
+  const hiddenButtons = hiddenEvidence.interactiveControls.filter((control) => control.role === 'button');
+  const hiddenTextboxes = hiddenEvidence.interactiveControls.filter((control) => control.role === 'textbox');
+  assert.equal(hiddenButtons.length, 5, 'hidden ancestor/aria-hidden buttons must be absent from the accessibility audit');
+  assert.ok(hiddenButtons.filter((control) => !control.accessibleName).length >= 3, 'alt-only, hidden-text and empty buttons must remain unnamed');
+  assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Submit'), 'default submit control should use Chrome accessible name');
+  assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Reset'), 'default reset control should use Chrome accessible name');
+  assert.ok(hiddenTextboxes.some((control) => !control.accessibleName), 'text input value must not become its accessible name');
 
   const websocketRoute = '/websocket';
   const websocketUrl = `${origin}${websocketRoute}`;
@@ -338,9 +362,10 @@ try {
     timeoutMs: 5_000,
     settleMs: 50
   });
-  const monkeyButton = monkeyEvidence.interactiveControls.find((control) => control.id === 'id:monkey-button');
-  assert.ok(monkeyButton, 'isolated-world audit must ignore page monkey patches of DOM APIs');
-  assert.equal(monkeyButton.accessibleName, '', 'monkey-patched page must not hide an unnamed rendered button');
+  assert.ok(
+    monkeyEvidence.interactiveControls.some((control) => control.role === 'button' && !control.accessibleName),
+    'isolated-world/Accessibility audit must ignore page monkey patches and still expose the unnamed rendered button'
+  );
 
   const shadowFrameRoute = '/shadow-frame';
   const shadowFrameUrl = `${origin}${shadowFrameRoute}`;
@@ -352,12 +377,54 @@ try {
     timeoutMs: 5_000,
     settleMs: 150
   });
-  const shadowButton = shadowFrameEvidence.interactiveControls.find((control) => control.id === 'id:shadow-button');
-  const frameButton = shadowFrameEvidence.interactiveControls.find((control) => control.id === 'id:frame-button');
-  assert.ok(shadowButton, 'open shadow-root controls must be audited');
-  assert.equal(shadowButton.accessibleName, '');
-  assert.ok(frameButton, 'same-origin iframe controls must be audited');
-  assert.equal(frameButton.accessibleName, '');
+  assert.ok(
+    shadowFrameEvidence.interactiveControls.filter((control) => control.role === 'button' && !control.accessibleName).length >= 2,
+    'open shadow-root and same-origin iframe unnamed buttons must both be audited'
+  );
+
+  const closedShadowRoute = '/closed-shadow';
+  const closedShadowUrl = `${origin}${closedShadowRoute}`;
+  const closedShadowEvidence = await browser.inspectPage({
+    request: fixtureRequest(closedShadowRoute),
+    pagePlan: { route: closedShadowRoute, url: closedShadowUrl },
+    routeUrls: { [closedShadowRoute]: closedShadowUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 100
+  });
+  assert.ok(
+    closedShadowEvidence.interactiveControls.some((control) => control.role === 'button' && !control.accessibleName),
+    'closed shadow-root unnamed button must be visible in Chrome Accessibility Tree'
+  );
+
+  const frameHostRoute = '/frame-host';
+  const frameHostUrl = `${origin}${frameHostRoute}`;
+  const frameHostEvidence = await browser.inspectPage({
+    request: fixtureRequest(frameHostRoute, [
+      { id: 'framed-route', fromRoute: frameHostRoute, semantics: 'route', destination: '/contact' }
+    ]),
+    pagePlan: { route: frameHostRoute, url: frameHostUrl },
+    routeUrls: { [frameHostRoute]: frameHostUrl, '/contact': `${origin}/contact` },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 150
+  });
+  assert.deepEqual(frameHostEvidence.targets, [], 'iframe-relative href=contact must resolve to /nested/contact, not top-level /contact');
+
+  const fragmentScopeRoute = '/fragment-scope';
+  const fragmentScopeUrl = `${origin}${fragmentScopeRoute}`;
+  const fragmentScopeEvidence = await browser.inspectPage({
+    request: fixtureRequest(fragmentScopeRoute, [
+      { id: 'fragment-target', fromRoute: fragmentScopeRoute, semantics: 'anchor', destination: '#contact' }
+    ]),
+    pagePlan: { route: fragmentScopeRoute, url: fragmentScopeUrl },
+    routeUrls: { [fragmentScopeRoute]: fragmentScopeUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 100
+  });
+  assert.deepEqual(fragmentScopeEvidence.anchors, [], 'iframe-only fragment destination must not satisfy top-page anchor');
+  assert.deepEqual(fragmentScopeEvidence.targets, [], 'top-page href=#contact must not resolve to iframe-only destination');
 
   const preconnectRoute = '/preconnect';
   const preconnectUrl = `${origin}${preconnectRoute}`;
