@@ -693,6 +693,9 @@ test('approval comments must be exact and cannot be embedded in agent status pro
   assert.equal(parseApprovalComment(`Please run /agent approve ${token}`), null);
   assert.equal(parseApprovalComment(`\`/agent approve ${token}\``), null);
   assert.equal(parseApprovalComment('/agent approve not-a-token'), null);
+  assert.equal(parseApprovalComment(` /agent approve ${token}`), null);
+  assert.equal(parseApprovalComment(`\n/agent approve ${token}`), null);
+  assert.equal(parseApprovalComment(`/agent approve ${token} `), null);
 });
 
 test('new issue produces only a dry-run and fingerprinted start approval request', async () => {
