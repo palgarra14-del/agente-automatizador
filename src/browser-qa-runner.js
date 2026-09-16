@@ -560,9 +560,7 @@ class ChromeCdpBrowser {
       const info = params.targetInfo ?? {};
       secondaryTargetFailure = secondaryTargetFailure ?? new Error(`browser_qa_secondary_target_forbidden:${String(info.type ?? 'unknown')}`);
       if (info.targetId) await bestEffortCdp(this.connection, 'Target.closeTarget', { targetId: info.targetId }, undefined, 250);
-      if (params.waitingForDebugger && childSessionId) {
-        await bestEffortCdp(this.connection, 'Runtime.runIfWaitingForDebugger', {}, childSessionId, 100);
-      }
+      void childSessionId;
     }, sessionId);
 
     try {
@@ -595,6 +593,7 @@ class ChromeCdpBrowser {
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
+      if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
         (navigation.loaderId && item.loaderId === navigation.loaderId) ||
         (!navigation.loaderId && navigation.frameId && item.frameId === navigation.frameId)
