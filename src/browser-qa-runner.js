@@ -549,7 +549,11 @@ class ChromeCdpBrowser {
 
     const offFetch = this.connection.on('Fetch.requestPaused', async (params) => {
       const requestData = params.request ?? {};
-      const fail = async () => this.connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }, sessionId).catch(() => {});
+      console.error('DOGFOOD_FETCH', JSON.stringify({ url: requestData.url, method: requestData.method, resourceType: params.resourceType, pagePlan: pagePlan.url }));
+      const fail = async () => {
+        console.error('DOGFOOD_FAIL_REQUEST', JSON.stringify({ url: requestData.url, resourceType: params.resourceType }));
+        return this.connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }, sessionId).catch(() => {});
+      };
       try {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
         const url = new URL(requestData.url);
@@ -558,6 +562,7 @@ class ChromeCdpBrowser {
         else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
         await this.connection.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId);
       } catch (error) {
+        console.error('DOGFOOD_INTERCEPTION_ERROR', error?.stack || error?.message || String(error));
         interceptionFailure = interceptionFailure ?? error;
         await fail();
       }
@@ -589,7 +594,9 @@ class ChromeCdpBrowser {
       ]);
 
       const load = this.connection.waitFor('Page.loadEventFired', { sessionId, signal, timeoutMs });
+      console.error('DOGFOOD_NAVIGATE', pagePlan.url);
       const navigation = await this.connection.send('Page.navigate', { url: pagePlan.url, transitionType: 'typed' }, sessionId);
+      console.error('DOGFOOD_NAVIGATION_RESULT', JSON.stringify(navigation));
       if (navigation.errorText) throw new Error(`browser_qa_navigation_failed:${navigation.errorText}`);
       await load;
       if (interceptionFailure) throw interceptionFailure;
