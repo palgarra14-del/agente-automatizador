@@ -119,10 +119,10 @@ function hostnameLooksLocal(hostname) {
   return normalized === 'localhost' || blockedHostSuffixes.some((suffix) => normalized.endsWith(suffix));
 }
 
-export async function assertPublicNetworkUrl(value, { lookup = dnsLookup } = {}) {
+export async function resolvePublicNetworkUrl(value, { lookup = dnsLookup } = {}) {
   let url;
   try {
-    url = value instanceof URL ? value : new URL(value);
+    url = value instanceof URL ? new URL(value.toString()) : new URL(value);
   } catch {
     throw new Error('browser_qa_runner_url_invalid');
   }
@@ -131,19 +131,25 @@ export async function assertPublicNetworkUrl(value, { lookup = dnsLookup } = {})
   }
   if (hostnameLooksLocal(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
   const ipVersion = isIP(url.hostname);
-  if (ipVersion && isUnsafeNetworkAddress(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
-  if (!ipVersion) {
-    let addresses;
-    try {
-      addresses = await lookup(url.hostname, { all: true, verbatim: true });
-    } catch (error) {
-      throw new Error('browser_qa_runner_dns_failed', { cause: error });
-    }
-    if (!Array.isArray(addresses) || !addresses.length || addresses.some((entry) => isUnsafeNetworkAddress(entry.address))) {
-      throw new Error('browser_qa_runner_private_network_forbidden');
-    }
+  if (ipVersion) {
+    if (isUnsafeNetworkAddress(url.hostname)) throw new Error('browser_qa_runner_private_network_forbidden');
+    return { url, addresses: [{ address: url.hostname, family: ipVersion }] };
   }
-  return url;
+  let addresses;
+  try {
+    addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  } catch (error) {
+    throw new Error('browser_qa_runner_dns_failed', { cause: error });
+  }
+  if (!Array.isArray(addresses) || !addresses.length || addresses.some((entry) => isUnsafeNetworkAddress(entry.address))) {
+    throw new Error('browser_qa_runner_private_network_forbidden');
+  }
+  const normalized = addresses.map((entry) => ({ address: entry.address, family: Number(entry.family) }));
+  return { url, addresses: normalized };
+}
+
+export async function assertPublicNetworkUrl(value, options = {}) {
+  return (await resolvePublicNetworkUrl(value, options)).url;
 }
 
 async function executable(path) {
@@ -323,7 +329,16 @@ async function waitForChildExit(child, timeoutMs = 750) {
   ]);
 }
 
-function chromeArguments(userDataDir) {
+function chromeHostResolverRule(hostPin) {
+  if (!hostPin) return null;
+  const hostname = String(hostPin.hostname ?? '').toLowerCase();
+  const address = String(hostPin.address ?? '').toLowerCase();
+  if (!hostname || hostnameLooksLocal(hostname) || !isIP(address) || isUnsafeNetworkAddress(address)) throw new Error('browser_qa_host_pin_invalid');
+  const target = isIP(address) === 6 ? `[${address}]` : address;
+  return `--host-resolver-rules=MAP ${hostname} ${target}`;
+}
+
+function chromeArguments(userDataDir, hostPin = null) {
   return [
     '--headless=new',
     '--disable-gpu',
@@ -341,6 +356,7 @@ function chromeArguments(userDataDir) {
     '--safebrowsing-disable-auto-update',
     '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
+    ...(chromeHostResolverRule(hostPin) ? [chromeHostResolverRule(hostPin)] : []),
     'about:blank'
   ];
 }
@@ -471,31 +487,24 @@ async function evaluateJson(connection, sessionId, expression) {
 }
 
 class ChromeCdpBrowser {
-  constructor({ child, connection, userDataDir, dnsResolver }) {
-    Object.assign(this, { child, connection, userDataDir, dnsResolver });
+  constructor({ child, connection, userDataDir, allowedOrigin }) {
+    Object.assign(this, { child, connection, userDataDir, allowedOrigin });
     this.closed = false;
-    this.hostSafety = new Map();
   }
 
   async version() {
     return this.connection.send('Browser.getVersion');
   }
 
-  async #publicUrl(value) {
+  #allowedUrl(value) {
     const url = new URL(value);
-    const key = url.hostname.toLowerCase();
-    let check = this.hostSafety.get(key);
-    if (!check) {
-      check = assertPublicNetworkUrl(url, { lookup: this.dnsResolver });
-      this.hostSafety.set(key, check);
-    }
-    await check;
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin !== this.allowedOrigin) throw new Error('browser_qa_cross_origin_resource_forbidden');
     return url;
   }
 
   async inspectPage({ request, pagePlan, routeUrls, signal, timeoutMs, settleMs = 150 }) {
     throwIfAborted(signal);
-    await this.#publicUrl(pagePlan.url);
+    this.#allowedUrl(pagePlan.url);
     const context = await this.connection.send('Target.createBrowserContext', { disposeOnDetach: true });
     const target = await this.connection.send('Target.createTarget', { url: 'about:blank', browserContextId: context.browserContextId });
     const attached = await this.connection.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
@@ -518,7 +527,7 @@ class ChromeCdpBrowser {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
         const url = new URL(requestData.url);
         if (params.resourceType === 'Document' && !samePhysicalDocumentUrl(url, pagePlan.url)) return fail();
-        if (['http:', 'https:'].includes(url.protocol)) await this.#publicUrl(url);
+        if (['http:', 'https:'].includes(url.protocol)) this.#allowedUrl(url);
         else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
         await this.connection.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId);
       } catch (error) {
@@ -582,7 +591,8 @@ export async function launchChromeCdpBrowser({
   environment = process.env,
   spawnImpl = spawn,
   WebSocketImpl = globalThis.WebSocket,
-  lookup = dnsLookup
+  hostPin = null,
+  allowedOrigin = null
 } = {}) {
   throwIfAborted(signal);
   const executablePath = await findChromeExecutable({ explicitPath: chromePath, environment });
@@ -590,7 +600,7 @@ export async function launchChromeCdpBrowser({
   let child = null;
   let connection = null;
   try {
-    child = spawnImpl(executablePath, chromeArguments(userDataDir), {
+    child = spawnImpl(executablePath, chromeArguments(userDataDir, hostPin), {
       stdio: ['ignore', 'ignore', 'ignore'],
       env: Object.fromEntries(Object.entries({
         PATH: environment.PATH,
@@ -617,7 +627,7 @@ export async function launchChromeCdpBrowser({
     });
     const devtools = await waitForDevtoolsActivePort(userDataDir, child, { signal, timeoutMs });
     connection = await CdpConnection.connect(`ws://127.0.0.1:${devtools.port}${devtools.path}`, { WebSocketImpl, signal, timeoutMs });
-    const browser = new ChromeCdpBrowser({ child, connection, userDataDir, dnsResolver: lookup });
+    const browser = new ChromeCdpBrowser({ child, connection, userDataDir, allowedOrigin });
     await waitWithDeadline(browser.version(), { timeoutMs, signal, label: 'browser_qa_browser_version' });
     return browser;
   } catch (error) {
@@ -652,20 +662,26 @@ function validateRunnerPlan(request, navigationPlan) {
 }
 
 export class ChromeBrowserQaRunner {
-  constructor({ browserFactory = launchChromeCdpBrowser, networkGuard = assertPublicNetworkUrl, settleMs = 150 } = {}) {
+  constructor({ browserFactory = launchChromeCdpBrowser, networkResolver = resolvePublicNetworkUrl, settleMs = 150 } = {}) {
     if (typeof browserFactory !== 'function') throw new Error('browser_qa_runner_factory_invalid');
-    if (typeof networkGuard !== 'function') throw new Error('browser_qa_runner_network_guard_invalid');
+    if (typeof networkResolver !== 'function') throw new Error('browser_qa_runner_network_resolver_invalid');
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 2_000) throw new Error('browser_qa_runner_settle_invalid');
     this.browserFactory = browserFactory;
-    this.networkGuard = networkGuard;
+    this.networkResolver = networkResolver;
     this.settleMs = settleMs;
   }
 
   async verify({ request, navigationPlan, signal, timeoutMs }) {
     throwIfAborted(signal);
     const routeUrls = validateRunnerPlan(request, navigationPlan);
-    for (const page of navigationPlan.sameOriginPages) await this.networkGuard(page.url);
-    const browser = await this.browserFactory({ signal, timeoutMs });
+    const resolvedPreview = await this.networkResolver(navigationPlan.previewBaseUrl);
+    if (!resolvedPreview?.url || !Array.isArray(resolvedPreview.addresses) || !resolvedPreview.addresses.length) throw new Error('browser_qa_runner_network_resolution_invalid');
+    const preview = new URL(navigationPlan.previewBaseUrl);
+    if (resolvedPreview.url.origin !== preview.origin) throw new Error('browser_qa_runner_network_resolution_invalid');
+    const preferred = resolvedPreview.addresses.find((entry) => Number(entry.family) === 4) ?? resolvedPreview.addresses[0];
+    if (!preferred || isUnsafeNetworkAddress(preferred.address)) throw new Error('browser_qa_runner_private_network_forbidden');
+    const hostPin = { hostname: preview.hostname, address: preferred.address };
+    const browser = await this.browserFactory({ signal, timeoutMs, hostPin, allowedOrigin: preview.origin });
     const onAbort = () => { Promise.resolve(browser.close()).catch(() => {}); };
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
