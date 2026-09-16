@@ -351,6 +351,8 @@ function chromeArguments(userDataDir, hostPin = null) {
     '--disable-dev-shm-usage',
     '--disable-extensions',
     '--disable-background-networking',
+    '--disable-preconnect',
+    '--dns-prefetch-disable',
     '--disable-component-update',
     '--disable-default-apps',
     '--disable-sync',
@@ -397,12 +399,53 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     const expectedTargets = ${JSON.stringify(targets)};
     const routeUrls = ${JSON.stringify(routeUrls)};
     const clean = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim();
+    const roots = [];
+    const rootQueue = [document];
+    const seenRoots = new Set();
+    let scannedNodes = 0;
+    while (rootQueue.length) {
+      const root = rootQueue.shift();
+      if (!root || seenRoots.has(root)) continue;
+      seenRoots.add(root);
+      roots.push(root);
+      if (roots.length > 100) throw new Error('browser_qa_dom_root_limit_exceeded');
+      const descendants = [...root.querySelectorAll('*')];
+      scannedNodes += descendants.length;
+      if (scannedNodes > 20_000) throw new Error('browser_qa_dom_node_limit_exceeded');
+      for (const element of descendants) {
+        if (element.shadowRoot) rootQueue.push(element.shadowRoot);
+        if (['IFRAME', 'FRAME'].includes(String(element.tagName ?? '').toUpperCase())) {
+          try {
+            if (element.contentDocument) rootQueue.push(element.contentDocument);
+          } catch {
+            // Cross-origin frames are blocked by the network sandbox and are not readable here.
+          }
+        }
+      }
+    }
+    const queryAll = (selector) => {
+      const found = [];
+      const seen = new Set();
+      for (const root of roots) {
+        for (const element of root.querySelectorAll(selector)) {
+          if (!seen.has(element)) {
+            seen.add(element);
+            found.push(element);
+          }
+        }
+      }
+      return found;
+    };
+    const idMap = new Map();
+    for (const element of queryAll('[id]')) {
+      if (!idMap.has(element.id)) idMap.set(element.id, element);
+    }
     const nameFor = (element) => {
       const aria = clean(element.getAttribute?.('aria-label'));
       if (aria) return aria.slice(0, 500);
       const labelledBy = clean(element.getAttribute?.('aria-labelledby'));
       if (labelledBy) {
-        const value = labelledBy.split(/\\s+/).map((id) => clean(document.getElementById(id)?.textContent)).filter(Boolean).join(' ');
+        const value = labelledBy.split(/\\s+/).map((id) => clean(idMap.get(id)?.textContent)).filter(Boolean).join(' ');
         if (value) return value.slice(0, 500);
       }
       if (element.labels?.length) {
@@ -433,16 +476,32 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       if (svgTitle) return svgTitle.slice(0, 500);
       return clean(element.innerText || element.textContent).slice(0, 500);
     };
+    const composedParent = (node) => {
+      if (!node) return null;
+      if (node.parentElement) return node.parentElement;
+      const root = node.getRootNode?.();
+      if (root?.host) return root.host;
+      if (node.ownerDocument?.documentElement === node) {
+        try { return node.ownerDocument.defaultView?.frameElement ?? null; } catch { return null; }
+      }
+      return null;
+    };
     const isRendered = (element) => {
-      if (!element || element.hidden || element.hasAttribute('disabled') || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
-      for (let current = element; current; current = current.parentElement) {
+      if (!element || (element.hasAttribute?.('disabled') ?? false)) return false;
+      for (let current = element; current; current = composedParent(current)) {
+        if (
+          current.hidden ||
+          current.hasAttribute?.('hidden') ||
+          current.hasAttribute?.('inert') ||
+          current.getAttribute?.('aria-hidden') === 'true'
+        ) return false;
         const style = getComputedStyle(current);
         if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
         if (Number.parseFloat(style.opacity || '1') === 0) return false;
       }
       return element.getClientRects().length > 0;
     };
-    const hrefElements = [...document.querySelectorAll('a[href], area[href]')].filter(isRendered);
+    const hrefElements = queryAll('a[href], area[href]').filter(isRendered);
     const targetFor = (target) => {
       let element = null;
       if (target.semantics === 'route') {
@@ -459,7 +518,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           } catch { return false; }
         }) ?? null;
       } else if (target.semantics === 'anchor') {
-        const destination = document.getElementById(target.destination.slice(1));
+        const destination = idMap.get(target.destination.slice(1));
         if (!isRendered(destination)) return null;
         element = hrefElements.find((candidate) => {
           try {
@@ -484,12 +543,12 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       }
       return element ? { id: target.id, href: element.getAttribute('href'), accessibleName: nameFor(element) } : null;
     };
-    const sectionNodes = [...document.querySelectorAll('[id], [data-section], [data-section-id]')];
+    const sectionNodes = queryAll('[id], [data-section], [data-section-id]');
     const observedSections = expectedSections.filter((section) => sectionNodes.some((node) =>
       isRendered(node) && (node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section)
     ));
-    const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
-    const interactiveNodes = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')].filter(isRendered);
+    const observedAnchors = expectedAnchors.filter((anchor) => isRendered(idMap.get(anchor)));
+    const interactiveNodes = queryAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])').filter(isRendered);
     if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
     const interactive = interactiveNodes
       .map((element, index) => ({ id: element.id ? 'id:' + String(element.id).slice(0, 100) : 'control-' + index, accessibleName: nameFor(element) }));
@@ -497,7 +556,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     return {
       finalUrl: location.href,
       bodyTextLength: clean(document.body?.innerText).length,
-      errorOverlay: overlaySelectors.some((selector) => Boolean(document.querySelector(selector))),
+      errorOverlay: overlaySelectors.some((selector) => queryAll(selector).length > 0),
       horizontalOverflow: Math.max(document.documentElement?.scrollWidth ?? 0, document.body?.scrollWidth ?? 0) > window.innerWidth + 1,
       sections: observedSections,
       anchors: observedAnchors,
@@ -511,12 +570,13 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
   })()`;
 }
 
-async function evaluateJson(connection, sessionId, expression) {
+async function evaluateJson(connection, sessionId, expression, contextId = null) {
   const result = await connection.send('Runtime.evaluate', {
     expression,
     returnByValue: true,
     awaitPromise: true,
-    userGesture: false
+    userGesture: false,
+    ...(contextId ? { contextId } : {})
   }, sessionId);
   if (result.exceptionDetails) throw new Error('browser_qa_runtime_probe_failed');
   return result.result?.value;
@@ -656,15 +716,28 @@ class ChromeCdpBrowser {
       if (interceptionFailure) throw interceptionFailure;
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       if (websocketFailure) throw websocketFailure;
-      const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
+      const frameId = navigation.frameId ?? (await this.connection.send('Page.getFrameTree', {}, sessionId))?.frameTree?.frame?.id;
+      if (!frameId) throw new Error('browser_qa_top_frame_missing');
+      const isolatedWorld = await this.connection.send('Page.createIsolatedWorld', {
+        frameId,
+        worldName: 'browser-qa-evidence-v1',
+        grantUniveralAccess: false
+      }, sessionId);
+      if (!Number.isInteger(isolatedWorld.executionContextId)) throw new Error('browser_qa_isolated_world_missing');
+      const probe = await evaluateJson(
+        this.connection,
+        sessionId,
+        buildDomProbeExpression({ request, pagePlan, routeUrls }),
+        isolatedWorld.executionContextId
+      );
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
-      const directNetworkAttempt = await evaluateJson(this.connection, sessionId, `Boolean(
-        globalThis.__browserQaWebSocketAttempted ||
-        globalThis.__browserQaWebSocketStreamAttempted ||
-        globalThis.__browserQaRtcAttempted ||
-        globalThis.__browserQaWebkitRtcAttempted ||
-        globalThis.__browserQaMozRtcAttempted ||
-        globalThis.__browserQaWebTransportAttempted
+      const directNetworkAttempt = await evaluateJson(this.connection, sessionId, `!!(
+        this.__browserQaWebSocketAttempted ||
+        this.__browserQaWebSocketStreamAttempted ||
+        this.__browserQaRtcAttempted ||
+        this.__browserQaWebkitRtcAttempted ||
+        this.__browserQaMozRtcAttempted ||
+        this.__browserQaWebTransportAttempted
       )`);
       if (directNetworkAttempt || websocketFailure) throw websocketFailure ?? new Error('browser_qa_direct_network_forbidden');
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
