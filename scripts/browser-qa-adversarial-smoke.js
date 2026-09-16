@@ -220,6 +220,34 @@ root.innerHTML = '<div style="position:fixed;inset:0">Hidden error overlay</div>
 </script></body></html>`);
     return;
   }
+  if (request.url === '/zero-area') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>Zero area fixture</title><meta name="description" content="Fixture description"></head>
+<body>
+  <section id="hero">Hero</section>
+  <div style="width:0;height:0;overflow:hidden">
+    <section id="clipped-section" style="width:100px;height:100px">Clipped section</section>
+    <a id="clipped-target" href="#clipped-section" style="display:block;width:100px;height:20px">Clipped target</a>
+  </div>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/post-nav' && request.method === 'GET') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>POST navigation fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<form id="post-form" method="post" action="/post-nav"><input type="hidden" name="x" value="1"></form>
+<script>setTimeout(() => document.getElementById('post-form').submit(), 25);</script>
+</body></html>`);
+    return;
+  }
+  if (request.url === '/post-nav' && request.method === 'POST') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Posted</title></head><body>POSTED</body></html>');
+    return;
+  }
   if (request.url === '/worker') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -553,6 +581,44 @@ try {
     }),
     /browser_qa_direct_network_forbidden/,
     'direct-network attempt markers inside same-origin/srcdoc iframe must fail the whole run'
+  );
+
+  const zeroAreaRoute = '/zero-area';
+  const zeroAreaUrl = `${origin}${zeroAreaRoute}`;
+  const zeroAreaEvidence = await browser.inspectPage({
+    request: fixtureRequest(zeroAreaRoute, [
+      { id: 'clipped-target', fromRoute: zeroAreaRoute, semantics: 'anchor', destination: '#clipped-section' }
+    ], ['hero', 'clipped-section']),
+    pagePlan: { route: zeroAreaRoute, url: zeroAreaUrl },
+    routeUrls: { [zeroAreaRoute]: zeroAreaUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 100
+  });
+  assert.deepEqual(
+    zeroAreaEvidence.sections,
+    ['hero'],
+    'required section fully clipped to zero visible area must not count as rendered'
+  );
+  assert.deepEqual(
+    zeroAreaEvidence.targets,
+    [],
+    'required CTA fully clipped to zero visible area must not satisfy the target'
+  );
+
+  const postNavRoute = '/post-nav';
+  const postNavUrl = `${origin}${postNavRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(postNavRoute),
+      pagePlan: { route: postNavRoute, url: postNavUrl },
+      routeUrls: { [postNavRoute]: postNavUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 150
+    }),
+    /browser_qa_document_method_forbidden:POST/,
+    'blocked top-level POST navigation must fail Browser QA instead of leaving the original GET eligible for PASS'
   );
 
   const workerRoute = '/worker';
