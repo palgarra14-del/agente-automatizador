@@ -12,6 +12,16 @@ const speculativeServer = createServer((request, response) => {
 speculativeServer.on('connection', () => { speculativeConnections += 1; });
 
 const server = createServer((request, response) => {
+  if (request.url === '/bypass') {
+    if (request.headers['x-vercel-protection-bypass'] !== 'fixture-secret') {
+      response.writeHead(401, { 'content-type': 'text/plain' });
+      response.end('missing bypass');
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><html><head><title>Bypass fixture</title><meta name="description" content="Fixture description"></head><body><section id="hero">Bypass accepted</section></body></html>');
+    return;
+  }
   if (request.url === '/hidden') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html>
@@ -294,8 +304,21 @@ try {
   browser = await launchChromeCdpBrowser({
     signal: controller.signal,
     timeoutMs: 10_000,
-    allowedOrigin: origin
+    allowedOrigin: origin,
+    protectionBypassSecret: 'fixture-secret'
   });
+
+  const bypassRoute = '/bypass';
+  const bypassUrl = `${origin}${bypassRoute}`;
+  const bypassEvidence = await browser.inspectPage({
+    request: fixtureRequest(bypassRoute),
+    pagePlan: { route: bypassRoute, url: bypassUrl },
+    routeUrls: { [bypassRoute]: bypassUrl },
+    signal: controller.signal,
+    timeoutMs: 5_000,
+    settleMs: 50
+  });
+  assert.equal(bypassEvidence.status, 200, 'runtime bypass header must authorize the initial exact-origin document');
 
   const hiddenRoute = '/hidden';
   const hiddenUrl = `${origin}${hiddenRoute}`;
