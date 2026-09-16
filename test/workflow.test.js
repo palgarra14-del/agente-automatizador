@@ -1523,6 +1523,81 @@ test('app-improvement executes read-only inspection and diagnosis in one run bef
   );
 });
 
+test('exact-file deterministic inspect and diagnose reach approval with zero model calls', async () => {
+  const configured = configFrom({
+    id: 'deterministic-exact-file-workflow',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    budgets: { maxModelCalls: 6 },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const content = 'export const fixture = true;\n';
+  const file = { path: 'src/core.js', content, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+  const repositoryContext = { version: 1, files: [file], fingerprint: createHash('sha256').update(JSON.stringify([{ path: file.path, sha256: file.sha256, bytes: file.bytes }])).digest('hex') };
+  const calls = [];
+  const fastPath = { version: 1, fingerprint: 'a'.repeat(64), allowedPaths: ['src/core.js'] };
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    usesModel: (skill) => skill !== 'code.diagnose',
+    async prepareContext() { return repositoryContext; },
+    async revalidateContext(expected) { assert.equal(expected.fingerprint, repositoryContext.fingerprint); return expected; },
+    deterministicInspectionContext(input) {
+      if (input.skill !== 'code.inspect') return null;
+      assert.equal(input.workflowProfile, 'app-improvement');
+      assert.deepEqual(input.scope.allowedPaths, ['src/core.js']);
+      assert.equal(input.repositoryContext.fingerprint, repositoryContext.fingerprint);
+      return fastPath;
+    },
+    async execute(request) {
+      calls.push(request);
+      if (request.skill === 'code.inspect') {
+        assert.deepEqual(request.context.deterministicInspection, fastPath);
+        assert.equal(request.context.workflowProfile, 'app-improvement');
+        assert.deepEqual(request.context.scope.allowedPaths, ['src/core.js']);
+        return {
+          ok: true,
+          status: 'completed',
+          usage: null,
+          outputBytes: 10,
+          executionMode: 'deterministic',
+          result: { inspectionEvidence: { summary: 'exact file verified', relevantPaths: ['src/core.js'], findings: ['verified exact file metadata'] } }
+        };
+      }
+      assert.equal(request.skill, 'code.diagnose');
+      return {
+        ok: true,
+        status: 'completed',
+        usage: null,
+        outputBytes: 10,
+        executionMode: 'deterministic',
+        result: { diagnosis: { summary: 'bounded diagnosis', cause: 'validated exact-file context', relevantPaths: ['src/core.js'], recommendedChange: 'bounded exact-file change', risks: [] } }
+      };
+    }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), skillExecutor });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Apply an exact-file maintenance change',
+    scope: { allowedPaths: ['src/core.js'], forbiddenPaths: [] }
+  });
+  const waiting = await instance.run(created.id);
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(waiting.steps.find((step) => step.id === 'inspect-project').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'diagnose').status, WorkflowStepStatus.COMPLETED);
+  assert.equal(waiting.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.deepEqual(calls.map((request) => request.skill), ['code.inspect', 'code.diagnose']);
+  assert.equal(waiting.modelUsage.calls, 0);
+  assert.equal(waiting.modelUsage.inputTokens, 0);
+  assert.equal(waiting.modelUsage.outputTokens, 0);
+  assert.deepEqual(waiting.modelUsage.entries, []);
+});
+
 test('workflow fails closed if orchestrator repository context drifts during analysis', async () => {
   const configured = configFrom({
     id: 'context-drift', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main',
