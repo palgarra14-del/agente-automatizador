@@ -18,8 +18,8 @@ permissions:
   statuses: read
 
 jobs:
-  cloud-once:
-    name: cloud-once (${{ matrix.lane }})
+  route:
+    name: route cloud lanes
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -34,10 +34,45 @@ jobs:
           )
         )
       )
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lanes: ${{ steps.route.outputs.lanes }}
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up routing Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Route event to trusted cloud lanes
+        id: route
+        shell: bash
+        env:
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+          AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          LANES="$(node scripts/cloud-lane-route.js)"
+          if [[ ! "$LANES" =~ ^\["[a-z0-9-]+"(,"[a-z0-9-]+")*\]$ ]]; then
+            echo "invalid cloud lane routing result" >&2
+            exit 1
+          fi
+          echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+
+  cloud-once:
+    name: cloud-once (${{ matrix.lane }})
+    needs: route
     strategy:
       fail-fast: false
       matrix:
-        lane: [self, website-pilot, callflow]
+        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
