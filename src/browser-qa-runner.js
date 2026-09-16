@@ -369,7 +369,7 @@ function chromeArguments(userDataDir, hostPin = null) {
   ];
 }
 
-function samePhysicalDocumentUrl(candidate, expected) {
+export function browserQaDocumentUrlMatches(candidate, expected) {
   try {
     const a = new URL(candidate);
     const b = new URL(expected);
@@ -545,7 +545,7 @@ class ChromeCdpBrowser {
       try {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
         const url = new URL(requestData.url);
-        if (params.resourceType === 'Document' && !samePhysicalDocumentUrl(url, pagePlan.url)) return fail();
+        if (params.resourceType === 'Document' && !browserQaDocumentUrlMatches(url, pagePlan.url)) return fail();
         if (['http:', 'https:'].includes(url.protocol)) this.#allowedUrl(url);
         else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
         await this.connection.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId);
