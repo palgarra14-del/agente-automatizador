@@ -39,6 +39,7 @@ function abortableDelay(ms, signal) {
     const timer = setTimeout(() => finish(resolvePromise), ms);
     const onAbort = () => finish(reject, abortError());
     signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -57,6 +58,7 @@ function waitWithDeadline(promise, { timeoutMs, signal, label }) {
     const onAbort = () => finish(reject, abortError());
     const timer = setTimeout(() => finish(reject, new Error(`${label}_timeout`)), timeoutMs);
     signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     Promise.resolve(promise).then(
       (value) => finish(resolvePromise, value),
       (error) => finish(reject, error)
@@ -271,6 +273,7 @@ class CdpConnection {
       const onAbort = () => finish(reject, abortError());
       const timer = setTimeout(() => finish(reject, new Error(`browser_qa_cdp_event_${method.replaceAll('.', '_')}_timeout`)), timeoutMs);
       signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
     });
   }
 
@@ -310,6 +313,14 @@ async function waitForDevtoolsActivePort(userDataDir, child, { signal, timeoutMs
     await abortableDelay(25, signal);
   }
   throw new Error('browser_qa_devtools_port_timeout');
+}
+
+async function waitForChildExit(child, timeoutMs = 750) {
+  if (!child || child.exitCode !== null) return;
+  await Promise.race([
+    new Promise((resolvePromise) => child.once('exit', resolvePromise)),
+    new Promise((resolvePromise) => setTimeout(resolvePromise, timeoutMs))
+  ]);
 }
 
 function chromeArguments(userDataDir) {
@@ -555,7 +566,11 @@ class ChromeCdpBrowser {
     this.closed = true;
     await this.connection.send('Browser.close').catch(() => {});
     this.connection.close();
-    if (this.child.exitCode === null) this.child.kill('SIGKILL');
+    await waitForChildExit(this.child, 500);
+    if (this.child.exitCode === null) {
+      this.child.kill('SIGKILL');
+      await waitForChildExit(this.child, 500);
+    }
     await rm(this.userDataDir, { recursive: true, force: true });
   }
 }
@@ -607,7 +622,10 @@ export async function launchChromeCdpBrowser({
     return browser;
   } catch (error) {
     connection?.close();
-    if (child?.exitCode === null) child.kill('SIGKILL');
+    if (child?.exitCode === null) {
+      child.kill('SIGKILL');
+      await waitForChildExit(child, 500);
+    }
     await rm(userDataDir, { recursive: true, force: true });
     throw error;
   }
