@@ -104,12 +104,9 @@ export function isUnsafeNetworkAddress(address) {
     return cidrs.some(([base, bits]) => inIpv4Cidr(value, ipv4Number(base), bits));
   }
   if (version === 6) {
-    if (normalized === '::' || normalized === '::1') return true;
-    if (normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('ff')) return true;
-    if (/^fe[89ab]/.test(normalized)) return true;
-    if (normalized.startsWith('2001:db8:')) return true;
     const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    return mapped ? isUnsafeNetworkAddress(mapped[1]) : false;
+    if (mapped) return isUnsafeNetworkAddress(mapped[1]);
+    return !/^[23]/.test(normalized);
   }
   return true;
 }
@@ -321,6 +318,17 @@ async function waitForDevtoolsActivePort(userDataDir, child, { signal, timeoutMs
   throw new Error('browser_qa_devtools_port_timeout');
 }
 
+async function bestEffortCdp(connection, method, params = {}, sessionId = undefined, timeoutMs = 250) {
+  try {
+    await waitWithDeadline(connection.send(method, params, sessionId), {
+      timeoutMs,
+      label: `browser_qa_cleanup_${method.replaceAll('.', '_')}`
+    });
+  } catch {
+    // Cleanup is best-effort; socket/process teardown follows.
+  }
+}
+
 async function waitForChildExit(child, timeoutMs = 750) {
   if (!child || child.exitCode !== null) return;
   await Promise.race([
@@ -365,7 +373,10 @@ function samePhysicalDocumentUrl(candidate, expected) {
   try {
     const a = new URL(candidate);
     const b = new URL(expected);
-    return a.protocol === b.protocol && a.host === b.host && a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '');
+    return a.protocol === b.protocol &&
+      a.host === b.host &&
+      a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '') &&
+      a.search === b.search;
   } catch {
     return false;
   }
@@ -399,8 +410,12 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         const value = [...element.labels].map((label) => clean(label.textContent)).filter(Boolean).join(' ');
         if (value) return value.slice(0, 500);
       }
-      for (const attr of ['alt', 'title', 'placeholder', 'value']) {
+      for (const attr of ['alt', 'title', 'placeholder']) {
         const value = clean(element.getAttribute?.(attr));
+        if (value) return value.slice(0, 500);
+      }
+      if (element.tagName === 'INPUT' && ['button', 'reset', 'submit'].includes(String(element.type ?? '').toLowerCase())) {
+        const value = clean(element.value);
         if (value) return value.slice(0, 500);
       }
       const descendantAlt = clean(element.querySelector?.('img[alt]')?.getAttribute('alt'));
@@ -409,7 +424,13 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       if (svgTitle) return svgTitle.slice(0, 500);
       return clean(element.innerText || element.textContent).slice(0, 500);
     };
-    const hrefElements = [...document.querySelectorAll('a[href], area[href]')];
+    const isRendered = (element) => {
+      if (!element || element.hidden || element.hasAttribute('disabled') || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      return element.getClientRects().length > 0;
+    };
+    const hrefElements = [...document.querySelectorAll('a[href], area[href]')].filter(isRendered);
     const targetFor = (target) => {
       let element = null;
       if (target.semantics === 'route') {
@@ -448,12 +469,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => Boolean(document.getElementById(anchor)));
-    const isInteractive = (element) => {
-      if (element.hidden || element.hasAttribute('disabled') || element.closest('[inert]') || element.getAttribute('aria-hidden') === 'true') return false;
-      const style = getComputedStyle(element);
-      return style.display !== 'none' && style.visibility !== 'hidden';
-    };
-    const interactiveNodes = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')].filter(isInteractive);
+    const interactiveNodes = [...document.querySelectorAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')].filter(isRendered);
     if (interactiveNodes.length > 500) throw new Error('browser_qa_interactive_control_limit_exceeded');
     const interactive = interactiveNodes
       .map((element, index) => ({ id: element.id ? 'id:' + String(element.id).slice(0, 100) : 'control-' + index, accessibleName: nameFor(element) }));
@@ -511,6 +527,8 @@ class ChromeCdpBrowser {
     const sessionId = attached.sessionId;
     const documentResponses = [];
     let interceptionFailure = null;
+    let secondaryTargetFailure = null;
+
     const offResponse = this.connection.on('Network.responseReceived', (params) => {
       if (params.type === 'Document' && Number.isFinite(params.response?.status)) {
         documentResponses.push({
@@ -520,6 +538,7 @@ class ChromeCdpBrowser {
         });
       }
     }, sessionId);
+
     const offFetch = this.connection.on('Fetch.requestPaused', async (params) => {
       const requestData = params.request ?? {};
       const fail = async () => this.connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }, sessionId).catch(() => {});
@@ -535,12 +554,28 @@ class ChromeCdpBrowser {
         await fail();
       }
     }, sessionId);
+
+    const offSecondaryTarget = this.connection.on('Target.attachedToTarget', async (params) => {
+      const childSessionId = params.sessionId;
+      const info = params.targetInfo ?? {};
+      secondaryTargetFailure = secondaryTargetFailure ?? new Error(`browser_qa_secondary_target_forbidden:${String(info.type ?? 'unknown')}`);
+      if (info.targetId) await bestEffortCdp(this.connection, 'Target.closeTarget', { targetId: info.targetId }, undefined, 250);
+      if (params.waitingForDebugger && childSessionId) {
+        await bestEffortCdp(this.connection, 'Runtime.runIfWaitingForDebugger', {}, childSessionId, 100);
+      }
+    }, sessionId);
+
     try {
       await Promise.all([
         this.connection.send('Page.enable', {}, sessionId),
         this.connection.send('Runtime.enable', {}, sessionId),
         this.connection.send('Network.enable', {}, sessionId),
         this.connection.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId),
+        this.connection.send('Target.setAutoAttach', {
+          autoAttach: true,
+          waitForDebuggerOnStart: true,
+          flatten: true
+        }, sessionId),
         this.connection.send('Emulation.setDeviceMetricsOverride', {
           width: request.acceptance.mobileViewport.width,
           height: request.acceptance.mobileViewport.height,
@@ -548,13 +583,16 @@ class ChromeCdpBrowser {
           mobile: true
         }, sessionId)
       ]);
+
       const load = this.connection.waitFor('Page.loadEventFired', { sessionId, signal, timeoutMs });
       const navigation = await this.connection.send('Page.navigate', { url: pagePlan.url, transitionType: 'typed' }, sessionId);
       if (navigation.errorText) throw new Error(`browser_qa_navigation_failed:${navigation.errorText}`);
       await load;
       if (interceptionFailure) throw interceptionFailure;
+      if (secondaryTargetFailure) throw secondaryTargetFailure;
       await abortableDelay(settleMs, signal);
       if (interceptionFailure) throw interceptionFailure;
+      if (secondaryTargetFailure) throw secondaryTargetFailure;
       const probe = await evaluateJson(this.connection, sessionId, buildDomProbeExpression({ request, pagePlan, routeUrls }));
       if (!probe || typeof probe !== 'object') throw new Error('browser_qa_probe_invalid');
       const response = [...documentResponses].reverse().find((item) =>
@@ -565,15 +603,21 @@ class ChromeCdpBrowser {
     } finally {
       offResponse();
       offFetch();
-      await this.connection.send('Target.closeTarget', { targetId: target.targetId }).catch(() => {});
-      await this.connection.send('Target.disposeBrowserContext', { browserContextId: context.browserContextId }).catch(() => {});
+      offSecondaryTarget();
+      await bestEffortCdp(this.connection, 'Target.setAutoAttach', {
+        autoAttach: false,
+        waitForDebuggerOnStart: false,
+        flatten: true
+      }, sessionId, 150);
+      await bestEffortCdp(this.connection, 'Target.closeTarget', { targetId: target.targetId }, undefined, 250);
+      await bestEffortCdp(this.connection, 'Target.disposeBrowserContext', { browserContextId: context.browserContextId }, undefined, 250);
     }
   }
 
   async close() {
     if (this.closed) return;
     this.closed = true;
-    await this.connection.send('Browser.close').catch(() => {});
+    await bestEffortCdp(this.connection, 'Browser.close', {}, undefined, 250);
     this.connection.close();
     await waitForChildExit(this.child, 500);
     if (this.child.exitCode === null) {
