@@ -103,7 +103,10 @@ jobs:
 
       - name: Prepare exact cloud runtime
         if: steps.preflight.outputs.has_work == 'true'
-        run: docker pull node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+        shell: bash
+        run: |
+          docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
+          docker run --rm --entrypoint git agent-node22-pnpm11:local --version
 
       - name: Run one governed cloud queue tick
         if: steps.preflight.outputs.has_work == 'true'
