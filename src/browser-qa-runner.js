@@ -529,6 +529,22 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       }
       return element.getClientRects().length > 0;
     };
+    const hasRenderedComposedDescendant = (element) => {
+      const stack = [];
+      for (const child of element?.children ?? []) stack.push(child);
+      if (element?.shadowRoot) {
+        for (const child of element.shadowRoot.children ?? []) stack.push(child);
+      }
+      while (stack.length) {
+        const current = stack.pop();
+        if (isRendered(current)) return true;
+        for (const child of current?.children ?? []) stack.push(child);
+        if (current?.shadowRoot) {
+          for (const child of current.shadowRoot.children ?? []) stack.push(child);
+        }
+      }
+      return false;
+    };
     const hrefElements = queryAll('a[href], area[href]').filter(isRendered);
     const targetFor = (target) => {
       let element = null;
@@ -584,7 +600,9 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     return {
       finalUrl: location.href,
       bodyTextLength: clean(document.body?.innerText).length,
-      errorOverlay: overlaySelectors.some((selector) => queryAll(selector).some(isRendered)),
+      errorOverlay: overlaySelectors.some((selector) => queryAll(selector).some((overlay) =>
+        isRendered(overlay) || hasRenderedComposedDescendant(overlay)
+      )),
       horizontalOverflow: Math.max(document.documentElement?.scrollWidth ?? 0, document.body?.scrollWidth ?? 0) > window.innerWidth + 1,
       sections: observedSections,
       anchors: observedAnchors,
