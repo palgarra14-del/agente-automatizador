@@ -337,6 +337,26 @@ test('record rejects a serialized request whose fingerprinted fields changed', (
   assert.throws(() => coordinator.record(tampered, unavailableBrowserQaEvidence(tampered)), /browser_qa_request_changed/);
 });
 
+test('record retains a defensive deep-frozen evidence copy', () => {
+  const request = requestFor();
+  const coordinator = new BrowserQaCoordinator();
+  const mutable = JSON.parse(JSON.stringify(unavailableBrowserQaEvidence(request)));
+  const recorded = coordinator.record(request, mutable);
+  assert.equal(recorded.evidence.status, 'unavailable');
+  assert.ok(Object.isFrozen(recorded.evidence));
+  assert.ok(Object.isFrozen(recorded.evidence.deterministicDefects));
+  assert.ok(Object.isFrozen(recorded.evidence.observations));
+  mutable.status = 'pass';
+  mutable.unavailableReason = 'mutated-after-validation';
+  assert.equal(recorded.evidence.status, 'unavailable');
+  assert.equal(recorded.evidence.unavailableReason, 'browser_runner_unavailable');
+  assert.throws(() => { recorded.evidence.status = 'pass'; }, TypeError);
+
+  const duplicate = coordinator.record(request, JSON.parse(JSON.stringify(unavailableBrowserQaEvidence(request))));
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.evidence.status, 'unavailable');
+});
+
 test('runner unavailability fails closed and can never produce PASS', async () => {
   const request = requestFor();
   const coordinator = new BrowserQaCoordinator();
@@ -346,6 +366,29 @@ test('runner unavailability fails closed and can never produce PASS', async () =
   const failed = await throwing.verify(request);
   assert.equal(failed.evidence.status, 'unavailable');
   assert.equal(failed.evidence.unavailableReason, 'browser_runner_error');
+});
+
+test('runner verification is bounded and receives cancellation', async () => {
+  const request = requestFor();
+  let seenSignal = null;
+  let seenTimeoutMs = null;
+  const coordinator = new BrowserQaCoordinator({
+    timeoutMs: 10,
+    runner: {
+      async verify({ signal, timeoutMs }) {
+        seenSignal = signal;
+        seenTimeoutMs = timeoutMs;
+        return new Promise(() => {});
+      }
+    }
+  });
+  const result = await coordinator.verify(request);
+  assert.equal(result.evidence.status, 'unavailable');
+  assert.equal(result.evidence.unavailableReason, 'browser_runner_timeout');
+  assert.equal(seenTimeoutMs, 10);
+  assert.equal(seenSignal.aborted, true);
+  assert.throws(() => new BrowserQaCoordinator({ timeoutMs: 0 }), /runner_timeout_invalid/);
+  assert.throws(() => new BrowserQaCoordinator({ timeoutMs: 120001 }), /runner_timeout_invalid/);
 });
 test('external CTA is syntax-checked but excluded from navigation and execution', async () => {
   const siteBlueprint = blueprint({ contactPage: false, external: 'whatsapp' });
@@ -360,6 +403,33 @@ test('external CTA is syntax-checked but excluded from navigation and execution'
   const coordinator = new BrowserQaCoordinator({ runner: { async verify() { return unsafe; } } });
   const result = await coordinator.verify(request);
   assert.equal(result.evidence.status, 'unavailable');
+});
+
+test('external phone and WhatsApp CTAs require actionable recipients', () => {
+  const whatsappRequest = requestFor(blueprint({ contactPage: false, external: 'whatsapp' }));
+
+  const emptyWa = passingSnapshot(whatsappRequest);
+  emptyWa.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'https://wa.me/';
+  assert.ok(classifyBrowserQaSnapshot(whatsappRequest, emptyWa).deterministicDefects.some((item) => item.kind === 'broken_required_target' && item.subject === 'cta:primary'));
+
+  const queryWa = passingSnapshot(whatsappRequest);
+  queryWa.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'https://api.whatsapp.com/send?phone=34123456789';
+  assert.equal(classifyBrowserQaSnapshot(whatsappRequest, queryWa).status, 'pass');
+
+  const emptyQueryWa = passingSnapshot(whatsappRequest);
+  emptyQueryWa.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'https://api.whatsapp.com/send?phone=';
+  assert.ok(classifyBrowserQaSnapshot(whatsappRequest, emptyQueryWa).deterministicDefects.some((item) => item.subject === 'cta:primary'));
+
+  const phoneRequest = requestFor(blueprint({ contactPage: false, external: 'phone' }));
+  const punctuationOnly = passingSnapshot(phoneRequest);
+  punctuationOnly.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'tel:---';
+  assert.ok(classifyBrowserQaSnapshot(phoneRequest, punctuationOnly).deterministicDefects.some((item) => item.subject === 'cta:primary'));
+
+  const tooShort = passingSnapshot(phoneRequest);
+  tooShort.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'tel:123';
+  assert.ok(classifyBrowserQaSnapshot(phoneRequest, tooShort).deterministicDefects.some((item) => item.subject === 'cta:primary'));
+
+  assert.equal(classifyBrowserQaSnapshot(phoneRequest, passingSnapshot(phoneRequest)).status, 'pass');
 });
 test('missing sections, metadata, blank bodies and runtime overlays are deterministic defects', () => {
   const request = requestFor();
