@@ -190,7 +190,7 @@ try {
       timeoutMs: 5_000,
       settleMs: 50
     }),
-    /browser_qa_websocket_forbidden/
+    /browser_qa_direct_network_forbidden|browser_qa_websocket_forbidden/
   );
 
   const webrtcRoute = '/webrtc';
