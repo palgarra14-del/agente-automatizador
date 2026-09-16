@@ -604,11 +604,6 @@ const browserQaInteractiveAxRoles = new Set([
   'tab', 'textbox', 'treeitem'
 ]);
 
-function axPropertyBoolean(node, name) {
-  const property = Array.isArray(node?.properties) ? node.properties.find((item) => item?.name === name) : null;
-  return property?.value?.value === true;
-}
-
 function browserQaInteractiveControlsFromAxTrees(trees) {
   const controls = [];
   const seen = new Set();
@@ -617,9 +612,7 @@ function browserQaInteractiveControlsFromAxTrees(trees) {
     for (const node of tree.nodes) {
       if (!node || node.ignored) continue;
       const role = String(node.role?.value ?? '').toLowerCase();
-      const focusable = axPropertyBoolean(node, 'focusable');
-      if (!browserQaInteractiveAxRoles.has(role) && !focusable) continue;
-      if (['rootwebarea', 'webarea', 'iframe'].includes(role)) continue;
+      if (!browserQaInteractiveAxRoles.has(role)) continue;
       const key = node.backendDOMNodeId
         ? `backend:${node.backendDOMNodeId}`
         : `ax:${treeIndex}:${node.nodeId ?? controls.length}`;
@@ -688,6 +681,8 @@ class ChromeCdpBrowser {
     const attached = await this.connection.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
     const sessionId = attached.sessionId;
     const documentResponses = [];
+    const defaultExecutionContexts = new Map();
+    let mainFrameId = null;
     let interceptionFailure = null;
     let secondaryTargetFailure = null;
     let websocketFailure = null;
@@ -702,6 +697,21 @@ class ChromeCdpBrowser {
       }
     }, sessionId);
 
+    const offExecutionContext = this.connection.on('Runtime.executionContextCreated', (params) => {
+      const context = params.context ?? {};
+      const frameId = context.auxData?.frameId;
+      if (context.auxData?.isDefault === true && typeof frameId === 'string' && frameId && Number.isInteger(context.id)) {
+        defaultExecutionContexts.set(frameId, context.id);
+      }
+    }, sessionId);
+
+    const offExecutionContextDestroyed = this.connection.on('Runtime.executionContextDestroyed', (params) => {
+      const destroyedId = params.executionContextId;
+      for (const [frameId, contextId] of defaultExecutionContexts.entries()) {
+        if (contextId === destroyedId) defaultExecutionContexts.delete(frameId);
+      }
+    }, sessionId);
+
     const offWebSocket = this.connection.on('Network.webSocketCreated', (params) => {
       websocketFailure = websocketFailure ?? new Error(`browser_qa_websocket_forbidden:${String(params.url ?? 'unknown')}`);
     }, sessionId);
@@ -712,7 +722,13 @@ class ChromeCdpBrowser {
       try {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(String(requestData.method ?? '').toUpperCase())) return fail();
         const url = new URL(requestData.url);
-        if (params.resourceType === 'Document' && !browserQaDocumentUrlMatches(url, pagePlan.url)) return fail();
+        if (params.resourceType === 'Document') {
+          const isMainDocument = mainFrameId ? params.frameId === mainFrameId : browserQaDocumentUrlMatches(url, pagePlan.url);
+          if (isMainDocument && !browserQaDocumentUrlMatches(url, pagePlan.url)) {
+            interceptionFailure = interceptionFailure ?? new Error(`browser_qa_document_navigation_forbidden:${url.pathname}`);
+            return fail();
+          }
+        }
         if (['http:', 'https:'].includes(url.protocol)) this.#allowedUrl(url);
         else if (!['data:', 'blob:', 'about:'].includes(url.protocol)) return fail();
         await this.connection.send('Fetch.continueRequest', { requestId: params.requestId }, sessionId);
@@ -787,6 +803,7 @@ class ChromeCdpBrowser {
       try {
         navigation = await this.connection.send('Page.navigate', { url: pagePlan.url, transitionType: 'typed' }, sessionId);
         if (navigation.errorText) throw new Error(`browser_qa_navigation_failed:${navigation.errorText}`);
+        mainFrameId = navigation.frameId ?? mainFrameId;
         await load;
       } finally {
         loadController.abort();
@@ -820,15 +837,21 @@ class ChromeCdpBrowser {
         accessibilityTrees.push(await this.connection.send('Accessibility.getFullAXTree', { frameId: accessibilityFrameId }, sessionId));
       }
       probe.interactiveControls = browserQaInteractiveControlsFromAxTrees(accessibilityTrees);
-      const directNetworkAttempt = await evaluateJson(this.connection, sessionId, `!!(
+      const directNetworkExpression = `!!(
         this.__browserQaWebSocketAttempted ||
         this.__browserQaWebSocketStreamAttempted ||
         this.__browserQaRtcAttempted ||
         this.__browserQaWebkitRtcAttempted ||
         this.__browserQaMozRtcAttempted ||
         this.__browserQaWebTransportAttempted
-      )`);
-      if (directNetworkAttempt || websocketFailure) throw websocketFailure ?? new Error('browser_qa_direct_network_forbidden');
+      )`;
+      for (const networkFrameId of browserQaFrameIds(currentFrameTree?.frameTree)) {
+        const contextId = defaultExecutionContexts.get(networkFrameId);
+        if (!Number.isInteger(contextId)) throw new Error(`browser_qa_frame_context_missing:${networkFrameId}`);
+        const attempted = await evaluateJson(this.connection, sessionId, directNetworkExpression, contextId);
+        if (attempted) throw new Error(`browser_qa_direct_network_forbidden:${networkFrameId}`);
+      }
+      if (websocketFailure) throw websocketFailure;
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
       if (secondaryTargetFailure) throw secondaryTargetFailure;
       const response = [...documentResponses].reverse().find((item) =>
@@ -838,6 +861,8 @@ class ChromeCdpBrowser {
       return { route: pagePlan.route, status: response?.status ?? 0, ...probe };
     } finally {
       offResponse();
+      offExecutionContext();
+      offExecutionContextDestroyed();
       offWebSocket();
       offFetch();
       offSecondaryTarget();
