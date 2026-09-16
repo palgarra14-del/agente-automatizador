@@ -8,6 +8,7 @@ const projects = JSON.parse(readFileSync(new URL('../config/projects.json', impo
 const queueConfig = JSON.parse(readFileSync(new URL('../config/issue-queue.json', import.meta.url), 'utf8'));
 const self = projects.projects.find((project) => project.id === 'self');
 const website = projects.projects.find((project) => project.id === 'website-pilot');
+const callflow = projects.projects.find((project) => project.id === 'callflow');
 
 test('cloud worker reacts to owner control-plane events with a scheduled fallback only', () => {
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
@@ -21,17 +22,19 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
 });
 
 test('cloud worker uses a static reviewed lane matrix with independent concurrency groups', () => {
-  assert.match(workflow, /fail-fast: false[\s\S]*lane: \[self, website-pilot\]/);
+  assert.match(workflow, /fail-fast: false[\s\S]*lane: \[self, website-pilot, callflow\]/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /timeout-minutes: 35/);
   assert.doesNotMatch(workflow, /matrix\.lane:\s*\$\{\{\s*github\./);
-  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot']);
+  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
 });
 
-test('website and self lanes have distinct durable namespaces and non-overlapping ownership', () => {
+test('all active lanes have distinct durable namespaces and non-overlapping ownership', () => {
   const selfLane = queueConfig.cloudLanes.find((lane) => lane.id === 'self');
   const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
+  const callflowLane = queueConfig.cloudLanes.find((lane) => lane.id === 'callflow');
+
   assert.deepEqual(selfLane, {
     id: 'self',
     projectIds: ['self'],
@@ -44,9 +47,16 @@ test('website and self lanes have distinct durable namespaces and non-overlappin
     tag: 'agent-cloud-state-website-pilot-v1',
     statePath: '.agent/cloud-state-website-pilot.json'
   });
-  assert.notEqual(selfLane.tag, websiteLane.tag);
-  assert.notEqual(selfLane.statePath, websiteLane.statePath);
-  assert.equal(new Set([...selfLane.projectIds, ...websiteLane.projectIds]).size, 2);
+  assert.deepEqual(callflowLane, {
+    id: 'callflow',
+    projectIds: ['callflow'],
+    tag: 'agent-cloud-state-callflow-v1',
+    statePath: '.agent/cloud-state-callflow.json'
+  });
+
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 3);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 3);
+  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 3);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
@@ -73,8 +83,10 @@ test('cloud worker checks out trusted main without persisting checkout credentia
 test('cloud worker uses frozen dependencies and the exact runtime shared by active lanes', () => {
   assert.ok(self);
   assert.ok(website);
+  assert.ok(callflow);
   assert.match(self.execution.image, /@sha256:[a-f0-9]{64}$/);
   assert.equal(website.execution.image, self.execution.image);
+  assert.equal(callflow.execution.image, self.execution.image);
   assert.match(workflow, /run: npm ci --ignore-scripts/);
   assert.ok(workflow.includes(`run: docker pull ${self.execution.image}`));
 });
