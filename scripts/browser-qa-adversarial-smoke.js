@@ -35,6 +35,7 @@ const server = createServer((request, response) => {
   <input id="default-reset" type="reset">
   <input id="name" type="text" value="Jane">
   <div id="programmatic-focus" tabindex="-1"></div>
+  <div id="custom-scrollbar" role="scrollbar" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
 </body></html>`);
     return;
   }
@@ -275,6 +276,9 @@ try {
     false,
     'programmatic-only tabindex=-1 generic focus target must not be treated as an interactive control'
   );
+  const scrollbar = hiddenEvidence.interactiveControls.find((control) => control.role === 'scrollbar');
+  assert.ok(scrollbar, 'custom ARIA scrollbar must be included in the accessibility control audit');
+  assert.equal(scrollbar.accessibleName, '', 'unnamed custom scrollbar must remain visible to the classifier as unnamed');
 
   const websocketRoute = '/websocket';
   const websocketUrl = `${origin}${websocketRoute}`;
