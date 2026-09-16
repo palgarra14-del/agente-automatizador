@@ -164,18 +164,39 @@ test('Vercel automation bypass headers are exact-origin, trusted and strip page-
   }), [{ name: 'Accept', value: 'text/html' }]);
 });
 
-test('runner keeps Vercel bypass secret out of enumerable state and rejects unsafe secret values', () => {
+test('runner keeps Vercel bypass policy out of enumerable state and validates secret + approved origins together', () => {
   const runner = new ChromeBrowserQaRunner({
-    environment: { VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret' }
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com'
+    }
   });
-  assert.equal(Object.keys(runner).includes('protectionBypassSecret'), false);
+  assert.equal(Object.keys(runner).includes('protectionBypassPolicy'), false);
   assert.equal(JSON.stringify(runner).includes('runtime-secret'), false);
   assert.throws(() => new ChromeBrowserQaRunner({
-    environment: { VERCEL_AUTOMATION_BYPASS_SECRET: 'bad\nsecret' }
+    environment: { VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret' }
+  }), /protection_bypass_policy_incomplete/);
+  assert.throws(() => new ChromeBrowserQaRunner({
+    environment: { VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com' }
+  }), /protection_bypass_policy_incomplete/);
+  assert.throws(() => new ChromeBrowserQaRunner({
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'bad\nsecret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com'
+    }
   }), /protection_bypass_secret_invalid/);
   assert.throws(() => new ChromeBrowserQaRunner({
-    environment: { VERCEL_AUTOMATION_BYPASS_SECRET: ' padded ' }
-  }), /protection_bypass_secret_invalid/);
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com/path'
+    }
+  }), /protection_bypass_origin_invalid/);
+  assert.throws(() => new ChromeBrowserQaRunner({
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'http://preview.example.com'
+    }
+  }), /protection_bypass_origin_invalid/);
 });
 
 test('network guard resolves DNS and fails closed on private answers', async () => {
@@ -265,7 +286,10 @@ test('runner passes runtime-only Vercel bypass secret only to the browser bounda
   const navigationPlan = browserQaNavigationPlan(request);
   let browserOptions = null;
   const runner = new ChromeBrowserQaRunner({
-    environment: { VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret' },
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com'
+    },
     networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] }),
     browserFactory: async (options) => {
       browserOptions = options;
@@ -284,6 +308,35 @@ test('runner passes runtime-only Vercel bypass secret only to the browser bounda
   assert.equal(browserOptions.protectionBypassSecret, 'runtime-secret');
   assert.equal(JSON.stringify(snapshot).includes('runtime-secret'), false);
   assert.equal(JSON.stringify(request).includes('runtime-secret'), false);
+});
+
+test('runner never forwards the bypass secret to an unapproved preview origin', async () => {
+  const request = requestFor({ previewUrl: 'https://attacker.example/previews/build-1' });
+  const navigationPlan = browserQaNavigationPlan(request);
+  let browserOptions = null;
+  const runner = new ChromeBrowserQaRunner({
+    environment: {
+      VERCEL_AUTOMATION_BYPASS_SECRET: 'runtime-secret',
+      VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com'
+    },
+    networkResolver: async (url) => ({ url: new URL(url), addresses: [{ address: '8.8.8.8', family: 4 }] }),
+    browserFactory: async (options) => {
+      browserOptions = options;
+      return {
+        async inspectPage(args) { return fakePageEvidence(args.request, args.pagePlan); },
+        async close() {}
+      };
+    }
+  });
+  const snapshot = await runner.verify({
+    request,
+    navigationPlan,
+    signal: new AbortController().signal,
+    timeoutMs: 5_000
+  });
+  assert.equal(browserOptions.allowedOrigin, 'https://attacker.example');
+  assert.equal(browserOptions.protectionBypassSecret, null);
+  assert.equal(JSON.stringify(snapshot).includes('runtime-secret'), false);
 });
 
 test('runner rejects plan entries that escape a non-root preview base path', async () => {
