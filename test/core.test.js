@@ -31,6 +31,7 @@ import {
   evaluateChangePolicy,
   fingerprintChangeSet,
   formatDoctor,
+  githubApiTokenForProject,
   githubGitNetworkEnvironment,
   imageIsPinned,
   loadProjects,
@@ -880,9 +881,11 @@ test('model billing/auth failures are fail-fast while transient transport failur
 });
 
 test('project subprocesses retain PATH but never inherit orchestrator credentials', async () => {
-  const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const agentGitToken = 'ghp_agent_command_environment_test_1234567890';
   Object.assign(process.env, {
+    AGENT_GITHUB_TOKEN: agentGitToken,
     GITHUB_TOKEN: 'ghp_command_environment_test', VERCEL_TOKEN: 'vcp_command_environment_test',
     OPENAI_API_KEY: 'sk-command_environment_test', CODEX_API_KEY: 'codex-command_environment_test'
   });
@@ -892,6 +895,7 @@ test('project subprocesses retain PATH but never inherit orchestrator credential
     assert.equal(result.ok, true);
     assert.equal(observed.pathAvailable, true);
     assert.deepEqual(observed.credentials, { github: false, vercel: false, openai: false, codex: false });
+    assert.equal(result.stdout.includes(agentGitToken), false);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];
@@ -1294,9 +1298,10 @@ test('Codex API credentials use the SDK apiKey boundary and never enter the gene
   assert.throws(() => codexApiKeyFromEnvironment({ CODEX_API_KEY: 'too short' }), /codex_api_key_invalid/);
   assert.throws(() => codexApiKeyFromEnvironment({ OPENAI_API_KEY: 'sk-valid-length-but has-space-1234' }), /codex_api_key_invalid/);
 
-  const names = ['GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
+    AGENT_GITHUB_TOKEN: 'ghp_agent_worker_test_secret_1234567890',
     GITHUB_TOKEN: 'ghp_worker_test_secret_1234567890',
     VERCEL_TOKEN: 'vcp_worker_test_secret_1234567890',
     OPENAI_API_KEY: openAiKey,
@@ -1310,6 +1315,7 @@ test('Codex API credentials use the SDK apiKey boundary and never enter the gene
     assert.equal(clientOptions.apiKey, codexKey);
     assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
     assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
+    assert.equal(clientOptions.env.AGENT_GITHUB_TOKEN, undefined);
     assert.equal(clientOptions.env.GITHUB_TOKEN, undefined);
     assert.equal(clientOptions.env.VERCEL_TOKEN, undefined);
     assert.ok(clientOptions.configOverrides.includes('shell_environment_policy.inherit="none"'));
@@ -1675,32 +1681,123 @@ test('command runner resolves pnpm through its JavaScript entrypoint without a s
   }
 });
 
-test('GitHub network Git credentials are environment-only and never embedded in arguments', () => {
-  const token = 'ghs_cloud_private_repo_fixture_1234567890';
-  const env = githubGitNetworkEnvironment({ GITHUB_TOKEN: token });
-  assert.equal(env.GH_TOKEN, token);
+test('GitHub network Git credentials use least authority: self fallback by default and cross-repo token only when requested', () => {
+  const agentToken = 'ghs_agent_cross_repo_fixture_123456789012345';
+  const fallbackToken = 'ghs_cloud_default_repo_fixture_123456789012345';
+
+  const selfEnv = githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken });
+  assert.equal(selfEnv.GH_TOKEN, fallbackToken);
+  assert.equal(JSON.stringify(selfEnv).includes(agentToken), false);
+
+  const env = githubGitNetworkEnvironment(
+    { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken },
+    { preferAgentToken: true }
+  );
+  assert.equal(env.GH_TOKEN, agentToken);
   assert.equal(env.GH_HOST, 'github.com');
   assert.equal(env.GIT_TERMINAL_PROMPT, '0');
   assert.equal(env.GIT_CONFIG_COUNT, '1');
   assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper');
   assert.equal(env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(Object.hasOwn(env, 'AGENT_GITHUB_TOKEN'), false);
   assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false);
   assert.equal(JSON.stringify(env).includes('https://x-access-token:'), false);
+  assert.equal(JSON.stringify(env).includes(fallbackToken), false);
+
+  const fallback = githubGitNetworkEnvironment({ GITHUB_TOKEN: fallbackToken }, { preferAgentToken: true });
+  assert.equal(fallback.GH_TOKEN, fallbackToken);
   assert.deepEqual(githubGitNetworkEnvironment({}), {});
-  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'too short' }), /github_git_network_token_invalid/);
-  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_git_network_token_invalid/);
+  assert.throws(
+    () => githubGitNetworkEnvironment(
+      { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken },
+      { preferAgentToken: true }
+    ),
+    /github_orchestrator_token_invalid/
+  );
+  assert.equal(
+    githubGitNetworkEnvironment({ AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }).GH_TOKEN,
+    fallbackToken
+  );
+  assert.throws(() => githubGitNetworkEnvironment({ GITHUB_TOKEN: 'ghs_valid_length_but has_space_123456' }), /github_orchestrator_token_invalid/);
+  assert.equal(maskSecrets(`AGENT_GITHUB_TOKEN=${agentToken}`).includes(agentToken), false);
+});
+
+test('target-repository GitHub API token keeps self least-authority and prefers cross-repo credential only for non-self projects', () => {
+  const agentToken = 'ghs_api_cross_repo_fixture_123456789012345';
+  const fallbackToken = 'ghs_api_self_fixture_123456789012345';
+  const environment = { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken };
+  assert.equal(githubApiTokenForProject(project({ id: 'self' }), environment), fallbackToken);
+  assert.equal(githubApiTokenForProject(project({ id: 'website-pilot' }), environment), agentToken);
+  assert.equal(githubApiTokenForProject(project({ id: 'website-pilot' }), { GITHUB_TOKEN: fallbackToken }), fallbackToken);
+  assert.throws(
+    () => githubApiTokenForProject(project({ id: 'website-pilot' }), { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }),
+    /github_orchestrator_token_invalid/
+  );
+  assert.equal(
+    githubApiTokenForProject(project({ id: 'self' }), { AGENT_GITHUB_TOKEN: 'too short', GITHUB_TOKEN: fallbackToken }),
+    fallbackToken
+  );
+});
+
+test('workflow publication routes target GitHub API and preview fallback through the cross-repo credential without changing self authority', async () => {
+  const agentToken = 'ghs_bridge_cross_repo_fixture_123456789012345';
+  const fallbackToken = 'ghs_bridge_self_fixture_123456789012345';
+  const environment = { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken };
+  const calls = [];
+  const githubFactory = (token) => ({
+    inspect: async (configured) => { calls.push({ op: 'inspect', projectId: configured.id, token }); return { provider: 'github', head: 'base' }; },
+    authenticatedCommitIdentity: async () => { calls.push({ op: 'identity', token }); return { name: 'fixture', email: '1+fixture@users.noreply.github.com' }; },
+    branchHead: async (configured, branch) => { calls.push({ op: 'branch', projectId: configured.id, token }); return { branch, head: 'commit' }; },
+    createPullRequest: async (configured) => { calls.push({ op: 'pr', projectId: configured.id, token }); return { number: 1, state: 'open' }; },
+    pullRequest: async (configured) => { calls.push({ op: 'pr-read', projectId: configured.id, token }); return { number: 1, state: 'open', headSha: 'commit', headRef: 'agent/run', baseRef: configured.defaultBranch }; },
+    dispatchWorkflow: async (configured) => { calls.push({ op: 'dispatch', projectId: configured.id, token }); return { workflow: 'ci.yml', ref: 'agent/run', dispatched: true }; },
+    waitForCi: async (configured) => { calls.push({ op: 'ci', projectId: configured.id, token }); return { state: 'success' }; },
+    previewDeployment: async (configured) => { calls.push({ op: 'preview', projectId: configured.id, token }); return { provider: 'vercel', state: 'READY', ok: true }; }
+  });
+  const localGit = {
+    commit: async () => ({ finalHead: 'commit' }),
+    push: async () => ({ finalHead: 'commit' })
+  };
+  const bridge = new WorkflowPublicationBridge({
+    localGit,
+    environment,
+    githubFactory,
+    deploymentProviderFactory: ({ github }) => new VercelDeploymentProvider({ token: '', github }),
+    ciWorkflow: 'ci.yml'
+  });
+  const crossRepo = project({ id: 'website-pilot', deployment: { provider: 'vercel', projectId: 'prj_test', teamId: 'team_test' } });
+  const selfProject = project({ id: 'self', deployment: { provider: 'vercel', projectId: 'prj_self', teamId: 'team_test' } });
+
+  assert.equal((await bridge.inspectBase(crossRepo)).head, 'base');
+  await bridge.commit(crossRepo, { branch: 'agent/run', goal: 'fixture', baseHead: 'base', remote: 'https://github.com/owner/repo.git', changeSetFingerprint: 'a'.repeat(64) });
+  await bridge.verifyRemoteBranch(crossRepo, 'agent/run', 'commit');
+  await bridge.createPullRequest(crossRepo, { branch: 'agent/run', workflowId: 'workflow-1', changeSetFingerprint: 'a'.repeat(64), goal: 'fixture' });
+  await bridge.dispatchCi(crossRepo, { branch: 'agent/run' });
+  await bridge.waitForCi(crossRepo, 'commit', {});
+  await bridge.waitForPreview(crossRepo, { commitSha: 'commit', branch: 'agent/run' }, { timeoutMs: 1, pollIntervalMs: 1 });
+  await bridge.inspectBase(selfProject);
+
+  const crossRepoCalls = calls.filter((call) => call.projectId === 'website-pilot' || ['identity', 'preview'].includes(call.op));
+  assert.ok(crossRepoCalls.length >= 7);
+  assert.ok(crossRepoCalls.every((call) => call.token === agentToken));
+  const selfCalls = calls.filter((call) => call.projectId === 'self');
+  assert.equal(selfCalls.length, 1);
+  assert.equal(selfCalls[0].token, fallbackToken);
+  assert.equal(JSON.stringify(calls).includes('AGENT_GITHUB_TOKEN'), false);
+  assert.equal(JSON.stringify(calls).includes('GITHUB_TOKEN'), false);
 });
 
 test('managed private clone gets GitHub credential helper only through subprocess environment', async () => {
   const root = await mkdtemp(join(tmpdir(), 'managed-private-clone-'));
   const configured = configFrom({
-    id: 'self', repository: { owner: 'owner', name: 'private-repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
+    id: 'website-pilot', repository: { owner: 'owner', name: 'private-repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.',
     workspaceStrategy: 'managed', managedWorkspaceRoot: '.agent-workspaces', commands: { test: 'node --version' }, acceptance: { require: ['test'] }
   }, join(root, 'host', 'config'));
   const token = 'ghs_private_clone_fixture_123456789012345';
+  const fallbackToken = 'ghs_private_clone_fallback_123456789012345';
   let observed = null;
   const manager = new WorkspaceManager({
-    environment: { GITHUB_TOKEN: token },
+    environment: { AGENT_GITHUB_TOKEN: token, GITHUB_TOKEN: fallbackToken },
     processRunner: async (binary, args, options) => {
       observed = { binary, args, options };
       return { ok: true, exitCode: 0, durationMs: 1, stdout: '', stderr: '' };
@@ -1712,15 +1809,18 @@ test('managed private clone gets GitHub credential helper only through subproces
   assert.equal(observed.args.some((arg) => String(arg).includes(token)), false);
   assert.equal(observed.options.env.GH_TOKEN, token);
   assert.equal(observed.options.env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(Object.hasOwn(observed.options.env, 'AGENT_GITHUB_TOKEN'), false);
   assert.equal(Object.hasOwn(observed.options.env, 'GITHUB_TOKEN'), false);
+  assert.equal(JSON.stringify(observed).includes(fallbackToken), false);
 });
 
 test('LocalGitAdapter injects GitHub credentials only when a Git operation is explicitly networked', async () => {
   const token = 'ghs_private_git_fixture_1234567890123456';
+  const fallbackToken = 'ghs_private_git_fallback_1234567890123456';
   const calls = [];
-  const configured = project();
+  const configured = project({ id: 'website-pilot' });
   const adapter = new LocalGitAdapter({
-    environment: { GITHUB_TOKEN: token },
+    environment: { AGENT_GITHUB_TOKEN: token, GITHUB_TOKEN: fallbackToken },
     processRunner: async (_binary, args, options) => {
       calls.push({ args, options });
       return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' };
@@ -1731,7 +1831,27 @@ test('LocalGitAdapter injects GitHub credentials only when a Git operation is ex
   assert.deepEqual(calls[0].options.env, {});
   assert.equal(calls[1].options.env.GH_TOKEN, token);
   assert.equal(calls[1].options.env.GIT_CONFIG_VALUE_0, '!gh auth git-credential');
+  assert.equal(Object.hasOwn(calls[1].options.env, 'AGENT_GITHUB_TOKEN'), false);
+  assert.equal(Object.hasOwn(calls[1].options.env, 'GITHUB_TOKEN'), false);
   assert.equal(calls[1].args.some((arg) => String(arg).includes(token)), false);
+  assert.equal(JSON.stringify(calls).includes(fallbackToken), false);
+});
+
+test('self network Git ignores the broader cross-repo credential even when it is present', async () => {
+  const agentToken = 'ghs_agent_self_must_ignore_123456789012345';
+  const fallbackToken = 'ghs_self_workflow_token_123456789012345';
+  const calls = [];
+  const configured = project({ id: 'self' });
+  const adapter = new LocalGitAdapter({
+    environment: { AGENT_GITHUB_TOKEN: agentToken, GITHUB_TOKEN: fallbackToken },
+    processRunner: async (_binary, args, options) => {
+      calls.push({ args, options });
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '' };
+    }
+  });
+  await adapter.git(['fetch', 'origin', 'main'], configured, { network: true });
+  assert.equal(calls[0].options.env.GH_TOKEN, fallbackToken);
+  assert.equal(JSON.stringify(calls).includes(agentToken), false);
 });
 
 test('managed workspaces are isolated under the configured root and clone only the configured repository', async () => {
