@@ -655,7 +655,12 @@ async function evaluateJson(connection, sessionId, expression, contextId = null)
     userGesture: false,
     ...(contextId ? { contextId } : {})
   }, sessionId);
-  if (result.exceptionDetails) throw new Error('browser_qa_runtime_probe_failed');
+  if (result.exceptionDetails) {
+    const className = String(result.exceptionDetails.exception?.className ?? 'Error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 40) || 'Error';
+    const line = Number.isInteger(result.exceptionDetails.lineNumber) ? result.exceptionDetails.lineNumber : -1;
+    const column = Number.isInteger(result.exceptionDetails.columnNumber) ? result.exceptionDetails.columnNumber : -1;
+    throw new Error(`browser_qa_runtime_probe_failed:${className}:${line}:${column}`);
+  }
   return result.result?.value;
 }
 
