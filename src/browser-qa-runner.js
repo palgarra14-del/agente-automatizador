@@ -543,11 +543,11 @@ export async function launchChromeCdpBrowser({
   try {
     child = spawnImpl(executablePath, chromeArguments(userDataDir), {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: {
+      env: Object.fromEntries(Object.entries({
         PATH: environment.PATH,
         HOME: environment.HOME,
         LANG: environment.LANG ?? 'C.UTF-8'
-      }
+      }).filter(([, value]) => value !== undefined))
     });
     await new Promise((resolvePromise, reject) => {
       let handled = false;
@@ -585,27 +585,32 @@ function validateRunnerPlan(request, navigationPlan) {
   }
   const preview = new URL(navigationPlan.previewBaseUrl);
   if (preview.protocol !== 'https:' || preview.username || preview.password) throw new Error('browser_qa_runner_preview_invalid');
-  const routeUrls = Object.fromEntries(navigationPlan.sameOriginPages.map((page) => [page.route, page.url]));
+  const routeUrls = {};
+  const basePath = preview.pathname === '/' ? '/' : preview.pathname.replace(/\/+$/, '');
   for (const page of navigationPlan.sameOriginPages) {
-    if (!page || typeof page.route !== 'string' || typeof page.url !== 'string') throw new Error('browser_qa_runner_page_plan_invalid');
+    if (!page || typeof page.route !== 'string' || typeof page.url !== 'string' || Object.hasOwn(routeUrls, page.route)) throw new Error('browser_qa_runner_page_plan_invalid');
     const url = new URL(page.url);
-    if (url.protocol !== 'https:' || url.origin !== preview.origin) throw new Error('browser_qa_runner_page_plan_invalid');
+    const withinBase = basePath === '/' || url.pathname === basePath || url.pathname.startsWith(`${basePath}/`);
+    if (url.protocol !== 'https:' || url.origin !== preview.origin || !withinBase || url.search || url.hash) throw new Error('browser_qa_runner_page_plan_invalid');
+    routeUrls[page.route] = page.url;
   }
   return routeUrls;
 }
 
 export class ChromeBrowserQaRunner {
-  constructor({ browserFactory = launchChromeCdpBrowser, settleMs = 150 } = {}) {
+  constructor({ browserFactory = launchChromeCdpBrowser, networkGuard = assertPublicNetworkUrl, settleMs = 150 } = {}) {
     if (typeof browserFactory !== 'function') throw new Error('browser_qa_runner_factory_invalid');
+    if (typeof networkGuard !== 'function') throw new Error('browser_qa_runner_network_guard_invalid');
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 2_000) throw new Error('browser_qa_runner_settle_invalid');
     this.browserFactory = browserFactory;
+    this.networkGuard = networkGuard;
     this.settleMs = settleMs;
   }
 
   async verify({ request, navigationPlan, signal, timeoutMs }) {
     throwIfAborted(signal);
     const routeUrls = validateRunnerPlan(request, navigationPlan);
-    for (const page of navigationPlan.sameOriginPages) await assertPublicNetworkUrl(page.url);
+    for (const page of navigationPlan.sameOriginPages) await this.networkGuard(page.url);
     const browser = await this.browserFactory({ signal, timeoutMs });
     const onAbort = () => { Promise.resolve(browser.close()).catch(() => {}); };
     signal?.addEventListener('abort', onAbort, { once: true });
