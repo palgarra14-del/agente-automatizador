@@ -24,6 +24,14 @@
       ],
       "tag": "agent-cloud-state-website-pilot-v1",
       "statePath": ".agent/cloud-state-website-pilot.json"
+    },
+    {
+      "id": "callflow",
+      "projectIds": [
+        "callflow"
+      ],
+      "tag": "agent-cloud-state-callflow-v1",
+      "statePath": ".agent/cloud-state-callflow.json"
     }
   ]
 }
