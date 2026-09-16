@@ -1538,7 +1538,7 @@ export class SupervisedIssueQueue {
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
-      let routingRequest = null;
+      let routingRequest;
       try {
         routingRequest = parseIssueRequestBody(issue.body).request;
       } catch {
