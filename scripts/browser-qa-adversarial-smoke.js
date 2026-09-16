@@ -11,13 +11,24 @@ const server = createServer((request, response) => {
 <style>.ancestor-hidden{display:none}</style></head>
 <body>
   <section id="hero">Hero</section>
-  <section id="contact">Contact</section>
+  <a id="visible-target" href="#contact">Contact</a>
+  <section id="contact" hidden>Contact</section>
   <div class="ancestor-hidden">
     <a id="hidden-target" href="#contact"></a>
     <input id="hidden-control" value="secret">
   </div>
   <div aria-hidden="true"><button id="aria-hidden-control"></button></div>
+  <button id="alt-button" alt="Save"></button>
   <input id="name" type="text" value="Jane">
+</body></html>`);
+    return;
+  }
+  if (request.url === '/history') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html>
+<html><head><title>History fixture</title><meta name="description" content="Fixture description"></head>
+<body><section id="hero">Hero</section>
+<script>history.replaceState({}, '', '/history?qa=1');</script>
 </body></html>`);
     return;
   }
@@ -47,11 +58,11 @@ const controller = new AbortController();
 const timer = setTimeout(() => controller.abort(), 20_000);
 let browser = null;
 
-function fixtureRequest(route, targets = []) {
+function fixtureRequest(route, targets = [], requiredSections = ['hero']) {
   return {
     acceptance: {
       mobileViewport: { width: 390, height: 844 },
-      pages: [{ route, requiredSections: ['hero'] }],
+      pages: [{ route, requiredSections }],
       targets
     }
   };
@@ -68,7 +79,7 @@ try {
   const hiddenUrl = `${origin}${hiddenRoute}`;
   const hiddenRequest = fixtureRequest(hiddenRoute, [
     { id: 'primary', fromRoute: hiddenRoute, semantics: 'anchor', destination: '#contact' }
-  ]);
+  ], ['hero', 'contact']);
   const hiddenEvidence = await browser.inspectPage({
     request: hiddenRequest,
     pagePlan: { route: hiddenRoute, url: hiddenUrl },
@@ -79,12 +90,31 @@ try {
   });
 
   assert.equal(hiddenEvidence.status, 200);
-  assert.deepEqual(hiddenEvidence.targets, [], 'hidden required CTA must not count as user-visible');
+  assert.deepEqual(hiddenEvidence.sections, ['hero'], 'hidden required section must not count as rendered');
+  assert.deepEqual(hiddenEvidence.anchors, [], 'hidden anchor destination must not count as reachable');
+  assert.deepEqual(hiddenEvidence.targets, [], 'visible CTA to hidden destination must not count as usable');
   assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:hidden-control'), false);
   assert.equal(hiddenEvidence.interactiveControls.some((control) => control.id === 'id:aria-hidden-control'), false);
+  const altButton = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:alt-button');
+  assert.ok(altButton, 'visible button should be audited');
+  assert.equal(altButton.accessibleName, '', 'button alt attribute must not be treated as an accessible name');
   const textInput = hiddenEvidence.interactiveControls.find((control) => control.id === 'id:name');
   assert.ok(textInput, 'visible text input should be audited');
   assert.equal(textInput.accessibleName, '', 'text input value must not be treated as an accessible name');
+
+  const historyRoute = '/history';
+  const historyUrl = `${origin}${historyRoute}`;
+  await assert.rejects(
+    browser.inspectPage({
+      request: fixtureRequest(historyRoute),
+      pagePlan: { route: historyRoute, url: historyUrl },
+      routeUrls: { [historyRoute]: historyUrl },
+      signal: controller.signal,
+      timeoutMs: 5_000,
+      settleMs: 50
+    }),
+    /browser_qa_final_url_mismatch/
+  );
 
   const workerRoute = '/worker';
   const workerUrl = `${origin}${workerRoute}`;
@@ -104,6 +134,5 @@ try {
 } finally {
   clearTimeout(timer);
   await browser?.close();
-  server.close();
-  await once(server, 'close').catch(() => {});
+  await new Promise((resolvePromise) => server.close(resolvePromise));
 }
