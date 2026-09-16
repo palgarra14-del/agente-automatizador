@@ -94,6 +94,7 @@ test('routing job receives event data but no secrets or write credentials', () =
   assert.ok(routeStart >= 0 && cloudStart > routeStart);
   const route = workflow.slice(routeStart, cloudStart);
   assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(route, /AGENT_CLOUD_EVENT_ACTION: \$\{\{ github\.event\.action \}\}/);
   assert.match(route, /AGENT_CLOUD_ISSUE_BODY: \$\{\{ github\.event\.issue\.body \}\}/);
   assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
