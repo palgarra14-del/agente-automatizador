@@ -213,7 +213,7 @@ export class GitHubStateStore extends JsonStore {
   async readEnvelopeAt(commitSha) {
     const sha = assertSha(commitSha);
     const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
-    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(sha)}`);
+    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(sha)}`, { allow404: true });
     if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
     const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
     if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
