@@ -86,7 +86,7 @@ test('release approval preserves the exact durable commit sha', () => {
 test('dry-run authority description exposes the pre-approval durable branch write', () => {
   assert.deepEqual(durableCheckpointExternalWrite(), {
     id: 'release-readiness-durable-checkpoint',
-    skill: 'repository.publish',
+    skill: 'release.publish-reviewed-workflow',
     specialist: 'release-manager',
     purpose: 'Persist the exact reviewed change on the non-protected working branch before the final release-readiness approval.'
   });
