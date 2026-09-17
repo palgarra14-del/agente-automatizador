@@ -14,7 +14,8 @@ export default [
         fetch: 'readonly',
         process: 'readonly',
         setTimeout: 'readonly',
-        clearTimeout: 'readonly'
+        clearTimeout: 'readonly',
+        structuredClone: 'readonly'
       }
     },
     rules: { 'no-console': 'off' }
