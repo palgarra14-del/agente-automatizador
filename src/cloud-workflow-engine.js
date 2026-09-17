@@ -39,7 +39,7 @@ export function releaseCheckpointCandidate(plan) {
 export function durableCheckpointExternalWrite() {
   return {
     id: 'release-readiness-durable-checkpoint',
-    skill: 'repository.publish',
+    skill: 'release.publish-reviewed-workflow',
     specialist: 'release-manager',
     purpose: 'Persist the exact reviewed change on the non-protected working branch before the final release-readiness approval.'
   };
@@ -226,6 +226,10 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     const project = this.projects.get(plan.projectId);
     if (!project || !plan.workspace?.managed || !plan.workspace.workingBranch || !plan.workspace.baseHead || !plan.workspace.remote) {
       return this.blockDurability(id, 'durable_checkpoint_workspace_invalid');
+    }
+    const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
+    if (!publicationCapability.available) {
+      return this.blockDurability(id, 'durable_checkpoint_publication_capability_unavailable', publicationCapability.reason);
     }
 
     let base;
