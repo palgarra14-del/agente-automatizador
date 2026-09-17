@@ -543,23 +543,6 @@ export class GitHubStateStore extends JsonStore {
     return this.snapshotFrom(targetSha, targetSha, targetSha, targetEnvelope);
   }
 
-  async recoverMissingMigrationReceipt(stateSha, stateEnvelope, refs) {
-    const { anchorSha, anchorGeneration } = await this.validateLineageAnchor(stateEnvelope);
-    if (anchorGeneration < 1 || stateEnvelope.generation !== anchorGeneration + 1 || refs.checkpointSha || refs.witnessSha) {
-      throw new Error('cloud_state_history_receipt_missing');
-    }
-    const commit = await this.readCommit(stateSha);
-    if (commit.parents.length !== 1 || assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid') !== anchorSha) {
-      throw new Error('cloud_state_history_fork');
-    }
-    const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
-    if (nextReceipt) throw new Error('cloud_state_history_fork');
-    await this.claimHistoryReceipt(stateEnvelope.generation, stateSha);
-    await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-    await this.repairWatermarks(stateSha, null, null);
-    return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
-  }
-
   async recoverReceiptAhead(stateSha, stateEnvelope, refs, nextSha) {
     const nextEnvelope = await this.readEnvelopeAt(nextSha);
     await this.validateDirectV2Child(stateSha, stateEnvelope, nextSha, nextEnvelope);
@@ -607,6 +590,11 @@ export class GitHubStateStore extends JsonStore {
     const stateEnvelope = await this.readEnvelopeAt(stateSha);
 
     if (!checkpointSha && !witnessSha && stateEnvelope.version === 1) {
+      const sameGenerationReceipt = await this.historySha(stateEnvelope.generation);
+      if (sameGenerationReceipt) {
+        if (sameGenerationReceipt !== stateSha) throw new Error('cloud_state_history_fork');
+        throw new Error('cloud_state_legacy_after_migration');
+      }
       const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
       if (!nextReceipt) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
       const nextEnvelope = await this.readEnvelopeAt(nextReceipt);
@@ -618,10 +606,7 @@ export class GitHubStateStore extends JsonStore {
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
 
     const currentReceipt = await this.historySha(stateEnvelope.generation);
-    if (!currentReceipt) {
-      if (!repair) throw new Error('cloud_state_history_receipt_missing');
-      return this.recoverMissingMigrationReceipt(stateSha, stateEnvelope, refs);
-    }
+    if (!currentReceipt) throw new Error('cloud_state_history_receipt_missing');
     if (currentReceipt !== stateSha) throw new Error('cloud_state_history_fork');
     const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
     if (nextReceipt) {
@@ -763,12 +748,15 @@ export class GitHubStateStore extends JsonStore {
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
     if (migrationFromV1) {
-      await this.advanceRef(this.tag, expectedStateSha, commitSha);
-      await this.claimHistoryReceipt(generation, commitSha);
-    } else {
-      await this.claimHistoryReceipt(generation, commitSha);
-      await this.advanceRef(this.tag, expectedStateSha, commitSha);
+      const beforeReceipt = await this.readRefs();
+      if (beforeReceipt.stateSha !== expectedStateSha ||
+          beforeReceipt.checkpointSha !== expectedCheckpointSha ||
+          beforeReceipt.witnessSha !== expectedWitnessSha) {
+        throw new Error('cloud_state_conflict');
+      }
     }
+    await this.claimHistoryReceipt(generation, commitSha);
+    await this.advanceRef(this.tag, expectedStateSha, commitSha);
 
     let checkpointError = null;
     let witnessError = null;
