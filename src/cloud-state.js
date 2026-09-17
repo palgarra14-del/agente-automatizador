@@ -107,6 +107,7 @@ export class GitHubStateStore extends JsonStore {
     fetchImpl = fetch,
     tag = DEFAULT_TAG,
     checkpointTag = `${tag}-checkpoint-v2`,
+    initializationTag = `${checkpointTag}-initialized-v2`,
     statePath = DEFAULT_PATH,
     laneId = 'self',
     allowedProjectIds = ['self'],
@@ -124,6 +125,9 @@ export class GitHubStateStore extends JsonStore {
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
     if (!/^[A-Za-z0-9._-]{1,120}$/.test(checkpointTag) || checkpointTag === tag) throw new Error('cloud_state_checkpoint_tag_invalid');
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(initializationTag) || [tag, checkpointTag].includes(initializationTag)) {
+      throw new Error('cloud_state_initialization_tag_invalid');
+    }
     if (!/^[a-z0-9-]{1,80}$/.test(laneId)) throw new Error('cloud_state_lane_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
@@ -134,6 +138,7 @@ export class GitHubStateStore extends JsonStore {
     this.fetchImpl = fetchImpl;
     this.tag = tag;
     this.checkpointTag = checkpointTag;
+    this.initializationTag = initializationTag;
     this.statePath = statePath;
     this.laneId = laneId;
     this.allowedProjectIds = normalizedAllowedProjectIds;
@@ -211,12 +216,31 @@ export class GitHubStateStore extends JsonStore {
     }
     const persistedLaneId = envelope.laneId ?? 'self';
     if (persistedLaneId !== this.laneId) throw new Error('cloud_state_lane_mismatch');
-    if (envelope.version === 2 && (envelope.stateTag !== this.tag || envelope.checkpointTag !== this.checkpointTag)) {
+    if (envelope.version === 2 && (
+      envelope.stateTag !== this.tag ||
+      envelope.checkpointTag !== this.checkpointTag ||
+      envelope.statePath !== this.statePath
+    )) {
       throw new Error('cloud_state_ref_binding_mismatch');
     }
     validateCloudState(envelope.state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     if (stateHash(envelope.state) !== envelope.stateHash) throw new Error('cloud_state_integrity_mismatch');
     return envelope;
+  }
+
+  async validateHeadContinuity(stateSha, stateEnvelope) {
+    const commit = await this.readCommit(stateSha);
+    if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+    const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+    if (stateEnvelope.generation === 1) {
+      const baseSha = await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
+      if (!baseSha) throw new Error('cloud_state_base_branch_missing');
+      const baseRelation = await this.compareCommits(parentSha, baseSha);
+      if (!['identical', 'ahead'].includes(baseRelation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+      return;
+    }
+    const parentEnvelope = await this.readEnvelopeAt(parentSha);
+    if (parentEnvelope.generation !== stateEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
   }
 
   async validateBootstrapHistory(stateSha, stateEnvelope) {
@@ -313,6 +337,29 @@ export class GitHubStateStore extends JsonStore {
     throw new Error(failureCode, { cause: publishError ?? verifyError ?? undefined });
   }
 
+  async ensureInitializationMarker(trustedSha) {
+    const ref = `tags/${encodeURIComponent(this.initializationTag)}`;
+    const existingSha = await this.refSha(ref);
+    if (existingSha) {
+      const relation = await this.compareCommits(existingSha, trustedSha);
+      if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_initialization_marker_invalid');
+      return existingSha;
+    }
+
+    let createError = null;
+    try {
+      await this.request('/git/refs', {
+        method: 'POST',
+        body: { ref: `refs/tags/${this.initializationTag}`, sha: trustedSha }
+      });
+    } catch (error) {
+      createError = error;
+    }
+    const observedSha = await this.refSha(ref);
+    if (observedSha === trustedSha) return observedSha;
+    throw new Error('cloud_state_initialization_marker_failed', { cause: createError ?? undefined });
+  }
+
   snapshotFrom(sha, checkpointSha, envelope) {
     return {
       refSha: sha,
@@ -323,28 +370,41 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async readSnapshot() {
-    const [stateSha, checkpointSha] = await Promise.all([
+    const [stateSha, checkpointSha, initializationSha] = await Promise.all([
       this.refSha(`tags/${encodeURIComponent(this.tag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`)
+      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`),
+      this.refSha(`tags/${encodeURIComponent(this.initializationTag)}`)
     ]);
 
-    if (!stateSha && !checkpointSha) return { refSha: null, checkpointSha: null, generation: 0, state: emptyState() };
+    if (!stateSha && !checkpointSha) {
+      if (initializationSha) throw new Error('cloud_state_initialization_marker_orphaned');
+      return { refSha: null, checkpointSha: null, generation: 0, state: emptyState() };
+    }
     if (!stateSha && checkpointSha) throw new Error('cloud_state_partial_publication');
 
     const stateEnvelope = await this.readEnvelopeAt(stateSha);
     if (!checkpointSha) {
+      if (initializationSha) throw new Error('cloud_state_checkpoint_missing');
       if (stateEnvelope.version === 2 && stateEnvelope.generation !== 1) throw new Error('cloud_state_checkpoint_missing');
       await this.validateBootstrapHistory(stateSha, stateEnvelope);
-      const [latestStateSha, latestCheckpointSha] = await Promise.all([
+      const [latestStateSha, latestCheckpointSha, latestInitializationSha] = await Promise.all([
         this.refSha(`tags/${encodeURIComponent(this.tag)}`),
-        this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`)
+        this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`),
+        this.refSha(`tags/${encodeURIComponent(this.initializationTag)}`)
       ]);
-      if (latestStateSha !== stateSha || latestCheckpointSha !== null) throw new Error('cloud_state_conflict');
+      if (latestStateSha !== stateSha || latestCheckpointSha !== null || latestInitializationSha !== null) {
+        throw new Error('cloud_state_conflict');
+      }
       await this.publishCheckpointAndVerify(null, stateSha, 'cloud_state_checkpoint_recovery_failed');
+      await this.ensureInitializationMarker(stateSha);
       return this.snapshotFrom(stateSha, stateSha, stateEnvelope);
     }
 
-    if (stateSha === checkpointSha) return this.snapshotFrom(stateSha, checkpointSha, stateEnvelope);
+    if (stateSha === checkpointSha) {
+      await this.validateHeadContinuity(stateSha, stateEnvelope);
+      await this.ensureInitializationMarker(stateSha);
+      return this.snapshotFrom(stateSha, checkpointSha, stateEnvelope);
+    }
 
     const checkpointEnvelope = await this.readEnvelopeAt(checkpointSha);
     const relation = await this.compareCommits(checkpointSha, stateSha);
@@ -355,6 +415,7 @@ export class GitHubStateStore extends JsonStore {
     }
     if (relation !== 'ahead') throw new Error('cloud_state_history_invalid');
     await this.validateDescendantHistory(checkpointSha, checkpointEnvelope, stateSha, stateEnvelope);
+    await this.ensureInitializationMarker(checkpointSha);
 
     const [latestStateSha, latestCheckpointSha] = await Promise.all([
       this.refSha(`tags/${encodeURIComponent(this.tag)}`),
@@ -371,22 +432,20 @@ export class GitHubStateStore extends JsonStore {
     const expectedCheckpointSha = snapshot?.checkpointSha ?? expectedStateSha;
     if ((expectedStateSha === null) !== (expectedCheckpointSha === null)) throw new Error('cloud_state_snapshot_untrusted');
 
-    const [currentStateSha, currentCheckpointSha] = await Promise.all([
-      this.refSha(`tags/${encodeURIComponent(this.tag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`)
-    ]);
-    if (currentStateSha !== expectedStateSha || currentCheckpointSha !== expectedCheckpointSha) {
-      if (!currentStateSha && currentCheckpointSha) throw new Error('cloud_state_partial_publication');
+    const trustedSnapshot = await this.readSnapshot();
+    if (trustedSnapshot.refSha !== expectedStateSha || trustedSnapshot.checkpointSha !== expectedCheckpointSha) {
       throw new Error('cloud_state_conflict');
     }
+    if (snapshot?.generation !== trustedSnapshot.generation) throw new Error('cloud_state_snapshot_untrusted');
 
-    const generation = snapshot.generation + 1;
+    const generation = trustedSnapshot.generation + 1;
     const envelope = {
       version: 2,
       repository: `${this.repository.owner}/${this.repository.name}`,
       laneId: this.laneId,
       stateTag: this.tag,
       checkpointTag: this.checkpointTag,
+      statePath: this.statePath,
       generation,
       stateHash: stateHash(state),
       updatedAt: new Date(this.now()).toISOString(),
@@ -395,7 +454,7 @@ export class GitHubStateStore extends JsonStore {
     const content = JSON.stringify(envelope);
     if (Buffer.byteLength(content, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
 
-    const parentSha = expectedStateSha ?? await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
+    const parentSha = trustedSnapshot.refSha ?? await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
     if (!parentSha) throw new Error('cloud_state_base_branch_missing');
     const parent = await this.readCommit(parentSha);
     const baseTree = assertSha(parent?.tree?.sha, 'cloud_state_base_tree_invalid');
@@ -414,7 +473,7 @@ export class GitHubStateStore extends JsonStore {
     });
     const commitSha = assertSha(commit?.sha, 'cloud_state_commit_invalid');
 
-    if (expectedStateSha) {
+    if (trustedSnapshot.refSha) {
       await this.request(`/git/refs/tags/${encodeURIComponent(this.tag)}`, {
         method: 'PATCH',
         body: { sha: commitSha, force: false }
@@ -426,7 +485,8 @@ export class GitHubStateStore extends JsonStore {
       });
     }
 
-    await this.publishCheckpointAndVerify(expectedCheckpointSha, commitSha, 'cloud_state_partial_publication');
+    await this.publishCheckpointAndVerify(trustedSnapshot.checkpointSha, commitSha, 'cloud_state_partial_publication');
+    await this.ensureInitializationMarker(commitSha);
     return commitSha;
   }
 
