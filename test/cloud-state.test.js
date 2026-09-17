@@ -20,6 +20,8 @@ function fakeGitHub() {
   const commits = new Map([[mainSha, { sha: mainSha, tree: { sha: mainTree }, parents: [] }]]);
   const trees = new Map([[mainTree, new Map()]]);
   const blobs = new Map();
+  const contentRefs = [];
+  let staleNextTagRefSha = null;
 
   const fetchImpl = async (rawUrl, options = {}) => {
     const url = new URL(rawUrl);
@@ -31,7 +33,11 @@ function fakeGitHub() {
 
     if (method === 'GET' && path.startsWith('/git/ref/')) {
       const ref = 'refs/' + decodeURIComponent(path.slice('/git/ref/'.length));
-      const value = refs.get(ref);
+      let value = refs.get(ref);
+      if (ref.startsWith('refs/tags/') && staleNextTagRefSha) {
+        value = staleNextTagRefSha;
+        staleNextTagRefSha = null;
+      }
       return value ? response(200, { object: { sha: value } }) : response(404, { message: 'not found' });
     }
     if (method === 'GET' && path.startsWith('/git/commits/')) {
@@ -41,7 +47,8 @@ function fakeGitHub() {
     if (method === 'GET' && path.startsWith('/contents/')) {
       const contentPath = decodeURIComponent(path.slice('/contents/'.length));
       const refName = url.searchParams.get('ref');
-      const commitSha = refs.get(refName);
+      contentRefs.push(refName);
+      const commitSha = refs.get(refName) ?? (commits.has(refName) ? refName : null);
       const commit = commits.get(commitSha);
       const tree = commit && trees.get(commit.tree.sha);
       const blobSha = tree?.get(contentPath);
@@ -92,7 +99,10 @@ function fakeGitHub() {
     blobs.set(blobSha, JSON.stringify(envelope));
   };
 
-  return { fetchImpl, tamperCurrentStateHash };
+  const currentTagSha = (tag = 'agent-cloud-state-v1') => refs.get(`refs/tags/${tag}`) ?? null;
+  const staleNextTagRef = (sha) => { staleNextTagRefSha = sha; };
+
+  return { fetchImpl, tamperCurrentStateHash, currentTagSha, staleNextTagRef, contentRefs };
 }
 
 function storeFor(fake, {
@@ -279,6 +289,25 @@ test('optimistic ref update rejects stale writers', async () => {
   await first.writeSnapshot(a.state, a);
   await assert.rejects(second.writeSnapshot(b.state, b), /cloud_state_conflict/);
 });
+
+test('cloud state reads the envelope through the exact ref SHA and rejects read-after-write regression', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:32:1' });
+  const lease = await store.claimGlobalLease();
+  const previousRef = fake.currentTagSha();
+
+  await store.mutate((state) => {
+    state.marker = 'newest';
+  });
+
+  assert.ok(fake.contentRefs.length > 0);
+  assert.equal(fake.contentRefs.every((ref) => /^[a-f0-9]{40}$/.test(ref)), true);
+
+  fake.staleNextTagRef(previousRef);
+  await assert.rejects(store.load(), /cloud_state_generation_regressed/);
+  assert.equal(await store.releaseGlobalLease(lease.leaseId), true);
+});
+
 
 test('execution leases use cloud owner identity and become recoverable only after ttl', async () => {
   const fake = fakeGitHub();
