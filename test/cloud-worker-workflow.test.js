@@ -75,7 +75,7 @@ test('cloud worker permissions are explicit and exclude deployment or identity a
     'contents: write',
     'issues: write',
     'pull-requests: write',
-    'statuses: read'
+    'statuses: write'
   ]) assert.match(workflow, new RegExp(`^  ${permission}$`, 'm'));
   assert.doesNotMatch(workflow, /^\s*(deployments|id-token|packages|environments):/m);
 });

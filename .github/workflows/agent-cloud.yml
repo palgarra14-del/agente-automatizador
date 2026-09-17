@@ -15,7 +15,7 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  statuses: read
+  statuses: write
 
 jobs:
   route:
