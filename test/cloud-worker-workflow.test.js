@@ -85,8 +85,21 @@ test('cloud worker checks out trusted main without persisting checkout credentia
   assert.match(workflow, /uses: actions\/setup-node@v4[\s\S]*?node-version: 24/);
   const thirdPartyUses = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)]
     .map((match) => match[1])
-    .filter((action) => !/^actions\/(checkout|setup-node)@/.test(action));
+    .filter((action) => !/^actions\/(checkout|setup-node|cache)@/.test(action));
   assert.deepEqual(thirdPartyUses, []);
+});
+
+test('cloud worker restores lane-scoped managed workspaces across approval-triggered runners', () => {
+  assert.equal((workflow.match(/uses: actions\/cache@v4/g) ?? []).length, 1);
+  assert.match(workflow, /- name: Restore lane workspace continuity\n\s+uses: actions\/cache@v4/);
+  assert.match(workflow, /path: \.agent-workspaces\/\$\{\{ matrix\.lane \}\}/);
+  assert.match(workflow, /key: agent-workspace-\$\{\{ matrix\.lane \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(workflow, /restore-keys:\n\s+\|\n\s+agent-workspace-\$\{\{ matrix\.lane \}\}-/);
+  assert.match(workflow, /- name: Trim managed workspace cache\n\s+if: always\(\) && steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(workflow, /ROOT="\.agent-workspaces\/\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /-name node_modules -o -name \.next -o -name coverage -o -name dist/);
+  const cacheBlock = workflow.slice(workflow.indexOf('- name: Restore lane workspace continuity'), workflow.indexOf('- name: Set up Node'));
+  assert.doesNotMatch(cacheBlock, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
 
 test('routing job receives event data but no secrets or write credentials', () => {
@@ -134,7 +147,7 @@ test('model and cross-repo credentials exist only at the governed queue step', (
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 2);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 3);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
