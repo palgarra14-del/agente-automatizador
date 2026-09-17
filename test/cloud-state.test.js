@@ -32,6 +32,14 @@ function blankState(marker) {
   return { runs: {}, approvals: {}, events: [], ...(marker === undefined ? {} : { marker }) };
 }
 
+function checkpointTagFor(tag) {
+  return `agent-cloud-state-v2-checkpoints/${tag}`;
+}
+
+function witnessTagFor(tag) {
+  return `agent-cloud-state-v2-witnesses/${tag}`;
+}
+
 function fakeGitHub() {
   let sequence = 10;
   let writeCount = 0;
@@ -149,8 +157,8 @@ function fakeGitHub() {
     version = 2,
     laneId = 'self',
     tag = 'agent-cloud-state-v1',
-    checkpointTag = `${tag}-checkpoint-v2`,
-    witnessTag = `${tag}-witness-v2`,
+    checkpointTag = checkpointTagFor(tag),
+    witnessTag = witnessTagFor(tag),
     statePath = '.agent/cloud-state.json'
   }) => {
     const parent = commits.get(parentSha);
@@ -208,7 +216,7 @@ function fakeGitHub() {
       method: refs.has(ref) ? 'PATCH' : 'POST',
       status,
       match(path, body) {
-        if (this.method === 'PATCH') return path === `/git/${ref}`;
+        if (this.method === 'PATCH') return decodeURIComponent(path) === `/git/${ref}`;
         return path === '/git/refs' && body?.ref === ref;
       }
     });
@@ -246,8 +254,6 @@ function storeFor(fake, {
   laneId = 'self',
   allowedProjectIds = ['self'],
   tag = 'agent-cloud-state-v1',
-  checkpointTag = `${tag}-checkpoint-v2`,
-  witnessTag = `${tag}-witness-v2`,
   statePath = '.agent/cloud-state.json'
 } = {}) {
   return new GitHubStateStore({
@@ -260,15 +266,13 @@ function storeFor(fake, {
     laneId,
     allowedProjectIds,
     tag,
-    checkpointTag,
-    witnessTag,
     statePath
   });
 }
 
 const stateTag = 'agent-cloud-state-v1';
-const checkpointTag = `${stateTag}-checkpoint-v2`;
-const witnessTag = `${stateTag}-witness-v2`;
+const checkpointTag = checkpointTagFor(stateTag);
+const witnessTag = witnessTagFor(stateTag);
 
 async function publishMarker(store, marker) {
   const snapshot = await store.readSnapshot();
@@ -349,6 +353,22 @@ test('legacy multi-generation state migrates to a v2 child and ignores mutable s
   assert.equal(fake.tagSha(witnessTag), migratedSha);
 });
 
+test('legacy histories beyond 2048 generations remain migratable', async () => {
+  const fake = fakeGitHub();
+  let head = fake.mainSha;
+  for (let generation = 1; generation <= 2050; generation += 1) {
+    head = fake.makeStateCommit({ parentSha: head, generation, state: blankState(`legacy-${generation}`), version: 1 });
+  }
+  fake.forceTag(stateTag, head);
+  const store = storeFor(fake, { ownerId: 'github:migrate:deep' });
+  const snapshot = await store.readSnapshot();
+  assert.equal(snapshot.generation, 2050);
+  const migratedSha = await store.writeSnapshot(blankState('migrated-deep'), snapshot);
+  assert.equal(fake.envelopeAt(migratedSha).generation, 2051);
+  assert.equal(fake.tagSha(checkpointTag), migratedSha);
+  assert.equal(fake.tagSha(witnessTag), migratedSha);
+});
+
 test('legacy writer racing migration cannot overwrite a winning v2 transition', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 1, state: blankState('legacy'), version: 1 });
@@ -396,7 +416,7 @@ test('durable writes strip worker shell output but keep bounded status/summary e
   assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
 });
 
-test('independent cloud lanes isolate state, checkpoint and witness namespaces', async () => {
+test('independent cloud lanes isolate state and reserved watermark namespaces', async () => {
   const fake = fakeGitHub();
   const selfStore = storeFor(fake, { ownerId: 'github:self:1' });
   const websiteTag = 'agent-cloud-state-website-pilot-v1';
@@ -426,9 +446,22 @@ test('independent cloud lanes isolate state, checkpoint and witness namespaces',
   assert.equal(Object.hasOwn(websiteState.workflows, 'self1'), false);
   assert.equal(fake.tagSha(stateTag), fake.tagSha(checkpointTag));
   assert.equal(fake.tagSha(stateTag), fake.tagSha(witnessTag));
-  assert.equal(fake.tagSha(websiteTag), fake.tagSha(`${websiteTag}-checkpoint-v2`));
-  assert.equal(fake.tagSha(websiteTag), fake.tagSha(`${websiteTag}-witness-v2`));
-  assert.notEqual(fake.tagSha(stateTag), fake.tagSha(websiteTag));
+  assert.equal(fake.tagSha(websiteTag), fake.tagSha(checkpointTagFor(websiteTag)));
+  assert.equal(fake.tagSha(websiteTag), fake.tagSha(witnessTagFor(websiteTag)));
+  assert.notEqual(checkpointTagFor(stateTag), witnessTagFor(stateTag));
+  assert.notEqual(checkpointTagFor(stateTag), checkpointTagFor(websiteTag));
+  assert.notEqual(witnessTagFor(stateTag), witnessTagFor(websiteTag));
+});
+
+test('reserved watermark refs cannot collide with any valid explicit state tag', () => {
+  const collidingLookingStateTag = 'agent-cloud-state-v1-checkpoint-v2';
+  assert.doesNotThrow(() => storeFor(fakeGitHub(), { tag: collidingLookingStateTag }));
+  assert.ok(checkpointTagFor(collidingLookingStateTag).includes('/'));
+  assert.ok(witnessTagFor(collidingLookingStateTag).includes('/'));
+  assert.doesNotMatch(collidingLookingStateTag, /\//);
+  assert.notEqual(checkpointTagFor(collidingLookingStateTag), collidingLookingStateTag);
+  assert.notEqual(witnessTagFor(collidingLookingStateTag), collidingLookingStateTag);
+  assert.notEqual(checkpointTagFor(collidingLookingStateTag), witnessTagFor(collidingLookingStateTag));
 });
 
 test('lane envelope binding rejects reading another lane through the wrong store', async () => {
@@ -450,7 +483,7 @@ test('lane envelope binding rejects reading another lane through the wrong store
   await assert.rejects(wrongLane.load(), /cloud_state_lane_mismatch/);
 });
 
-test('v2 envelope binds the configured state path and watermark ref names', async () => {
+test('v2 envelope binds the configured state path and derived watermark ref names', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const sha = await publishMarker(store, 'bound');
@@ -458,9 +491,11 @@ test('v2 envelope binds the configured state path and watermark ref names', asyn
   const wrongPath = storeFor(fake, { statePath: '.agent/alternate-state.json', ownerId: 'github:path:wrong' });
   await assert.rejects(wrongPath.load(), /cloud_state_ref_binding_mismatch/);
 
-  const wrongRefs = storeFor(fake, {
-    checkpointTag: 'alternate-checkpoint-v2', witnessTag: 'alternate-witness-v2', ownerId: 'github:refs:wrong'
-  });
+  const alternateTag = 'alternate-state-v1';
+  fake.forceTag(alternateTag, sha);
+  fake.forceTag(checkpointTagFor(alternateTag), sha);
+  fake.forceTag(witnessTagFor(alternateTag), sha);
+  const wrongRefs = storeFor(fake, { tag: alternateTag, ownerId: 'github:refs:wrong' });
   await assert.rejects(wrongRefs.load(), /cloud_state_ref_binding_mismatch/);
 });
 
@@ -506,6 +541,23 @@ test('a forged skipped generation is rejected even when all three refs agree', a
   fake.forceTag(checkpointTag, bad);
   fake.forceTag(witnessTag, bad);
   await assert.rejects(storeFor(fake, { ownerId: 'github:skip:fresh' }).load(), /cloud_state_generation_discontinuity/);
+});
+
+test('aligned refs still reject a malformed older v2 ancestor', async () => {
+  const fake = fakeGitHub();
+  const malformedGeneration2 = fake.makeStateCommit({
+    parentSha: fake.mainSha, generation: 2, state: blankState('bad-generation-2')
+  });
+  const apparentlyValidGeneration3 = fake.makeStateCommit({
+    parentSha: malformedGeneration2, generation: 3, state: blankState('looks-valid-generation-3')
+  });
+  fake.forceTag(stateTag, apparentlyValidGeneration3);
+  fake.forceTag(checkpointTag, apparentlyValidGeneration3);
+  fake.forceTag(witnessTag, apparentlyValidGeneration3);
+  await assert.rejects(
+    storeFor(fake, { ownerId: 'github:full-lineage:fresh' }).load(),
+    /cloud_state_file_invalid|cloud_state_generation_discontinuity|cloud_state_bootstrap_ancestry_invalid/
+  );
 });
 
 test('higher-generation divergent history is rejected despite its numeric generation', async () => {
