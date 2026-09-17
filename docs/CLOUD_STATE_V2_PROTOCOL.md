@@ -1,174 +1,260 @@
 # Cloud state v2 protocol
 
-Issue: #180
+Issues: #180, #182, #193
 
-This document fixes the authority model before implementation. It does not widen execution, merge, deploy, model, secret, or communication authority.
+This document defines the r5 Cloud State v2 authority model. It does not widen merge, deployment, model, secret, identity, or communication authority. The only prerequisite authority change landed separately in #194: the cloud worker may create commit statuses.
 
-## Durable refs per lane
+## Authority model
 
-Each lane owns three refs in the same repository:
+Each lane still owns three movable Git refs:
 
-- `stateRef`: the existing configured lane state tag. It points at the newest published state commit.
-- `checkpointRef`: a lane-specific durable watermark derived as `agent-cloud-state-v2-checkpoints/<stateTag>`.
-- `witnessRef`: a second independent lane-specific durable watermark derived as `agent-cloud-state-v2-witnesses/<stateTag>`.
+- `stateRef`: the configured lane state tag;
+- `checkpointRef`: `agent-cloud-state-v2-checkpoints/<stateTag>`;
+- `witnessRef`: `agent-cloud-state-v2-witnesses/<stateTag>`.
 
-Process memory is never authoritative. A completed publication leaves all three refs at the same exact state commit SHA.
+These refs are operational pointers only. They are not the final monotonic root of trust because the same `contents: write` authority can force-move or delete all of them outside this implementation.
 
-The watermark namespaces are reserved by construction. Configured state tags use the existing grammar that excludes `/`, while both watermark refs always contain `/`; checkpoint and witness also live under different prefixes. The store derives both watermark names from the validated state tag and does not accept caller-selected watermark names. The namespace roots `agent-cloud-state-v2-checkpoints` and `agent-cloud-state-v2-witnesses` are themselves forbidden as configured state tags because Git cannot contain both a ref and a child ref beneath the same path.
+The monotonic authority is an append-only commit-status ledger attached to the repository's verified parentless root commit:
 
-The two watermark refs are redundant on purpose: loss or deletion of one watermark must not erase the cross-process monotonic proof carried by the other. If both watermarks are unavailable after v2 has begun, the store fails closed rather than re-trusting `stateRef`.
+`b4f3b2e76e24be58d241227850a5d48ea19c2ea8`
 
-All v2 envelopes are bound to repository, lane id, state path, state ref name, checkpoint ref name, witness ref name, an exact lineage base SHA, lineage base generation, current generation and state hash.
+Before trusting the ledger, the store reads that exact Git commit and requires zero parents.
 
-## Why v1 history becomes an explicit migration boundary
+GitHub exposes list/create operations for commit statuses but no status update/delete operation. The implementation therefore has only an append path for authority records. A later writer can append a conflicting record, but it cannot erase the older record through this API; any conflicting record for the same lane generation fails closed.
 
-Cloud State v1 had no separate durable monotonic watermark. A fresh process therefore cannot retroactively prove that the current v1 state tag was never force-moved to an older but otherwise valid ancestor. Walking every historical v1 envelope gives expensive false assurance: it can prove local shape and generation continuity, but not that the selected v1 head is the newest head that ever existed.
+## Lane and generation binding
 
-Migration therefore treats the exact v1 `stateRef` SHA observed at the successful publication race as the one-time trust boundary. This is explicit, durable and honest about what can be proven. Once the first v2 commit is published, the redundant v2 watermarks become the cross-process monotonic authority.
+Each store derives a 128-bit lowercase lane digest from the canonical tuple:
 
-This also preserves real existing lanes whose historical generation counter may have an inherited offset relative to the current Git merge-base. Migration does not require legacy generation to equal commit distance from today's `main` branch.
+- repository;
+- lane id;
+- state path;
+- state tag;
+- derived checkpoint tag;
+- derived witness tag.
 
-## Bounded v2 lineage anchor
+A ledger status context is:
 
-Every v2 envelope carries:
+`agent-cloud-state-v2/<laneDigest>/g/<generation>`
 
-- `lineageBaseSha`
-- `lineageBaseGeneration`
+Every generation has a distinct context, avoiding GitHub's 1000-status limit for one SHA/context pair.
 
-For a brand-new v2 lane, `lineageBaseSha` is the exact configured base-branch SHA used as the first state commit's parent and `lineageBaseGeneration` is `0`.
+The status is always created on the immutable root commit with:
 
-For migration from v1, `lineageBaseSha` is the exact validated v1 head SHA and `lineageBaseGeneration` is that exact v1 envelope's generation.
+- `state = success`;
+- no target URL;
+- the deterministic context above;
+- description `s=<stateSha>;p=<parentSha>`.
 
-Every later v2 child must inherit both fields unchanged.
+The description therefore binds the exact state commit and its exact Git parent. Context matching is treated case-insensitively, matching GitHub status-context semantics.
 
-For a trusted v2 state SHA `S` with generation `G`, validation is bounded independently of total history length:
+Duplicate identical records are idempotent and support recovery from an uncertain POST response. Two records for the same lane/generation that disagree on state SHA or parent SHA are corruption/fork evidence and fail closed.
 
-1. Read `S` and its envelope by exact SHA.
-2. Require the exact state commit to have one parent.
-3. Validate the lineage base:
-   - if base generation is zero, the base SHA must remain in the configured base branch's ancestry;
-   - otherwise read the base envelope by exact SHA, require v1 and require its generation to equal the persisted base generation.
-4. Compare `lineageBaseSha...S` through GitHub's commit graph.
-5. Require the lineage base to be an ancestor of `S` and require `ahead_by == G - lineageBaseGeneration` exactly.
-6. Validate the immediate parent edge. The first v2 state must parent the lineage base exactly. Later v2 states require a v2 parent at generation `G-1` with the same immutable lineage-base fields.
+## Ledger scan invariant
 
-The compare payload is validated fail-closed: missing, negative or non-integer `ahead_by`/`behind_by` values are invalid.
+A fresh process lists statuses on the immutable root in pages of 100 and filters only the exact lane digest.
 
-The head proof is intentionally self-contained instead of recursively trusting the `generation` field of every historical envelope. In v2, the authoritative generation of the current head is constrained by Git topology from the fixed exact lineage base. A historical envelope with malformed metadata cannot alter the current head's state hash, binding or topology-derived generation claim; if that historical commit is ever made authoritative again, its own envelope and topology invariants are checked at that time and surviving watermarks additionally reject rollback. This is what removes the O(total-history) REST walk rather than merely hiding it behind a larger cutoff.
+For that lane:
 
-This catches the previously demonstrated aligned-ref malformed bootstrap: a generation-2 v2 commit parented directly to a generation-0 base followed by an apparently valid generation-3 child has only two Git commits after the lineage base, so generation distance does not match and the fresh process rejects it.
+1. every matching context must contain a positive safe-integer generation;
+2. every matching status must be `success`, have no target URL, and contain the exact `s=<40hex>;p=<40hex>` description;
+3. duplicate entries for a generation must be byte-equivalent in authority meaning;
+4. generations must be contiguous from the first v2 generation to the newest;
+5. each generation's recorded parent SHA must equal the preceding generation's recorded state SHA.
 
-The proof uses a constant number of GitHub API calls for a head regardless of whether the legacy history had 4, 280, 2,050 or far more generations. It does not impose an arbitrary history-depth cutoff.
+Unrelated status contexts on the same root commit are ignored. Malformed contexts for the exact lane prefix, gaps, or conflicting records fail closed.
 
-## One-time legacy v1 migration
+## Legacy v1 trust boundary
 
-When `stateRef` is v1 and both watermark refs are absent:
+Cloud State v1 had no independent append-only monotonic authority. A fresh process cannot retroactively prove that a v1 state tag was never force-moved to an older otherwise-valid v1 head.
 
-1. Read the v1 state by exact commit SHA and validate repository/lane ownership, state hash and secret boundaries.
-2. Require the exact v1 head commit to have one parent. Do not attempt an unbounded historical walk that cannot establish retroactive monotonicity anyway.
-3. Re-read all refs and require the same migration pre-state.
-4. Create a new v2 migration commit whose parent is exactly that v1 head and whose generation is exactly parent generation + 1.
-5. Persist `lineageBaseSha` as that exact v1 head and `lineageBaseGeneration` as its exact generation.
-6. Advance `stateRef` non-force to the v2 migration commit.
-7. Attempt `checkpointRef` and `witnessRef` independently at that same commit. A failure of one must not prevent attempting the other.
-8. Return success only after all three refs resolve to the exact v2 migration SHA; otherwise return an explicit partial-publication error.
+Migration therefore treats the exact v1 `stateRef` observed at the successful transition as the one-time legacy trust boundary:
 
-If an old v1 writer wins the state-ref race before publication, migration conflicts and restarts from the new exact v1 head. Once `stateRef` has advanced to v2, an old v1 writer holding the previous v1 parent cannot non-force advance the ref. A v1 descendant must never be accepted after either watermark exists or v2 migration has begun.
+- `lineageBaseSha` = exact v1 head SHA;
+- `lineageBaseGeneration` = exact v1 envelope generation;
+- first v2 generation = legacy generation + 1.
 
-If `stateRef` is already v2 and both watermarks are absent, the state is a hard partial publication. It must fail closed and require explicit operator recovery that preserves the newer exact state SHA; a normal read/mutation must never recreate trust automatically from `stateRef` alone.
+This intentionally preserves inherited generation offsets such as a valid legacy generation that does not equal current Git distance from `main`.
 
-## Read invariant
+The same unavoidable one-time trust boundary exists for a brand-new lane before its first status record. After the first ledger record exists, monotonic authority is independent of the movable refs.
 
-A fresh process reads all refs by exact SHA before reading any state content.
+## Complete v2 lineage validation
 
-Let `S` be `stateRef`, `C` be `checkpointRef`, and `W` be `witnessRef`.
+Status records prove monotonic publication history, but they do not replace Git/envelope validation.
 
-1. If `S`, `C` and `W` are all absent, bootstrap from the configured base branch.
-2. If `S` is absent while either watermark exists, fail closed as partial/corrupt publication.
-3. If `S` is v1 and both watermarks are absent, only the one-time legacy migration path above is eligible on a governed write; ordinary reads remain read-only.
-4. If `S` is v2 and both watermarks are absent, validate enough exact-SHA evidence to classify the state, then fail closed. Never reinterpret it as first migration.
-5. If exactly one watermark exists, it is the durable authority witness. `S` must be either that exact commit or one validated direct v2 child. The missing watermark may be reconstructed only during a governed repair after exact-SHA validation and a fresh ref re-check.
-6. If both watermarks exist and differ, either one may be the newer direct v2 child because publication attempts them independently. Prove their exact parent/child relationship, generation +1 continuity and identical lineage-base fields, then use the newer watermark as trusted SHA. Divergent or multi-step watermark gaps fail closed.
-7. A trusted v2 watermark is validated against its exact persisted lineage base even when all refs agree. Matching refs alone never authorize a skipped generation, malformed bootstrap or lineage-anchor rewrite.
-8. `stateRef` may equal the newest watermark or be one validated direct v2 child ahead of it as the result of an interrupted publication. A state ref behind a surviving newer watermark is rollback evidence and is rejected.
-9. If neither side is ancestor of the other, reject `cloud_state_history_fork`.
-10. State content is always read by exact commit SHA, never through a moving tag.
-11. Ordinary `load()`/preflight reads never mutate refs. Watermark repair occurs only on an explicitly governed mutation/recovery path.
+The newest authoritative status points to an exact v2 state SHA. The store validates the complete v2 lineage from that SHA back to its persisted bootstrap/migration boundary using paginated GitHub GraphQL `Commit.history`, 100 commits per page.
 
-A numerically higher generation never substitutes for ancestry proof. For v2, the generation delta must equal the Git commit distance from the immutable migration/bootstrap boundary.
+Every v2 state in the chain must satisfy:
 
-## Write protocol
+- exact SHA continuity;
+- exactly one Git parent;
+- exact generation continuity;
+- a present, non-binary, non-truncated state blob;
+- valid JSON envelope;
+- correct repository and lane binding;
+- exact state path and derived ref names;
+- unchanged lineage-base SHA and generation;
+- valid state hash;
+- project ownership boundaries;
+- secret-material boundaries;
+- an exact matching status-ledger record for that generation and parent.
 
-Given a validated snapshot whose exact state SHA is `S0` and both durable watermarks resolve to `S0` (or a legacy v1 snapshot with no watermarks):
+The first v2 state must parent its exact lineage base. For a bootstrap, base generation is zero. For migration, the base is the exact validated v1 head and generation.
 
-1. Re-read all three refs immediately before publication and require them to still match the validated snapshot.
-2. Re-read the exact parent envelope. For v1 migration, use that exact v1 head as the lineage base. For established v2, revalidate the bounded lineage proof and inherit its lineage-base fields unchanged.
-3. Derive next generation only from the exact parent envelope. Caller-supplied snapshot generation is never authoritative.
-4. Create blob, tree and v2 state commit `S1` with parent exactly `S0` (or the configured base SHA for a brand-new lane).
-5. Publish `stateRef -> S1` with a non-force update.
-6. Attempt `checkpointRef -> S1` and `witnessRef -> S1` independently with non-force updates. Do not skip the second watermark merely because the first failed.
-7. Return success only after all three refs resolve to `S1`. Otherwise return `cloud_state_partial_publication` while preserving every successfully published newer ref.
+Pagination is fail-closed: missing nodes, malformed/repeated cursors, incomplete history, hidden merge commits, skipped generations, truncated blobs, malformed intermediate envelopes, or ledger/lineage disagreement all reject the state.
 
-No force updates are permitted.
+This removes the r3 `ahead_by` shortcut and the r2 per-generation REST explosion. A 2,050-generation v2 chain is tested with both complete ledger and complete lineage validation below the GitHub request cliff.
 
-A stale writer must fail on the state-ref update before it can change either watermark. A single watermark failure after the state update still leaves the other watermark as durable evidence and is automatically repairable by a later governed mutation. If both watermark writes fail after `stateRef` advanced, the lane fails closed: zero-watermark v2 cannot be automatically trusted.
+## Publication protocol
 
-Recovery never rolls any ref backward and never discards a newer validated state commit.
+### Brand-new lane or v1 migration
 
-## Generation and anchor rules
+1. Read refs and the lane status ledger.
+2. Require the lane ledger to be empty.
+3. Validate the exact bootstrap base or exact v1 migration head.
+4. Create the first v2 state commit as an exact one-parent child.
+5. Advance `stateRef` non-force to that child. This is the single-writer election.
+6. Append the first commit-status authority record.
+7. Advance checkpoint and witness independently, non-force.
+8. Return success only when state, checkpoint, witness and newest status all identify the expected state.
 
-The v2 envelope is monotonic metadata backed by exact Git ancestry and an immutable migration/bootstrap boundary.
+If the process crashes after step 5 but before step 6, ordinary reads fail closed. Governed `repair:true` may create the first status only after proving that the observed v2 state is exactly the first valid child of its persisted bootstrap/migration boundary and that no lane ledger already exists. This is part of the explicit one-time legacy/bootstrap trust boundary; it is not allowed after the ledger has begun.
 
-- brand-new v2 bootstrap commit: generation 1, lineage base generation 0;
-- v1 migration commit: legacy generation + 1, lineage base is exact legacy head;
-- every later v2 child: parent generation + 1 exactly;
-- every later v2 child: identical lineage base SHA and generation to its parent;
-- every trusted v2 head: Git distance from lineage base equals current generation minus base generation;
-- valid histories are not rejected solely for exceeding an arbitrary generation count;
-- same-generation different SHA: reject against surviving watermarks;
-- higher generation without trusted ancestry: reject;
-- skipped generation: reject;
-- lineage base rewrite: reject;
-- once v2 begins, a v1 descendant: reject.
+### Established v2
+
+Given newest immutable authority `(G, S0)`:
+
+1. validate the full ledger and full v2 lineage ending at `S0`;
+2. repair mutable refs to `S0` on a governed mutation path if necessary;
+3. derive generation `G+1` only from the exact parent envelope;
+4. create child state commit `S1` with sole parent `S0`;
+5. advance `stateRef` non-force from `S0` to `S1`; only one sibling writer can win;
+6. append status context for `G+1`, binding `S1` and parent `S0`;
+7. advance checkpoint and witness independently, non-force;
+8. verify all final pointers plus newest ledger authority before success.
+
+A writer that loses the state-ref election does not append authority.
+
+## Crash recovery
+
+### State ref one generation ahead of status authority
+
+A crash may occur after the state CAS but before the status POST. Ordinary reads report partial publication and never write.
+
+Governed repair may append exactly one next-generation status only if:
+
+- current state is generation `G+1`;
+- its Git parent is exactly authoritative state `S0` at generation `G`;
+- all envelope and lineage-base bindings are valid;
+- the status ledger has not changed since observation;
+- no competing status already claims `G+1`.
+
+After appending, complete lineage is revalidated before mutable watermark repair.
+
+A state more than one generation ahead of immutable authority cannot arise from the supported publication protocol and fails closed.
+
+### Status authority newer than movable refs
+
+If the immutable ledger is newer than state/checkpoint/witness, ordinary reads report rollback. Governed repair may only move each ref forward, non-force, to the fully validated authoritative SHA. Divergent or already-ahead refs fail closed.
+
+This includes a forced joint rollback of all three movable refs: the append-only status history remains visible and prevents a fresh process from accepting the older state.
+
+### Missing or stale checkpoint/witness
+
+Checkpoint and witness are redundant operational acknowledgements. If `stateRef` already equals the immutable authority, ordinary reads may return the authoritative state without writing. Governed repair may move missing/stale watermarks forward after ancestry validation.
+
+## Same-generation conflicts
+
+A same-generation sibling cannot silently replace authority:
+
+- existing status context for generation `G` permanently exposes the previously recorded SHA;
+- forcing all three Git refs to a sibling does not change that status record;
+- fresh validation detects the state/authority divergence;
+- appending a second conflicting status for the same generation creates an explicit ledger conflict rather than selecting a winner.
+
+Identical duplicate statuses are accepted only as idempotent evidence of the same authority record.
+
+## Read purity
+
+Ordinary `load()` and preflight reads perform zero mutations. GraphQL is used only as a read query even though it is transported with HTTP POST.
+
+State file content is always read by exact commit SHA, never through a moving tag.
+
+Only governed recovery/mutation paths may:
+
+- move mutable refs forward non-force;
+- append a missing first status during the one-time bootstrap/migration recovery case;
+- append one missing next-generation status after proving an exact direct child of existing immutable authority.
+
+No recovery path force-updates a Git ref, rewrites/deletes a status, or rolls authority backward.
 
 ## Concurrency
 
-Two writers may prepare children from the same trusted state, but only one may advance `stateRef` non-force. The loser fails with `cloud_state_conflict` and must not advance either watermark.
+Two writers may construct sibling candidate commits from the same authoritative parent. The non-force `stateRef` update elects at most one sibling because the losing sibling is not a descendant of the newly elected child.
 
-Recovery itself must be idempotent. If another process wins the same non-force watermark repair and all exact refs now resolve to the expected validated SHA, recovery may succeed; otherwise it fails closed.
+Only the elected child is eligible to append the next status. If a conflicting status is externally appended, the immutable conflict remains visible and the lane fails closed.
 
-After `stateRef` advances, `checkpointRef` and `witnessRef` are independent redundant acknowledgements. Either watermark may be one direct child ahead of the other, but neither may be ahead of `stateRef`, diverge from the other, rewrite the lineage base, or lag by more than the single in-flight state commit accepted by the bounded publication protocol.
+Concurrent recovery is safe only when all independently observed refs and ledger authority still match the expected pre-state. Otherwise recovery conflicts and re-reads rather than guessing.
+
+## Request budget
+
+Status-ledger reads paginate at 100 statuses per request. Complete Git lineage reads paginate at 100 commits per GraphQL request.
+
+The adversarial suite includes an established 2,050-generation v2 chain and requires complete fresh-process ledger + lineage validation below 100 GitHub requests in the in-memory transport model. Legacy migration beyond 2,048 generations is also tested separately and does not traverse all v1 history because v1 has no retroactive monotonic proof to recover.
+
+Every generation uses a unique status context, so the GitHub limit of 1000 statuses per SHA/context is not approached during normal monotonic publication.
 
 ## Required adversarial regressions
 
-Tests must use completely new `GitHubStateStore` instances so no in-memory watermark can satisfy them:
+The final candidate must cover at least:
 
-- migrate a multi-generation legacy v1 history to a v2 child and persist the exact migration head/generation as immutable lineage base;
-- preserve migration for a valid legacy history beyond 2,048 generations with bounded remote requests rather than per-generation REST traversal;
-- preserve migration when legacy generation has an inherited non-zero offset relative to base-branch commit distance;
-- old v1 writer races migration: either the legacy writer wins first and migration restarts, or migration wins and the old writer conflicts; a v1 child is never accepted after migration;
-- publish N+1, force `stateRef` back to N, delete `checkpointRef`, keep `witnessRef` at N+1: fresh process rejects rollback;
-- symmetric loss of `witnessRef` with `checkpointRef` intact also rejects rollback;
-- both watermarks missing while `stateRef` is already v2 fails closed;
-- divergent higher-generation history is rejected;
-- same generation with a different SHA is rejected;
-- a child whose generation skips the parent is rejected even when all three refs are forced to agree on it;
-- the previously demonstrated malformed generation-2 bootstrap followed by an apparently valid generation-3 child is rejected even with aligned refs;
-- a v2 child cannot rewrite its lineage base;
-- wrong `statePath` or derived ref binding cannot satisfy another store;
-- explicit state tags that resemble old watermark suffixes cannot collide with reserved checkpoint/witness namespaces;
-- the two reserved namespace root names themselves are rejected as explicit state tags;
-- interruption before state-ref publication leaves prior authority intact;
-- failure of checkpoint publication still attempts witness publication; the surviving witness permits safe later repair;
-- failure of witness publication leaves checkpoint evidence and permits safe later repair;
-- if both watermark publications fail after state publication, normal readers fail closed rather than recreating trust;
-- concurrent writers from the same snapshot yield one winner and one conflict;
-- concurrent recovery of the same partial publication is idempotent;
-- refs for `self`, `callflow`, and `website-pilot` cannot satisfy another lane's validation;
-- exact-SHA content reads are retained and ordinary loads/preflight perform zero writes.
+- verified parentless immutable ledger root;
+- brand-new bootstrap and exact-SHA read purity;
+- multi-generation v1 migration;
+- inherited legacy generation offsets;
+- legacy history deeper than 2,048 with bounded traffic;
+- crash after first-v2 state CAS but before first status append;
+- stale v1 writer racing migration;
+- lane-isolated status contexts;
+- joint rollback of state/checkpoint/witness with newer status authority surviving;
+- missing/stale movable watermarks and forward-only repair;
+- same-generation sibling with all movable refs forced to it;
+- conflicting and identical duplicate status records;
+- malformed lane status records;
+- status-generation gaps;
+- two stale writers and one state-CAS winner;
+- crash after established state CAS but before status append;
+- checkpoint and witness write failures after status authority exists;
+- hidden intermediate merge;
+- malformed intermediate envelope;
+- truncated historical state blob;
+- lineage-anchor rewrite;
+- unrelated statuses on the same root commit;
+- complete 2,050-generation v2 ledger and lineage below request budget;
+- exact-SHA content reads;
+- global/execution lease semantics;
+- remote envelope integrity failure.
 
-## Merge gates
+## Merge gate
 
-Implementation remains blocked until the exact implementation SHA passes full tests, typecheck, lint, build, prepared runtime image, real Docker boundary, and a fresh independent adversarial review.
+The exact implementation SHA must pass:
 
-Any unresolved P1/P2 authority, rollback, fork, generation, mixed-version, TOCTOU, lane-isolation, state-path/ref-binding, scope or secret-boundary finding blocks merge. The final implementation PR for #182 must contain only the paths explicitly authorized by that issue.
+- full unit/adversarial tests;
+- real Chrome/CDP Browser QA smoke;
+- adversarial Chrome smoke;
+- typecheck;
+- lint;
+- build;
+- prepared Node/pnpm runtime image;
+- real Docker execution boundary;
+- fresh independent adversarial review on frozen exact bytes with zero unresolved P1/P2.
+
+Any unresolved authority, rollback, status-ledger, fork, generation, mixed-version, TOCTOU, lineage, request-budget, lane-isolation, path/ref-binding, scope, or secret-boundary P1/P2 blocks merge.
+
+The Cloud State implementation PR remains limited to the three paths authorized by #182:
+
+- `src/cloud-state.js`
+- `test/cloud-state.test.js`
+- `docs/CLOUD_STATE_V2_PROTOCOL.md`
+
+No merge, deployment, or production authority is added here.
