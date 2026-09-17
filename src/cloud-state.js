@@ -7,7 +7,8 @@ const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
-const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE]);
+const HISTORY_NAMESPACE = 'agent-cloud-state-v2-history';
+const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE, HISTORY_NAMESPACE]);
 
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
@@ -46,6 +47,11 @@ function checkpointTagFor(tag) {
 
 function witnessTagFor(tag) {
   return `${WITNESS_NAMESPACE}/${tag}`;
+}
+
+function historyTagFor(tag, generation) {
+  if (!Number.isInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
+  return `${HISTORY_NAMESPACE}/${tag}/${generation}`;
 }
 
 function assertNoSensitiveKeys(value, path = 'state') {
@@ -195,6 +201,10 @@ export class GitHubStateStore extends JsonStore {
     return { stateSha, checkpointSha, witnessSha };
   }
 
+  async historySha(generation) {
+    return this.refSha(`tags/${encodeURIComponent(historyTagFor(this.tag, generation))}`);
+  }
+
   async readCommit(sha) {
     const normalized = assertSha(sha);
     const commit = await this.request(`/git/commits/${normalized}`);
@@ -203,36 +213,16 @@ export class GitHubStateStore extends JsonStore {
     return commit;
   }
 
-  async compareDetails(baseSha, headSha) {
+  async compareCommits(baseSha, headSha) {
     const base = assertSha(baseSha);
     const head = assertSha(headSha);
-    if (base === head) return { status: 'identical', aheadBy: 0, behindBy: 0 };
+    if (base === head) return 'identical';
     const comparison = await this.request(`/compare/${base}...${head}`);
-    if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status) ||
-        !Number.isInteger(comparison?.ahead_by) || comparison.ahead_by < 0 ||
-        !Number.isInteger(comparison?.behind_by) || comparison.behind_by < 0) {
-      throw new Error('cloud_state_compare_invalid');
-    }
-    return {
-      status: comparison.status,
-      aheadBy: comparison.ahead_by,
-      behindBy: comparison.behind_by
-    };
+    if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status)) throw new Error('cloud_state_compare_invalid');
+    return comparison.status;
   }
 
-  async compareCommits(baseSha, headSha) {
-    return (await this.compareDetails(baseSha, headSha)).status;
-  }
-
-  async readEnvelopeAt(commitSha) {
-    const sha = assertSha(commitSha);
-    const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
-    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(sha)}`, { allow404: true });
-    if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
-    const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
-    if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
-    let envelope;
-    try { envelope = JSON.parse(raw); } catch { throw new Error('cloud_state_envelope_invalid'); }
+  validateEnvelope(envelope) {
     if (![1, 2].includes(envelope?.version) ||
         envelope.repository !== `${this.repository.owner}/${this.repository.name}` ||
         !Number.isInteger(envelope.generation) ||
@@ -263,6 +253,18 @@ export class GitHubStateStore extends JsonStore {
     return envelope;
   }
 
+  async readEnvelopeAt(commitSha) {
+    const sha = assertSha(commitSha);
+    const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
+    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(sha)}`, { allow404: true });
+    if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
+    const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
+    if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
+    let envelope;
+    try { envelope = JSON.parse(raw); } catch { throw new Error('cloud_state_envelope_invalid'); }
+    return this.validateEnvelope(envelope);
+  }
+
   async baseBranchSha() {
     const sha = await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
     if (!sha) throw new Error('cloud_state_base_branch_missing');
@@ -281,57 +283,64 @@ export class GitHubStateStore extends JsonStore {
     if (!Number.isInteger(anchorGeneration) || anchorGeneration < 0 || anchorGeneration >= stateEnvelope.generation) {
       throw new Error('cloud_state_lineage_anchor_invalid');
     }
-    if (anchorGeneration === 0) {
-      const currentBaseSha = await this.baseBranchSha();
-      const relation = await this.compareCommits(anchorSha, currentBaseSha);
-      if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
-      return { anchorSha, anchorGeneration };
-    }
+    if (anchorGeneration === 0) return { anchorSha, anchorGeneration };
     const anchorEnvelope = await this.readEnvelopeAt(anchorSha);
     if (anchorEnvelope.version !== 1 || anchorEnvelope.generation !== anchorGeneration) {
       throw new Error('cloud_state_lineage_anchor_invalid');
     }
-    const anchorCommit = await this.readCommit(anchorSha);
-    if (anchorCommit.parents.length !== 1) throw new Error('cloud_state_history_fork');
     return { anchorSha, anchorGeneration };
   }
 
-  async validateCurrentV2Commit(stateSha, stateEnvelope) {
+  async validateV2Edge(parentSha, parentEnvelope, childSha, childEnvelope) {
+    if (childEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
+    const commit = await this.readCommit(childSha);
+    if (commit.parents.length !== 1 || assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid') !== parentSha) {
+      throw new Error('cloud_state_history_fork');
+    }
+    if (childEnvelope.generation !== parentEnvelope.generation + 1) throw new Error('cloud_state_generation_discontinuity');
+    if (parentEnvelope.version === 2) {
+      if (assertSha(childEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !==
+            assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') ||
+          childEnvelope.lineageBaseGeneration !== parentEnvelope.lineageBaseGeneration) {
+        throw new Error('cloud_state_lineage_anchor_mismatch');
+      }
+    } else if (parentEnvelope.version === 1) {
+      if (assertSha(childEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== parentSha ||
+          childEnvelope.lineageBaseGeneration !== parentEnvelope.generation) {
+        throw new Error('cloud_state_lineage_anchor_mismatch');
+      }
+    } else {
+      throw new Error('cloud_state_history_invalid');
+    }
+  }
+
+  async validateCurrentV2Commit(stateSha, stateEnvelope, { requireNoNextReceipt = true } = {}) {
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
     const commit = await this.readCommit(stateSha);
     if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
     const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
     const { anchorSha, anchorGeneration } = await this.validateLineageAnchor(stateEnvelope);
-    const comparison = await this.compareDetails(anchorSha, stateSha);
-    const expectedDistance = stateEnvelope.generation - anchorGeneration;
-    if (comparison.status !== 'ahead' || comparison.aheadBy !== expectedDistance || comparison.behindBy !== 0) {
-      throw new Error('cloud_state_generation_discontinuity');
-    }
-    if (expectedDistance === 1) {
+    const currentReceipt = await this.historySha(stateEnvelope.generation);
+    if (!currentReceipt) throw new Error('cloud_state_history_receipt_missing');
+    if (currentReceipt !== stateSha) throw new Error('cloud_state_history_fork');
+
+    if (stateEnvelope.generation === anchorGeneration + 1) {
       if (parentSha !== anchorSha) throw new Error('cloud_state_history_invalid');
-      return;
+    } else {
+      const previousReceipt = await this.historySha(stateEnvelope.generation - 1);
+      if (!previousReceipt || previousReceipt !== parentSha) throw new Error('cloud_state_history_fork');
+      const parentEnvelope = await this.readEnvelopeAt(parentSha);
+      await this.validateV2Edge(parentSha, parentEnvelope, stateSha, stateEnvelope);
     }
-    const parentEnvelope = await this.readEnvelopeAt(parentSha);
-    if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
-    if (parentEnvelope.generation !== stateEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
-    if (assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== anchorSha ||
-        parentEnvelope.lineageBaseGeneration !== anchorGeneration) {
-      throw new Error('cloud_state_lineage_anchor_mismatch');
+
+    if (requireNoNextReceipt) {
+      const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
+      if (nextReceipt) throw new Error('cloud_state_rollback');
     }
   }
 
   async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
-    if (parentEnvelope.version !== 2 || childEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
-    const commit = await this.readCommit(childSha);
-    if (commit.parents.length !== 1 || assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid') !== parentSha) {
-      throw new Error('cloud_state_history_invalid');
-    }
-    if (childEnvelope.generation !== parentEnvelope.generation + 1) throw new Error('cloud_state_generation_discontinuity');
-    if (assertSha(childEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !==
-          assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') ||
-        childEnvelope.lineageBaseGeneration !== parentEnvelope.lineageBaseGeneration) {
-      throw new Error('cloud_state_lineage_anchor_mismatch');
-    }
+    await this.validateV2Edge(parentSha, parentEnvelope, childSha, childEnvelope);
   }
 
   snapshotFrom(stateSha, checkpointSha, witnessSha, envelope) {
@@ -369,6 +378,24 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_conflict');
   }
 
+  async claimHistoryReceipt(generation, targetSha) {
+    const refName = historyTagFor(this.tag, generation);
+    let error = null;
+    try {
+      await this.request('/git/refs', {
+        method: 'POST',
+        body: { ref: `refs/tags/${refName}`, sha: targetSha }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    const observed = await this.historySha(generation);
+    if (observed === targetSha) return;
+    if (observed) throw new Error('cloud_state_history_conflict', { cause: error ?? undefined });
+    if (error) throw error;
+    throw new Error('cloud_state_history_receipt_failed');
+  }
+
   async repairWatermarks(stateSha, expectedCheckpointSha, expectedWitnessSha) {
     const before = await this.readRefs();
     if (before.stateSha !== stateSha || before.checkpointSha !== expectedCheckpointSha || before.witnessSha !== expectedWitnessSha) {
@@ -391,6 +418,33 @@ export class GitHubStateStore extends JsonStore {
     return finalRefs;
   }
 
+  async recoverReceiptAhead(stateSha, stateEnvelope, refs, nextSha) {
+    const nextEnvelope = await this.readEnvelopeAt(nextSha);
+    await this.validateDirectV2Child(stateSha, stateEnvelope, nextSha, nextEnvelope);
+    const observedReceipt = await this.historySha(nextEnvelope.generation);
+    if (observedReceipt !== nextSha) throw new Error('cloud_state_history_fork');
+
+    const before = await this.readRefs();
+    if (before.stateSha !== refs.stateSha || before.checkpointSha !== refs.checkpointSha || before.witnessSha !== refs.witnessSha) {
+      throw new Error('cloud_state_conflict');
+    }
+    await this.advanceRef(this.tag, stateSha, nextSha, 'cloud_state_partial_publication');
+    const afterState = await this.readRefs();
+    if (afterState.stateSha !== nextSha) throw new Error('cloud_state_partial_publication');
+    if (afterState.checkpointSha !== nextSha) {
+      await this.advanceRef(this.checkpointTag, afterState.checkpointSha, nextSha, 'cloud_state_checkpoint_recovery_failed');
+    }
+    const afterCheckpoint = await this.readRefs();
+    if (afterCheckpoint.witnessSha !== nextSha) {
+      await this.advanceRef(this.witnessTag, afterCheckpoint.witnessSha, nextSha, 'cloud_state_witness_recovery_failed');
+    }
+    const finalRefs = await this.readRefs();
+    if (finalRefs.stateSha !== nextSha || finalRefs.checkpointSha !== nextSha || finalRefs.witnessSha !== nextSha) {
+      throw new Error('cloud_state_partial_publication');
+    }
+    return this.snapshotFrom(nextSha, nextSha, nextSha, nextEnvelope);
+  }
+
   async readSnapshot({ repair = false } = {}) {
     const refs = await this.readRefs();
     const { stateSha, checkpointSha, witnessSha } = refs;
@@ -399,13 +453,27 @@ export class GitHubStateStore extends JsonStore {
 
     const stateEnvelope = await this.readEnvelopeAt(stateSha);
 
-    if (!checkpointSha && !witnessSha) {
-      if (stateEnvelope.version === 1) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
-      await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-      throw new Error('cloud_state_watermarks_missing');
+    if (!checkpointSha && !witnessSha && stateEnvelope.version === 1) {
+      const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
+      if (!nextReceipt) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
+      const nextEnvelope = await this.readEnvelopeAt(nextReceipt);
+      await this.validateDirectV2Child(stateSha, stateEnvelope, nextReceipt, nextEnvelope);
+      if (!repair) throw new Error('cloud_state_partial_publication');
+      return this.recoverReceiptAhead(stateSha, stateEnvelope, refs, nextReceipt);
     }
 
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
+
+    const currentReceipt = await this.historySha(stateEnvelope.generation);
+    if (!currentReceipt) throw new Error('cloud_state_history_receipt_missing');
+    if (currentReceipt !== stateSha) throw new Error('cloud_state_history_fork');
+    const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
+    if (nextReceipt) {
+      if (!repair) throw new Error('cloud_state_rollback');
+      return this.recoverReceiptAhead(stateSha, stateEnvelope, refs, nextReceipt);
+    }
+
+    if (!checkpointSha && !witnessSha) throw new Error('cloud_state_watermarks_missing');
 
     let trustedSha;
     let trustedEnvelope;
@@ -436,7 +504,9 @@ export class GitHubStateStore extends JsonStore {
       trustedEnvelope = await this.readEnvelopeAt(trustedSha);
     }
     if (trustedEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
-    await this.validateCurrentV2Commit(trustedSha, trustedEnvelope);
+
+    const trustedReceipt = await this.historySha(trustedEnvelope.generation);
+    if (trustedReceipt !== trustedSha) throw new Error('cloud_state_history_fork');
 
     if (stateSha !== trustedSha) {
       const relation = await this.compareCommits(trustedSha, stateSha);
@@ -445,6 +515,8 @@ export class GitHubStateStore extends JsonStore {
       if (relation !== 'ahead') throw new Error('cloud_state_history_invalid');
       await this.validateDirectV2Child(trustedSha, trustedEnvelope, stateSha, stateEnvelope);
     }
+
+    await this.validateCurrentV2Commit(stateSha, stateEnvelope);
 
     if (repair && (checkpointSha !== stateSha || witnessSha !== stateSha)) {
       await this.repairWatermarks(stateSha, checkpointSha, witnessSha);
@@ -487,6 +559,7 @@ export class GitHubStateStore extends JsonStore {
     let generation;
     let lineageBaseSha;
     let lineageBaseGeneration;
+    let migrationFromV1 = false;
     if (!expectedStateSha) {
       if (expectedCheckpointSha || expectedWitnessSha) throw new Error('cloud_state_snapshot_untrusted');
       parentSha = await this.baseBranchSha();
@@ -499,6 +572,7 @@ export class GitHubStateStore extends JsonStore {
         await this.validateLegacyMigrationHead(expectedStateSha, parentEnvelope);
         lineageBaseSha = expectedStateSha;
         lineageBaseGeneration = parentEnvelope.generation;
+        migrationFromV1 = true;
       } else {
         if (parentEnvelope.version !== 2 || expectedCheckpointSha !== expectedStateSha || expectedWitnessSha !== expectedStateSha) {
           throw new Error('cloud_state_snapshot_untrusted');
@@ -528,7 +602,14 @@ export class GitHubStateStore extends JsonStore {
     };
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
-    await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    if (migrationFromV1) {
+      await this.advanceRef(this.tag, expectedStateSha, commitSha);
+      await this.claimHistoryReceipt(generation, commitSha);
+    } else {
+      await this.claimHistoryReceipt(generation, commitSha);
+      await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    }
+
     let checkpointError = null;
     let witnessError = null;
     try {
@@ -542,7 +623,8 @@ export class GitHubStateStore extends JsonStore {
       witnessError = error;
     }
     const finalRefs = await this.readRefs();
-    if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha) {
+    const finalReceipt = await this.historySha(generation);
+    if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha && finalReceipt === commitSha) {
       return commitSha;
     }
     throw new Error('cloud_state_partial_publication', { cause: checkpointError ?? witnessError ?? undefined });
