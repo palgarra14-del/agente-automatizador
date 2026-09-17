@@ -81,7 +81,10 @@ jobs:
       - name: Restore lane workspace continuity
         uses: actions/cache@v4
         with:
-          path: .agent-workspaces/${{ matrix.lane }}
+          path: |
+            .agent-workspaces/${{ matrix.lane }}
+            !.agent-workspaces/${{ matrix.lane }}/**/node_modules
+            !.agent-workspaces/${{ matrix.lane }}/**/.next/cache
           key: agent-workspace-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             agent-workspace-${{ matrix.lane }}-
@@ -125,14 +128,3 @@ jobs:
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
-
-      - name: Trim managed workspace cache
-        if: always() && steps.preflight.outputs.has_work == 'true'
-        shell: bash
-        env:
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: |
-          ROOT=".agent-workspaces/$AGENT_CLOUD_LANE"
-          if [[ -d "$ROOT" ]]; then
-            find "$ROOT" -type d \( -name node_modules -o -name .next -o -name coverage -o -name dist \) -prune -exec rm -rf {} +
-          fi
