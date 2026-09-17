@@ -7,6 +7,7 @@ const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
+const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE]);
 
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
@@ -131,6 +132,7 @@ export class GitHubStateStore extends JsonStore {
     if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes('..')) throw new Error('cloud_state_base_branch_invalid');
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
+    if (RESERVED_STATE_TAGS.has(tag)) throw new Error('cloud_state_tag_reserved');
     if (!/^[a-z0-9-]{1,80}$/.test(laneId)) throw new Error('cloud_state_lane_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
@@ -201,13 +203,25 @@ export class GitHubStateStore extends JsonStore {
     return commit;
   }
 
-  async compareCommits(baseSha, headSha) {
+  async compareDetails(baseSha, headSha) {
     const base = assertSha(baseSha);
     const head = assertSha(headSha);
-    if (base === head) return 'identical';
+    if (base === head) return { status: 'identical', aheadBy: 0, behindBy: 0 };
     const comparison = await this.request(`/compare/${base}...${head}`);
-    if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status)) throw new Error('cloud_state_compare_invalid');
-    return comparison.status;
+    if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status) ||
+        !Number.isInteger(comparison?.ahead_by) || comparison.ahead_by < 0 ||
+        !Number.isInteger(comparison?.behind_by) || comparison.behind_by < 0) {
+      throw new Error('cloud_state_compare_invalid');
+    }
+    return {
+      status: comparison.status,
+      aheadBy: comparison.ahead_by,
+      behindBy: comparison.behind_by
+    };
+  }
+
+  async compareCommits(baseSha, headSha) {
+    return (await this.compareDetails(baseSha, headSha)).status;
   }
 
   async readEnvelopeAt(commitSha) {
@@ -247,54 +261,24 @@ export class GitHubStateStore extends JsonStore {
     return sha;
   }
 
-  async assertBootstrapParent(parentSha) {
+  async validateGenerationDistance(stateSha, envelope) {
+    const commit = await this.readCommit(stateSha);
+    if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
     const baseSha = await this.baseBranchSha();
-    const relation = await this.compareCommits(parentSha, baseSha);
-    if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+    const comparison = await this.compareDetails(baseSha, stateSha);
+    if (!['ahead', 'diverged'].includes(comparison.status) || comparison.aheadBy !== envelope.generation) {
+      throw new Error('cloud_state_generation_discontinuity');
+    }
   }
 
   async validateLegacyHistory(stateSha, stateEnvelope) {
     if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
-    let currentSha = stateSha;
-    let currentEnvelope = stateEnvelope;
-    while (true) {
-      const commit = await this.readCommit(currentSha);
-      if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
-      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      if (currentEnvelope.generation === 1) {
-        await this.assertBootstrapParent(parentSha);
-        return;
-      }
-      const parentEnvelope = await this.readEnvelopeAt(parentSha);
-      if (parentEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
-      if (parentEnvelope.generation !== currentEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
-      currentSha = parentSha;
-      currentEnvelope = parentEnvelope;
-    }
+    await this.validateGenerationDistance(stateSha, stateEnvelope);
   }
 
   async validateCurrentV2Commit(stateSha, stateEnvelope) {
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
-    let currentSha = stateSha;
-    let currentEnvelope = stateEnvelope;
-    while (true) {
-      const commit = await this.readCommit(currentSha);
-      if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
-      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      if (currentEnvelope.generation === 1) {
-        await this.assertBootstrapParent(parentSha);
-        return;
-      }
-      const parentEnvelope = await this.readEnvelopeAt(parentSha);
-      if (parentEnvelope.generation !== currentEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
-      if (parentEnvelope.version === 1) {
-        await this.validateLegacyHistory(parentSha, parentEnvelope);
-        return;
-      }
-      if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
-      currentSha = parentSha;
-      currentEnvelope = parentEnvelope;
-    }
+    await this.validateGenerationDistance(stateSha, stateEnvelope);
   }
 
   async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
