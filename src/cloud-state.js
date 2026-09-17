@@ -5,6 +5,8 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
+const MAX_STATE_HISTORY_DEPTH = 2048;
+
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
   return /(^|_)(api_key|api_token|access_token|refresh_token|auth_token|github_token|vercel_token|secret|password|credential|authorization|cookie)($|_)/.test(normalized);
@@ -29,6 +31,11 @@ function canonical(value) {
 
 function stateHash(state) {
   return createHash('sha256').update(JSON.stringify(canonical(state))).digest('hex');
+}
+
+function assertSha(value, code = 'cloud_state_sha_invalid') {
+  if (typeof value !== 'string' || !/^[a-f0-9]{40}$/i.test(value)) throw new Error(code);
+  return value.toLowerCase();
 }
 
 function assertNoSensitiveKeys(value, path = 'state') {
@@ -99,6 +106,8 @@ export class GitHubStateStore extends JsonStore {
     token = process.env.GITHUB_TOKEN,
     fetchImpl = fetch,
     tag = DEFAULT_TAG,
+    checkpointTag = `${tag}-checkpoint-v2`,
+    witnessTag = `${tag}-witness-v2`,
     statePath = DEFAULT_PATH,
     laneId = 'self',
     allowedProjectIds = ['self'],
@@ -115,6 +124,10 @@ export class GitHubStateStore extends JsonStore {
     if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes('..')) throw new Error('cloud_state_base_branch_invalid');
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
+    if (!/^[A-Za-z0-9._-]{1,120}$/.test(checkpointTag) || checkpointTag === tag) throw new Error('cloud_state_checkpoint_tag_invalid');
+    if (!/^[A-Za-z0-9._-]{1,120}$/.test(witnessTag) || witnessTag === tag || witnessTag === checkpointTag) {
+      throw new Error('cloud_state_witness_tag_invalid');
+    }
     if (!/^[a-z0-9-]{1,80}$/.test(laneId)) throw new Error('cloud_state_lane_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
@@ -124,6 +137,8 @@ export class GitHubStateStore extends JsonStore {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.tag = tag;
+    this.checkpointTag = checkpointTag;
+    this.witnessTag = witnessTag;
     this.statePath = statePath;
     this.laneId = laneId;
     this.allowedProjectIds = normalizedAllowedProjectIds;
@@ -163,22 +178,45 @@ export class GitHubStateStore extends JsonStore {
   async refSha(ref) {
     const result = await this.request(`/git/ref/${ref}`, { allow404: true });
     if (!result) return null;
-    const sha = result?.object?.sha;
-    if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) throw new Error('cloud_state_ref_invalid');
-    return sha.toLowerCase();
+    return assertSha(result?.object?.sha, 'cloud_state_ref_invalid');
   }
 
-  async readSnapshot() {
-    const refSha = await this.refSha(`tags/${encodeURIComponent(this.tag)}`);
-    if (!refSha) return { refSha: null, generation: 0, state: emptyState() };
+  async readRefs() {
+    const [stateSha, checkpointSha, witnessSha] = await Promise.all([
+      this.refSha(`tags/${encodeURIComponent(this.tag)}`),
+      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`),
+      this.refSha(`tags/${encodeURIComponent(this.witnessTag)}`)
+    ]);
+    return { stateSha, checkpointSha, witnessSha };
+  }
+
+  async readCommit(sha) {
+    const normalized = assertSha(sha);
+    const commit = await this.request(`/git/commits/${normalized}`);
+    if (assertSha(commit?.sha, 'cloud_state_commit_invalid') !== normalized) throw new Error('cloud_state_commit_invalid');
+    if (!Array.isArray(commit.parents)) throw new Error('cloud_state_commit_invalid');
+    return commit;
+  }
+
+  async compareCommits(baseSha, headSha) {
+    const base = assertSha(baseSha);
+    const head = assertSha(headSha);
+    if (base === head) return 'identical';
+    const comparison = await this.request(`/compare/${base}...${head}`);
+    if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status)) throw new Error('cloud_state_compare_invalid');
+    return comparison.status;
+  }
+
+  async readEnvelopeAt(commitSha) {
+    const sha = assertSha(commitSha);
     const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
-    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(`refs/tags/${this.tag}`)}`);
+    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(sha)}`);
     if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
     const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
     if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
     let envelope;
     try { envelope = JSON.parse(raw); } catch { throw new Error('cloud_state_envelope_invalid'); }
-    if (envelope?.version !== 1 ||
+    if (![1, 2].includes(envelope?.version) ||
         envelope.repository !== `${this.repository.owner}/${this.repository.name}` ||
         !Number.isInteger(envelope.generation) ||
         envelope.generation < 1 ||
@@ -187,31 +225,212 @@ export class GitHubStateStore extends JsonStore {
     }
     const persistedLaneId = envelope.laneId ?? 'self';
     if (persistedLaneId !== this.laneId) throw new Error('cloud_state_lane_mismatch');
+    if (envelope.version === 2 && (
+      envelope.statePath !== this.statePath ||
+      envelope.stateTag !== this.tag ||
+      envelope.checkpointTag !== this.checkpointTag ||
+      envelope.witnessTag !== this.witnessTag
+    )) {
+      throw new Error('cloud_state_ref_binding_mismatch');
+    }
     validateCloudState(envelope.state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     if (stateHash(envelope.state) !== envelope.stateHash) throw new Error('cloud_state_integrity_mismatch');
-    return { refSha, generation: envelope.generation, state: envelope.state };
+    return envelope;
   }
 
-  async writeSnapshot(state, snapshot) {
-    validateCloudState(state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
-    const envelope = {
-      version: 1,
-      repository: `${this.repository.owner}/${this.repository.name}`,
-      laneId: this.laneId,
-      generation: snapshot.generation + 1,
-      stateHash: stateHash(state),
-      updatedAt: new Date(this.now()).toISOString(),
-      state
+  async baseBranchSha() {
+    const sha = await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
+    if (!sha) throw new Error('cloud_state_base_branch_missing');
+    return sha;
+  }
+
+  async assertBootstrapParent(parentSha) {
+    const baseSha = await this.baseBranchSha();
+    const relation = await this.compareCommits(parentSha, baseSha);
+    if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+  }
+
+  async validateLegacyHistory(stateSha, stateEnvelope) {
+    if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
+    let currentSha = stateSha;
+    let currentEnvelope = stateEnvelope;
+    const visited = new Set();
+    for (let depth = 0; depth < MAX_STATE_HISTORY_DEPTH; depth += 1) {
+      if (visited.has(currentSha)) throw new Error('cloud_state_history_cycle');
+      visited.add(currentSha);
+      const commit = await this.readCommit(currentSha);
+      if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+      if (currentEnvelope.generation === 1) {
+        await this.assertBootstrapParent(parentSha);
+        return;
+      }
+      const parentEnvelope = await this.readEnvelopeAt(parentSha);
+      if (parentEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
+      if (parentEnvelope.generation !== currentEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
+      currentSha = parentSha;
+      currentEnvelope = parentEnvelope;
+    }
+    throw new Error('cloud_state_history_too_deep');
+  }
+
+  async validateCurrentV2Commit(stateSha, stateEnvelope) {
+    if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
+    const commit = await this.readCommit(stateSha);
+    if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+    const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+    if (stateEnvelope.generation === 1) {
+      await this.assertBootstrapParent(parentSha);
+      return;
+    }
+    const parentEnvelope = await this.readEnvelopeAt(parentSha);
+    if (parentEnvelope.generation !== stateEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
+    if (parentEnvelope.version === 1) {
+      await this.validateLegacyHistory(parentSha, parentEnvelope);
+      return;
+    }
+    if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
+  }
+
+  async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
+    if (parentEnvelope.version !== 2 || childEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
+    const commit = await this.readCommit(childSha);
+    if (commit.parents.length !== 1 || assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid') !== parentSha) {
+      throw new Error('cloud_state_history_invalid');
+    }
+    if (childEnvelope.generation !== parentEnvelope.generation + 1) throw new Error('cloud_state_generation_discontinuity');
+  }
+
+  snapshotFrom(stateSha, checkpointSha, witnessSha, envelope) {
+    return {
+      refSha: stateSha,
+      checkpointSha,
+      witnessSha,
+      generation: envelope?.generation ?? 0,
+      envelopeVersion: envelope?.version ?? null,
+      state: envelope?.state ?? emptyState()
     };
+  }
+
+  async advanceRef(refName, expectedSha, targetSha, failureCode = null) {
+    let error = null;
+    try {
+      if (expectedSha) {
+        await this.request(`/git/refs/tags/${encodeURIComponent(refName)}`, {
+          method: 'PATCH',
+          body: { sha: targetSha, force: false }
+        });
+      } else {
+        await this.request('/git/refs', {
+          method: 'POST',
+          body: { ref: `refs/tags/${refName}`, sha: targetSha }
+        });
+      }
+    } catch (caught) {
+      error = caught;
+    }
+    const observed = await this.refSha(`tags/${encodeURIComponent(refName)}`);
+    if (observed === targetSha) return;
+    if (failureCode) throw new Error(failureCode, { cause: error ?? undefined });
+    if (error) throw error;
+    throw new Error('cloud_state_conflict');
+  }
+
+  async repairWatermarks(stateSha, expectedCheckpointSha, expectedWitnessSha) {
+    const before = await this.readRefs();
+    if (before.stateSha !== stateSha || before.checkpointSha !== expectedCheckpointSha || before.witnessSha !== expectedWitnessSha) {
+      throw new Error('cloud_state_conflict');
+    }
+    if (expectedCheckpointSha !== stateSha) {
+      await this.advanceRef(this.checkpointTag, expectedCheckpointSha, stateSha, 'cloud_state_checkpoint_recovery_failed');
+    }
+    const afterCheckpoint = await this.readRefs();
+    if (afterCheckpoint.stateSha !== stateSha || afterCheckpoint.checkpointSha !== stateSha) {
+      throw new Error('cloud_state_checkpoint_recovery_failed');
+    }
+    if (afterCheckpoint.witnessSha !== stateSha) {
+      await this.advanceRef(this.witnessTag, afterCheckpoint.witnessSha, stateSha, 'cloud_state_witness_recovery_failed');
+    }
+    const finalRefs = await this.readRefs();
+    if (finalRefs.stateSha !== stateSha || finalRefs.checkpointSha !== stateSha || finalRefs.witnessSha !== stateSha) {
+      throw new Error('cloud_state_partial_publication');
+    }
+    return finalRefs;
+  }
+
+  async readSnapshot({ repair = false } = {}) {
+    const refs = await this.readRefs();
+    const { stateSha, checkpointSha, witnessSha } = refs;
+    if (!stateSha && !checkpointSha && !witnessSha) return this.snapshotFrom(null, null, null, null);
+    if (!stateSha) throw new Error('cloud_state_partial_publication');
+
+    const stateEnvelope = await this.readEnvelopeAt(stateSha);
+
+    if (!checkpointSha && !witnessSha) {
+      if (stateEnvelope.version === 1) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
+      await this.validateCurrentV2Commit(stateSha, stateEnvelope);
+      const commit = await this.readCommit(stateSha);
+      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+      let recoverableFirstV2 = stateEnvelope.generation === 1;
+      if (!recoverableFirstV2) {
+        const parentEnvelope = await this.readEnvelopeAt(parentSha);
+        recoverableFirstV2 = parentEnvelope.version === 1 && parentEnvelope.generation + 1 === stateEnvelope.generation;
+      }
+      if (!recoverableFirstV2) throw new Error('cloud_state_watermarks_missing');
+      if (repair) {
+        await this.repairWatermarks(stateSha, null, null);
+        return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
+      }
+      return this.snapshotFrom(stateSha, null, null, stateEnvelope);
+    }
+
+    if (stateEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
+
+    let trustedSha;
+    let trustedEnvelope;
+    if (checkpointSha && witnessSha) {
+      if (checkpointSha === witnessSha) {
+        trustedSha = checkpointSha;
+        trustedEnvelope = await this.readEnvelopeAt(trustedSha);
+      } else {
+        const relation = await this.compareCommits(witnessSha, checkpointSha);
+        if (relation === 'behind') throw new Error('cloud_state_watermark_order_invalid');
+        if (relation === 'diverged') throw new Error('cloud_state_history_fork');
+        if (relation !== 'ahead') throw new Error('cloud_state_watermark_history_invalid');
+        const witnessEnvelope = await this.readEnvelopeAt(witnessSha);
+        const checkpointEnvelope = await this.readEnvelopeAt(checkpointSha);
+        await this.validateDirectV2Child(witnessSha, witnessEnvelope, checkpointSha, checkpointEnvelope);
+        trustedSha = checkpointSha;
+        trustedEnvelope = checkpointEnvelope;
+      }
+    } else {
+      trustedSha = checkpointSha ?? witnessSha;
+      trustedEnvelope = await this.readEnvelopeAt(trustedSha);
+    }
+    if (trustedEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
+
+    if (stateSha === trustedSha) {
+      await this.validateCurrentV2Commit(stateSha, stateEnvelope);
+    } else {
+      const relation = await this.compareCommits(trustedSha, stateSha);
+      if (relation === 'behind') throw new Error('cloud_state_rollback');
+      if (relation === 'diverged') throw new Error('cloud_state_history_fork');
+      if (relation !== 'ahead') throw new Error('cloud_state_history_invalid');
+      await this.validateDirectV2Child(trustedSha, trustedEnvelope, stateSha, stateEnvelope);
+    }
+
+    if (repair && (checkpointSha !== stateSha || witnessSha !== stateSha)) {
+      await this.repairWatermarks(stateSha, checkpointSha, witnessSha);
+      return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
+    }
+    return this.snapshotFrom(stateSha, checkpointSha, witnessSha, stateEnvelope);
+  }
+
+  async createStateCommit(envelope, parentSha) {
     const content = JSON.stringify(envelope);
     if (Buffer.byteLength(content, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
-
-    const parentSha = snapshot.refSha ?? await this.refSha(`heads/${encodeURIComponent(this.baseBranch)}`);
-    if (!parentSha) throw new Error('cloud_state_base_branch_missing');
-    const parent = await this.request(`/git/commits/${parentSha}`);
-    const baseTree = parent?.tree?.sha;
-    if (typeof baseTree !== 'string' || !/^[a-f0-9]{40}$/i.test(baseTree)) throw new Error('cloud_state_base_tree_invalid');
-
+    const parent = await this.readCommit(parentSha);
+    const baseTree = assertSha(parent?.tree?.sha, 'cloud_state_base_tree_invalid');
     const blob = await this.request('/git/blobs', { method: 'POST', body: { content, encoding: 'utf-8' } });
     const tree = await this.request('/git/trees', {
       method: 'POST',
@@ -224,20 +443,66 @@ export class GitHubStateStore extends JsonStore {
       method: 'POST',
       body: { message: 'Update durable agent cloud state', tree: tree.sha, parents: [parentSha] }
     });
-    if (typeof commit?.sha !== 'string' || !/^[a-f0-9]{40}$/i.test(commit.sha)) throw new Error('cloud_state_commit_invalid');
+    return assertSha(commit?.sha, 'cloud_state_commit_invalid');
+  }
 
-    if (snapshot.refSha) {
-      await this.request(`/git/refs/tags/${encodeURIComponent(this.tag)}`, {
-        method: 'PATCH',
-        body: { sha: commit.sha, force: false }
-      });
-    } else {
-      await this.request('/git/refs', {
-        method: 'POST',
-        body: { ref: `refs/tags/${this.tag}`, sha: commit.sha }
-      });
+  async writeSnapshot(state, snapshot) {
+    validateCloudState(state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
+    const expectedStateSha = snapshot?.refSha ?? null;
+    const expectedCheckpointSha = snapshot?.checkpointSha ?? null;
+    const expectedWitnessSha = snapshot?.witnessSha ?? null;
+    const current = await this.readRefs();
+    if (current.stateSha !== expectedStateSha || current.checkpointSha !== expectedCheckpointSha || current.witnessSha !== expectedWitnessSha) {
+      throw new Error('cloud_state_conflict');
     }
-    return commit.sha.toLowerCase();
+
+    let parentSha;
+    let generation;
+    if (!expectedStateSha) {
+      if (expectedCheckpointSha || expectedWitnessSha) throw new Error('cloud_state_snapshot_untrusted');
+      parentSha = await this.baseBranchSha();
+      generation = 1;
+    } else {
+      const parentEnvelope = await this.readEnvelopeAt(expectedStateSha);
+      if (!expectedCheckpointSha && !expectedWitnessSha && parentEnvelope.version === 1) {
+        await this.validateLegacyHistory(expectedStateSha, parentEnvelope);
+      } else {
+        if (parentEnvelope.version !== 2 || expectedCheckpointSha !== expectedStateSha || expectedWitnessSha !== expectedStateSha) {
+          throw new Error('cloud_state_snapshot_untrusted');
+        }
+        await this.validateCurrentV2Commit(expectedStateSha, parentEnvelope);
+      }
+      parentSha = expectedStateSha;
+      generation = parentEnvelope.generation + 1;
+    }
+
+    const envelope = {
+      version: 2,
+      repository: `${this.repository.owner}/${this.repository.name}`,
+      laneId: this.laneId,
+      statePath: this.statePath,
+      stateTag: this.tag,
+      checkpointTag: this.checkpointTag,
+      witnessTag: this.witnessTag,
+      generation,
+      stateHash: stateHash(state),
+      updatedAt: new Date(this.now()).toISOString(),
+      state
+    };
+    const commitSha = await this.createStateCommit(envelope, parentSha);
+
+    await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    try {
+      await this.advanceRef(this.checkpointTag, expectedCheckpointSha, commitSha, 'cloud_state_partial_publication');
+      await this.advanceRef(this.witnessTag, expectedWitnessSha, commitSha, 'cloud_state_partial_publication');
+    } catch (error) {
+      throw new Error('cloud_state_partial_publication', { cause: error });
+    }
+    const finalRefs = await this.readRefs();
+    if (finalRefs.stateSha !== commitSha || finalRefs.checkpointSha !== commitSha || finalRefs.witnessSha !== commitSha) {
+      throw new Error('cloud_state_partial_publication');
+    }
+    return commitSha;
   }
 
   async load() {
@@ -249,7 +514,7 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async mutateInternal(mutator, { requireLease }) {
-    const snapshot = await this.readSnapshot();
+    const snapshot = await this.readSnapshot({ repair: true });
     const data = snapshot.state;
     if (requireLease) {
       const lease = data.cloudExecutionLease;
