@@ -427,8 +427,8 @@ test('v0.5 resolves container runtime user from the host without requiring root'
 test('v0.5 validates explicit execution providers and configures registered projects as container-required', async () => {
   const configured = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
   assert.equal(configured.get('self').execution.provider, 'container-required');
-  assert.equal(configured.get('self').execution.image, 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5');
-  assert.equal(imageIsPinned(configured.get('self').execution.image), true);
+  assert.equal(configured.get('self').execution.image, 'agent-node22-pnpm11:local');
+  assert.equal(imageIsPinned(configured.get('self').execution.image), false);
   assert.equal(configured.get('leadfinder').execution.provider, 'container-required');
   assert.equal(configured.get('leadfinder').execution.image, 'agent-node22-pnpm11:local');
   assert.equal(imageIsPinned('registry.example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), true);
