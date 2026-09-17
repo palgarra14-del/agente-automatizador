@@ -475,6 +475,29 @@ test('legacy histories beyond 2048 generations remain migratable with bounded re
   assert.ok(fake.requestCount() < 50, `expected bounded migration traffic, received ${fake.requestCount()} requests`);
 });
 
+test('established v2 history of 2050 generations validates below the GitHub request cliff', async () => {
+  const fake = fakeGitHub();
+  let head = fake.mainSha;
+  for (let generation = 1; generation <= 2050; generation += 1) {
+    head = fake.makeStateCommit({
+      parentSha: head,
+      generation,
+      state: blankState(`v2-${generation}`),
+      lineageBaseSha: fake.mainSha,
+      lineageBaseGeneration: 0
+    });
+  }
+  fake.forceTag(historyTagFor(stateTag, 2050), head);
+  fake.forceTag(stateTag, head);
+  fake.forceTag(checkpointTag, head);
+  fake.forceTag(witnessTag, head);
+  fake.resetRequestCount();
+  const snapshot = await storeFor(fake, { ownerId: 'github:v2:deep' }).readSnapshot();
+  assert.equal(snapshot.generation, 2050);
+  assert.equal(snapshot.state.marker, 'v2-2050');
+  assert.ok(fake.requestCount() < 1000, `expected request-efficient complete validation, received ${fake.requestCount()} requests`);
+});
+
 test('legacy migration accepts an inherited generation offset without trusting base-branch commit distance', async () => {
   const fake = fakeGitHub();
   const legacyA = fake.makeStateCommit({ generation: 4, state: blankState('offset-4'), version: 1 });
@@ -711,7 +734,7 @@ test('aligned refs and forged head receipt still reject malformed older bootstra
   fake.forceTag(witnessTag, apparentlyValidGeneration3);
   await assert.rejects(
     storeFor(fake, { ownerId: 'github:full-lineage:fresh' }).load(),
-    /cloud_state_history_blob_invalid|cloud_state_generation_discontinuity|cloud_state_history_incomplete/
+    /cloud_state_history_fork|cloud_state_history_blob_invalid|cloud_state_generation_discontinuity|cloud_state_history_incomplete/
   );
 });
 
