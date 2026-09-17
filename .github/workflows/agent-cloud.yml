@@ -105,7 +105,7 @@ jobs:
         if: steps.preflight.outputs.has_work == 'true'
         shell: bash
         run: |
-          docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
+          node src/cli.js runtime sync
           docker run --rm --entrypoint git agent-node22-pnpm11:local --version
 
       - name: Run one governed cloud queue tick
