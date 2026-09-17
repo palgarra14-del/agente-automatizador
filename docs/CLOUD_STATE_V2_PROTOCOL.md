@@ -54,6 +54,8 @@ For a trusted v2 state SHA `S` with generation `G`, validation is bounded indepe
 
 The compare payload is validated fail-closed: missing, negative or non-integer `ahead_by`/`behind_by` values are invalid.
 
+The head proof is intentionally self-contained instead of recursively trusting the `generation` field of every historical envelope. In v2, the authoritative generation of the current head is constrained by Git topology from the fixed exact lineage base. A historical envelope with malformed metadata cannot alter the current head's state hash, binding or topology-derived generation claim; if that historical commit is ever made authoritative again, its own envelope and topology invariants are checked at that time and surviving watermarks additionally reject rollback. This is what removes the O(total-history) REST walk rather than merely hiding it behind a larger cutoff.
+
 This catches the previously demonstrated aligned-ref malformed bootstrap: a generation-2 v2 commit parented directly to a generation-0 base followed by an apparently valid generation-3 child has only two Git commits after the lineage base, so generation distance does not match and the fresh process rejects it.
 
 The proof uses a constant number of GitHub API calls for a head regardless of whether the legacy history had 4, 280, 2,050 or far more generations. It does not impose an arbitrary history-depth cutoff.
