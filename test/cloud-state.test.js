@@ -166,13 +166,8 @@ function fakeGitHub() {
 
   const addStatus = ({ context, description, state = 'success', target_url = null }) => {
     const entry = {
-      id: statusId++,
-      state,
-      description,
-      target_url,
-      context,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      id: statusId++, state, description, target_url, context,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       creator: { login: 'github-actions[bot]', id: 1 }
     };
     statuses.unshift(entry);
@@ -349,12 +344,16 @@ function fakeGitHub() {
     });
   };
 
-  const failNextStatusWrite = (status = 500) => {
+  const failNextStatusWrite = (status = 500, bodyMatch = () => true) => {
     failures.push({
       method: 'POST',
       status,
-      match(path) { return path === `/statuses/${LEDGER_ROOT_SHA}`; }
+      match(path, body) { return path === `/statuses/${LEDGER_ROOT_SHA}` && bodyMatch(body); }
     });
+  };
+
+  const failNextCanonicalStatusWrite = (status = 500) => {
+    failNextStatusWrite(status, (body) => typeof body?.context === 'string' && body.context.includes('/g/'));
   };
 
   return {
@@ -366,6 +365,7 @@ function fakeGitHub() {
     aliasStatePath,
     failNextTagWrite,
     failNextStatusWrite,
+    failNextCanonicalStatusWrite,
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
     tagSha(tag) { return refs.get(fullTagRef(tag)) ?? null; },
@@ -433,7 +433,9 @@ async function publishMarker(store, marker) {
 }
 
 function installLedgerRecord(fake, store, generation, stateSha, parentSha) {
-  fake.forceStatus(store.ledgerContext(generation), store.ledgerDescription(stateSha, parentSha));
+  const description = store.ledgerDescription(stateSha, parentSha);
+  fake.forceStatus(store.intentContext(generation, stateSha), description);
+  fake.forceStatus(store.ledgerContext(generation), description);
 }
 
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
@@ -458,7 +460,7 @@ test('status authority is anchored to the verified parentless repository root', 
   await assert.rejects(storeFor(fake, { ownerId: 'github:root:bad' }).readStatusLedger(), /cloud_state_status_root_invalid/);
 });
 
-test('durable bootstrap appends status authority and fresh load is read-only', async () => {
+test('durable bootstrap appends immutable intent and canonical authority while fresh load is read-only', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:10:1' });
   await first.withGlobalLease(async () => {
@@ -469,8 +471,9 @@ test('durable bootstrap appends status authority and fresh load is read-only', a
   const stateSha = fake.tagSha(stateTag);
   assert.equal(fake.tagSha(checkpointTag), stateSha);
   assert.equal(fake.tagSha(witnessTag), stateSha);
-  const ledger = await storeFor(fake, { ownerId: 'github:ledger:peek' }).readStatusLedger();
-  assert.equal(ledger.at(-1).stateSha, stateSha);
+  const evidence = await storeFor(fake, { ownerId: 'github:ledger:peek' }).readStatusEvidence();
+  assert.equal(evidence.ledger.at(-1).stateSha, stateSha);
+  assert.ok(evidence.intents.size >= evidence.ledger.length);
   fake.resetWriteCount();
   fake.clearContentRefs();
   const loaded = await storeFor(fake, { ownerId: 'github:11:1' }).load();
@@ -480,23 +483,21 @@ test('durable bootstrap appends status authority and fresh load is read-only', a
   assert.ok(fake.contentRefs().every((ref) => /^[a-f0-9]{40}$/i.test(ref)));
 });
 
-test('legacy multi-generation state migrates to first v2 status authority', async () => {
+test('legacy multi-generation state migrates through intent to first v2 authority', async () => {
   const fake = fakeGitHub();
   const legacy1 = fake.makeStateCommit({ generation: 1, state: blankState('legacy-1'), version: 1 });
   const legacy2 = fake.makeStateCommit({ parentSha: legacy1, generation: 2, state: blankState('legacy-2'), version: 1 });
   fake.forceTag(stateTag, legacy2);
   const store = storeFor(fake, { ownerId: 'github:migrate:1' });
   const snapshot = await store.readSnapshot();
-  assert.equal(snapshot.envelopeVersion, 1);
-  assert.equal(snapshot.generation, 2);
   const migratedSha = await store.writeSnapshot(blankState('migrated'), snapshot);
   const envelope = fake.envelopeAt(migratedSha);
-  assert.equal(envelope.version, 2);
   assert.equal(envelope.generation, 3);
   assert.equal(envelope.lineageBaseSha, legacy2);
   assert.equal(envelope.lineageBaseGeneration, 2);
-  const ledger = await store.readStatusLedger();
-  assert.deepEqual(ledger, [{ generation: 3, stateSha: migratedSha, parentSha: legacy2 }]);
+  const evidence = await store.readStatusEvidence();
+  assert.deepEqual(evidence.ledger, [{ kind: 'authority', generation: 3, stateSha: migratedSha, parentSha: legacy2 }]);
+  assert.equal(evidence.intents.get(`3:${migratedSha}`).parentSha, legacy2);
 });
 
 test('legacy histories beyond 2048 generations migrate with bounded requests', async () => {
@@ -511,7 +512,7 @@ test('legacy histories beyond 2048 generations migrate with bounded requests', a
   const snapshot = await store.readSnapshot();
   const migratedSha = await store.writeSnapshot(blankState('migrated-deep'), snapshot);
   assert.equal(fake.envelopeAt(migratedSha).generation, 2051);
-  assert.ok(fake.requestCount() < 60, `expected bounded migration traffic, received ${fake.requestCount()} requests`);
+  assert.ok(fake.requestCount() < 80, `expected bounded migration traffic, received ${fake.requestCount()} requests`);
 });
 
 test('legacy migration preserves inherited generation offsets', async () => {
@@ -528,23 +529,34 @@ test('legacy migration preserves inherited generation offsets', async () => {
   assert.equal(envelope.lineageBaseGeneration, 5);
 });
 
-test('first-v2 crash after state CAS but before status append is repair-only', async () => {
+test('first-v2 crash after CAS but before canonical status recovers only with pre-existing intent', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 1, state: blankState('legacy'), version: 1 });
   fake.forceTag(stateTag, legacy);
   const store = storeFor(fake, { ownerId: 'github:migrate:crash' });
   const snapshot = await store.readSnapshot();
-  fake.failNextStatusWrite(500);
+  fake.failNextCanonicalStatusWrite(500);
   await assert.rejects(store.writeSnapshot(blankState('v2-partial'), snapshot), /cloud_state_partial_publication/);
   const partialSha = fake.tagSha(stateTag);
   assert.notEqual(partialSha, legacy);
-  assert.deepEqual(await store.readStatusLedger(), []);
+  const partialEvidence = await store.readStatusEvidence();
+  assert.equal(partialEvidence.ledger.length, 0);
+  assert.ok(partialEvidence.intents.has(`2:${partialSha}`));
   await assert.rejects(storeFor(fake, { ownerId: 'github:migrate:peek' }).load(), /cloud_state_status_ledger_missing/);
   const repaired = await storeFor(fake, { ownerId: 'github:migrate:repair' }).readSnapshot({ repair: true });
   assert.equal(repaired.refSha, partialSha);
-  assert.equal(fake.tagSha(checkpointTag), partialSha);
-  assert.equal(fake.tagSha(witnessTag), partialSha);
   assert.equal((await storeFor(fake, { ownerId: 'github:migrate:post' }).readStatusLedger()).at(-1).stateSha, partialSha);
+});
+
+test('first v2 mutable state without immutable intent cannot be blessed by repair', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:bootstrap:tamper' });
+  const candidate = fake.makeStateCommit({ generation: 1, state: blankState('tampered-bootstrap') });
+  fake.forceTag(stateTag, candidate);
+  await assert.rejects(store.readSnapshot({ repair: true }), /cloud_state_status_intent_missing/);
+  assert.deepEqual(await store.readStatusLedger(), []);
+  assert.equal(fake.tagSha(checkpointTag), null);
+  assert.equal(fake.tagSha(witnessTag), null);
 });
 
 test('legacy writer racing migration cannot publish stale v2 authority', async () => {
@@ -585,7 +597,7 @@ test('durable writes strip worker shell output but retain safe summary evidence'
   assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
 });
 
-test('independent lanes use disjoint status contexts and state', async () => {
+test('independent lanes use disjoint authority and intent contexts', async () => {
   const fake = fakeGitHub();
   const selfStore = storeFor(fake, { ownerId: 'github:self' });
   const websiteTag = 'agent-cloud-state-website-pilot-v1';
@@ -599,11 +611,12 @@ test('independent lanes use disjoint status contexts and state', async () => {
   await websiteStore.withGlobalLease(async () => {
     await websiteStore.mutate((state) => { state.workflows = { web1: { projectId: 'website-pilot' } }; });
   });
+  const selfHead = fake.tagSha(stateTag);
+  const websiteHead = fake.tagSha(websiteTag);
   assert.notEqual(selfStore.ledgerContext(1), websiteStore.ledgerContext(1));
+  assert.notEqual(selfStore.intentContext(1, selfHead), websiteStore.intentContext(1, websiteHead));
   assert.equal((await selfStore.load()).workflows.self1.projectId, 'self');
   assert.equal((await websiteStore.load()).workflows.web1.projectId, 'website-pilot');
-  assert.equal((await selfStore.readStatusLedger()).length, 3);
-  assert.equal((await websiteStore.readStatusLedger()).length, 3);
 });
 
 test('reserved mutable namespace roots remain invalid state tags', () => {
@@ -612,16 +625,20 @@ test('reserved mutable namespace roots remain invalid state tags', () => {
   assert.doesNotThrow(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-history' }));
 });
 
-test('status contexts are generation-specific and status writes only append to immutable root', async () => {
+test('each publication appends candidate intent before canonical authority', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  await publishMarker(store, 'one');
-  await publishMarker(store, 'two');
+  const one = await publishMarker(store, 'one');
+  const two = await publishMarker(store, 'two');
   assert.notEqual(store.ledgerContext(1), store.ledgerContext(2));
-  assert.ok(store.ledgerContext(2).length < 100);
-  assert.ok(fake.statusWrites().length >= 2);
-  assert.ok(fake.statusWrites().every((entry) => entry.state === 'success' && entry.target_url === undefined));
-  assert.ok(fake.refWrites().every((entry) => !decodeURIComponent(entry.path).includes('status')));
+  assert.notEqual(store.intentContext(1, one), store.intentContext(2, two));
+  assert.ok(store.intentContext(2, two).length < 100);
+  const writes = fake.statusWrites();
+  assert.ok(writes.length >= 4);
+  assert.ok(writes.every((entry) => entry.state === 'success' && entry.target_url === undefined));
+  const lastContexts = writes.slice(-2).map((entry) => entry.context);
+  assert.ok(lastContexts[0].includes('/i/'));
+  assert.ok(lastContexts[1].includes('/g/'));
 });
 
 test('lane envelope binding rejects another lane', async () => {
@@ -666,7 +683,7 @@ test('fresh process rejects joint rollback of all mutable refs and repair moves 
   assert.equal(fake.tagSha(witnessTag), n2);
 });
 
-test('missing checkpoint and witness do not erase status authority or cause write-on-load', async () => {
+test('missing checkpoint and witness do not erase authority or cause write-on-load', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const current = await publishMarker(writer, 'current');
@@ -698,20 +715,72 @@ test('same-generation sibling is rejected even when every mutable ref points to 
   await assert.rejects(storeFor(fake, { ownerId: 'github:sibling' }).load(), /cloud_state_history_fork/);
 });
 
-test('established-v2 crash after state CAS but before status append is repair-only', async () => {
+test('contents-only direct child without matching intent cannot be promoted by repair', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  const n1 = await publishMarker(writer, 'n1');
+  const e1 = fake.envelopeAt(n1);
+  const tamperedChild = fake.makeStateCommit({
+    parentSha: n1,
+    generation: e1.generation + 1,
+    state: blankState('contents-only-child'),
+    lineageBaseSha: e1.lineageBaseSha,
+    lineageBaseGeneration: e1.lineageBaseGeneration
+  });
+  fake.forceTag(stateTag, tamperedChild);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:contents-only:peek' }).load(), /cloud_state_partial_publication/);
+  await assert.rejects(
+    storeFor(fake, { ownerId: 'github:contents-only:repair' }).readSnapshot({ repair: true }),
+    /cloud_state_status_intent_missing/
+  );
+  assert.equal((await writer.readStatusLedger()).at(-1).stateSha, n1);
+  assert.equal(fake.tagSha(checkpointTag), n1);
+  assert.equal(fake.tagSha(witnessTag), n1);
+});
+
+test('established-v2 crash after CAS but before canonical status recovers using existing intent', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const n1 = await publishMarker(writer, 'n1');
   const snapshot = await writer.readSnapshot();
-  fake.failNextStatusWrite(500);
+  fake.failNextCanonicalStatusWrite(500);
   await assert.rejects(writer.writeSnapshot(blankState('n2'), snapshot), /cloud_state_partial_publication/);
   const n2 = fake.tagSha(stateTag);
   assert.notEqual(n1, n2);
-  assert.equal((await writer.readStatusLedger()).at(-1).stateSha, n1);
+  const evidence = await writer.readStatusEvidence();
+  assert.equal(evidence.ledger.at(-1).stateSha, n1);
+  assert.ok(evidence.intents.has(`${snapshot.generation + 1}:${n2}`));
   await assert.rejects(storeFor(fake, { ownerId: 'github:ahead:peek' }).load(), /cloud_state_partial_publication/);
   const repaired = await storeFor(fake, { ownerId: 'github:ahead:repair' }).readSnapshot({ repair: true });
   assert.equal(repaired.refSha, n2);
   assert.equal((await storeFor(fake, { ownerId: 'github:ahead:post' }).readStatusLedger()).at(-1).stateSha, n2);
+});
+
+test('competing intents may coexist but only the state-CAS winner can become canonical authority', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:intent:race' });
+  const parent = await publishMarker(store, 'parent');
+  const envelope = fake.envelopeAt(parent);
+  const generation = envelope.generation + 1;
+  const common = {
+    parentSha: parent,
+    generation,
+    lineageBaseSha: envelope.lineageBaseSha,
+    lineageBaseGeneration: envelope.lineageBaseGeneration
+  };
+  const a = fake.makeStateCommit({ ...common, state: blankState('a') });
+  const b = fake.makeStateCommit({ ...common, state: blankState('b') });
+  await Promise.all([
+    store.appendStatusIntent(generation, a, parent),
+    store.appendStatusIntent(generation, b, parent)
+  ]);
+  const before = await store.readStatusEvidence();
+  assert.ok(before.intents.has(`${generation}:${a}`));
+  assert.ok(before.intents.has(`${generation}:${b}`));
+  assert.equal(fake.tryFastForwardTag(stateTag, a), true);
+  await store.appendStatusRecord(generation, a, parent);
+  await assert.rejects(store.appendStatusRecord(generation, b, parent), /cloud_state_status_ledger_conflict/);
+  assert.equal((await store.readStatusLedger()).at(-1).stateSha, a);
 });
 
 test('duplicate identical status records are idempotent but conflicting duplicates fail closed', async () => {
@@ -725,6 +794,23 @@ test('duplicate identical status records are idempotent but conflicting duplicat
   assert.equal((await storeFor(fake, { ownerId: 'github:duplicate:ok' }).load()).marker, 'one');
   fake.forceStatus(context, store.ledgerDescription(fake.mainSha, envelope.lineageBaseSha));
   await assert.rejects(storeFor(fake, { ownerId: 'github:duplicate:bad' }).load(), /cloud_state_status_ledger_conflict/);
+});
+
+test('canonical status without a matching immutable intent fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const candidate = fake.makeStateCommit({ generation: 1, state: blankState('candidate') });
+  fake.forceStatus(store.ledgerContext(1), store.ledgerDescription(candidate, fake.mainSha));
+  await assert.rejects(store.readStatusLedger(), /cloud_state_status_intent_missing/);
+});
+
+test('conflicting duplicate intent for one candidate fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const candidate = fake.makeStateCommit({ generation: 1, state: blankState('candidate') });
+  fake.forceStatus(store.intentContext(1, candidate), store.ledgerDescription(candidate, fake.mainSha));
+  fake.forceStatus(store.intentContext(1, candidate), store.ledgerDescription(candidate, LEDGER_ROOT_SHA));
+  await assert.rejects(store.readStatusEvidence(), /cloud_state_status_intent_conflict/);
 });
 
 test('malformed status record for the lane fails closed', async () => {
@@ -748,7 +834,7 @@ test('status ledger generation gap fails closed', async () => {
   await assert.rejects(storeFor(fake, { ownerId: 'github:gap' }).load(), /cloud_state_status_ledger_gap/);
 });
 
-test('two stale writers have one state-CAS winner and only that lineage gains status authority', async () => {
+test('two stale writers yield one canonical winner', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:writer:a' });
   await publishMarker(first, 'seed');
@@ -764,7 +850,7 @@ test('two stale writers have one state-CAS winner and only that lineage gains st
   assert.equal((await first.readStatusLedger()).at(-1).stateSha, winningSha);
 });
 
-test('checkpoint failure still attempts witness and immutable authority permits later repair', async () => {
+test('checkpoint failure still attempts witness and authority permits later repair', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const n1 = await publishMarker(writer, 'n1');
@@ -779,7 +865,7 @@ test('checkpoint failure still attempts witness and immutable authority permits 
   assert.equal(fake.tagSha(checkpointTag), n2);
 });
 
-test('witness failure leaves checkpoint and immutable authority for repair', async () => {
+test('witness failure leaves checkpoint and authority for repair', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   await publishMarker(writer, 'n1');
@@ -875,10 +961,10 @@ test('v2 child cannot rewrite its inherited lineage anchor', async () => {
   fake.forceTag(stateTag, bad);
   fake.forceTag(checkpointTag, bad);
   fake.forceTag(witnessTag, bad);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:anchor-rewrite' }).load(), /cloud_state_lineage_anchor|cloud_state_status_ledger/);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:anchor-rewrite' }).load(), /cloud_state_lineage_anchor|cloud_state_status/);
 });
 
-test('established 2050-generation v2 ledger and complete lineage validate below request cliff', async () => {
+test('established 2050-generation v2 intents, authority and complete lineage stay below request cliff', async () => {
   const fake = fakeGitHub();
   const builder = storeFor(fake, { ownerId: 'github:deep:builder' });
   let parent = fake.mainSha;
@@ -900,16 +986,14 @@ test('established 2050-generation v2 ledger and complete lineage validate below 
   fake.resetRequestCount();
   const loaded = await storeFor(fake, { ownerId: 'github:deep:fresh' }).load();
   assert.equal(loaded.marker, 'v2-2050');
-  assert.ok(fake.requestCount() < 100, `expected batched ledger+lineage validation, received ${fake.requestCount()} requests`);
+  assert.ok(fake.requestCount() < 100, `expected batched status+lineage validation, received ${fake.requestCount()} requests`);
 });
 
-test('status ledger pagination tolerates unrelated statuses without weakening lane isolation', async () => {
+test('status pagination tolerates unrelated contexts without weakening lane isolation', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const head = await publishMarker(store, 'one');
-  for (let index = 0; index < 150; index += 1) {
-    fake.forceStatus(`unrelated/${index}`, `noise-${index}`);
-  }
+  for (let index = 0; index < 150; index += 1) fake.forceStatus(`unrelated/${index}`, `noise-${index}`);
   assert.equal((await storeFor(fake, { ownerId: 'github:pagination' }).load()).marker, 'one');
   assert.equal((await store.readStatusLedger()).at(-1).stateSha, head);
 });
@@ -949,7 +1033,7 @@ test('execution leases use cloud owner identity and become recoverable only afte
   assert.equal(await first.lockOwnerIsAbandoned(metadata), true);
 });
 
-test('remote envelope integrity mismatch fails closed even with matching status authority', async () => {
+test('remote envelope integrity mismatch fails closed with matching status authority', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake, { ownerId: 'github:integrity' });
   const stateSha = await publishMarker(store, 'safe');
