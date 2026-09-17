@@ -224,6 +224,7 @@ test('durable state bootstraps state and checkpoint refs and resumes across ephe
 
   assert.ok(fake.ref('refs/tags/agent-cloud-state-v1'));
   assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'));
+  assert.ok(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2-initialized-v2'));
 
   const second = storeFor(fake, { ownerId: 'github:11:1' });
   const loaded = await second.load();
@@ -316,7 +317,7 @@ test('lane envelope binding rejects reading another lane through the wrong store
   });
   await websiteStore.withGlobalLease(async () => {
     await websiteStore.mutate((state) => {
-      state.workflows = { web1: { id: 'web1', projectId: 'website-pilot', status: 'pending', executionLease: null } };
+      state.workflows = { web1: { id: 'w1', projectId: 'website-pilot', status: 'pending', executionLease: null } };
     });
   });
 
@@ -431,19 +432,21 @@ test('interruption before state-ref publication leaves prior authoritative refs 
   assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), before.checkpointSha);
 });
 
-test('state-only bootstrap recovery validates history and creates durable checkpoint', async () => {
+test('state-only initial bootstrap recovery validates history and creates durable checkpoint', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake, { ownerId: 'github:migration:a' });
   const initial = await writer.readSnapshot();
   const state = cloneState(initial.state);
-  state.marker = 'legacy-state';
+  state.marker = 'initial-state';
   const sha = await writer.writeSnapshot(state, initial);
   fake.deleteRef('refs/tags/agent-cloud-state-v1-checkpoint-v2');
+  fake.deleteRef('refs/tags/agent-cloud-state-v1-checkpoint-v2-initialized-v2');
 
   const fresh = storeFor(fake, { ownerId: 'github:migration:b' });
   const loaded = await fresh.load();
-  assert.equal(loaded.marker, 'legacy-state');
+  assert.equal(loaded.marker, 'initial-state');
   assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), sha);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2-initialized-v2'), sha);
 });
 
 test('checkpoint without state ref fails closed as partial publication', async () => {
