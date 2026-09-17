@@ -183,6 +183,10 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     );
     const fetched = (await this.localGit.git(['rev-parse', `refs/remotes/origin/${branch}`], workspaceProject)).stdout.trim();
     if (fetched !== remoteHead) throw new Error('durable_checkpoint_remote_head_raced');
+    const ancestry = (await this.localGit.git(['rev-list', '--parents', '-n', '1', remoteHead], workspaceProject)).stdout.trim().split(/\s+/);
+    if (ancestry.length !== 2 || ancestry[0] !== remoteHead || ancestry[1] !== plan.workspace.baseHead) {
+      throw new Error('durable_checkpoint_remote_parent_mismatch');
+    }
     await this.localGit.git(['reset', '--hard', remoteHead], workspaceProject);
     await this.localGit.git(['reset', '--mixed', plan.workspace.baseHead], workspaceProject);
     const recoveredChangeSet = await this.localGit.inspectChangeSet(workspaceProject);
