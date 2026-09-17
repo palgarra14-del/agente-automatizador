@@ -108,7 +108,7 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.equal(website.execution.image, self.execution.image);
   assert.equal(callflow.execution.image, self.execution.image);
   assert.match(workflow, /run: npm ci --ignore-scripts/);
-  assert.ok(workflow.includes(`docker build --pull=false --tag ${self.execution.image} docker/node22-pnpm11`));
+  assert.ok(workflow.includes('node src/cli.js runtime sync'));
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
