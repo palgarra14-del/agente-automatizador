@@ -333,6 +333,7 @@ export class GitHubStateStore extends JsonStore {
 
     const stateEnvelope = await this.readEnvelopeAt(stateSha);
     if (!checkpointSha) {
+      if (stateEnvelope.version === 2 && stateEnvelope.generation !== 1) throw new Error('cloud_state_checkpoint_missing');
       await this.validateBootstrapHistory(stateSha, stateEnvelope);
       const [latestStateSha, latestCheckpointSha] = await Promise.all([
         this.refSha(`tags/${encodeURIComponent(this.tag)}`),
