@@ -131,6 +131,13 @@ function fakeGitHub() {
     throw new Error(`unexpected fake GitHub request: ${method} ${path}`);
   };
 
+  const envelopeAt = (commitSha, statePath = '.agent/cloud-state.json') => {
+    const commit = commits.get(commitSha);
+    const tree = trees.get(commit.tree.sha);
+    const blobSha = tree.get(statePath);
+    return { blobSha, envelope: JSON.parse(blobs.get(blobSha)) };
+  };
+
   return {
     fetchImpl,
     failNextRefWrite(ref) { failRef = ref; },
@@ -140,23 +147,34 @@ function fakeGitHub() {
     ref(ref) { return refs.get(ref) ?? null; },
     lastCreatedCommit() { return lastCreatedCommit; },
     tamperGeneration(ref, delta) {
-      const commit = commits.get(refs.get(ref));
-      const tree = trees.get(commit.tree.sha);
-      const blobSha = tree.get('.agent/cloud-state.json');
-      const envelope = JSON.parse(blobs.get(blobSha));
+      const { blobSha, envelope } = envelopeAt(refs.get(ref));
       envelope.generation += delta;
       blobs.set(blobSha, JSON.stringify(envelope));
+    },
+    downgradeEnvelopeToV1(commitSha) {
+      const { blobSha, envelope } = envelopeAt(commitSha);
+      envelope.version = 1;
+      delete envelope.stateTag;
+      delete envelope.checkpointTag;
+      delete envelope.statePath;
+      blobs.set(blobSha, JSON.stringify(envelope));
+    },
+    copyStatePath(commitSha, fromPath, toPath) {
+      const commit = commits.get(commitSha);
+      const tree = trees.get(commit.tree.sha);
+      tree.set(toPath, tree.get(fromPath));
     }
   };
 }
 
-function storeFor(fake, ownerId) {
+function storeFor(fake, ownerId, options = {}) {
   return new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     token: 'test-token-not-a-real-secret',
     fetchImpl: fake.fetchImpl,
     ownerId,
-    leaseTtlMs: 60_000
+    leaseTtlMs: 60_000,
+    ...options
   });
 }
 
@@ -166,6 +184,7 @@ function cloneState(state) {
 
 const stateRef = 'refs/tags/agent-cloud-state-v1';
 const checkpointRef = 'refs/tags/agent-cloud-state-v1-checkpoint-v2';
+const initializationRef = 'refs/tags/agent-cloud-state-v1-checkpoint-v2-initialized-v2';
 
 test('fresh process rejects a higher-generation state on divergent Git history', async () => {
   const fake = fakeGitHub();
@@ -204,6 +223,30 @@ test('fresh process rejects a higher-generation state on divergent Git history',
   fake.forceRef(checkpointRef, acceptedN1);
   const fresh = storeFor(fake, 'github:higher:fresh');
   await assert.rejects(fresh.load(), /cloud_state_history_fork/);
+});
+
+test('writer rejects a caller-mutated generation and agreed refs reject an external generation jump', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, 'github:generation:writer');
+  const initial = await writer.readSnapshot();
+  const state1 = cloneState(initial.state);
+  state1.marker = 'n';
+  await writer.writeSnapshot(state1, initial);
+
+  const mutableSnapshot = await writer.readSnapshot();
+  mutableSnapshot.generation += 5;
+  const attemptedState = cloneState(mutableSnapshot.state);
+  attemptedState.marker = 'must-not-write';
+  await assert.rejects(writer.writeSnapshot(attemptedState, mutableSnapshot), /cloud_state_snapshot_untrusted/);
+
+  const cleanSnapshot = await writer.readSnapshot();
+  const state2 = cloneState(cleanSnapshot.state);
+  state2.marker = 'n+1';
+  await writer.writeSnapshot(state2, cleanSnapshot);
+  fake.tamperGeneration(stateRef, 1);
+
+  const fresh = storeFor(fake, 'github:generation:fresh');
+  await assert.rejects(fresh.load(), /cloud_state_generation_discontinuity/);
 });
 
 test('fresh process rejects a descendant whose generation skips the trusted checkpoint sequence', async () => {
@@ -247,6 +290,49 @@ test('checkpoint recovery is idempotent when another process wins the same optim
   assert.equal(loaded.marker, 'n+1');
   assert.equal(fake.ref(stateRef), newestStateSha);
   assert.equal(fake.ref(checkpointRef), newestStateSha);
+});
+
+test('initialization marker prevents legacy v1 migration from silently resetting the watermark', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, 'github:legacy:writer');
+  const initial = await writer.readSnapshot();
+  const state1 = cloneState(initial.state);
+  state1.marker = 'legacy-n';
+  const sha1 = await writer.writeSnapshot(state1, initial);
+  const snapshot = await writer.readSnapshot();
+  const state2 = cloneState(snapshot.state);
+  state2.marker = 'legacy-n+1';
+  const sha2 = await writer.writeSnapshot(state2, snapshot);
+
+  fake.downgradeEnvelopeToV1(sha1);
+  fake.downgradeEnvelopeToV1(sha2);
+  fake.deleteRef(checkpointRef);
+  fake.deleteRef(initializationRef);
+
+  const migrator = storeFor(fake, 'github:legacy:migrator');
+  const migrated = await migrator.load();
+  assert.equal(migrated.marker, 'legacy-n+1');
+  assert.equal(fake.ref(checkpointRef), sha2);
+  assert.equal(fake.ref(initializationRef), sha2);
+
+  fake.deleteRef(checkpointRef);
+  fake.forceRef(stateRef, sha1);
+  const rolledBack = storeFor(fake, 'github:legacy:rollback');
+  await assert.rejects(rolledBack.load(), /cloud_state_checkpoint_missing/);
+});
+
+test('v2 envelope is bound to the exact configured state path', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, 'github:path:writer');
+  const initial = await writer.readSnapshot();
+  const state = cloneState(initial.state);
+  state.marker = 'bound-path';
+  const sha = await writer.writeSnapshot(state, initial);
+
+  const alternatePath = '.agent/copied-cloud-state.json';
+  fake.copyStatePath(sha, '.agent/cloud-state.json', alternatePath);
+  const wrongPathStore = storeFor(fake, 'github:path:reader', { statePath: alternatePath });
+  await assert.rejects(wrongPathStore.load(), /cloud_state_ref_binding_mismatch/);
 });
 
 test('missing checkpoint after v2 bootstrap fails closed instead of resetting the trusted watermark', async () => {
