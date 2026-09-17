@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
 import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
 import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
@@ -132,7 +133,7 @@ try {
         })
         : store;
       const activeWorkflows = cloudAction
-        ? new WorkflowEngine({ store: activeStore, projects })
+        ? new DurableCloudWorkflowEngine({ store: activeStore, projects })
         : workflows;
       const queue = new SupervisedIssueQueue({
         store: activeStore,
