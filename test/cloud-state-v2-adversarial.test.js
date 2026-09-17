@@ -136,6 +136,7 @@ function fakeGitHub() {
     failNextRefWrite(ref) { failRef = ref; },
     raceNextRefWrite(ref) { raceRef = ref; },
     forceRef(ref, sha) { refs.set(ref, sha); },
+    deleteRef(ref) { refs.delete(ref); },
     ref(ref) { return refs.get(ref) ?? null; },
     lastCreatedCommit() { return lastCreatedCommit; },
     tamperGeneration(ref, delta) {
@@ -246,4 +247,21 @@ test('checkpoint recovery is idempotent when another process wins the same optim
   assert.equal(loaded.marker, 'n+1');
   assert.equal(fake.ref(stateRef), newestStateSha);
   assert.equal(fake.ref(checkpointRef), newestStateSha);
+});
+
+test('missing checkpoint after v2 bootstrap fails closed instead of resetting the trusted watermark', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, 'github:missing:writer');
+  const initial = await writer.readSnapshot();
+  const state1 = cloneState(initial.state);
+  state1.marker = 'n';
+  await writer.writeSnapshot(state1, initial);
+  const snapshot = await writer.readSnapshot();
+  const state2 = cloneState(snapshot.state);
+  state2.marker = 'n+1';
+  await writer.writeSnapshot(state2, snapshot);
+
+  fake.deleteRef(checkpointRef);
+  const fresh = storeFor(fake, 'github:missing:fresh');
+  await assert.rejects(fresh.load(), /cloud_state_checkpoint_missing/);
 });
