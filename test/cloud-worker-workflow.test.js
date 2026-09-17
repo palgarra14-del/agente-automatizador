@@ -85,21 +85,15 @@ test('cloud worker checks out trusted main without persisting checkout credentia
   assert.match(workflow, /uses: actions\/setup-node@v4[\s\S]*?node-version: 24/);
   const thirdPartyUses = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)]
     .map((match) => match[1])
-    .filter((action) => !/^actions\/(checkout|setup-node|cache)@/.test(action));
+    .filter((action) => !/^actions\/(checkout|setup-node)@/.test(action));
   assert.deepEqual(thirdPartyUses, []);
 });
 
-test('cloud worker restores lane-scoped managed workspaces across approval-triggered runners', () => {
-  assert.equal((workflow.match(/uses: actions\/cache@v4/g) ?? []).length, 1);
-  assert.match(workflow, /- name: Restore lane workspace continuity\n\s+uses: actions\/cache@v4/);
-  assert.match(workflow, /path: \|\n\s+\.agent-workspaces\/\$\{\{ matrix\.lane \}\}/);
-  assert.match(workflow, /!\.agent-workspaces\/\$\{\{ matrix\.lane \}\}\/\*\*\/node_modules/);
-  assert.match(workflow, /!\.agent-workspaces\/\$\{\{ matrix\.lane \}\}\/\*\*\/\.next\/cache/);
-  assert.match(workflow, /key: agent-workspace-\$\{\{ matrix\.lane \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-  assert.match(workflow, /restore-keys: \|\n\s+agent-workspace-\$\{\{ matrix\.lane \}\}-/);
-  assert.doesNotMatch(workflow, /rm -rf|find .*node_modules/);
-  const cacheBlock = workflow.slice(workflow.indexOf('- name: Restore lane workspace continuity'), workflow.indexOf('- name: Set up Node'));
-  assert.doesNotMatch(cacheBlock, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
+test('cloud worker does not depend on runner cache for workflow continuity', () => {
+  assert.doesNotMatch(workflow, /actions\/cache@/);
+  assert.doesNotMatch(workflow, /agent-workspace-\$\{\{ matrix\.lane \}\}/);
+  assert.doesNotMatch(workflow, /Restore lane workspace continuity/);
+  assert.doesNotMatch(workflow, /\.agent-workspaces\/\$\{\{ matrix\.lane \}\}/);
 });
 
 test('routing job receives event data but no secrets or write credentials', () => {
