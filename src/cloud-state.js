@@ -5,7 +5,8 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
-const MAX_STATE_HISTORY_DEPTH = 2048;
+const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
+const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
 
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
@@ -36,6 +37,14 @@ function stateHash(state) {
 function assertSha(value, code = 'cloud_state_sha_invalid') {
   if (typeof value !== 'string' || !/^[a-f0-9]{40}$/i.test(value)) throw new Error(code);
   return value.toLowerCase();
+}
+
+function checkpointTagFor(tag) {
+  return `${CHECKPOINT_NAMESPACE}/${tag}`;
+}
+
+function witnessTagFor(tag) {
+  return `${WITNESS_NAMESPACE}/${tag}`;
 }
 
 function assertNoSensitiveKeys(value, path = 'state') {
@@ -106,8 +115,6 @@ export class GitHubStateStore extends JsonStore {
     token = process.env.GITHUB_TOKEN,
     fetchImpl = fetch,
     tag = DEFAULT_TAG,
-    checkpointTag = `${tag}-checkpoint-v2`,
-    witnessTag = `${tag}-witness-v2`,
     statePath = DEFAULT_PATH,
     laneId = 'self',
     allowedProjectIds = ['self'],
@@ -124,10 +131,6 @@ export class GitHubStateStore extends JsonStore {
     if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch) || baseBranch.includes('..')) throw new Error('cloud_state_base_branch_invalid');
     if (!token) throw new Error('cloud_state_github_token_required');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(tag)) throw new Error('cloud_state_tag_invalid');
-    if (!/^[A-Za-z0-9._-]{1,120}$/.test(checkpointTag) || checkpointTag === tag) throw new Error('cloud_state_checkpoint_tag_invalid');
-    if (!/^[A-Za-z0-9._-]{1,120}$/.test(witnessTag) || witnessTag === tag || witnessTag === checkpointTag) {
-      throw new Error('cloud_state_witness_tag_invalid');
-    }
     if (!/^[a-z0-9-]{1,80}$/.test(laneId)) throw new Error('cloud_state_lane_invalid');
     if (!/^[A-Za-z0-9._/-]{1,200}$/.test(statePath) || statePath.includes('..')) throw new Error('cloud_state_path_invalid');
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
@@ -137,8 +140,8 @@ export class GitHubStateStore extends JsonStore {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.tag = tag;
-    this.checkpointTag = checkpointTag;
-    this.witnessTag = witnessTag;
+    this.checkpointTag = checkpointTagFor(tag);
+    this.witnessTag = witnessTagFor(tag);
     this.statePath = statePath;
     this.laneId = laneId;
     this.allowedProjectIds = normalizedAllowedProjectIds;
@@ -254,10 +257,7 @@ export class GitHubStateStore extends JsonStore {
     if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
     let currentSha = stateSha;
     let currentEnvelope = stateEnvelope;
-    const visited = new Set();
-    for (let depth = 0; depth < MAX_STATE_HISTORY_DEPTH; depth += 1) {
-      if (visited.has(currentSha)) throw new Error('cloud_state_history_cycle');
-      visited.add(currentSha);
+    while (true) {
       const commit = await this.readCommit(currentSha);
       if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
       const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
@@ -271,25 +271,30 @@ export class GitHubStateStore extends JsonStore {
       currentSha = parentSha;
       currentEnvelope = parentEnvelope;
     }
-    throw new Error('cloud_state_history_too_deep');
   }
 
   async validateCurrentV2Commit(stateSha, stateEnvelope) {
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
-    const commit = await this.readCommit(stateSha);
-    if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
-    const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-    if (stateEnvelope.generation === 1) {
-      await this.assertBootstrapParent(parentSha);
-      return;
+    let currentSha = stateSha;
+    let currentEnvelope = stateEnvelope;
+    while (true) {
+      const commit = await this.readCommit(currentSha);
+      if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+      if (currentEnvelope.generation === 1) {
+        await this.assertBootstrapParent(parentSha);
+        return;
+      }
+      const parentEnvelope = await this.readEnvelopeAt(parentSha);
+      if (parentEnvelope.generation !== currentEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
+      if (parentEnvelope.version === 1) {
+        await this.validateLegacyHistory(parentSha, parentEnvelope);
+        return;
+      }
+      if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
+      currentSha = parentSha;
+      currentEnvelope = parentEnvelope;
     }
-    const parentEnvelope = await this.readEnvelopeAt(parentSha);
-    if (parentEnvelope.generation !== stateEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
-    if (parentEnvelope.version === 1) {
-      await this.validateLegacyHistory(parentSha, parentEnvelope);
-      return;
-    }
-    if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
   }
 
   async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
@@ -403,10 +408,9 @@ export class GitHubStateStore extends JsonStore {
       trustedEnvelope = await this.readEnvelopeAt(trustedSha);
     }
     if (trustedEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
+    await this.validateCurrentV2Commit(trustedSha, trustedEnvelope);
 
-    if (stateSha === trustedSha) {
-      await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-    } else {
+    if (stateSha !== trustedSha) {
       const relation = await this.compareCommits(trustedSha, stateSha);
       if (relation === 'behind') throw new Error('cloud_state_rollback');
       if (relation === 'diverged') throw new Error('cloud_state_history_fork');
