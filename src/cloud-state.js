@@ -369,19 +369,7 @@ export class GitHubStateStore extends JsonStore {
     if (!checkpointSha && !witnessSha) {
       if (stateEnvelope.version === 1) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
       await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-      const commit = await this.readCommit(stateSha);
-      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      let recoverableFirstV2 = stateEnvelope.generation === 1;
-      if (!recoverableFirstV2) {
-        const parentEnvelope = await this.readEnvelopeAt(parentSha);
-        recoverableFirstV2 = parentEnvelope.version === 1 && parentEnvelope.generation + 1 === stateEnvelope.generation;
-      }
-      if (!recoverableFirstV2) throw new Error('cloud_state_watermarks_missing');
-      if (repair) {
-        await this.repairWatermarks(stateSha, null, null);
-        return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
-      }
-      return this.snapshotFrom(stateSha, null, null, stateEnvelope);
+      throw new Error('cloud_state_watermarks_missing');
     }
 
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
@@ -393,15 +381,22 @@ export class GitHubStateStore extends JsonStore {
         trustedSha = checkpointSha;
         trustedEnvelope = await this.readEnvelopeAt(trustedSha);
       } else {
-        const relation = await this.compareCommits(witnessSha, checkpointSha);
-        if (relation === 'behind') throw new Error('cloud_state_watermark_order_invalid');
-        if (relation === 'diverged') throw new Error('cloud_state_history_fork');
-        if (relation !== 'ahead') throw new Error('cloud_state_watermark_history_invalid');
-        const witnessEnvelope = await this.readEnvelopeAt(witnessSha);
+        const relation = await this.compareCommits(checkpointSha, witnessSha);
         const checkpointEnvelope = await this.readEnvelopeAt(checkpointSha);
-        await this.validateDirectV2Child(witnessSha, witnessEnvelope, checkpointSha, checkpointEnvelope);
-        trustedSha = checkpointSha;
-        trustedEnvelope = checkpointEnvelope;
+        const witnessEnvelope = await this.readEnvelopeAt(witnessSha);
+        if (relation === 'ahead') {
+          await this.validateDirectV2Child(checkpointSha, checkpointEnvelope, witnessSha, witnessEnvelope);
+          trustedSha = witnessSha;
+          trustedEnvelope = witnessEnvelope;
+        } else if (relation === 'behind') {
+          await this.validateDirectV2Child(witnessSha, witnessEnvelope, checkpointSha, checkpointEnvelope);
+          trustedSha = checkpointSha;
+          trustedEnvelope = checkpointEnvelope;
+        } else if (relation === 'diverged') {
+          throw new Error('cloud_state_history_fork');
+        } else {
+          throw new Error('cloud_state_watermark_history_invalid');
+        }
       }
     } else {
       trustedSha = checkpointSha ?? witnessSha;
@@ -492,17 +487,23 @@ export class GitHubStateStore extends JsonStore {
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
     await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    let checkpointError = null;
+    let witnessError = null;
     try {
       await this.advanceRef(this.checkpointTag, expectedCheckpointSha, commitSha, 'cloud_state_partial_publication');
+    } catch (error) {
+      checkpointError = error;
+    }
+    try {
       await this.advanceRef(this.witnessTag, expectedWitnessSha, commitSha, 'cloud_state_partial_publication');
     } catch (error) {
-      throw new Error('cloud_state_partial_publication', { cause: error });
+      witnessError = error;
     }
     const finalRefs = await this.readRefs();
-    if (finalRefs.stateSha !== commitSha || finalRefs.checkpointSha !== commitSha || finalRefs.witnessSha !== commitSha) {
-      throw new Error('cloud_state_partial_publication');
+    if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha) {
+      return commitSha;
     }
-    return commitSha;
+    throw new Error('cloud_state_partial_publication', { cause: checkpointError ?? witnessError ?? undefined });
   }
 
   async load() {
