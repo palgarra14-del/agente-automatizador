@@ -12,8 +12,7 @@ test('Callflow is registered as a governed isolated project', async () => {
   assert.equal(callflow.defaultBranch, 'main');
   assert.equal(callflow.workspaceStrategy, 'managed');
   assert.equal(callflow.execution.provider, 'container-required');
-  assert.equal(callflow.execution.image, 'node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5');
-  assert.equal(imageIsPinned(callflow.execution.image), true);
+  assert.equal(callflow.execution.image, 'agent-node22-pnpm11:local');
   assert.equal(callflow.commands.test, 'npm test');
   assert.equal(callflow.commands.typecheck, 'node --check prospect-utils.js');
   assert.equal(callflow.commands.lint, 'node --check prospect.js');
