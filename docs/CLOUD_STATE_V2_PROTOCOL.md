@@ -26,13 +26,14 @@ When `stateRef` is v1 and both watermark refs are absent:
 
 1. Read the v1 state by exact commit SHA and validate the complete v1 parent chain, generation continuity, repository/lane ownership, state hash, secret boundaries and base ancestry.
 2. Re-read all refs and require the same migration pre-state.
-3. Create a new v2 migration commit whose parent is exactly the validated v1 head, whose logical state is unchanged, and whose generation is exactly parent generation + 1.
+3. Create a new v2 migration commit whose parent is exactly the validated v1 head and whose generation is exactly parent generation + 1. The logical state may include the governed mutation that triggered migration.
 4. Advance `stateRef` non-force to the v2 migration commit.
-5. Create `checkpointRef` at that same commit.
-6. Create `witnessRef` at that same commit.
-7. Return success only after all three refs resolve to the exact v2 migration SHA.
+5. Attempt `checkpointRef` and `witnessRef` independently at that same commit. A failure of one must not prevent attempting the other.
+6. Return success only after all three refs resolve to the exact v2 migration SHA; otherwise return an explicit partial-publication error.
 
 If an old v1 writer wins the state-ref race before step 4, migration must conflict and restart from the new exact v1 head. Once `stateRef` has advanced to a v2 commit, an old v1 writer holding the previous v1 parent cannot non-force advance the ref. A v1 descendant must never be accepted after either watermark exists or v2 migration has begun.
+
+If `stateRef` is already v2 and both watermarks are absent, the state is a hard partial publication. It must fail closed and require explicit operator recovery that preserves the newer exact state SHA; a normal read/mutation must never recreate trust automatically from `stateRef` alone.
 
 ## Read invariant
 
@@ -42,32 +43,34 @@ Let `S` be `stateRef`, `C` be `checkpointRef`, and `W` be `witnessRef`.
 
 1. If `S`, `C` and `W` are all absent, bootstrap from the configured base branch.
 2. If `S` is absent while either watermark exists, fail closed as partial/corrupt publication.
-3. If `S` is v1 and both watermarks are absent, only the one-time legacy migration protocol above is allowed.
+3. If `S` is v1 and both watermarks are absent, only the one-time legacy migration path above is eligible on a governed write; ordinary reads remain read-only.
 4. If `S` is v2 and both watermarks are absent, fail closed. Never reinterpret it as first migration.
-5. If exactly one watermark is absent, the surviving watermark remains authoritative. Reconstruct the missing watermark only after exact-SHA envelope validation, ancestry proof, generation continuity and a fresh ref re-check.
-6. If both watermarks exist, they must be mutually consistent with the publication order and Git history. A watermark or state ref that is an ancestor of a newer trusted watermark is rollback evidence, not a reason to move the trusted watermark backward.
-7. `stateRef` may be ahead of one or both watermarks only as a valid descendant produced by an interrupted publication. Validate every traversed edge: each child generation must equal parent generation + 1 and every v2 envelope must retain the same repository/lane/path/ref bindings.
+5. If exactly one watermark exists, it is the durable authority witness. `S` must be either that exact commit or one validated direct v2 child. The missing watermark may be reconstructed only during a governed repair after exact-SHA validation and a fresh ref re-check.
+6. If both watermarks exist and differ, either one may be the newer direct v2 child because publication attempts them independently. Prove their exact parent/child relationship and generation +1 continuity, then use the newer watermark as the trusted SHA. Divergent or multi-step watermark gaps fail closed.
+7. `stateRef` may equal the newest watermark or be one validated direct v2 child ahead of it as the result of an interrupted publication. A state ref behind a surviving newer watermark is rollback evidence and is rejected.
 8. If neither side is ancestor of the other, reject `cloud_state_history_fork`.
 9. State content is always read by exact commit SHA, never through a moving tag.
-10. Even when `S == C == W`, validate the current v2 commit against its exact parent (or equivalent trusted-history proof). Matching refs alone never authorize a skipped generation or malformed lineage.
+10. Even when `S == C == W`, validate the current v2 commit against its exact parent. Matching refs alone never authorize a skipped generation or malformed lineage.
+11. Ordinary `load()`/preflight reads never mutate refs. Watermark repair occurs only on an explicitly governed mutation/recovery path.
 
 A numerically higher generation never substitutes for ancestry proof.
 
 ## Write protocol
 
-Given a validated snapshot whose exact state SHA is `S0` and both durable watermarks resolve to `S0`:
+Given a validated snapshot whose exact state SHA is `S0` and both durable watermarks resolve to `S0` (or a validated legacy v1 snapshot with no watermarks):
 
-1. Re-read all three refs immediately before publication and require them to still match the validated snapshot/recovery state.
+1. Re-read all three refs immediately before publication and require them to still match the validated snapshot.
 2. Re-read the exact trusted parent envelope at `S0` and derive the next generation from it. Caller-supplied or mutable snapshot generation is never authoritative.
 3. Create blob, tree and v2 state commit `S1` with parent exactly `S0` (or the configured base commit for a brand-new lane).
 4. Publish `stateRef -> S1` with a non-force update.
-5. Publish `checkpointRef -> S1` with a non-force update.
-6. Publish `witnessRef -> S1` with a non-force update.
-7. Return success only after all three refs resolve to `S1`.
+5. Attempt `checkpointRef -> S1` and `witnessRef -> S1` independently with non-force updates. Do not skip the second watermark merely because the first failed.
+6. Return success only after all three refs resolve to `S1`. Otherwise return `cloud_state_partial_publication` while preserving every successfully published newer ref.
 
 No force updates are permitted.
 
-A stale writer must fail on the first ref it can no longer advance. If publication stops after step 4 or 5, a fresh process may recover only by proving the exact descendant history from the surviving watermark(s). Recovery never rolls any ref backward and never discards a newer validated state commit.
+A stale writer must fail on the state-ref update before it can change either watermark. A single watermark failure after the state update still leaves the other watermark as durable evidence and is automatically repairable by a later governed mutation. If both watermark writes fail after `stateRef` advanced, the lane fails closed: zero-watermark v2 cannot be automatically trusted.
+
+Recovery never rolls any ref backward and never discards a newer validated state commit.
 
 ## Generation rules
 
@@ -85,31 +88,31 @@ The envelope is monotonic metadata backed by exact Git ancestry, not a standalon
 
 Two writers may prepare children from the same trusted state, but only one may advance `stateRef` non-force. The loser fails with `cloud_state_conflict` and must not advance either watermark.
 
-Recovery itself must be idempotent. If another process wins the same non-force watermark repair and all exact refs now resolve to the expected validated SHA, the recovery may succeed; otherwise it fails closed.
+Recovery itself must be idempotent. If another process wins the same non-force watermark repair and all exact refs now resolve to the expected validated SHA, recovery may succeed; otherwise it fails closed.
 
-The valid interrupted-publication prefixes are bounded by the fixed order `stateRef -> checkpointRef -> witnessRef`. States that require a watermark to be ahead of `stateRef`, or `witnessRef` ahead of `checkpointRef`, are not normal publication prefixes and must not be silently normalized.
+After `stateRef` advances, `checkpointRef` and `witnessRef` are independent redundant acknowledgements. Either watermark may be one direct child ahead of the other, but neither may be ahead of `stateRef`, diverge from the other, or lag by more than the single in-flight state commit accepted by the bounded publication protocol.
 
 ## Required adversarial regressions
 
 Tests must use completely new `GitHubStateStore` instances so no in-memory watermark can satisfy them:
 
-- migrate a multi-generation legacy v1 history to a v2 child without changing logical state;
-- old v1 writer races migration: either the legacy writer wins first and migration restarts, or migration wins and the old writer conflicts; a v1 child is never checkpointed after migration begins;
+- migrate a multi-generation legacy v1 history to a v2 child and derive generation from the exact parent rather than mutable snapshot metadata;
+- old v1 writer races migration: either the legacy writer wins first and migration restarts, or migration wins and the old writer conflicts; a v1 child is never accepted after migration;
 - publish N+1, force `stateRef` back to N, delete `checkpointRef`, keep `witnessRef` at N+1: fresh process rejects rollback;
 - symmetric loss of `witnessRef` with `checkpointRef` intact also rejects rollback;
 - both watermarks missing while `stateRef` is already v2 fails closed;
 - divergent higher-generation history is rejected;
 - same generation with a different SHA is rejected;
 - a child whose generation skips the parent is rejected even when all three refs are forced to agree on it;
-- mutating `snapshot.generation` cannot influence the persisted next generation;
 - wrong `statePath`, state ref name, checkpoint ref name or witness ref name cannot satisfy another store;
 - interruption before state-ref publication leaves prior authority intact;
-- interruption after state-ref publication is recoverable without rollback;
-- interruption after checkpoint publication but before witness publication is recoverable without rollback;
+- failure of checkpoint publication still attempts witness publication; the surviving witness permits safe later repair;
+- failure of witness publication leaves checkpoint evidence and permits safe later repair;
+- if both watermark publications fail after state publication, normal readers fail closed rather than recreating trust;
 - concurrent writers from the same snapshot yield one winner and one conflict;
 - concurrent recovery of the same partial publication is idempotent;
 - refs for `self`, `callflow`, and `website-pilot` cannot satisfy another lane's validation;
-- exact-SHA content reads are retained.
+- exact-SHA content reads are retained and ordinary loads/preflight perform zero writes.
 
 ## Merge gates
 
