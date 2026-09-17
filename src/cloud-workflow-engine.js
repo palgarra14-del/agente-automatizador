@@ -364,13 +364,23 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     const checkpoint = release?.evidence?.durableCheckpoint ?? null;
     const expectedFingerprint = implementation?.evidence?.changeSetFingerprint ?? null;
     if (!checkpoint ||
+        implementation?.status !== WorkflowStepStatus.COMPLETED ||
+        review?.status !== WorkflowStepStatus.COMPLETED ||
+        release?.status !== WorkflowStepStatus.COMPLETED ||
+        !reviewPassed(review) ||
         checkpoint.version !== DURABLE_CHECKPOINT_VERSION ||
         checkpoint.changeSetFingerprint !== expectedFingerprint ||
-        release?.evidence?.approvedCommitSha !== checkpoint.commit?.finalHead ||
-        release?.evidence?.approvedChangeSetFingerprint !== expectedFingerprint ||
-        review?.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint ||
-        !exactSha(checkpoint.commit?.finalHead)) {
+        release.evidence?.approvedCommitSha !== checkpoint.commit?.finalHead ||
+        release.evidence?.approvedChangeSetFingerprint !== expectedFingerprint ||
+        review.evidence?.reviewedChangeSetFingerprint !== expectedFingerprint ||
+        !exactSha(checkpoint.commit?.finalHead) ||
+        !plan.workspace?.managed ||
+        plan.workspace.workingBranch !== checkpoint.branch ||
+        plan.workspace.baseHead !== checkpoint.baseHead) {
       return this.stopPublication(id, next.id, 'workflow_publication_durable_checkpoint_invalid', { blocked: false, phase: 'preflight' });
+    }
+    if (next.attempts >= plan.budgets.maxAttempts) {
+      return this.stopPublication(id, next.id, 'workflow_publication_attempt_budget_exhausted', { blocked: false, phase: next.evidence?.phase ?? 'preflight' });
     }
 
     if (!next.evidence?.commit) {
@@ -409,7 +419,6 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
         });
       } catch (error) {
         return this.stopPublication(id, next.id, 'workflow_publication_pr_state_uncertain', {
-          blocked: false,
           phase: 'pr-uncertain',
           patch: { error: maskSecrets(error.message).slice(0, 1_000) }
         });
