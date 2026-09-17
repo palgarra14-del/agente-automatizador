@@ -10,6 +10,9 @@ export default [
       globals: {
         Buffer: 'readonly',
         AbortController: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        structuredClone: 'readonly',
         console: 'readonly',
         fetch: 'readonly',
         process: 'readonly',
