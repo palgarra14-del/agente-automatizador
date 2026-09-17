@@ -43,6 +43,7 @@ function witnessTagFor(tag) {
 function fakeGitHub() {
   let sequence = 10;
   let writeCount = 0;
+  let requestCount = 0;
   const sha = () => (sequence++).toString(16).padStart(40, '0');
   const mainSha = 'a'.repeat(40);
   const mainTree = 'b'.repeat(40);
@@ -54,20 +55,50 @@ function fakeGitHub() {
   const contentRefs = [];
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
-  const isAncestor = (ancestorSha, descendantSha) => {
-    if (ancestorSha === descendantSha) return true;
-    const stack = [descendantSha];
-    const seen = new Set();
-    while (stack.length) {
-      const current = stack.pop();
-      if (seen.has(current)) continue;
-      seen.add(current);
+  const ancestorDistances = (startSha) => {
+    const distances = new Map([[startSha, 0]]);
+    const queue = [startSha];
+    while (queue.length) {
+      const current = queue.shift();
+      const distance = distances.get(current);
       for (const parent of commits.get(current)?.parents ?? []) {
-        if (parent.sha === ancestorSha) return true;
-        stack.push(parent.sha);
+        if (distances.has(parent.sha)) continue;
+        distances.set(parent.sha, distance + 1);
+        queue.push(parent.sha);
       }
     }
-    return false;
+    return distances;
+  };
+  const isAncestor = (ancestorSha, descendantSha) => ancestorDistances(descendantSha).has(ancestorSha);
+  const comparePayload = (baseSha, headSha) => {
+    if (baseSha === headSha) {
+      return { status: 'identical', ahead_by: 0, behind_by: 0, merge_base_commit: { sha: baseSha } };
+    }
+    const baseDistances = ancestorDistances(baseSha);
+    const headDistances = ancestorDistances(headSha);
+    let mergeBaseSha = null;
+    let mergeScore = Number.POSITIVE_INFINITY;
+    for (const [candidate, headDistance] of headDistances.entries()) {
+      const baseDistance = baseDistances.get(candidate);
+      if (baseDistance === undefined) continue;
+      const score = headDistance + baseDistance;
+      if (score < mergeScore) {
+        mergeScore = score;
+        mergeBaseSha = candidate;
+      }
+    }
+    if (!mergeBaseSha) return { status: 'diverged', ahead_by: 0, behind_by: 0, merge_base_commit: null };
+    const aheadBy = headDistances.get(mergeBaseSha);
+    const behindBy = baseDistances.get(mergeBaseSha);
+    let status = 'diverged';
+    if (behindBy === 0) status = 'ahead';
+    else if (aheadBy === 0) status = 'behind';
+    return {
+      status,
+      ahead_by: aheadBy,
+      behind_by: behindBy,
+      merge_base_commit: { sha: mergeBaseSha }
+    };
   };
 
   const maybeFail = (method, path, body) => {
@@ -78,6 +109,7 @@ function fakeGitHub() {
   };
 
   const fetchImpl = async (rawUrl, options = {}) => {
+    requestCount += 1;
     const url = new URL(rawUrl);
     const prefix = '/repos/palgarra14-del/agente-automatizador';
     assert.ok(url.pathname.startsWith(prefix));
@@ -99,11 +131,7 @@ function fakeGitHub() {
     }
     if (method === 'GET' && path.startsWith('/compare/')) {
       const [baseSha, headSha] = path.slice('/compare/'.length).split('...');
-      let status = 'diverged';
-      if (baseSha === headSha) status = 'identical';
-      else if (isAncestor(baseSha, headSha)) status = 'ahead';
-      else if (isAncestor(headSha, baseSha)) status = 'behind';
-      return response(200, { status });
+      return response(200, comparePayload(baseSha, headSha));
     }
     if (method === 'GET' && path.startsWith('/contents/')) {
       const contentPath = decodeURIComponent(path.slice('/contents/'.length));
@@ -242,6 +270,8 @@ function fakeGitHub() {
     },
     resetWriteCount() { writeCount = 0; },
     writeCount() { return writeCount; },
+    resetRequestCount() { requestCount = 0; },
+    requestCount() { return requestCount; },
     clearContentRefs() { contentRefs.length = 0; },
     contentRefs() { return [...contentRefs]; }
   };
@@ -353,13 +383,14 @@ test('legacy multi-generation state migrates to a v2 child and ignores mutable s
   assert.equal(fake.tagSha(witnessTag), migratedSha);
 });
 
-test('legacy histories beyond 2048 generations remain migratable', async () => {
+test('legacy histories beyond 2048 generations remain migratable with bounded remote requests', async () => {
   const fake = fakeGitHub();
   let head = fake.mainSha;
   for (let generation = 1; generation <= 2050; generation += 1) {
     head = fake.makeStateCommit({ parentSha: head, generation, state: blankState(`legacy-${generation}`), version: 1 });
   }
   fake.forceTag(stateTag, head);
+  fake.resetRequestCount();
   const store = storeFor(fake, { ownerId: 'github:migrate:deep' });
   const snapshot = await store.readSnapshot();
   assert.equal(snapshot.generation, 2050);
@@ -367,6 +398,7 @@ test('legacy histories beyond 2048 generations remain migratable', async () => {
   assert.equal(fake.envelopeAt(migratedSha).generation, 2051);
   assert.equal(fake.tagSha(checkpointTag), migratedSha);
   assert.equal(fake.tagSha(witnessTag), migratedSha);
+  assert.ok(fake.requestCount() < 50, `expected bounded REST traffic, received ${fake.requestCount()} requests`);
 });
 
 test('legacy writer racing migration cannot overwrite a winning v2 transition', async () => {
@@ -462,6 +494,8 @@ test('reserved watermark refs cannot collide with any valid explicit state tag',
   assert.notEqual(checkpointTagFor(collidingLookingStateTag), collidingLookingStateTag);
   assert.notEqual(witnessTagFor(collidingLookingStateTag), collidingLookingStateTag);
   assert.notEqual(checkpointTagFor(collidingLookingStateTag), witnessTagFor(collidingLookingStateTag));
+  assert.throws(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-checkpoints' }), /cloud_state_tag_reserved/);
+  assert.throws(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-witnesses' }), /cloud_state_tag_reserved/);
 });
 
 test('lane envelope binding rejects reading another lane through the wrong store', async () => {
@@ -556,7 +590,7 @@ test('aligned refs still reject a malformed older v2 ancestor', async () => {
   fake.forceTag(witnessTag, apparentlyValidGeneration3);
   await assert.rejects(
     storeFor(fake, { ownerId: 'github:full-lineage:fresh' }).load(),
-    /cloud_state_file_invalid|cloud_state_generation_discontinuity|cloud_state_bootstrap_ancestry_invalid/
+    /cloud_state_generation_discontinuity/
   );
 });
 
