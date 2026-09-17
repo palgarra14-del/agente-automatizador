@@ -96,7 +96,7 @@ test('cloud worker restores lane-scoped managed workspaces across approval-trigg
   assert.match(workflow, /!\.agent-workspaces\/\$\{\{ matrix\.lane \}\}\/\*\*\/node_modules/);
   assert.match(workflow, /!\.agent-workspaces\/\$\{\{ matrix\.lane \}\}\/\*\*\/\.next\/cache/);
   assert.match(workflow, /key: agent-workspace-\$\{\{ matrix\.lane \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-  assert.match(workflow, /restore-keys:\n\s+\|\n\s+agent-workspace-\$\{\{ matrix\.lane \}\}-/);
+  assert.match(workflow, /restore-keys: \|\n\s+agent-workspace-\$\{\{ matrix\.lane \}\}-/);
   assert.doesNotMatch(workflow, /rm -rf|find .*node_modules/);
   const cacheBlock = workflow.slice(workflow.indexOf('- name: Restore lane workspace continuity'), workflow.indexOf('- name: Set up Node'));
   assert.doesNotMatch(cacheBlock, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
