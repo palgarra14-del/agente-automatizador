@@ -15,7 +15,7 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  statuses: read
+  statuses: write
 
 jobs:
   route:
@@ -77,6 +77,17 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      - name: Restore lane workspace continuity
+        uses: actions/cache@v4
+        with:
+          path: |
+            .agent-workspaces/${{ matrix.lane }}
+            !.agent-workspaces/${{ matrix.lane }}/**/node_modules
+            !.agent-workspaces/${{ matrix.lane }}/**/.next/cache
+          key: agent-workspace-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            agent-workspace-${{ matrix.lane }}-
 
       - name: Set up Node
         uses: actions/setup-node@v4
