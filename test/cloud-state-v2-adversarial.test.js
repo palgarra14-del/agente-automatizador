@@ -22,6 +22,7 @@ function fakeGitHub() {
   const blobs = new Map();
   let lastCreatedCommit = null;
   let failRef = null;
+  let raceRef = null;
 
   const isAncestor = (ancestorSha, descendantSha) => {
     if (ancestorSha === descendantSha) return true;
@@ -103,6 +104,11 @@ function fakeGitHub() {
         failRef = null;
         return response(500, {});
       }
+      if (raceRef === body.ref) {
+        refs.set(body.ref, body.sha);
+        raceRef = null;
+        return response(422, {});
+      }
       refs.set(body.ref, body.sha);
       return response(201, { ref: body.ref, object: { sha: body.sha } });
     }
@@ -111,6 +117,11 @@ function fakeGitHub() {
       if (failRef === ref) {
         failRef = null;
         return response(500, {});
+      }
+      if (raceRef === ref) {
+        refs.set(ref, body.sha);
+        raceRef = null;
+        return response(422, {});
       }
       const current = refs.get(ref);
       if (!current || body.force !== false || !isAncestor(current, body.sha)) return response(422, {});
@@ -123,6 +134,7 @@ function fakeGitHub() {
   return {
     fetchImpl,
     failNextRefWrite(ref) { failRef = ref; },
+    raceNextRefWrite(ref) { raceRef = ref; },
     forceRef(ref, sha) { refs.set(ref, sha); },
     ref(ref) { return refs.get(ref) ?? null; },
     lastCreatedCommit() { return lastCreatedCommit; },
@@ -210,4 +222,28 @@ test('fresh process rejects a descendant whose generation skips the trusted chec
 
   const fresh = storeFor(fake, 'github:skip:fresh');
   await assert.rejects(fresh.load(), /cloud_state_generation_discontinuity/);
+});
+
+test('checkpoint recovery is idempotent when another process wins the same optimistic ref race', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, 'github:race:writer');
+  const initial = await writer.readSnapshot();
+  const seedState = cloneState(initial.state);
+  seedState.marker = 'n';
+  await writer.writeSnapshot(seedState, initial);
+  const snapshot = await writer.readSnapshot();
+
+  fake.failNextRefWrite(checkpointRef);
+  const nextState = cloneState(snapshot.state);
+  nextState.marker = 'n+1';
+  await assert.rejects(writer.writeSnapshot(nextState, snapshot), /cloud_state_partial_publication/);
+  const newestStateSha = fake.ref(stateRef);
+  assert.notEqual(newestStateSha, fake.ref(checkpointRef));
+
+  fake.raceNextRefWrite(checkpointRef);
+  const fresh = storeFor(fake, 'github:race:fresh');
+  const loaded = await fresh.load();
+  assert.equal(loaded.marker, 'n+1');
+  assert.equal(fake.ref(stateRef), newestStateSha);
+  assert.equal(fake.ref(checkpointRef), newestStateSha);
 });
