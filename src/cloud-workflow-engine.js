@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { WorkflowEngine, WorkflowStepStatus, maskSecrets } from './core.js';
+import { WorkflowEngine, WorkflowStepStatus, maskSecrets, validateWorkflowPlan } from './core.js';
 
 const DURABLE_CHECKPOINT_VERSION = 1;
 const governedProfiles = new Set(['app-improvement', 'website-build']);
@@ -79,6 +79,7 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
   async get(id) {
     const plan = await super.get(id);
     if (!plan || this.suppressDurability > 0 || this.preparingDurableCheckpoints.has(id) || !releaseCheckpointCandidate(plan)) return plan;
+    validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
     this.preparingDurableCheckpoints.add(id);
     try {
       return await this.ensureDurableReleaseCheckpoint(id);
