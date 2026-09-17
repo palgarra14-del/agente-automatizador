@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { join } from 'node:path';
-import { evaluateChangePolicy, imageIsPinned, loadProjects } from '../src/core.js';
+import { evaluateChangePolicy, loadProjects } from '../src/core.js';
 
 test('Callflow is registered as a governed isolated project', async () => {
   const projects = await loadProjects(join(process.cwd(), 'config', 'projects.json'));
