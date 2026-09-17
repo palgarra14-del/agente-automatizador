@@ -294,6 +294,25 @@ export class GitHubStateStore extends JsonStore {
     return stateSha === expectedStateSha && checkpointSha === expectedCheckpointSha;
   }
 
+  async publishCheckpointAndVerify(expectedCheckpointSha, stateSha, failureCode) {
+    let publishError = null;
+    try {
+      await this.publishCheckpoint(expectedCheckpointSha, stateSha);
+    } catch (error) {
+      publishError = error;
+    }
+
+    let verified = false;
+    let verifyError = null;
+    try {
+      verified = await this.verifyRefs(stateSha, stateSha);
+    } catch (error) {
+      verifyError = error;
+    }
+    if (verified) return;
+    throw new Error(failureCode, { cause: publishError ?? verifyError ?? undefined });
+  }
+
   snapshotFrom(sha, checkpointSha, envelope) {
     return {
       refSha: sha,
@@ -320,12 +339,7 @@ export class GitHubStateStore extends JsonStore {
         this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`)
       ]);
       if (latestStateSha !== stateSha || latestCheckpointSha !== null) throw new Error('cloud_state_conflict');
-      try {
-        await this.publishCheckpoint(null, stateSha);
-      } catch (error) {
-        throw new Error('cloud_state_checkpoint_recovery_failed', { cause: error });
-      }
-      if (!await this.verifyRefs(stateSha, stateSha)) throw new Error('cloud_state_partial_publication');
+      await this.publishCheckpointAndVerify(null, stateSha, 'cloud_state_checkpoint_recovery_failed');
       return this.snapshotFrom(stateSha, stateSha, stateEnvelope);
     }
 
@@ -346,12 +360,7 @@ export class GitHubStateStore extends JsonStore {
       this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`)
     ]);
     if (latestStateSha !== stateSha || latestCheckpointSha !== checkpointSha) throw new Error('cloud_state_conflict');
-    try {
-      await this.publishCheckpoint(checkpointSha, stateSha);
-    } catch (error) {
-      throw new Error('cloud_state_checkpoint_recovery_failed', { cause: error });
-    }
-    if (!await this.verifyRefs(stateSha, stateSha)) throw new Error('cloud_state_partial_publication');
+    await this.publishCheckpointAndVerify(checkpointSha, stateSha, 'cloud_state_checkpoint_recovery_failed');
     return this.snapshotFrom(stateSha, stateSha, stateEnvelope);
   }
 
@@ -416,12 +425,7 @@ export class GitHubStateStore extends JsonStore {
       });
     }
 
-    try {
-      await this.publishCheckpoint(expectedCheckpointSha, commitSha);
-    } catch (error) {
-      throw new Error('cloud_state_partial_publication', { cause: error });
-    }
-    if (!await this.verifyRefs(commitSha, commitSha)) throw new Error('cloud_state_partial_publication');
+    await this.publishCheckpointAndVerify(expectedCheckpointSha, commitSha, 'cloud_state_partial_publication');
     return commitSha;
   }
 
