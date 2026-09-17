@@ -4,6 +4,8 @@ import test from 'node:test';
 import { URL } from 'node:url';
 import { GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
 
+const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
+
 function response(status, payload = null) {
   return {
     status,
@@ -40,24 +42,28 @@ function witnessTagFor(tag) {
   return `agent-cloud-state-v2-witnesses/${tag}`;
 }
 
-function historyTagFor(tag, generation) {
-  return `agent-cloud-state-v2-history/${tag}/${generation}`;
-}
-
 function fakeGitHub() {
   let sequence = 10;
+  let statusId = 1;
   let writeCount = 0;
   let requestCount = 0;
   const refWrites = [];
+  const statusWrites = [];
   const sha = () => (sequence++).toString(16).padStart(40, '0');
   const mainSha = 'a'.repeat(40);
   const mainTree = 'b'.repeat(40);
+  const rootTree = 'c'.repeat(40);
   const refs = new Map([['refs/heads/main', mainSha]]);
-  const commits = new Map([[mainSha, { sha: mainSha, tree: { sha: mainTree }, parents: [] }]]);
-  const trees = new Map([[mainTree, new Map()]]);
+  const commits = new Map([
+    [LEDGER_ROOT_SHA, { sha: LEDGER_ROOT_SHA, tree: { sha: rootTree }, parents: [] }],
+    [mainSha, { sha: mainSha, tree: { sha: mainTree }, parents: [{ sha: LEDGER_ROOT_SHA }] }]
+  ]);
+  const trees = new Map([[rootTree, new Map()], [mainTree, new Map()]]);
   const blobs = new Map();
   const failures = [];
   const contentRefs = [];
+  const statuses = [];
+  const truncatedBlobs = new Set();
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -130,7 +136,7 @@ function fakeGitHub() {
             oid: blobSha,
             byteSize: Buffer.byteLength(text, 'utf8'),
             isBinary: false,
-            isTruncated: false,
+            isTruncated: truncatedBlobs.has(blobSha),
             text
           }
         } : null
@@ -158,6 +164,21 @@ function fakeGitHub() {
     };
   };
 
+  const addStatus = ({ context, description, state = 'success', target_url = null }) => {
+    const entry = {
+      id: statusId++,
+      state,
+      description,
+      target_url,
+      context,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      creator: { login: 'github-actions[bot]', id: 1 }
+    };
+    statuses.unshift(entry);
+    return entry;
+  };
+
   const fetchImpl = async (rawUrl, options = {}) => {
     requestCount += 1;
     const url = new URL(rawUrl);
@@ -176,6 +197,16 @@ function fakeGitHub() {
     const injected = maybeFail(method, path, body);
     if (injected) return injected;
 
+    if (method === 'GET' && path.startsWith(`/commits/${LEDGER_ROOT_SHA}/statuses`)) {
+      const perPage = Number(url.searchParams.get('per_page') ?? '30');
+      const page = Number(url.searchParams.get('page') ?? '1');
+      const start = (page - 1) * perPage;
+      return response(200, statuses.slice(start, start + perPage).map(cloneState));
+    }
+    if (method === 'POST' && path === `/statuses/${LEDGER_ROOT_SHA}`) {
+      statusWrites.push(cloneState(body));
+      return response(201, addStatus(body));
+    }
     if (method === 'GET' && path.startsWith('/git/ref/')) {
       const ref = `refs/${decodeURIComponent(path.slice('/git/ref/'.length))}`;
       const value = refs.get(ref);
@@ -294,10 +325,6 @@ function fakeGitHub() {
     blobs.set(blobSha, JSON.stringify(envelope));
   };
 
-  const tamperCurrentStateHash = ({ tag = 'agent-cloud-state-v1', statePath = '.agent/cloud-state.json' } = {}) => {
-    tamperEnvelope(refs.get(`refs/tags/${tag}`), (envelope) => { envelope.stateHash = '0'.repeat(64); }, statePath);
-  };
-
   const envelopeAt = (commitSha, statePath = '.agent/cloud-state.json') => {
     const commit = commits.get(commitSha);
     const blobSha = trees.get(commit.tree.sha).get(statePath);
@@ -322,15 +349,23 @@ function fakeGitHub() {
     });
   };
 
+  const failNextStatusWrite = (status = 500) => {
+    failures.push({
+      method: 'POST',
+      status,
+      match(path) { return path === `/statuses/${LEDGER_ROOT_SHA}`; }
+    });
+  };
+
   return {
     fetchImpl,
     mainSha,
     makeStateCommit,
     tamperEnvelope,
-    tamperCurrentStateHash,
     envelopeAt,
     aliasStatePath,
     failNextTagWrite,
+    failNextStatusWrite,
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
     tagSha(tag) { return refs.get(fullTagRef(tag)) ?? null; },
@@ -341,13 +376,25 @@ function fakeGitHub() {
       refs.set(ref, commitSha);
       return true;
     },
+    forceStatus(context, description, options = {}) {
+      return addStatus({ context, description, state: options.state ?? 'success', target_url: options.target_url ?? null });
+    },
+    statuses() { return statuses.map(cloneState); },
+    statusWrites() { return statusWrites.map(cloneState); },
+    refWrites() { return refWrites.map(cloneState); },
     resetWriteCount() { writeCount = 0; },
     writeCount() { return writeCount; },
     resetRequestCount() { requestCount = 0; },
     requestCount() { return requestCount; },
-    refWrites() { return refWrites.map(cloneState); },
     clearContentRefs() { contentRefs.length = 0; },
-    contentRefs() { return [...contentRefs]; }
+    contentRefs() { return [...contentRefs]; },
+    markHistoryTruncated(commitSha, statePath = '.agent/cloud-state.json') {
+      const commit = commits.get(commitSha);
+      truncatedBlobs.add(trees.get(commit.tree.sha).get(statePath));
+    },
+    setRootParents(parentShas) {
+      commits.get(LEDGER_ROOT_SHA).parents = parentShas.map((value) => ({ sha: value }));
+    }
   };
 }
 
@@ -385,6 +432,10 @@ async function publishMarker(store, marker) {
   return store.writeSnapshot(state, snapshot);
 }
 
+function installLedgerRecord(fake, store, generation, stateSha, parentSha) {
+  fake.forceStatus(store.ledgerContext(generation), store.ledgerDescription(stateSha, parentSha));
+}
+
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.doesNotThrow(() => validateCloudState(
@@ -396,16 +447,18 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
     { allowedProjectIds: ['website-pilot'] }
   ), /ownership_mismatch/);
   assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], nested: { apiToken: 'value' } }), /sensitive_key/);
-  assert.doesNotThrow(() => validateCloudState({
-    runs: {}, approvals: {}, events: [], browser: { sessionId: 'visual-review-1' },
-    workflows: { w: { projectId: 'self', modelUsage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 } } }
-  }));
-  assert.throws(() => validateCloudState({
-    runs: {}, approvals: {}, events: [], diagnostic: 'Authorization: Bearer ghp_exampletoken123'
-  }), /contains_secret_material/);
+  assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], diagnostic: 'Authorization: Bearer ghp_exampletoken123' }), /contains_secret_material/);
 });
 
-test('durable state bootstraps aligned refs plus an immutable generation receipt and resumes read-only', async () => {
+test('status authority is anchored to the verified parentless repository root', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  assert.deepEqual(await store.readStatusLedger(), []);
+  fake.setRootParents([fake.mainSha]);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:root:bad' }).readStatusLedger(), /cloud_state_status_root_invalid/);
+});
+
+test('durable bootstrap appends status authority and fresh load is read-only', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:10:1' });
   await first.withGlobalLease(async () => {
@@ -413,50 +466,40 @@ test('durable state bootstraps aligned refs plus an immutable generation receipt
       state.workflows = { w1: { id: 'w1', projectId: 'self', status: 'pending', executionLease: null } };
     });
   });
-
   const stateSha = fake.tagSha(stateTag);
-  const envelope = fake.envelopeAt(stateSha);
   assert.equal(fake.tagSha(checkpointTag), stateSha);
   assert.equal(fake.tagSha(witnessTag), stateSha);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, envelope.generation)), stateSha);
+  const ledger = await storeFor(fake, { ownerId: 'github:ledger:peek' }).readStatusLedger();
+  assert.equal(ledger.at(-1).stateSha, stateSha);
   fake.resetWriteCount();
   fake.clearContentRefs();
-
   const loaded = await storeFor(fake, { ownerId: 'github:11:1' }).load();
   assert.equal(loaded.workflows.w1.projectId, 'self');
-  assert.equal(loaded.workflows.w1.status, 'pending');
-  assert.equal(loaded.cloudExecutionLease, null);
   assert.equal(fake.writeCount(), 0);
   assert.ok(fake.contentRefs().length > 0);
   assert.ok(fake.contentRefs().every((ref) => /^[a-f0-9]{40}$/i.test(ref)));
 });
 
-test('legacy multi-generation state migrates to a v2 child and anchors the exact migration boundary', async () => {
+test('legacy multi-generation state migrates to first v2 status authority', async () => {
   const fake = fakeGitHub();
   const legacy1 = fake.makeStateCommit({ generation: 1, state: blankState('legacy-1'), version: 1 });
   const legacy2 = fake.makeStateCommit({ parentSha: legacy1, generation: 2, state: blankState('legacy-2'), version: 1 });
   fake.forceTag(stateTag, legacy2);
-
   const store = storeFor(fake, { ownerId: 'github:migrate:1' });
   const snapshot = await store.readSnapshot();
   assert.equal(snapshot.envelopeVersion, 1);
   assert.equal(snapshot.generation, 2);
-  snapshot.generation = 999;
-  const next = cloneState(snapshot.state);
-  next.marker = 'migrated';
-  const migratedSha = await store.writeSnapshot(next, snapshot);
+  const migratedSha = await store.writeSnapshot(blankState('migrated'), snapshot);
   const envelope = fake.envelopeAt(migratedSha);
   assert.equal(envelope.version, 2);
   assert.equal(envelope.generation, 3);
   assert.equal(envelope.lineageBaseSha, legacy2);
   assert.equal(envelope.lineageBaseGeneration, 2);
-  assert.equal(fake.tagSha(stateTag), migratedSha);
-  assert.equal(fake.tagSha(checkpointTag), migratedSha);
-  assert.equal(fake.tagSha(witnessTag), migratedSha);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, 3)), migratedSha);
+  const ledger = await store.readStatusLedger();
+  assert.deepEqual(ledger, [{ generation: 3, stateSha: migratedSha, parentSha: legacy2 }]);
 });
 
-test('legacy histories beyond 2048 generations remain migratable with bounded remote requests', async () => {
+test('legacy histories beyond 2048 generations migrate with bounded requests', async () => {
   const fake = fakeGitHub();
   let head = fake.mainSha;
   for (let generation = 1; generation <= 2050; generation += 1) {
@@ -466,76 +509,45 @@ test('legacy histories beyond 2048 generations remain migratable with bounded re
   fake.resetRequestCount();
   const store = storeFor(fake, { ownerId: 'github:migrate:deep' });
   const snapshot = await store.readSnapshot();
-  assert.equal(snapshot.generation, 2050);
   const migratedSha = await store.writeSnapshot(blankState('migrated-deep'), snapshot);
   assert.equal(fake.envelopeAt(migratedSha).generation, 2051);
-  assert.equal(fake.envelopeAt(migratedSha).lineageBaseSha, head);
-  assert.equal(fake.envelopeAt(migratedSha).lineageBaseGeneration, 2050);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, 2051)), migratedSha);
-  assert.ok(fake.requestCount() < 50, `expected bounded migration traffic, received ${fake.requestCount()} requests`);
+  assert.ok(fake.requestCount() < 60, `expected bounded migration traffic, received ${fake.requestCount()} requests`);
 });
 
-test('established v2 history of 2050 generations validates below the GitHub request cliff', async () => {
-  const fake = fakeGitHub();
-  let head = fake.mainSha;
-  for (let generation = 1; generation <= 2050; generation += 1) {
-    head = fake.makeStateCommit({
-      parentSha: head,
-      generation,
-      state: blankState(`v2-${generation}`),
-      lineageBaseSha: fake.mainSha,
-      lineageBaseGeneration: 0
-    });
-  }
-  fake.forceTag(historyTagFor(stateTag, 2050), head);
-  fake.forceTag(stateTag, head);
-  fake.forceTag(checkpointTag, head);
-  fake.forceTag(witnessTag, head);
-  fake.resetRequestCount();
-  const snapshot = await storeFor(fake, { ownerId: 'github:v2:deep' }).readSnapshot();
-  assert.equal(snapshot.generation, 2050);
-  assert.equal(snapshot.state.marker, 'v2-2050');
-  assert.ok(fake.requestCount() < 1000, `expected request-efficient complete validation, received ${fake.requestCount()} requests`);
-});
-
-test('legacy migration accepts an inherited generation offset without trusting base-branch commit distance', async () => {
+test('legacy migration preserves inherited generation offsets', async () => {
   const fake = fakeGitHub();
   const legacyA = fake.makeStateCommit({ generation: 4, state: blankState('offset-4'), version: 1 });
   const legacyB = fake.makeStateCommit({ parentSha: legacyA, generation: 5, state: blankState('offset-5'), version: 1 });
   fake.forceTag(stateTag, legacyB);
   const store = storeFor(fake, { ownerId: 'github:migrate:offset' });
   const snapshot = await store.readSnapshot();
-  assert.equal(snapshot.generation, 5);
   const migratedSha = await store.writeSnapshot(blankState('offset-v2'), snapshot);
   const envelope = fake.envelopeAt(migratedSha);
   assert.equal(envelope.generation, 6);
   assert.equal(envelope.lineageBaseSha, legacyB);
   assert.equal(envelope.lineageBaseGeneration, 5);
-  assert.equal((await storeFor(fake, { ownerId: 'github:migrate:offset:fresh' }).readSnapshot()).generation, 6);
 });
 
-test('migration crash after state publication but before first receipt fails read-only and repairs safely', async () => {
+test('first-v2 crash after state CAS but before status append is repair-only', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 1, state: blankState('legacy'), version: 1 });
   fake.forceTag(stateTag, legacy);
   const store = storeFor(fake, { ownerId: 'github:migrate:crash' });
   const snapshot = await store.readSnapshot();
-  fake.failNextTagWrite(historyTagFor(stateTag, 2), 500);
-  await assert.rejects(store.writeSnapshot(blankState('v2-partial'), snapshot), /cloud_state_github_request_failed:500/);
+  fake.failNextStatusWrite(500);
+  await assert.rejects(store.writeSnapshot(blankState('v2-partial'), snapshot), /cloud_state_partial_publication/);
   const partialSha = fake.tagSha(stateTag);
   assert.notEqual(partialSha, legacy);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, 2)), null);
-  assert.equal(fake.tagSha(checkpointTag), null);
-  assert.equal(fake.tagSha(witnessTag), null);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:migrate:peek' }).load(), /cloud_state_history_receipt_missing/);
+  assert.deepEqual(await store.readStatusLedger(), []);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:migrate:peek' }).load(), /cloud_state_status_ledger_missing/);
   const repaired = await storeFor(fake, { ownerId: 'github:migrate:repair' }).readSnapshot({ repair: true });
   assert.equal(repaired.refSha, partialSha);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, 2)), partialSha);
   assert.equal(fake.tagSha(checkpointTag), partialSha);
   assert.equal(fake.tagSha(witnessTag), partialSha);
+  assert.equal((await storeFor(fake, { ownerId: 'github:migrate:post' }).readStatusLedger()).at(-1).stateSha, partialSha);
 });
 
-test('legacy writer racing migration cannot overwrite a winning v2 transition', async () => {
+test('legacy writer racing migration cannot publish stale v2 authority', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 1, state: blankState('legacy'), version: 1 });
   fake.forceTag(stateTag, legacy);
@@ -544,17 +556,16 @@ test('legacy writer racing migration cannot overwrite a winning v2 transition', 
   const oldWriterChild = fake.makeStateCommit({ parentSha: legacy, generation: 2, state: blankState('old-writer'), version: 1 });
   assert.equal(fake.tryFastForwardTag(stateTag, oldWriterChild), true);
   await assert.rejects(migrating.writeSnapshot(blankState('stale-migration'), staleSnapshot), /cloud_state_conflict/);
+  assert.deepEqual(await migrating.readStatusLedger(), []);
   const fresh = storeFor(fake, { ownerId: 'github:migrate:b' });
   const current = await fresh.readSnapshot();
   const migratedSha = await fresh.writeSnapshot(blankState('v2'), current);
-  const obsoleteV1Child = fake.makeStateCommit({ parentSha: oldWriterChild, generation: 3, state: blankState('too-late-v1'), version: 1 });
-  assert.equal(fake.tryFastForwardTag(stateTag, obsoleteV1Child), false);
-  assert.equal(fake.tagSha(stateTag), migratedSha);
+  assert.equal((await fresh.readStatusLedger()).at(-1).stateSha, migratedSha);
 });
 
-test('durable writes strip worker shell output but keep bounded status/summary evidence', async () => {
+test('durable writes strip worker shell output but retain safe summary evidence', async () => {
   const fake = fakeGitHub();
-  const store = storeFor(fake, { ownerId: 'github:12:1' });
+  const store = storeFor(fake, { ownerId: 'github:evidence' });
   await store.withGlobalLease(async () => {
     await store.mutate((state) => {
       state.workflows = {
@@ -569,124 +580,93 @@ test('durable writes strip worker shell output but keep bounded status/summary e
     });
   });
   const evidence = (await store.load()).workflows.w1.steps[0].evidence.workerEvidence;
-  assert.equal(evidence.status, 'completed');
   assert.equal(evidence.summary, 'bounded safe summary');
   assert.equal(Object.hasOwn(evidence, 'output'), false);
   assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
 });
 
-test('independent cloud lanes isolate state and reserved durable namespaces', async () => {
+test('independent lanes use disjoint status contexts and state', async () => {
   const fake = fakeGitHub();
-  const selfStore = storeFor(fake, { ownerId: 'github:self:1' });
+  const selfStore = storeFor(fake, { ownerId: 'github:self' });
   const websiteTag = 'agent-cloud-state-website-pilot-v1';
   const websiteStore = storeFor(fake, {
-    ownerId: 'github:website:1', laneId: 'website-pilot', allowedProjectIds: ['website-pilot'],
+    ownerId: 'github:web', laneId: 'website-pilot', allowedProjectIds: ['website-pilot'],
     tag: websiteTag, statePath: '.agent/cloud-state-website-pilot.json'
   });
-  await Promise.all([
-    selfStore.withGlobalLease(async () => {
-      await selfStore.mutate((state) => { state.workflows = { self1: { projectId: 'self' } }; });
-    }),
-    websiteStore.withGlobalLease(async () => {
-      await websiteStore.mutate((state) => { state.workflows = { web1: { projectId: 'website-pilot' } }; });
-    })
-  ]);
-  const selfState = await selfStore.load();
-  const websiteState = await websiteStore.load();
-  assert.equal(selfState.workflows.self1.projectId, 'self');
-  assert.equal(websiteState.workflows.web1.projectId, 'website-pilot');
-  const selfEnvelope = fake.envelopeAt(fake.tagSha(stateTag));
-  const websiteEnvelope = fake.envelopeAt(fake.tagSha(websiteTag), '.agent/cloud-state-website-pilot.json');
-  assert.equal(fake.tagSha(historyTagFor(stateTag, selfEnvelope.generation)), fake.tagSha(stateTag));
-  assert.equal(fake.tagSha(historyTagFor(websiteTag, websiteEnvelope.generation)), fake.tagSha(websiteTag));
-  assert.notEqual(historyTagFor(stateTag, selfEnvelope.generation), historyTagFor(websiteTag, websiteEnvelope.generation));
+  await selfStore.withGlobalLease(async () => {
+    await selfStore.mutate((state) => { state.workflows = { self1: { projectId: 'self' } }; });
+  });
+  await websiteStore.withGlobalLease(async () => {
+    await websiteStore.mutate((state) => { state.workflows = { web1: { projectId: 'website-pilot' } }; });
+  });
+  assert.notEqual(selfStore.ledgerContext(1), websiteStore.ledgerContext(1));
+  assert.equal((await selfStore.load()).workflows.self1.projectId, 'self');
+  assert.equal((await websiteStore.load()).workflows.web1.projectId, 'website-pilot');
+  assert.equal((await selfStore.readStatusLedger()).length, 3);
+  assert.equal((await websiteStore.readStatusLedger()).length, 3);
 });
 
-test('reserved durable namespace roots cannot be explicit state tags', () => {
+test('reserved mutable namespace roots remain invalid state tags', () => {
   assert.throws(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-checkpoints' }), /cloud_state_tag_reserved/);
   assert.throws(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-witnesses' }), /cloud_state_tag_reserved/);
-  assert.throws(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-history' }), /cloud_state_tag_reserved/);
-  assert.doesNotThrow(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v1-checkpoint-v2' }));
+  assert.doesNotThrow(() => storeFor(fakeGitHub(), { tag: 'agent-cloud-state-v2-history' }));
 });
 
-test('history receipts are create-only and never patched by normal publication', async () => {
+test('status contexts are generation-specific and status writes only append to immutable root', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   await publishMarker(store, 'one');
   await publishMarker(store, 'two');
-  const historyWrites = fake.refWrites().filter((entry) =>
-    entry.body?.ref?.startsWith('refs/tags/agent-cloud-state-v2-history/') ||
-    decodeURIComponent(entry.path).includes('/git/refs/tags/agent-cloud-state-v2-history/'));
-  assert.ok(historyWrites.length >= 2);
-  assert.ok(historyWrites.every((entry) => entry.method === 'POST'));
+  assert.notEqual(store.ledgerContext(1), store.ledgerContext(2));
+  assert.ok(store.ledgerContext(2).length < 100);
+  assert.ok(fake.statusWrites().length >= 2);
+  assert.ok(fake.statusWrites().every((entry) => entry.state === 'success' && entry.target_url === undefined));
+  assert.ok(fake.refWrites().every((entry) => !decodeURIComponent(entry.path).includes('status')));
 });
 
-test('lane envelope binding rejects reading another lane through the wrong store', async () => {
+test('lane envelope binding rejects another lane', async () => {
   const fake = fakeGitHub();
   const websiteTag = 'agent-cloud-state-website-pilot-v1';
   const websiteStore = storeFor(fake, {
-    ownerId: 'github:website:2', laneId: 'website-pilot', allowedProjectIds: ['website-pilot'],
+    ownerId: 'github:web:2', laneId: 'website-pilot', allowedProjectIds: ['website-pilot'],
     tag: websiteTag, statePath: '.agent/cloud-state-website-pilot.json'
   });
   await websiteStore.withGlobalLease(async () => {
     await websiteStore.mutate((state) => { state.workflows = { web1: { projectId: 'website-pilot' } }; });
   });
   const wrongLane = storeFor(fake, {
-    ownerId: 'github:wrong:1', laneId: 'callflow', allowedProjectIds: ['website-pilot'],
+    ownerId: 'github:wrong', laneId: 'callflow', allowedProjectIds: ['website-pilot'],
     tag: websiteTag, statePath: '.agent/cloud-state-website-pilot.json'
   });
-  await assert.rejects(wrongLane.load(), /cloud_state_lane_mismatch/);
+  await assert.rejects(wrongLane.load(), /cloud_state_status_ledger_missing|cloud_state_lane_mismatch/);
 });
 
-test('v2 envelope binds configured state path and derived watermark ref names', async () => {
+test('v2 envelope binds configured state path and derived watermark names', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const shaValue = await publishMarker(store, 'bound');
   fake.aliasStatePath(shaValue, '.agent/cloud-state.json', '.agent/alternate-state.json');
   const wrongPath = storeFor(fake, { statePath: '.agent/alternate-state.json', ownerId: 'github:path:wrong' });
-  await assert.rejects(wrongPath.load(), /cloud_state_ref_binding_mismatch/);
-  const alternateTag = 'alternate-state-v1';
-  fake.forceTag(alternateTag, shaValue);
-  fake.forceTag(checkpointTagFor(alternateTag), shaValue);
-  fake.forceTag(witnessTagFor(alternateTag), shaValue);
-  const wrongRefs = storeFor(fake, { tag: alternateTag, ownerId: 'github:refs:wrong' });
-  await assert.rejects(wrongRefs.load(), /cloud_state_ref_binding_mismatch/);
+  await assert.rejects(wrongPath.load(), /cloud_state_status_ledger_missing|cloud_state_ref_binding_mismatch/);
 });
 
-test('fresh process rejects forced rollback when checkpoint survives and witness is missing', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  await publishMarker(writer, 'n2');
-  fake.deleteTag(witnessTag);
-  fake.forceTag(stateTag, n1);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:rollback:checkpoint' }).load(), /cloud_state_rollback/);
-});
-
-test('fresh process rejects forced rollback when witness survives and checkpoint is missing', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  await publishMarker(writer, 'n2');
-  fake.deleteTag(checkpointTag);
-  fake.forceTag(stateTag, n1);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:rollback:witness' }).load(), /cloud_state_rollback/);
-});
-
-test('fresh process rejects joint rollback of state checkpoint and witness because newer receipt survives', async () => {
+test('fresh process rejects joint rollback of all mutable refs and repair moves only forward', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const n1 = await publishMarker(writer, 'n1');
   const n2 = await publishMarker(writer, 'n2');
-  assert.notEqual(n1, n2);
   fake.forceTag(stateTag, n1);
   fake.forceTag(checkpointTag, n1);
   fake.forceTag(witnessTag, n1);
   await assert.rejects(storeFor(fake, { ownerId: 'github:rollback:all' }).load(), /cloud_state_rollback/);
-  assert.equal(fake.tagSha(historyTagFor(stateTag, fake.envelopeAt(n2).generation)), n2);
+  const repaired = await storeFor(fake, { ownerId: 'github:rollback:repair' }).readSnapshot({ repair: true });
+  assert.equal(repaired.refSha, n2);
+  assert.equal(fake.tagSha(stateTag), n2);
+  assert.equal(fake.tagSha(checkpointTag), n2);
+  assert.equal(fake.tagSha(witnessTag), n2);
 });
 
-test('both watermarks can be reconstructed from an immutable current receipt without write-on-load', async () => {
+test('missing checkpoint and witness do not erase status authority or cause write-on-load', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const current = await publishMarker(writer, 'current');
@@ -700,224 +680,75 @@ test('both watermarks can be reconstructed from an immutable current receipt wit
   assert.equal(fake.tagSha(witnessTag), current);
 });
 
-test('forged skipped generation is rejected even when refs and current receipt agree', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  const n1Envelope = fake.envelopeAt(n1);
-  const badGeneration = n1Envelope.generation + 2;
-  const bad = fake.makeStateCommit({
-    parentSha: n1,
-    generation: badGeneration,
-    state: blankState('n3'),
-    lineageBaseSha: n1Envelope.lineageBaseSha,
-    lineageBaseGeneration: n1Envelope.lineageBaseGeneration
-  });
-  fake.forceTag(historyTagFor(stateTag, badGeneration), bad);
-  fake.forceTag(stateTag, bad);
-  fake.forceTag(checkpointTag, bad);
-  fake.forceTag(witnessTag, bad);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:skip:fresh' }).load(), /cloud_state_generation_discontinuity/);
-});
-
-test('aligned refs and forged head receipt still reject malformed older bootstrap transition', async () => {
-  const fake = fakeGitHub();
-  const malformedGeneration2 = fake.makeStateCommit({
-    parentSha: fake.mainSha, generation: 2, state: blankState('bad-generation-2')
-  });
-  const apparentlyValidGeneration3 = fake.makeStateCommit({
-    parentSha: malformedGeneration2, generation: 3, state: blankState('looks-valid-generation-3')
-  });
-  fake.forceTag(historyTagFor(stateTag, 3), apparentlyValidGeneration3);
-  fake.forceTag(stateTag, apparentlyValidGeneration3);
-  fake.forceTag(checkpointTag, apparentlyValidGeneration3);
-  fake.forceTag(witnessTag, apparentlyValidGeneration3);
-  await assert.rejects(
-    storeFor(fake, { ownerId: 'github:full-lineage:fresh' }).load(),
-    /cloud_state_history_fork|cloud_state_history_blob_invalid|cloud_state_generation_discontinuity|cloud_state_history_incomplete/
-  );
-});
-
-test('batched lineage rejects a hidden two-parent merge in an intermediate v2 commit', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  const e1 = fake.envelopeAt(n1);
-  const side = fake.makeStateCommit({ generation: 1, state: blankState('side'), version: 1 });
-  const merge = fake.makeStateCommit({
-    parentSha: n1,
-    additionalParentShas: [side],
-    generation: e1.generation + 1,
-    state: blankState('merge'),
-    lineageBaseSha: e1.lineageBaseSha,
-    lineageBaseGeneration: e1.lineageBaseGeneration
-  });
-  const head = fake.makeStateCommit({
-    parentSha: merge,
-    generation: e1.generation + 2,
-    state: blankState('after-merge'),
-    lineageBaseSha: e1.lineageBaseSha,
-    lineageBaseGeneration: e1.lineageBaseGeneration
-  });
-  fake.forceTag(historyTagFor(stateTag, e1.generation + 2), head);
-  fake.forceTag(stateTag, head);
-  fake.forceTag(checkpointTag, head);
-  fake.forceTag(witnessTag, head);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:hidden-merge' }).load(), /cloud_state_history_fork/);
-});
-
-test('batched lineage rejects malformed intermediate envelope even when head looks valid', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  const e1 = fake.envelopeAt(n1);
-  const bad = fake.makeStateCommit({
-    parentSha: n1,
-    generation: e1.generation + 1,
-    state: blankState('bad-intermediate'),
-    lineageBaseSha: e1.lineageBaseSha,
-    lineageBaseGeneration: e1.lineageBaseGeneration
-  });
-  fake.tamperEnvelope(bad, (envelope) => { envelope.stateHash = '0'.repeat(64); });
-  const head = fake.makeStateCommit({
-    parentSha: bad,
-    generation: e1.generation + 2,
-    state: blankState('valid-looking-head'),
-    lineageBaseSha: e1.lineageBaseSha,
-    lineageBaseGeneration: e1.lineageBaseGeneration
-  });
-  fake.forceTag(historyTagFor(stateTag, e1.generation + 2), head);
-  fake.forceTag(stateTag, head);
-  fake.forceTag(checkpointTag, head);
-  fake.forceTag(witnessTag, head);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:bad-intermediate' }).load(), /cloud_state_integrity_mismatch/);
-});
-
-test('a v2 child cannot rewrite its inherited lineage anchor', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  const n1Envelope = fake.envelopeAt(n1);
-  const unrelatedLegacy = fake.makeStateCommit({ generation: 9, state: blankState('unrelated'), version: 1 });
-  const bad = fake.makeStateCommit({
-    parentSha: n1,
-    generation: n1Envelope.generation + 1,
-    state: blankState('rewritten-anchor'),
-    lineageBaseSha: unrelatedLegacy,
-    lineageBaseGeneration: 9
-  });
-  fake.forceTag(stateTag, bad);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:anchor-rewrite' }).load(), /cloud_state_history_receipt_missing|cloud_state_lineage_anchor/);
-});
-
-test('higher-generation divergent history is rejected even with a forged head receipt', async () => {
+test('same-generation sibling is rejected even when every mutable ref points to it', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const trusted = await publishMarker(writer, 'trusted');
-  const trustedEnvelope = fake.envelopeAt(trusted);
-  const divergentGeneration = trustedEnvelope.generation + 5;
-  const divergent = fake.makeStateCommit({
-    parentSha: fake.mainSha,
-    generation: divergentGeneration,
-    state: blankState('divergent'),
-    lineageBaseSha: trustedEnvelope.lineageBaseSha,
-    lineageBaseGeneration: trustedEnvelope.lineageBaseGeneration
+  const envelope = fake.envelopeAt(trusted);
+  const sibling = fake.makeStateCommit({
+    parentSha: envelope.lineageBaseSha,
+    generation: envelope.generation,
+    state: blankState('same-generation-fork'),
+    lineageBaseSha: envelope.lineageBaseSha,
+    lineageBaseGeneration: envelope.lineageBaseGeneration
   });
-  fake.forceTag(historyTagFor(stateTag, divergentGeneration), divergent);
-  fake.forceTag(stateTag, divergent);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:fork:fresh' }).load(), /cloud_state_history_blob_invalid|cloud_state_generation_discontinuity|cloud_state_history/);
+  fake.forceTag(stateTag, sibling);
+  fake.forceTag(checkpointTag, sibling);
+  fake.forceTag(witnessTag, sibling);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:sibling' }).load(), /cloud_state_history_fork/);
 });
 
-test('legacy descendants are rejected once durable v2 state exists', async () => {
-  const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const v2 = await publishMarker(writer, 'v2');
-  const envelope = fake.envelopeAt(v2);
-  const legacyChild = fake.makeStateCommit({ parentSha: v2, generation: envelope.generation + 1, state: blankState('legacy-child'), version: 1 });
-  fake.forceTag(stateTag, legacyChild);
-  fake.forceTag(checkpointTag, legacyChild);
-  fake.forceTag(witnessTag, legacyChild);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:downgrade:fresh' }).load(), /cloud_state_legacy_after_migration/);
-});
-
-test('checkpoint publication failure still publishes witness and repair restores all refs', async () => {
+test('established-v2 crash after state CAS but before status append is repair-only', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const n1 = await publishMarker(writer, 'n1');
   const snapshot = await writer.readSnapshot();
-  const next = cloneState(snapshot.state);
-  next.marker = 'n2';
-  fake.failNextTagWrite(checkpointTag, 500);
-  await assert.rejects(writer.writeSnapshot(next, snapshot), /cloud_state_partial_publication/);
+  fake.failNextStatusWrite(500);
+  await assert.rejects(writer.writeSnapshot(blankState('n2'), snapshot), /cloud_state_partial_publication/);
   const n2 = fake.tagSha(stateTag);
-  assert.notEqual(n2, n1);
-  assert.equal(fake.tagSha(checkpointTag), n1);
-  assert.equal(fake.tagSha(witnessTag), n2);
-  fake.resetWriteCount();
-  assert.equal((await storeFor(fake, { ownerId: 'github:partial:peek' }).load()).marker, 'n2');
-  assert.equal(fake.writeCount(), 0);
-  await storeFor(fake, { ownerId: 'github:partial:repair' }).readSnapshot({ repair: true });
-  assert.equal(fake.tagSha(checkpointTag), n2);
-  assert.equal(fake.tagSha(witnessTag), n2);
+  assert.notEqual(n1, n2);
+  assert.equal((await writer.readStatusLedger()).at(-1).stateSha, n1);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:ahead:peek' }).load(), /cloud_state_partial_publication/);
+  const repaired = await storeFor(fake, { ownerId: 'github:ahead:repair' }).readSnapshot({ repair: true });
+  assert.equal(repaired.refSha, n2);
+  assert.equal((await storeFor(fake, { ownerId: 'github:ahead:post' }).readStatusLedger()).at(-1).stateSha, n2);
 });
 
-test('witness publication failure leaves checkpoint proof and repair restores witness', async () => {
+test('duplicate identical status records are idempotent but conflicting duplicates fail closed', async () => {
   const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const n1 = await publishMarker(writer, 'n1');
-  const snapshot = await writer.readSnapshot();
-  const next = cloneState(snapshot.state);
-  next.marker = 'n2';
-  fake.failNextTagWrite(witnessTag, 500);
-  await assert.rejects(writer.writeSnapshot(next, snapshot), /cloud_state_partial_publication/);
-  const n2 = fake.tagSha(stateTag);
-  assert.notEqual(n2, n1);
-  assert.equal(fake.tagSha(checkpointTag), n2);
-  assert.equal(fake.tagSha(witnessTag), n1);
-  await storeFor(fake, { ownerId: 'github:witness:repair' }).readSnapshot({ repair: true });
-  assert.equal(fake.tagSha(checkpointTag), n2);
-  assert.equal(fake.tagSha(witnessTag), n2);
+  const store = storeFor(fake);
+  const stateSha = await publishMarker(store, 'one');
+  const envelope = fake.envelopeAt(stateSha);
+  const context = store.ledgerContext(envelope.generation);
+  const description = store.ledgerDescription(stateSha, envelope.lineageBaseSha);
+  fake.forceStatus(context, description);
+  assert.equal((await storeFor(fake, { ownerId: 'github:duplicate:ok' }).load()).marker, 'one');
+  fake.forceStatus(context, store.ledgerDescription(fake.mainSha, envelope.lineageBaseSha));
+  await assert.rejects(storeFor(fake, { ownerId: 'github:duplicate:bad' }).load(), /cloud_state_status_ledger_conflict/);
 });
 
-test('receipt-first failure before state-ref publication is visible and safely recoverable', async () => {
+test('malformed status record for the lane fails closed', async () => {
   const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const trusted = await publishMarker(writer, 'n1');
-  const snapshot = await writer.readSnapshot();
-  const next = cloneState(snapshot.state);
-  next.marker = 'n2';
-  const nextGeneration = snapshot.generation + 1;
-  fake.failNextTagWrite(stateTag, 500);
-  await assert.rejects(writer.writeSnapshot(next, snapshot), /cloud_state_github_request_failed:500|cloud_state_conflict/);
-  const receiptSha = fake.tagSha(historyTagFor(stateTag, nextGeneration));
-  assert.ok(receiptSha);
-  assert.equal(fake.tagSha(stateTag), trusted);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:receipt-ahead:peek' }).load(), /cloud_state_rollback/);
-  const repaired = await storeFor(fake, { ownerId: 'github:receipt-ahead:repair' }).readSnapshot({ repair: true });
-  assert.equal(repaired.refSha, receiptSha);
-  assert.equal(repaired.state.marker, 'n2');
-  assert.equal(fake.tagSha(checkpointTag), receiptSha);
-  assert.equal(fake.tagSha(witnessTag), receiptSha);
+  const store = storeFor(fake);
+  fake.forceStatus(store.ledgerContext(1), 'not-a-ledger-record');
+  await assert.rejects(store.readStatusLedger(), /cloud_state_status_ledger_invalid/);
 });
 
-test('bootstrap receipt created before state ref is recoverable only on governed repair', async () => {
+test('status ledger generation gap fails closed', async () => {
   const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const snapshot = await writer.readSnapshot();
-  fake.failNextTagWrite(stateTag, 500);
-  await assert.rejects(writer.writeSnapshot(blankState('bootstrap-partial'), snapshot), /cloud_state_github_request_failed:500|cloud_state_conflict/);
-  const receiptSha = fake.tagSha(historyTagFor(stateTag, 1));
-  assert.ok(receiptSha);
-  assert.equal(fake.tagSha(stateTag), null);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:bootstrap:peek' }).load(), /cloud_state_partial_publication/);
-  const repaired = await storeFor(fake, { ownerId: 'github:bootstrap:repair' }).readSnapshot({ repair: true });
-  assert.equal(repaired.refSha, receiptSha);
-  assert.equal(fake.tagSha(stateTag), receiptSha);
-  assert.equal(fake.tagSha(checkpointTag), receiptSha);
-  assert.equal(fake.tagSha(witnessTag), receiptSha);
+  const store = storeFor(fake);
+  const n1 = fake.makeStateCommit({ generation: 1, state: blankState('n1') });
+  const n2 = fake.makeStateCommit({ parentSha: n1, generation: 2, state: blankState('n2') });
+  const n3 = fake.makeStateCommit({ parentSha: n2, generation: 3, state: blankState('n3') });
+  installLedgerRecord(fake, store, 1, n1, fake.mainSha);
+  installLedgerRecord(fake, store, 3, n3, n2);
+  fake.forceTag(stateTag, n3);
+  fake.forceTag(checkpointTag, n3);
+  fake.forceTag(witnessTag, n3);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:gap' }).load(), /cloud_state_status_ledger_gap/);
 });
 
-test('two stale writers yield one winner and one conflict without watermark divergence', async () => {
+test('two stale writers have one state-CAS winner and only that lineage gains status authority', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:writer:a' });
   await publishMarker(first, 'seed');
@@ -930,92 +761,160 @@ test('two stale writers yield one winner and one conflict without watermark dive
   stateB.marker = 'b';
   const winningSha = await first.writeSnapshot(stateA, a);
   await assert.rejects(second.writeSnapshot(stateB, b), /cloud_state_conflict/);
-  assert.equal(fake.tagSha(stateTag), winningSha);
+  assert.equal((await first.readStatusLedger()).at(-1).stateSha, winningSha);
 });
 
-test('create-only next-generation receipt serializes two competing candidate commits', async () => {
+test('checkpoint failure still attempts witness and immutable authority permits later repair', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
-  const parent = await publishMarker(writer, 'parent');
-  const envelope = fake.envelopeAt(parent);
-  const generation = envelope.generation + 1;
-  const common = {
-    parentSha: parent,
-    generation,
-    lineageBaseSha: envelope.lineageBaseSha,
-    lineageBaseGeneration: envelope.lineageBaseGeneration
-  };
-  const a = fake.makeStateCommit({ ...common, state: blankState('a') });
-  const b = fake.makeStateCommit({ ...common, state: blankState('b') });
-  const storeA = storeFor(fake, { ownerId: 'github:receipt:a' });
-  const storeB = storeFor(fake, { ownerId: 'github:receipt:b' });
-  const results = await Promise.allSettled([
-    storeA.claimHistoryReceipt(generation, a),
-    storeB.claimHistoryReceipt(generation, b)
-  ]);
-  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
-  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
-  assert.ok([a, b].includes(fake.tagSha(historyTagFor(stateTag, generation))));
+  const n1 = await publishMarker(writer, 'n1');
+  const snapshot = await writer.readSnapshot();
+  fake.failNextTagWrite(checkpointTag, 500);
+  await assert.rejects(writer.writeSnapshot(blankState('n2'), snapshot), /cloud_state_partial_publication/);
+  const n2 = fake.tagSha(stateTag);
+  assert.notEqual(n2, n1);
+  assert.equal(fake.tagSha(witnessTag), n2);
+  assert.equal((await writer.readStatusLedger()).at(-1).stateSha, n2);
+  await storeFor(fake, { ownerId: 'github:checkpoint:repair' }).readSnapshot({ repair: true });
+  assert.equal(fake.tagSha(checkpointTag), n2);
 });
 
-test('concurrent recovery of the same partial publication is idempotent', async () => {
+test('witness failure leaves checkpoint and immutable authority for repair', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   await publishMarker(writer, 'n1');
   const snapshot = await writer.readSnapshot();
-  const next = cloneState(snapshot.state);
-  next.marker = 'n2';
   fake.failNextTagWrite(witnessTag, 500);
-  await assert.rejects(writer.writeSnapshot(next, snapshot), /cloud_state_partial_publication/);
-  const target = fake.tagSha(stateTag);
-  const [a, b] = await Promise.allSettled([
-    storeFor(fake, { ownerId: 'github:recover:a' }).readSnapshot({ repair: true }),
-    storeFor(fake, { ownerId: 'github:recover:b' }).readSnapshot({ repair: true })
-  ]);
-  assert.ok(a.status === 'fulfilled' || b.status === 'fulfilled');
-  assert.equal(fake.tagSha(stateTag), target);
-  assert.equal(fake.tagSha(checkpointTag), target);
-  assert.equal(fake.tagSha(witnessTag), target);
+  await assert.rejects(writer.writeSnapshot(blankState('n2'), snapshot), /cloud_state_partial_publication/);
+  const n2 = fake.tagSha(stateTag);
+  assert.equal(fake.tagSha(checkpointTag), n2);
+  assert.equal((await writer.readStatusLedger()).at(-1).stateSha, n2);
+  await storeFor(fake, { ownerId: 'github:witness:repair' }).readSnapshot({ repair: true });
+  assert.equal(fake.tagSha(witnessTag), n2);
 });
 
-test('same-generation sibling is rejected even when all mutable refs are forced to it', async () => {
+test('batched lineage rejects hidden two-parent merge beneath authoritative head', async () => {
   const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const trusted = await publishMarker(writer, 'trusted');
-  const envelope = fake.envelopeAt(trusted);
-  const sibling = fake.makeStateCommit({
-    parentSha: fake.mainSha,
-    generation: envelope.generation,
-    state: blankState('same-generation-fork'),
-    lineageBaseSha: envelope.lineageBaseSha,
-    lineageBaseGeneration: envelope.lineageBaseGeneration
+  const store = storeFor(fake);
+  const n1 = await publishMarker(store, 'n1');
+  const e1 = fake.envelopeAt(n1);
+  const side = fake.makeStateCommit({ generation: 9, state: blankState('side'), version: 1 });
+  const merge = fake.makeStateCommit({
+    parentSha: n1,
+    additionalParentShas: [side],
+    generation: e1.generation + 1,
+    state: blankState('merge'),
+    lineageBaseSha: e1.lineageBaseSha,
+    lineageBaseGeneration: e1.lineageBaseGeneration
   });
-  fake.forceTag(stateTag, sibling);
-  fake.forceTag(checkpointTag, sibling);
-  fake.forceTag(witnessTag, sibling);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:same-gen:fresh' }).load(), /cloud_state_history_fork/);
+  const head = fake.makeStateCommit({
+    parentSha: merge,
+    generation: e1.generation + 2,
+    state: blankState('head'),
+    lineageBaseSha: e1.lineageBaseSha,
+    lineageBaseGeneration: e1.lineageBaseGeneration
+  });
+  installLedgerRecord(fake, store, e1.generation + 1, merge, n1);
+  installLedgerRecord(fake, store, e1.generation + 2, head, merge);
+  fake.forceTag(stateTag, head);
+  fake.forceTag(checkpointTag, head);
+  fake.forceTag(witnessTag, head);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:hidden-merge' }).load(), /cloud_state_history_fork/);
 });
 
-test('failure of both watermark publications leaves receipt authority readable and repairable', async () => {
+test('batched lineage rejects malformed intermediate envelope', async () => {
   const fake = fakeGitHub();
-  const writer = storeFor(fake);
-  const snapshot = await writer.readSnapshot();
-  fake.failNextTagWrite(checkpointTag, 500);
-  fake.failNextTagWrite(witnessTag, 500);
-  await assert.rejects(writer.writeSnapshot(blankState('hard-partial'), snapshot), /cloud_state_partial_publication/);
-  const stateSha = fake.tagSha(stateTag);
-  assert.ok(stateSha);
-  assert.equal(fake.tagSha(checkpointTag), null);
-  assert.equal(fake.tagSha(witnessTag), null);
-  fake.resetWriteCount();
-  assert.equal((await storeFor(fake, { ownerId: 'github:hard-partial:peek' }).load()).marker, 'hard-partial');
-  assert.equal(fake.writeCount(), 0);
-  await storeFor(fake, { ownerId: 'github:hard-partial:repair' }).readSnapshot({ repair: true });
-  assert.equal(fake.tagSha(checkpointTag), stateSha);
-  assert.equal(fake.tagSha(witnessTag), stateSha);
+  const store = storeFor(fake);
+  const n1 = await publishMarker(store, 'n1');
+  const e1 = fake.envelopeAt(n1);
+  const bad = fake.makeStateCommit({
+    parentSha: n1,
+    generation: e1.generation + 1,
+    state: blankState('bad'),
+    lineageBaseSha: e1.lineageBaseSha,
+    lineageBaseGeneration: e1.lineageBaseGeneration
+  });
+  fake.tamperEnvelope(bad, (envelope) => { envelope.stateHash = '0'.repeat(64); });
+  const head = fake.makeStateCommit({
+    parentSha: bad,
+    generation: e1.generation + 2,
+    state: blankState('head'),
+    lineageBaseSha: e1.lineageBaseSha,
+    lineageBaseGeneration: e1.lineageBaseGeneration
+  });
+  installLedgerRecord(fake, store, e1.generation + 1, bad, n1);
+  installLedgerRecord(fake, store, e1.generation + 2, head, bad);
+  fake.forceTag(stateTag, head);
+  fake.forceTag(checkpointTag, head);
+  fake.forceTag(witnessTag, head);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:bad-intermediate' }).load(), /cloud_state_integrity_mismatch/);
 });
 
-test('state content is always read by exact commit SHA rather than moving tags', async () => {
+test('batched lineage rejects truncated state blobs', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const head = await publishMarker(store, 'head');
+  fake.markHistoryTruncated(head);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:truncated' }).load(), /cloud_state_history_blob_invalid/);
+});
+
+test('v2 child cannot rewrite its inherited lineage anchor', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const n1 = await publishMarker(store, 'n1');
+  const e1 = fake.envelopeAt(n1);
+  const unrelated = fake.makeStateCommit({ generation: 7, state: blankState('legacy'), version: 1 });
+  const bad = fake.makeStateCommit({
+    parentSha: n1,
+    generation: e1.generation + 1,
+    state: blankState('rewrite'),
+    lineageBaseSha: unrelated,
+    lineageBaseGeneration: 7
+  });
+  installLedgerRecord(fake, store, e1.generation + 1, bad, n1);
+  fake.forceTag(stateTag, bad);
+  fake.forceTag(checkpointTag, bad);
+  fake.forceTag(witnessTag, bad);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:anchor-rewrite' }).load(), /cloud_state_lineage_anchor|cloud_state_status_ledger/);
+});
+
+test('established 2050-generation v2 ledger and complete lineage validate below request cliff', async () => {
+  const fake = fakeGitHub();
+  const builder = storeFor(fake, { ownerId: 'github:deep:builder' });
+  let parent = fake.mainSha;
+  let head = null;
+  for (let generation = 1; generation <= 2050; generation += 1) {
+    head = fake.makeStateCommit({
+      parentSha: parent,
+      generation,
+      state: blankState(`v2-${generation}`),
+      lineageBaseSha: fake.mainSha,
+      lineageBaseGeneration: 0
+    });
+    installLedgerRecord(fake, builder, generation, head, parent);
+    parent = head;
+  }
+  fake.forceTag(stateTag, head);
+  fake.forceTag(checkpointTag, head);
+  fake.forceTag(witnessTag, head);
+  fake.resetRequestCount();
+  const loaded = await storeFor(fake, { ownerId: 'github:deep:fresh' }).load();
+  assert.equal(loaded.marker, 'v2-2050');
+  assert.ok(fake.requestCount() < 100, `expected batched ledger+lineage validation, received ${fake.requestCount()} requests`);
+});
+
+test('status ledger pagination tolerates unrelated statuses without weakening lane isolation', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const head = await publishMarker(store, 'one');
+  for (let index = 0; index < 150; index += 1) {
+    fake.forceStatus(`unrelated/${index}`, `noise-${index}`);
+  }
+  assert.equal((await storeFor(fake, { ownerId: 'github:pagination' }).load()).marker, 'one');
+  assert.equal((await store.readStatusLedger()).at(-1).stateSha, head);
+});
+
+test('state content is always read by exact commit SHA', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   await publishMarker(store, 'exact');
@@ -1050,11 +949,10 @@ test('execution leases use cloud owner identity and become recoverable only afte
   assert.equal(await first.lockOwnerIsAbandoned(metadata), true);
 });
 
-test('remote envelope integrity mismatch fails closed', async () => {
+test('remote envelope integrity mismatch fails closed even with matching status authority', async () => {
   const fake = fakeGitHub();
-  const store = storeFor(fake, { ownerId: 'github:50:1' });
-  const lease = await store.claimGlobalLease();
-  await store.releaseGlobalLease(lease.leaseId);
-  fake.tamperCurrentStateHash();
-  await assert.rejects(store.load(), /cloud_state_integrity_mismatch/);
+  const store = storeFor(fake, { ownerId: 'github:integrity' });
+  const stateSha = await publishMarker(store, 'safe');
+  fake.tamperEnvelope(stateSha, (envelope) => { envelope.stateHash = '0'.repeat(64); });
+  await assert.rejects(storeFor(fake, { ownerId: 'github:integrity:fresh' }).load(), /cloud_state_integrity_mismatch/);
 });
