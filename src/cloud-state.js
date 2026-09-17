@@ -133,6 +133,8 @@ export class GitHubStateStore extends JsonStore {
     this.ownerId = ownerId;
     this.now = now;
     this.activeGlobalLeaseId = null;
+    this.lastObservedRefSha = null;
+    this.lastObservedGeneration = 0;
   }
 
   apiPath(suffix) {
@@ -170,9 +172,12 @@ export class GitHubStateStore extends JsonStore {
 
   async readSnapshot() {
     const refSha = await this.refSha(`tags/${encodeURIComponent(this.tag)}`);
-    if (!refSha) return { refSha: null, generation: 0, state: emptyState() };
+    if (!refSha) {
+      if (this.lastObservedGeneration > 0) throw new Error('cloud_state_generation_regressed');
+      return { refSha: null, generation: 0, state: emptyState() };
+    }
     const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
-    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(`refs/tags/${this.tag}`)}`);
+    const file = await this.request(`/contents/${encodedPath}?ref=${encodeURIComponent(refSha)}`);
     if (file?.type !== 'file' || file?.encoding !== 'base64' || typeof file.content !== 'string') throw new Error('cloud_state_file_invalid');
     const raw = Buffer.from(file.content.replace(/\s+/g, ''), 'base64').toString('utf8');
     if (Buffer.byteLength(raw, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
@@ -189,6 +194,14 @@ export class GitHubStateStore extends JsonStore {
     if (persistedLaneId !== this.laneId) throw new Error('cloud_state_lane_mismatch');
     validateCloudState(envelope.state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     if (stateHash(envelope.state) !== envelope.stateHash) throw new Error('cloud_state_integrity_mismatch');
+    if (envelope.generation < this.lastObservedGeneration) throw new Error('cloud_state_generation_regressed');
+    if (
+      envelope.generation === this.lastObservedGeneration &&
+      this.lastObservedRefSha &&
+      refSha !== this.lastObservedRefSha
+    ) throw new Error('cloud_state_generation_fork');
+    this.lastObservedGeneration = envelope.generation;
+    this.lastObservedRefSha = refSha;
     return { refSha, generation: envelope.generation, state: envelope.state };
   }
 
@@ -237,7 +250,10 @@ export class GitHubStateStore extends JsonStore {
         body: { ref: `refs/tags/${this.tag}`, sha: commit.sha }
       });
     }
-    return commit.sha.toLowerCase();
+    const committedRefSha = commit.sha.toLowerCase();
+    this.lastObservedRefSha = committedRefSha;
+    this.lastObservedGeneration = envelope.generation;
+    return committedRefSha;
   }
 
   async load() {
