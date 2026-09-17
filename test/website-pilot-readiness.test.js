@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { join } from 'node:path';
-import { createWorkflowPlan, imageIsPinned, loadProjects } from '../src/core.js';
+import { createWorkflowPlan, loadProjects } from '../src/core.js';
 import { defaultToolSkillRegistry } from '../src/capabilities.js';
 
 test('website pilot is registered for the full governed website-build workflow', async () => {
@@ -12,7 +12,7 @@ test('website pilot is registered for the full governed website-build workflow',
   assert.deepEqual(project.repository, { owner: 'palgarra14-del', name: 'Zasert' });
   assert.equal(project.workspaceStrategy, 'managed');
   assert.equal(project.execution.provider, 'container-required');
-  assert.equal(imageIsPinned(project.execution.image), true);
+  assert.equal(project.execution.image, 'agent-node22-pnpm11:local');
   assert.deepEqual(
     ['test', 'typecheck', 'lint', 'build'].map((name) => Boolean(project.commands[name])),
     [true, true, true, true]
