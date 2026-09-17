@@ -20,6 +20,33 @@ function fakeGitHub() {
   const commits = new Map([[mainSha, { sha: mainSha, tree: { sha: mainTree }, parents: [] }]]);
   const trees = new Map([[mainTree, new Map()]]);
   const blobs = new Map();
+  const contentRefs = [];
+  const failures = [];
+  let lastCreatedCommit = null;
+
+  const isAncestor = (ancestorSha, descendantSha) => {
+    if (ancestorSha === descendantSha) return true;
+    const stack = [descendantSha];
+    const seen = new Set();
+    while (stack.length) {
+      const current = stack.pop();
+      if (seen.has(current)) continue;
+      seen.add(current);
+      const commit = commits.get(current);
+      for (const parent of commit?.parents ?? []) {
+        if (parent.sha === ancestorSha) return true;
+        stack.push(parent.sha);
+      }
+    }
+    return false;
+  };
+
+  const maybeFail = (method, path, body) => {
+    const index = failures.findIndex((failure) => failure.method === method && failure.match(path, body));
+    if (index === -1) return null;
+    const [failure] = failures.splice(index, 1);
+    return response(failure.status, { message: 'injected failure' });
+  };
 
   const fetchImpl = async (rawUrl, options = {}) => {
     const url = new URL(rawUrl);
@@ -28,6 +55,8 @@ function fakeGitHub() {
     const path = url.pathname.slice(prefix.length);
     const method = options.method ?? 'GET';
     const body = options.body ? JSON.parse(options.body) : null;
+    const injected = maybeFail(method, path, body);
+    if (injected) return injected;
 
     if (method === 'GET' && path.startsWith('/git/ref/')) {
       const ref = 'refs/' + decodeURIComponent(path.slice('/git/ref/'.length));
@@ -38,10 +67,19 @@ function fakeGitHub() {
       const value = commits.get(path.slice('/git/commits/'.length));
       return value ? response(200, value) : response(404, {});
     }
+    if (method === 'GET' && path.startsWith('/compare/')) {
+      const [baseSha, headSha] = path.slice('/compare/'.length).split('...');
+      let status = 'diverged';
+      if (baseSha === headSha) status = 'identical';
+      else if (isAncestor(baseSha, headSha)) status = 'ahead';
+      else if (isAncestor(headSha, baseSha)) status = 'behind';
+      return response(200, { status });
+    }
     if (method === 'GET' && path.startsWith('/contents/')) {
       const contentPath = decodeURIComponent(path.slice('/contents/'.length));
       const refName = url.searchParams.get('ref');
-      const commitSha = refs.get(refName);
+      contentRefs.push(refName);
+      const commitSha = /^[a-f0-9]{40}$/i.test(refName ?? '') ? refName.toLowerCase() : refs.get(refName);
       const commit = commits.get(commitSha);
       const tree = commit && trees.get(commit.tree.sha);
       const blobSha = tree?.get(contentPath);
@@ -65,6 +103,7 @@ function fakeGitHub() {
     if (method === 'POST' && path === '/git/commits') {
       const id = sha();
       commits.set(id, { sha: id, tree: { sha: body.tree }, parents: body.parents.map((parent) => ({ sha: parent })) });
+      lastCreatedCommit = id;
       return response(201, { sha: id });
     }
     if (method === 'POST' && path === '/git/refs') {
@@ -75,8 +114,7 @@ function fakeGitHub() {
     if (method === 'PATCH' && path.startsWith('/git/refs/tags/')) {
       const ref = 'refs/tags/' + decodeURIComponent(path.slice('/git/refs/tags/'.length));
       const current = refs.get(ref);
-      const candidate = commits.get(body.sha);
-      if (!current || !candidate?.parents?.some((parent) => parent.sha === current) || body.force !== false) return response(422, {});
+      if (!current || body.force !== false || !isAncestor(current, body.sha)) return response(422, {});
       refs.set(ref, body.sha);
       return response(200, { ref, object: { sha: body.sha } });
     }
@@ -92,7 +130,35 @@ function fakeGitHub() {
     blobs.set(blobSha, JSON.stringify(envelope));
   };
 
-  return { fetchImpl, tamperCurrentStateHash };
+  const forceRef = (ref, commitSha) => {
+    refs.set(ref, commitSha);
+  };
+
+  const deleteRef = (ref) => {
+    refs.delete(ref);
+  };
+
+  const failNextRefWrite = (ref, status = 500) => {
+    failures.push({
+      method: ref.startsWith('refs/tags/') && refs.has(ref) ? 'PATCH' : 'POST',
+      status,
+      match(path, body) {
+        if (this.method === 'PATCH') return path === `/git/${ref}`;
+        return path === '/git/refs' && body?.ref === ref;
+      }
+    });
+  };
+
+  return {
+    fetchImpl,
+    tamperCurrentStateHash,
+    forceRef,
+    deleteRef,
+    failNextRefWrite,
+    ref: (name) => refs.get(name) ?? null,
+    lastCreatedCommit: () => lastCreatedCommit,
+    contentRefs
+  };
 }
 
 function storeFor(fake, {
@@ -102,6 +168,7 @@ function storeFor(fake, {
   laneId = 'self',
   allowedProjectIds = ['self'],
   tag = 'agent-cloud-state-v1',
+  checkpointTag = `${tag}-checkpoint-v2`,
   statePath = '.agent/cloud-state.json'
 } = {}) {
   return new GitHubStateStore({
@@ -114,8 +181,13 @@ function storeFor(fake, {
     laneId,
     allowedProjectIds,
     tag,
+    checkpointTag,
     statePath
   });
+}
+
+function cloneState(state) {
+  return structuredClone(state);
 }
 
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
@@ -141,7 +213,7 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
   }), /contains_secret_material/);
 });
 
-test('durable state bootstraps on a tag and resumes across ephemeral stores', async () => {
+test('durable state bootstraps state and checkpoint refs and resumes across ephemeral stores', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:10:1' });
   await first.withGlobalLease(async () => {
@@ -150,11 +222,16 @@ test('durable state bootstraps on a tag and resumes across ephemeral stores', as
     });
   });
 
+  assert.ok(fake.ref('refs/tags/agent-cloud-state-v1'));
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'));
+
   const second = storeFor(fake, { ownerId: 'github:11:1' });
   const loaded = await second.load();
   assert.equal(loaded.workflows.w1.projectId, 'self');
   assert.equal(loaded.workflows.w1.status, 'pending');
   assert.equal(loaded.cloudExecutionLease, null);
+  assert.ok(fake.contentRefs.length > 0);
+  assert.ok(fake.contentRefs.every((ref) => /^[a-f0-9]{40}$/i.test(ref)));
 });
 
 test('durable writes strip worker shell output but keep bounded status/summary evidence', async () => {
@@ -191,7 +268,7 @@ test('durable writes strip worker shell output but keep bounded status/summary e
   assert.equal(Object.hasOwn(evidence, 'diagnostics'), false);
 });
 
-test('independent cloud lanes use separate refs and durable namespaces without clobbering', async () => {
+test('independent cloud lanes use separate state/checkpoint refs and durable namespaces without clobbering', async () => {
   const fake = fakeGitHub();
   const selfStore = storeFor(fake, { ownerId: 'github:self:1' });
   const websiteStore = storeFor(fake, {
@@ -223,6 +300,9 @@ test('independent cloud lanes use separate refs and durable namespaces without c
   assert.equal(Object.hasOwn(websiteState.workflows, 'self1'), false);
   assert.equal(selfState.cloudExecutionLease, null);
   assert.equal(websiteState.cloudExecutionLease, null);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'));
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-website-pilot-v1'), fake.ref('refs/tags/agent-cloud-state-website-pilot-v1-checkpoint-v2'));
+  assert.notEqual(fake.ref('refs/tags/agent-cloud-state-v1'), fake.ref('refs/tags/agent-cloud-state-website-pilot-v1'));
 });
 
 test('lane envelope binding rejects reading another lane through the wrong store', async () => {
@@ -250,6 +330,135 @@ test('lane envelope binding rejects reading another lane through the wrong store
   await assert.rejects(wrongLane.load(), /cloud_state_lane_mismatch/);
 });
 
+test('fresh process rejects forced state rollback while checkpoint remains newer', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:rollback:a' });
+  const initial = await writer.readSnapshot();
+  const state1 = cloneState(initial.state);
+  state1.marker = 'n';
+  const sha1 = await writer.writeSnapshot(state1, initial);
+  const snap1 = await writer.readSnapshot();
+  const state2 = cloneState(snap1.state);
+  state2.marker = 'n+1';
+  const sha2 = await writer.writeSnapshot(state2, snap1);
+  assert.notEqual(sha1, sha2);
+
+  fake.forceRef('refs/tags/agent-cloud-state-v1', sha1);
+  const fresh = storeFor(fake, { ownerId: 'github:rollback:b' });
+  await assert.rejects(fresh.load(), /cloud_state_rollback/);
+});
+
+test('fresh process rejects divergent higher generation and same-generation fork from trusted checkpoint', async () => {
+  const fake = fakeGitHub();
+  const a = storeFor(fake, { ownerId: 'github:fork:a' });
+  const seed = await a.readSnapshot();
+  const seededState = cloneState(seed.state);
+  seededState.marker = 'seed';
+  await a.writeSnapshot(seededState, seed);
+
+  const b = storeFor(fake, { ownerId: 'github:fork:b' });
+  const snapA = await a.readSnapshot();
+  const snapB = await b.readSnapshot();
+
+  fake.failNextRefWrite('refs/tags/agent-cloud-state-v1', 500);
+  const nextB = cloneState(snapB.state);
+  nextB.marker = 'divergent-child';
+  await assert.rejects(b.writeSnapshot(nextB, snapB), /cloud_state_github_request_failed:500/);
+  const divergentSha = fake.lastCreatedCommit();
+
+  const nextA = cloneState(snapA.state);
+  nextA.marker = 'accepted-child';
+  const acceptedSha = await a.writeSnapshot(nextA, snapA);
+  assert.notEqual(divergentSha, acceptedSha);
+
+  fake.forceRef('refs/tags/agent-cloud-state-v1', divergentSha);
+  const fresh = storeFor(fake, { ownerId: 'github:fork:fresh' });
+  await assert.rejects(fresh.load(), /cloud_state_same_generation_fork|cloud_state_history_fork/);
+});
+
+test('fresh process accepts legitimate descendant with matching checkpoint', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:descendant:a' });
+  const initial = await writer.readSnapshot();
+  const state = cloneState(initial.state);
+  state.marker = 'legitimate';
+  await writer.writeSnapshot(state, initial);
+
+  const fresh = storeFor(fake, { ownerId: 'github:descendant:b' });
+  const loaded = await fresh.load();
+  assert.equal(loaded.marker, 'legitimate');
+});
+
+test('interruption after state-ref publication fails writer and fresh process advances checkpoint without rollback', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:partial:a' });
+  const initial = await writer.readSnapshot();
+  const seed = cloneState(initial.state);
+  seed.marker = 'seed';
+  await writer.writeSnapshot(seed, initial);
+  const before = await writer.readSnapshot();
+  const oldSha = before.refSha;
+
+  fake.failNextRefWrite('refs/tags/agent-cloud-state-v1-checkpoint-v2', 500);
+  const next = cloneState(before.state);
+  next.marker = 'published-state-only';
+  await assert.rejects(writer.writeSnapshot(next, before), /cloud_state_partial_publication/);
+  const newStateSha = fake.ref('refs/tags/agent-cloud-state-v1');
+  assert.notEqual(newStateSha, oldSha);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), oldSha);
+
+  const fresh = storeFor(fake, { ownerId: 'github:partial:b' });
+  const recovered = await fresh.load();
+  assert.equal(recovered.marker, 'published-state-only');
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), newStateSha);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), newStateSha);
+});
+
+test('interruption before state-ref publication leaves prior authoritative refs intact', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:prestate:a' });
+  const initial = await writer.readSnapshot();
+  const seed = cloneState(initial.state);
+  seed.marker = 'seed';
+  await writer.writeSnapshot(seed, initial);
+  const before = await writer.readSnapshot();
+
+  fake.failNextRefWrite('refs/tags/agent-cloud-state-v1', 500);
+  const next = cloneState(before.state);
+  next.marker = 'must-not-publish';
+  await assert.rejects(writer.writeSnapshot(next, before), /cloud_state_github_request_failed:500/);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), before.refSha);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), before.checkpointSha);
+});
+
+test('state-only bootstrap recovery validates history and creates durable checkpoint', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:migration:a' });
+  const initial = await writer.readSnapshot();
+  const state = cloneState(initial.state);
+  state.marker = 'legacy-state';
+  const sha = await writer.writeSnapshot(state, initial);
+  fake.deleteRef('refs/tags/agent-cloud-state-v1-checkpoint-v2');
+
+  const fresh = storeFor(fake, { ownerId: 'github:migration:b' });
+  const loaded = await fresh.load();
+  assert.equal(loaded.marker, 'legacy-state');
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), sha);
+});
+
+test('checkpoint without state ref fails closed as partial publication', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake, { ownerId: 'github:partialonly:a' });
+  const initial = await writer.readSnapshot();
+  const state = cloneState(initial.state);
+  state.marker = 'seed';
+  await writer.writeSnapshot(state, initial);
+  fake.deleteRef('refs/tags/agent-cloud-state-v1');
+
+  const fresh = storeFor(fake, { ownerId: 'github:partialonly:b' });
+  await assert.rejects(fresh.load(), /cloud_state_partial_publication/);
+});
+
 test('global lease excludes concurrent runners and recovers after expiry', async () => {
   const fake = fakeGitHub();
   let clock = Date.parse('2026-09-14T12:00:00Z');
@@ -265,7 +474,7 @@ test('global lease excludes concurrent runners and recovers after expiry', async
   assert.equal(await second.releaseGlobalLease(recovered.leaseId), true);
 });
 
-test('optimistic ref update rejects stale writers', async () => {
+test('optimistic state ref update rejects stale writers and checkpoint does not advance', async () => {
   const fake = fakeGitHub();
   const first = storeFor(fake, { ownerId: 'github:30:1' });
   const seedLease = await first.claimGlobalLease();
@@ -276,8 +485,10 @@ test('optimistic ref update rejects stale writers', async () => {
   const b = await second.readSnapshot();
   a.state.marker = 'first';
   b.state.marker = 'second';
-  await first.writeSnapshot(a.state, a);
+  const winningSha = await first.writeSnapshot(a.state, a);
   await assert.rejects(second.writeSnapshot(b.state, b), /cloud_state_conflict/);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1'), winningSha);
+  assert.equal(fake.ref('refs/tags/agent-cloud-state-v1-checkpoint-v2'), winningSha);
 });
 
 test('execution leases use cloud owner identity and become recoverable only after ttl', async () => {
