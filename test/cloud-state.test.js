@@ -187,7 +187,9 @@ function fakeGitHub() {
     tag = 'agent-cloud-state-v1',
     checkpointTag = checkpointTagFor(tag),
     witnessTag = witnessTagFor(tag),
-    statePath = '.agent/cloud-state.json'
+    statePath = '.agent/cloud-state.json',
+    lineageBaseSha = mainSha,
+    lineageBaseGeneration = 0
   }) => {
     const parent = commits.get(parentSha);
     assert.ok(parent);
@@ -205,6 +207,8 @@ function fakeGitHub() {
       envelope.stateTag = tag;
       envelope.checkpointTag = checkpointTag;
       envelope.witnessTag = witnessTag;
+      envelope.lineageBaseSha = lineageBaseSha;
+      envelope.lineageBaseGeneration = lineageBaseGeneration;
     }
     const blobSha = sha();
     blobs.set(blobSha, JSON.stringify(envelope));
@@ -355,7 +359,7 @@ test('durable state bootstraps three aligned refs and resumes across ephemeral s
   assert.ok(fake.contentRefs().every((ref) => /^[a-f0-9]{40}$/i.test(ref)));
 });
 
-test('legacy multi-generation state migrates to a v2 child and ignores mutable snapshot generation', async () => {
+test('legacy multi-generation state migrates to a v2 child and anchors the exact migration boundary', async () => {
   const fake = fakeGitHub();
   const legacy1 = fake.makeStateCommit({ generation: 1, state: blankState('legacy-1'), version: 1 });
   const legacy2 = fake.makeStateCommit({ parentSha: legacy1, generation: 2, state: blankState('legacy-2'), version: 1 });
@@ -378,6 +382,8 @@ test('legacy multi-generation state migrates to a v2 child and ignores mutable s
   assert.equal(envelope.stateTag, stateTag);
   assert.equal(envelope.checkpointTag, checkpointTag);
   assert.equal(envelope.witnessTag, witnessTag);
+  assert.equal(envelope.lineageBaseSha, legacy2);
+  assert.equal(envelope.lineageBaseGeneration, 2);
   assert.equal(fake.tagSha(stateTag), migratedSha);
   assert.equal(fake.tagSha(checkpointTag), migratedSha);
   assert.equal(fake.tagSha(witnessTag), migratedSha);
@@ -396,9 +402,27 @@ test('legacy histories beyond 2048 generations remain migratable with bounded re
   assert.equal(snapshot.generation, 2050);
   const migratedSha = await store.writeSnapshot(blankState('migrated-deep'), snapshot);
   assert.equal(fake.envelopeAt(migratedSha).generation, 2051);
+  assert.equal(fake.envelopeAt(migratedSha).lineageBaseSha, head);
+  assert.equal(fake.envelopeAt(migratedSha).lineageBaseGeneration, 2050);
   assert.equal(fake.tagSha(checkpointTag), migratedSha);
   assert.equal(fake.tagSha(witnessTag), migratedSha);
   assert.ok(fake.requestCount() < 50, `expected bounded REST traffic, received ${fake.requestCount()} requests`);
+});
+
+test('legacy migration accepts an inherited generation offset without trusting base-branch commit distance', async () => {
+  const fake = fakeGitHub();
+  const legacyA = fake.makeStateCommit({ generation: 4, state: blankState('offset-4'), version: 1 });
+  const legacyB = fake.makeStateCommit({ parentSha: legacyA, generation: 5, state: blankState('offset-5'), version: 1 });
+  fake.forceTag(stateTag, legacyB);
+  const store = storeFor(fake, { ownerId: 'github:migrate:offset' });
+  const snapshot = await store.readSnapshot();
+  assert.equal(snapshot.generation, 5);
+  const migratedSha = await store.writeSnapshot(blankState('offset-v2'), snapshot);
+  const envelope = fake.envelopeAt(migratedSha);
+  assert.equal(envelope.generation, 6);
+  assert.equal(envelope.lineageBaseSha, legacyB);
+  assert.equal(envelope.lineageBaseGeneration, 5);
+  assert.equal((await storeFor(fake, { ownerId: 'github:migrate:offset:fresh' }).readSnapshot()).generation, 6);
 });
 
 test('legacy writer racing migration cannot overwrite a winning v2 transition', async () => {
@@ -570,14 +594,20 @@ test('a forged skipped generation is rejected even when all three refs agree', a
   const writer = storeFor(fake);
   const n1 = await publishMarker(writer, 'n1');
   const n1Envelope = fake.envelopeAt(n1);
-  const bad = fake.makeStateCommit({ parentSha: n1, generation: n1Envelope.generation + 2, state: blankState('n3') });
+  const bad = fake.makeStateCommit({
+    parentSha: n1,
+    generation: n1Envelope.generation + 2,
+    state: blankState('n3'),
+    lineageBaseSha: n1Envelope.lineageBaseSha,
+    lineageBaseGeneration: n1Envelope.lineageBaseGeneration
+  });
   fake.forceTag(stateTag, bad);
   fake.forceTag(checkpointTag, bad);
   fake.forceTag(witnessTag, bad);
   await assert.rejects(storeFor(fake, { ownerId: 'github:skip:fresh' }).load(), /cloud_state_generation_discontinuity/);
 });
 
-test('aligned refs still reject a malformed older v2 ancestor', async () => {
+test('aligned refs still reject a malformed older v2 bootstrap transition', async () => {
   const fake = fakeGitHub();
   const malformedGeneration2 = fake.makeStateCommit({
     parentSha: fake.mainSha, generation: 2, state: blankState('bad-generation-2')
@@ -594,16 +624,37 @@ test('aligned refs still reject a malformed older v2 ancestor', async () => {
   );
 });
 
+test('a v2 child cannot rewrite its inherited lineage anchor', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  const n1 = await publishMarker(writer, 'n1');
+  const n1Envelope = fake.envelopeAt(n1);
+  const unrelatedLegacy = fake.makeStateCommit({ generation: 9, state: blankState('unrelated'), version: 1 });
+  const bad = fake.makeStateCommit({
+    parentSha: n1,
+    generation: n1Envelope.generation + 1,
+    state: blankState('rewritten-anchor'),
+    lineageBaseSha: unrelatedLegacy,
+    lineageBaseGeneration: 9
+  });
+  fake.forceTag(stateTag, bad);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:anchor-rewrite' }).load(), /cloud_state_history_fork|cloud_state_generation_discontinuity|cloud_state_lineage_anchor/);
+});
+
 test('higher-generation divergent history is rejected despite its numeric generation', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
   const trusted = await publishMarker(writer, 'trusted');
   const trustedEnvelope = fake.envelopeAt(trusted);
   const divergent = fake.makeStateCommit({
-    parentSha: fake.mainSha, generation: trustedEnvelope.generation + 5, state: blankState('divergent')
+    parentSha: fake.mainSha,
+    generation: trustedEnvelope.generation + 5,
+    state: blankState('divergent'),
+    lineageBaseSha: trustedEnvelope.lineageBaseSha,
+    lineageBaseGeneration: trustedEnvelope.lineageBaseGeneration
   });
   fake.forceTag(stateTag, divergent);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:fork:fresh' }).load(), /cloud_state_history_fork/);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:fork:fresh' }).load(), /cloud_state_history_fork|cloud_state_generation_discontinuity/);
 });
 
 test('legacy descendants are rejected once durable v2 watermarks exist', async () => {
@@ -723,10 +774,12 @@ test('same-generation different-SHA state is rejected against surviving watermar
   const sibling = fake.makeStateCommit({
     parentSha: fake.mainSha,
     generation: trustedEnvelope.generation,
-    state: blankState('same-generation-fork')
+    state: blankState('same-generation-fork'),
+    lineageBaseSha: trustedEnvelope.lineageBaseSha,
+    lineageBaseGeneration: trustedEnvelope.lineageBaseGeneration
   });
   fake.forceTag(stateTag, sibling);
-  await assert.rejects(storeFor(fake, { ownerId: 'github:same-gen:fresh' }).load(), /cloud_state_history_fork/);
+  await assert.rejects(storeFor(fake, { ownerId: 'github:same-gen:fresh' }).load(), /cloud_state_history_fork|cloud_state_generation_discontinuity/);
 });
 
 test('failure of both watermark publications after state advancement fails closed without re-trusting state', async () => {
