@@ -246,7 +246,11 @@ export class GitHubStateStore extends JsonStore {
       envelope.statePath !== this.statePath ||
       envelope.stateTag !== this.tag ||
       envelope.checkpointTag !== this.checkpointTag ||
-      envelope.witnessTag !== this.witnessTag
+      envelope.witnessTag !== this.witnessTag ||
+      !/^[a-f0-9]{40}$/i.test(envelope.lineageBaseSha ?? '') ||
+      !Number.isInteger(envelope.lineageBaseGeneration) ||
+      envelope.lineageBaseGeneration < 0 ||
+      envelope.lineageBaseGeneration >= envelope.generation
     )) {
       throw new Error('cloud_state_ref_binding_mismatch');
     }
@@ -261,24 +265,55 @@ export class GitHubStateStore extends JsonStore {
     return sha;
   }
 
-  async validateGenerationDistance(stateSha, envelope) {
+  async validateLegacyMigrationHead(stateSha, stateEnvelope) {
+    if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
     const commit = await this.readCommit(stateSha);
     if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
-    const baseSha = await this.baseBranchSha();
-    const comparison = await this.compareDetails(baseSha, stateSha);
-    if (!['ahead', 'diverged'].includes(comparison.status) || comparison.aheadBy !== envelope.generation) {
-      throw new Error('cloud_state_generation_discontinuity');
-    }
   }
 
-  async validateLegacyHistory(stateSha, stateEnvelope) {
-    if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
-    await this.validateGenerationDistance(stateSha, stateEnvelope);
+  async validateLineageAnchor(stateEnvelope) {
+    const anchorSha = assertSha(stateEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid');
+    const anchorGeneration = stateEnvelope.lineageBaseGeneration;
+    if (!Number.isInteger(anchorGeneration) || anchorGeneration < 0 || anchorGeneration >= stateEnvelope.generation) {
+      throw new Error('cloud_state_lineage_anchor_invalid');
+    }
+    if (anchorGeneration === 0) {
+      const currentBaseSha = await this.baseBranchSha();
+      const relation = await this.compareCommits(anchorSha, currentBaseSha);
+      if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+      return { anchorSha, anchorGeneration };
+    }
+    const anchorEnvelope = await this.readEnvelopeAt(anchorSha);
+    if (anchorEnvelope.version !== 1 || anchorEnvelope.generation !== anchorGeneration) {
+      throw new Error('cloud_state_lineage_anchor_invalid');
+    }
+    const anchorCommit = await this.readCommit(anchorSha);
+    if (anchorCommit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+    return { anchorSha, anchorGeneration };
   }
 
   async validateCurrentV2Commit(stateSha, stateEnvelope) {
     if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
-    await this.validateGenerationDistance(stateSha, stateEnvelope);
+    const commit = await this.readCommit(stateSha);
+    if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
+    const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+    const { anchorSha, anchorGeneration } = await this.validateLineageAnchor(stateEnvelope);
+    const comparison = await this.compareDetails(anchorSha, stateSha);
+    const expectedDistance = stateEnvelope.generation - anchorGeneration;
+    if (comparison.status !== 'ahead' || comparison.aheadBy !== expectedDistance || comparison.behindBy !== 0) {
+      throw new Error('cloud_state_generation_discontinuity');
+    }
+    if (expectedDistance === 1) {
+      if (parentSha !== anchorSha) throw new Error('cloud_state_history_invalid');
+      return;
+    }
+    const parentEnvelope = await this.readEnvelopeAt(parentSha);
+    if (parentEnvelope.version !== 2) throw new Error('cloud_state_history_invalid');
+    if (parentEnvelope.generation !== stateEnvelope.generation - 1) throw new Error('cloud_state_generation_discontinuity');
+    if (assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== anchorSha ||
+        parentEnvelope.lineageBaseGeneration !== anchorGeneration) {
+      throw new Error('cloud_state_lineage_anchor_mismatch');
+    }
   }
 
   async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
@@ -288,6 +323,11 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_history_invalid');
     }
     if (childEnvelope.generation !== parentEnvelope.generation + 1) throw new Error('cloud_state_generation_discontinuity');
+    if (assertSha(childEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !==
+          assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') ||
+        childEnvelope.lineageBaseGeneration !== parentEnvelope.lineageBaseGeneration) {
+      throw new Error('cloud_state_lineage_anchor_mismatch');
+    }
   }
 
   snapshotFrom(stateSha, checkpointSha, witnessSha, envelope) {
@@ -441,19 +481,27 @@ export class GitHubStateStore extends JsonStore {
 
     let parentSha;
     let generation;
+    let lineageBaseSha;
+    let lineageBaseGeneration;
     if (!expectedStateSha) {
       if (expectedCheckpointSha || expectedWitnessSha) throw new Error('cloud_state_snapshot_untrusted');
       parentSha = await this.baseBranchSha();
       generation = 1;
+      lineageBaseSha = parentSha;
+      lineageBaseGeneration = 0;
     } else {
       const parentEnvelope = await this.readEnvelopeAt(expectedStateSha);
       if (!expectedCheckpointSha && !expectedWitnessSha && parentEnvelope.version === 1) {
-        await this.validateLegacyHistory(expectedStateSha, parentEnvelope);
+        await this.validateLegacyMigrationHead(expectedStateSha, parentEnvelope);
+        lineageBaseSha = expectedStateSha;
+        lineageBaseGeneration = parentEnvelope.generation;
       } else {
         if (parentEnvelope.version !== 2 || expectedCheckpointSha !== expectedStateSha || expectedWitnessSha !== expectedStateSha) {
           throw new Error('cloud_state_snapshot_untrusted');
         }
         await this.validateCurrentV2Commit(expectedStateSha, parentEnvelope);
+        lineageBaseSha = assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid');
+        lineageBaseGeneration = parentEnvelope.lineageBaseGeneration;
       }
       parentSha = expectedStateSha;
       generation = parentEnvelope.generation + 1;
@@ -467,6 +515,8 @@ export class GitHubStateStore extends JsonStore {
       stateTag: this.tag,
       checkpointTag: this.checkpointTag,
       witnessTag: this.witnessTag,
+      lineageBaseSha,
+      lineageBaseGeneration,
       generation,
       stateHash: stateHash(state),
       updatedAt: new Date(this.now()).toISOString(),
