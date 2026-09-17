@@ -5,11 +5,13 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
-const HISTORY_PAGE_SIZE = 10;
+const HISTORY_PAGE_SIZE = 100;
+const STATUS_PAGE_SIZE = 100;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
-const HISTORY_NAMESPACE = 'agent-cloud-state-v2-history';
-const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE, HISTORY_NAMESPACE]);
+const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
+const LEDGER_CONTEXT_ROOT = 'agent-cloud-state-v2';
+const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE]);
 
 const HISTORY_QUERY = `
 query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
@@ -70,11 +72,6 @@ function checkpointTagFor(tag) {
 
 function witnessTagFor(tag) {
   return `${WITNESS_NAMESPACE}/${tag}`;
-}
-
-function historyTagFor(tag, generation) {
-  if (!Number.isInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
-  return `${HISTORY_NAMESPACE}/${tag}/${generation}`;
 }
 
 function assertNoSensitiveKeys(value, path = 'state') {
@@ -183,6 +180,16 @@ export class GitHubStateStore extends JsonStore {
     this.now = now;
     this.activeGlobalLeaseId = null;
     this.validatedLineageHeads = new Set();
+    this.ledgerRootVerified = false;
+    this.ledgerDigest = createHash('sha256').update(JSON.stringify(canonical({
+      repository: `${repository.owner}/${repository.name}`,
+      laneId,
+      statePath,
+      stateTag: tag,
+      checkpointTag: this.checkpointTag,
+      witnessTag: this.witnessTag
+    }))).digest('hex').slice(0, 32);
+    this.ledgerContextPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/g/`;
   }
 
   apiPath(suffix) {
@@ -247,10 +254,6 @@ export class GitHubStateStore extends JsonStore {
       this.refSha(`tags/${encodeURIComponent(this.witnessTag)}`)
     ]);
     return { stateSha, checkpointSha, witnessSha };
-  }
-
-  async historySha(generation) {
-    return this.refSha(`tags/${encodeURIComponent(historyTagFor(this.tag, generation))}`);
   }
 
   async readCommit(sha) {
@@ -331,6 +334,112 @@ export class GitHubStateStore extends JsonStore {
     return sha;
   }
 
+  async verifyLedgerRoot() {
+    if (this.ledgerRootVerified) return;
+    const root = await this.readCommit(LEDGER_ROOT_SHA);
+    if (root.parents.length !== 0) throw new Error('cloud_state_status_root_invalid');
+    this.ledgerRootVerified = true;
+  }
+
+  ledgerContext(generation) {
+    if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
+    return `${this.ledgerContextPrefix}${generation}`;
+  }
+
+  ledgerDescription(stateSha, parentSha) {
+    return `s=${assertSha(stateSha)};p=${assertSha(parentSha)}`;
+  }
+
+  parseLedgerStatus(status) {
+    const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
+    const prefix = this.ledgerContextPrefix.toLowerCase();
+    if (!context.startsWith(prefix)) return null;
+    const generationText = context.slice(prefix.length);
+    if (!/^[1-9][0-9]*$/.test(generationText)) throw new Error('cloud_state_status_ledger_invalid');
+    const generation = Number(generationText);
+    if (!Number.isSafeInteger(generation)) throw new Error('cloud_state_status_ledger_invalid');
+    if (status.state !== 'success' || (status.target_url !== null && status.target_url !== undefined) || typeof status.description !== 'string') {
+      throw new Error('cloud_state_status_ledger_invalid');
+    }
+    const match = /^s=([a-f0-9]{40});p=([a-f0-9]{40})$/i.exec(status.description);
+    if (!match) throw new Error('cloud_state_status_ledger_invalid');
+    return {
+      generation,
+      stateSha: assertSha(match[1], 'cloud_state_status_ledger_invalid'),
+      parentSha: assertSha(match[2], 'cloud_state_status_ledger_invalid')
+    };
+  }
+
+  async readStatusLedger() {
+    await this.verifyLedgerRoot();
+    const byGeneration = new Map();
+    let page = 1;
+    while (true) {
+      const statuses = await this.request(`/commits/${LEDGER_ROOT_SHA}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(statuses)) throw new Error('cloud_state_status_ledger_invalid');
+      for (const status of statuses) {
+        const record = this.parseLedgerStatus(status);
+        if (!record) continue;
+        const previous = byGeneration.get(record.generation);
+        if (previous && (previous.stateSha !== record.stateSha || previous.parentSha !== record.parentSha)) {
+          throw new Error('cloud_state_status_ledger_conflict');
+        }
+        byGeneration.set(record.generation, record);
+      }
+      if (statuses.length < STATUS_PAGE_SIZE) break;
+      page += 1;
+    }
+    const records = [...byGeneration.values()].sort((a, b) => a.generation - b.generation);
+    for (let index = 1; index < records.length; index += 1) {
+      const previous = records[index - 1];
+      const current = records[index];
+      if (current.generation !== previous.generation + 1 || current.parentSha !== previous.stateSha) {
+        throw new Error('cloud_state_status_ledger_gap');
+      }
+    }
+    return records;
+  }
+
+  async appendStatusRecord(generation, stateSha, parentSha, observedLedger = null) {
+    const desired = {
+      generation,
+      stateSha: assertSha(stateSha),
+      parentSha: assertSha(parentSha)
+    };
+    const before = observedLedger ?? await this.readStatusLedger();
+    const existing = before.find((record) => record.generation === generation);
+    if (existing) {
+      if (existing.stateSha === desired.stateSha && existing.parentSha === desired.parentSha) return;
+      throw new Error('cloud_state_status_ledger_conflict');
+    }
+    if (before.length > 0) {
+      const latest = before.at(-1);
+      if (generation !== latest.generation + 1 || parentSha !== latest.stateSha) {
+        throw new Error('cloud_state_status_ledger_gap');
+      }
+    }
+
+    let postError = null;
+    try {
+      await this.request(`/statuses/${LEDGER_ROOT_SHA}`, {
+        method: 'POST',
+        body: {
+          state: 'success',
+          context: this.ledgerContext(generation),
+          description: this.ledgerDescription(stateSha, parentSha)
+        }
+      });
+    } catch (error) {
+      postError = error;
+    }
+    const after = await this.readStatusLedger();
+    const observed = after.find((record) => record.generation === generation);
+    if (observed?.stateSha === desired.stateSha && observed?.parentSha === desired.parentSha) return;
+    if (observed) throw new Error('cloud_state_status_ledger_conflict', { cause: postError ?? undefined });
+    if (postError) throw postError;
+    throw new Error('cloud_state_status_append_failed');
+  }
+
   async validateLegacyMigrationHead(stateSha, stateEnvelope) {
     if (stateEnvelope.version !== 1) throw new Error('cloud_state_legacy_history_invalid');
     const commit = await this.readCommit(stateSha);
@@ -380,9 +489,18 @@ export class GitHubStateStore extends JsonStore {
     }
   }
 
-  async validateCompleteV2Lineage(stateSha, stateEnvelope) {
+  async validateCompleteV2Lineage(stateSha, stateEnvelope, ledger) {
     if (this.validatedLineageHeads.has(stateSha)) return;
+    if (!Array.isArray(ledger) || ledger.length < 1) throw new Error('cloud_state_status_ledger_missing');
     const { anchorSha, anchorGeneration } = await this.validateLineageAnchor(stateEnvelope);
+    if (ledger[0].generation !== anchorGeneration + 1 || ledger[0].parentSha !== anchorSha) {
+      throw new Error('cloud_state_status_ledger_gap');
+    }
+    const latest = ledger.at(-1);
+    if (latest.generation !== stateEnvelope.generation || latest.stateSha !== stateSha) {
+      throw new Error('cloud_state_status_ledger_mismatch');
+    }
+    const ledgerByGeneration = new Map(ledger.map((record) => [record.generation, record]));
     let expectedSha = stateSha;
     let expectedGeneration = stateEnvelope.generation;
     let after = null;
@@ -419,6 +537,10 @@ export class GitHubStateStore extends JsonStore {
             envelope.lineageBaseGeneration !== anchorGeneration) {
           throw new Error('cloud_state_lineage_anchor_mismatch');
         }
+        const ledgerRecord = ledgerByGeneration.get(expectedGeneration);
+        if (!ledgerRecord || ledgerRecord.stateSha !== oid || ledgerRecord.parentSha !== parentSha) {
+          throw new Error('cloud_state_status_ledger_mismatch');
+        }
 
         if (expectedGeneration === anchorGeneration + 1) {
           if (parentSha !== anchorSha) throw new Error('cloud_state_history_invalid');
@@ -441,27 +563,13 @@ export class GitHubStateStore extends JsonStore {
     this.validatedLineageHeads.add(stateSha);
   }
 
-  async validateCurrentV2Commit(stateSha, stateEnvelope, { requireNoNextReceipt = true } = {}) {
-    if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
-    const currentReceipt = await this.historySha(stateEnvelope.generation);
-    if (!currentReceipt) throw new Error('cloud_state_history_receipt_missing');
-    if (currentReceipt !== stateSha) throw new Error('cloud_state_history_fork');
-    if (requireNoNextReceipt) {
-      const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
-      if (nextReceipt) throw new Error('cloud_state_rollback');
-    }
-    await this.validateCompleteV2Lineage(stateSha, stateEnvelope);
-  }
-
-  async validateDirectV2Child(parentSha, parentEnvelope, childSha, childEnvelope) {
-    await this.validateV2Edge(parentSha, parentEnvelope, childSha, childEnvelope);
-  }
-
-  snapshotFrom(stateSha, checkpointSha, witnessSha, envelope) {
+  snapshotFrom(stateSha, checkpointSha, witnessSha, envelope, authority = null) {
     return {
       refSha: stateSha,
       checkpointSha,
       witnessSha,
+      authoritySha: authority?.stateSha ?? null,
+      authorityGeneration: authority?.generation ?? 0,
       generation: envelope?.generation ?? 0,
       envelopeVersion: envelope?.version ?? null,
       state: envelope?.state ?? emptyState()
@@ -492,197 +600,141 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_conflict');
   }
 
-  async claimHistoryReceipt(generation, targetSha) {
-    const refName = historyTagFor(this.tag, generation);
-    let error = null;
-    try {
-      await this.request('/git/refs', {
-        method: 'POST',
-        body: { ref: `refs/tags/${refName}`, sha: targetSha }
-      });
-    } catch (caught) {
-      error = caught;
-    }
-    const observed = await this.historySha(generation);
-    if (observed === targetSha) return;
-    if (observed) throw new Error('cloud_state_history_conflict', { cause: error ?? undefined });
-    if (error) throw error;
-    throw new Error('cloud_state_history_receipt_failed');
+  async relationToAuthority(refSha, authoritySha) {
+    if (!refSha) return 'missing';
+    if (refSha === authoritySha) return 'identical';
+    const relation = await this.compareCommits(refSha, authoritySha);
+    if (relation === 'ahead') return 'behind';
+    if (relation === 'behind') return 'ahead';
+    return relation;
   }
 
-  async repairWatermarks(stateSha, expectedCheckpointSha, expectedWitnessSha) {
+  async repairRefToAuthority(refName, currentSha, authoritySha, failureCode) {
+    const relation = await this.relationToAuthority(currentSha, authoritySha);
+    if (!['missing', 'identical', 'behind'].includes(relation)) throw new Error('cloud_state_history_fork');
+    if (relation === 'identical') return;
+    await this.advanceRef(refName, currentSha, authoritySha, failureCode);
+  }
+
+  async repairAllRefs(refs, authoritySha) {
     const before = await this.readRefs();
-    if (before.stateSha !== stateSha || before.checkpointSha !== expectedCheckpointSha || before.witnessSha !== expectedWitnessSha) {
+    if (before.stateSha !== refs.stateSha || before.checkpointSha !== refs.checkpointSha || before.witnessSha !== refs.witnessSha) {
       throw new Error('cloud_state_conflict');
     }
-    if (expectedCheckpointSha !== stateSha) {
-      await this.advanceRef(this.checkpointTag, expectedCheckpointSha, stateSha, 'cloud_state_checkpoint_recovery_failed');
-    }
+    await this.repairRefToAuthority(this.tag, before.stateSha, authoritySha, 'cloud_state_state_recovery_failed');
+    const afterState = await this.readRefs();
+    await this.repairRefToAuthority(this.checkpointTag, afterState.checkpointSha, authoritySha, 'cloud_state_checkpoint_recovery_failed');
     const afterCheckpoint = await this.readRefs();
-    if (afterCheckpoint.stateSha !== stateSha || afterCheckpoint.checkpointSha !== stateSha) {
-      throw new Error('cloud_state_checkpoint_recovery_failed');
-    }
-    if (afterCheckpoint.witnessSha !== stateSha) {
-      await this.advanceRef(this.witnessTag, afterCheckpoint.witnessSha, stateSha, 'cloud_state_witness_recovery_failed');
-    }
+    await this.repairRefToAuthority(this.witnessTag, afterCheckpoint.witnessSha, authoritySha, 'cloud_state_witness_recovery_failed');
     const finalRefs = await this.readRefs();
-    if (finalRefs.stateSha !== stateSha || finalRefs.checkpointSha !== stateSha || finalRefs.witnessSha !== stateSha) {
+    if (finalRefs.stateSha !== authoritySha || finalRefs.checkpointSha !== authoritySha || finalRefs.witnessSha !== authoritySha) {
       throw new Error('cloud_state_partial_publication');
     }
     return finalRefs;
   }
 
-  async recoverBootstrapReceipt(refs, targetSha, targetEnvelope) {
-    await this.validateCurrentV2Commit(targetSha, targetEnvelope);
-    const before = await this.readRefs();
-    if (before.stateSha !== refs.stateSha || before.checkpointSha !== refs.checkpointSha || before.witnessSha !== refs.witnessSha) {
-      throw new Error('cloud_state_conflict');
-    }
-    await this.advanceRef(this.tag, null, targetSha, 'cloud_state_partial_publication');
-    await this.repairWatermarks(targetSha, null, null);
-    return this.snapshotFrom(targetSha, targetSha, targetSha, targetEnvelope);
-  }
-
-  async recoverMissingMigrationReceipt(stateSha, stateEnvelope, refs) {
+  async validateFirstV2Candidate(stateSha, stateEnvelope) {
+    if (stateEnvelope.version !== 2) throw new Error('cloud_state_v2_required');
     const { anchorSha, anchorGeneration } = await this.validateLineageAnchor(stateEnvelope);
-    if (anchorGeneration < 1 || stateEnvelope.generation !== anchorGeneration + 1 || refs.checkpointSha || refs.witnessSha) {
-      throw new Error('cloud_state_history_receipt_missing');
-    }
+    if (stateEnvelope.generation !== anchorGeneration + 1) throw new Error('cloud_state_generation_discontinuity');
     const commit = await this.readCommit(stateSha);
     if (commit.parents.length !== 1 || assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid') !== anchorSha) {
       throw new Error('cloud_state_history_fork');
     }
-    const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
-    if (nextReceipt) throw new Error('cloud_state_history_fork');
-    await this.claimHistoryReceipt(stateEnvelope.generation, stateSha);
-    await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-    await this.repairWatermarks(stateSha, null, null);
-    return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
+    return { anchorSha, anchorGeneration };
   }
 
-  async recoverReceiptAhead(stateSha, stateEnvelope, refs, nextSha) {
-    const nextEnvelope = await this.readEnvelopeAt(nextSha);
-    await this.validateDirectV2Child(stateSha, stateEnvelope, nextSha, nextEnvelope);
-    const observedReceipt = await this.historySha(nextEnvelope.generation);
-    if (observedReceipt !== nextSha) throw new Error('cloud_state_history_fork');
-    await this.validateCompleteV2Lineage(nextSha, nextEnvelope);
-
+  async recoverFirstStatus(refs, stateSha, stateEnvelope) {
+    if (refs.checkpointSha || refs.witnessSha) throw new Error('cloud_state_status_ledger_missing');
+    const { anchorSha } = await this.validateFirstV2Candidate(stateSha, stateEnvelope);
+    const currentLedger = await this.readStatusLedger();
+    if (currentLedger.length !== 0) throw new Error('cloud_state_status_ledger_conflict');
     const before = await this.readRefs();
     if (before.stateSha !== refs.stateSha || before.checkpointSha !== refs.checkpointSha || before.witnessSha !== refs.witnessSha) {
       throw new Error('cloud_state_conflict');
     }
-    await this.advanceRef(this.tag, stateSha, nextSha, 'cloud_state_partial_publication');
-    const afterState = await this.readRefs();
-    if (afterState.stateSha !== nextSha) throw new Error('cloud_state_partial_publication');
-    if (afterState.checkpointSha !== nextSha) {
-      await this.advanceRef(this.checkpointTag, afterState.checkpointSha, nextSha, 'cloud_state_checkpoint_recovery_failed');
+    await this.appendStatusRecord(stateEnvelope.generation, stateSha, anchorSha, currentLedger);
+    const ledger = await this.readStatusLedger();
+    await this.validateCompleteV2Lineage(stateSha, stateEnvelope, ledger);
+    await this.repairAllRefs(before, stateSha);
+    return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope, ledger.at(-1));
+  }
+
+  async recoverStateAhead(refs, authority, authorityEnvelope, stateSha, stateEnvelope, ledger) {
+    if (stateEnvelope.version !== 2 || stateEnvelope.generation !== authority.generation + 1) {
+      throw new Error('cloud_state_status_ledger_missing');
     }
-    const afterCheckpoint = await this.readRefs();
-    if (afterCheckpoint.witnessSha !== nextSha) {
-      await this.advanceRef(this.witnessTag, afterCheckpoint.witnessSha, nextSha, 'cloud_state_witness_recovery_failed');
+    await this.validateV2Edge(authority.stateSha, authorityEnvelope, stateSha, stateEnvelope);
+    const before = await this.readRefs();
+    if (before.stateSha !== refs.stateSha || before.checkpointSha !== refs.checkpointSha || before.witnessSha !== refs.witnessSha) {
+      throw new Error('cloud_state_conflict');
     }
-    const finalRefs = await this.readRefs();
-    if (finalRefs.stateSha !== nextSha || finalRefs.checkpointSha !== nextSha || finalRefs.witnessSha !== nextSha) {
-      throw new Error('cloud_state_partial_publication');
+    const refreshedLedger = await this.readStatusLedger();
+    const refreshedAuthority = refreshedLedger.at(-1);
+    if (!refreshedAuthority || refreshedAuthority.generation !== authority.generation || refreshedAuthority.stateSha !== authority.stateSha) {
+      throw new Error('cloud_state_status_ledger_conflict');
     }
-    return this.snapshotFrom(nextSha, nextSha, nextSha, nextEnvelope);
+    await this.appendStatusRecord(stateEnvelope.generation, stateSha, authority.stateSha, refreshedLedger);
+    const nextLedger = await this.readStatusLedger();
+    await this.validateCompleteV2Lineage(stateSha, stateEnvelope, nextLedger);
+    await this.repairAllRefs(before, stateSha);
+    return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope, nextLedger.at(-1));
   }
 
   async readSnapshot({ repair = false } = {}) {
-    const refs = await this.readRefs();
+    const [refs, ledger] = await Promise.all([this.readRefs(), this.readStatusLedger()]);
     const { stateSha, checkpointSha, witnessSha } = refs;
 
-    if (!stateSha && !checkpointSha && !witnessSha) {
-      const bootstrapReceipt = await this.historySha(1);
-      if (!bootstrapReceipt) return this.snapshotFrom(null, null, null, null);
-      const bootstrapEnvelope = await this.readEnvelopeAt(bootstrapReceipt);
-      if (bootstrapEnvelope.version !== 2 || bootstrapEnvelope.generation !== 1 || bootstrapEnvelope.lineageBaseGeneration !== 0) {
-        throw new Error('cloud_state_history_fork');
+    if (ledger.length === 0) {
+      if (!stateSha && !checkpointSha && !witnessSha) return this.snapshotFrom(null, null, null, null, null);
+      if (!stateSha) throw new Error('cloud_state_partial_publication');
+      const stateEnvelope = await this.readEnvelopeAt(stateSha);
+      if (stateEnvelope.version === 1) {
+        if (checkpointSha || witnessSha) throw new Error('cloud_state_legacy_after_migration');
+        return this.snapshotFrom(stateSha, null, null, stateEnvelope, null);
       }
-      if (!repair) throw new Error('cloud_state_partial_publication');
-      return this.recoverBootstrapReceipt(refs, bootstrapReceipt, bootstrapEnvelope);
-    }
-    if (!stateSha) throw new Error('cloud_state_partial_publication');
-
-    const stateEnvelope = await this.readEnvelopeAt(stateSha);
-
-    if (!checkpointSha && !witnessSha && stateEnvelope.version === 1) {
-      const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
-      if (!nextReceipt) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
-      const nextEnvelope = await this.readEnvelopeAt(nextReceipt);
-      await this.validateDirectV2Child(stateSha, stateEnvelope, nextReceipt, nextEnvelope);
-      if (!repair) throw new Error('cloud_state_partial_publication');
-      return this.recoverReceiptAhead(stateSha, stateEnvelope, refs, nextReceipt);
+      if (!repair) throw new Error('cloud_state_status_ledger_missing');
+      return this.recoverFirstStatus(refs, stateSha, stateEnvelope);
     }
 
-    if (stateEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
-
-    const currentReceipt = await this.historySha(stateEnvelope.generation);
-    if (!currentReceipt) {
-      if (!repair) throw new Error('cloud_state_history_receipt_missing');
-      return this.recoverMissingMigrationReceipt(stateSha, stateEnvelope, refs);
+    const authority = ledger.at(-1);
+    const authorityEnvelope = await this.readEnvelopeAt(authority.stateSha);
+    if (authorityEnvelope.version !== 2 || authorityEnvelope.generation !== authority.generation) {
+      throw new Error('cloud_state_status_ledger_mismatch');
     }
-    if (currentReceipt !== stateSha) throw new Error('cloud_state_history_fork');
-    const nextReceipt = await this.historySha(stateEnvelope.generation + 1);
-    if (nextReceipt) {
+    await this.validateCompleteV2Lineage(authority.stateSha, authorityEnvelope, ledger);
+
+    if (!stateSha) {
       if (!repair) throw new Error('cloud_state_rollback');
-      return this.recoverReceiptAhead(stateSha, stateEnvelope, refs, nextReceipt);
+      const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
 
-    await this.validateCurrentV2Commit(stateSha, stateEnvelope);
-
-    if (!checkpointSha && !witnessSha) {
-      if (!repair) return this.snapshotFrom(stateSha, null, null, stateEnvelope);
-      await this.repairWatermarks(stateSha, null, null);
-      return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
-    }
-
-    let trustedSha;
-    let trustedEnvelope;
-    if (checkpointSha && witnessSha) {
-      if (checkpointSha === witnessSha) {
-        trustedSha = checkpointSha;
-        trustedEnvelope = await this.readEnvelopeAt(trustedSha);
-      } else {
-        const relation = await this.compareCommits(checkpointSha, witnessSha);
-        const checkpointEnvelope = await this.readEnvelopeAt(checkpointSha);
-        const witnessEnvelope = await this.readEnvelopeAt(witnessSha);
-        if (relation === 'ahead') {
-          await this.validateDirectV2Child(checkpointSha, checkpointEnvelope, witnessSha, witnessEnvelope);
-          trustedSha = witnessSha;
-          trustedEnvelope = witnessEnvelope;
-        } else if (relation === 'behind') {
-          await this.validateDirectV2Child(witnessSha, witnessEnvelope, checkpointSha, checkpointEnvelope);
-          trustedSha = checkpointSha;
-          trustedEnvelope = checkpointEnvelope;
-        } else if (relation === 'diverged') {
-          throw new Error('cloud_state_history_fork');
-        } else {
-          throw new Error('cloud_state_watermark_history_invalid');
-        }
+    if (stateSha !== authority.stateSha) {
+      const stateEnvelope = await this.readEnvelopeAt(stateSha);
+      const stateRelation = await this.relationToAuthority(stateSha, authority.stateSha);
+      if (stateRelation === 'behind') {
+        if (!repair) throw new Error('cloud_state_rollback');
+        const repaired = await this.repairAllRefs(refs, authority.stateSha);
+        return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
       }
-    } else {
-      trustedSha = checkpointSha ?? witnessSha;
-      trustedEnvelope = await this.readEnvelopeAt(trustedSha);
-    }
-    if (trustedEnvelope.version !== 2) throw new Error('cloud_state_legacy_after_migration');
-
-    const trustedReceipt = await this.historySha(trustedEnvelope.generation);
-    if (trustedReceipt !== trustedSha) throw new Error('cloud_state_history_fork');
-
-    if (stateSha !== trustedSha) {
-      const relation = await this.compareCommits(trustedSha, stateSha);
-      if (relation === 'behind') throw new Error('cloud_state_rollback');
-      if (relation === 'diverged') throw new Error('cloud_state_history_fork');
-      if (relation !== 'ahead') throw new Error('cloud_state_history_invalid');
-      await this.validateDirectV2Child(trustedSha, trustedEnvelope, stateSha, stateEnvelope);
+      if (stateRelation === 'ahead') {
+        if (!repair) throw new Error('cloud_state_partial_publication');
+        return this.recoverStateAhead(refs, authority, authorityEnvelope, stateSha, stateEnvelope, ledger);
+      }
+      throw new Error('cloud_state_history_fork');
     }
 
-    if (repair && (checkpointSha !== stateSha || witnessSha !== stateSha)) {
-      await this.repairWatermarks(stateSha, checkpointSha, witnessSha);
-      return this.snapshotFrom(stateSha, stateSha, stateSha, stateEnvelope);
+    for (const watermarkSha of [checkpointSha, witnessSha]) {
+      const relation = await this.relationToAuthority(watermarkSha, authority.stateSha);
+      if (!['missing', 'identical', 'behind'].includes(relation)) throw new Error('cloud_state_history_fork');
     }
-    return this.snapshotFrom(stateSha, checkpointSha, witnessSha, stateEnvelope);
+
+    if (repair && (checkpointSha !== authority.stateSha || witnessSha !== authority.stateSha)) {
+      const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
+    }
+    return this.snapshotFrom(stateSha, checkpointSha, witnessSha, authorityEnvelope, authority);
   }
 
   async createStateCommit(envelope, parentSha) {
@@ -710,7 +762,7 @@ export class GitHubStateStore extends JsonStore {
     const expectedStateSha = snapshot?.refSha ?? null;
     const expectedCheckpointSha = snapshot?.checkpointSha ?? null;
     const expectedWitnessSha = snapshot?.witnessSha ?? null;
-    const current = await this.readRefs();
+    const [current, ledger] = await Promise.all([this.readRefs(), this.readStatusLedger()]);
     if (current.stateSha !== expectedStateSha || current.checkpointSha !== expectedCheckpointSha || current.witnessSha !== expectedWitnessSha) {
       throw new Error('cloud_state_conflict');
     }
@@ -719,9 +771,8 @@ export class GitHubStateStore extends JsonStore {
     let generation;
     let lineageBaseSha;
     let lineageBaseGeneration;
-    let migrationFromV1 = false;
     if (!expectedStateSha) {
-      if (expectedCheckpointSha || expectedWitnessSha) throw new Error('cloud_state_snapshot_untrusted');
+      if (expectedCheckpointSha || expectedWitnessSha || ledger.length > 0) throw new Error('cloud_state_snapshot_untrusted');
       parentSha = await this.baseBranchSha();
       generation = 1;
       lineageBaseSha = parentSha;
@@ -729,15 +780,18 @@ export class GitHubStateStore extends JsonStore {
     } else {
       const parentEnvelope = await this.readEnvelopeAt(expectedStateSha);
       if (!expectedCheckpointSha && !expectedWitnessSha && parentEnvelope.version === 1) {
+        if (ledger.length > 0) throw new Error('cloud_state_legacy_after_migration');
         await this.validateLegacyMigrationHead(expectedStateSha, parentEnvelope);
         lineageBaseSha = expectedStateSha;
         lineageBaseGeneration = parentEnvelope.generation;
-        migrationFromV1 = true;
       } else {
-        if (parentEnvelope.version !== 2 || expectedCheckpointSha !== expectedStateSha || expectedWitnessSha !== expectedStateSha) {
+        const authority = ledger.at(-1);
+        if (parentEnvelope.version !== 2 || !authority ||
+            authority.stateSha !== expectedStateSha || authority.generation !== parentEnvelope.generation ||
+            expectedCheckpointSha !== expectedStateSha || expectedWitnessSha !== expectedStateSha) {
           throw new Error('cloud_state_snapshot_untrusted');
         }
-        await this.validateCurrentV2Commit(expectedStateSha, parentEnvelope);
+        await this.validateCompleteV2Lineage(expectedStateSha, parentEnvelope, ledger);
         lineageBaseSha = assertSha(parentEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid');
         lineageBaseGeneration = parentEnvelope.lineageBaseGeneration;
       }
@@ -762,13 +816,14 @@ export class GitHubStateStore extends JsonStore {
     };
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
-    if (migrationFromV1) {
-      await this.advanceRef(this.tag, expectedStateSha, commitSha);
-      await this.claimHistoryReceipt(generation, commitSha);
-    } else {
-      await this.claimHistoryReceipt(generation, commitSha);
-      await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    await this.advanceRef(this.tag, expectedStateSha, commitSha);
+    let ledgerError = null;
+    try {
+      await this.appendStatusRecord(generation, commitSha, parentSha, ledger);
+    } catch (error) {
+      ledgerError = error;
     }
+    if (ledgerError) throw new Error('cloud_state_partial_publication', { cause: ledgerError });
 
     let checkpointError = null;
     let witnessError = null;
@@ -782,9 +837,10 @@ export class GitHubStateStore extends JsonStore {
     } catch (error) {
       witnessError = error;
     }
-    const finalRefs = await this.readRefs();
-    const finalReceipt = await this.historySha(generation);
-    if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha && finalReceipt === commitSha) {
+    const [finalRefs, finalLedger] = await Promise.all([this.readRefs(), this.readStatusLedger()]);
+    const finalAuthority = finalLedger.at(-1);
+    if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha &&
+        finalAuthority?.generation === generation && finalAuthority.stateSha === commitSha && finalAuthority.parentSha === parentSha) {
       this.validatedLineageHeads.add(commitSha);
       return commitSha;
     }
