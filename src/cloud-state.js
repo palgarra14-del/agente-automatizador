@@ -246,13 +246,17 @@ export class GitHubStateStore extends JsonStore {
       envelope.statePath !== this.statePath ||
       envelope.stateTag !== this.tag ||
       envelope.checkpointTag !== this.checkpointTag ||
-      envelope.witnessTag !== this.witnessTag ||
+      envelope.witnessTag !== this.witnessTag
+    )) {
+      throw new Error('cloud_state_ref_binding_mismatch');
+    }
+    if (envelope.version === 2 && (
       !/^[a-f0-9]{40}$/i.test(envelope.lineageBaseSha ?? '') ||
       !Number.isInteger(envelope.lineageBaseGeneration) ||
       envelope.lineageBaseGeneration < 0 ||
       envelope.lineageBaseGeneration >= envelope.generation
     )) {
-      throw new Error('cloud_state_ref_binding_mismatch');
+      throw new Error('cloud_state_lineage_anchor_invalid');
     }
     validateCloudState(envelope.state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     if (stateHash(envelope.state) !== envelope.stateHash) throw new Error('cloud_state_integrity_mismatch');
