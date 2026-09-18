@@ -758,6 +758,32 @@ test('cached lineage cannot publish after base branch ancestry changes between l
   assert.equal(authorities[0].generation, 1);
 });
 
+test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, epoch0, sealedSha, 256);
+  await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0);
+  fake.forceTag(stateTag, sealedSha);
+  fake.forceTag(checkpointTag, sealedSha);
+  fake.forceTag(witnessTag, sealedSha);
+
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main' });
+  fake.forceHead('main', divergentMain);
+
+  await assert.rejects(
+    () => storeFor(fake, { ownerId: 'github:2:1' }).load(),
+    /bootstrap_ancestry_invalid/
+  );
+});
+
 test('legacy migration preserves inherited generation offsets', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 280, state: blankState('legacy'), version: 1 });
