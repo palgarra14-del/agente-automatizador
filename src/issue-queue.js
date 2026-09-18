@@ -1381,6 +1381,12 @@ export class SupervisedIssueQueue {
       return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
     }
     if (record.status === 'admitted') {
+      if (this.operatorRevision) {
+        const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
       let claim;
       try { claim = await this.claimAdmittedInitialization(issue, parsed, record); }
       catch (error) {
