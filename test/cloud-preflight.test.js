@@ -159,12 +159,17 @@ function makeAdmissionQueue({
   remoteRevision = revision
 } = {}) {
   let writes = 0;
+  let leases = 0;
   let openIssueCalls = 0;
   const store = {
     async load() { return clone(state); },
     async mutate(mutator) {
       writes += 1;
       return mutator(state);
+    },
+    async withGlobalLease(operation) {
+      leases += 1;
+      return operation();
     }
   };
   const channel = {
@@ -193,6 +198,7 @@ function makeAdmissionQueue({
     queue,
     state,
     writes: () => writes,
+    leases: () => leases,
     openIssueCalls: () => openIssueCalls,
     channel
   };
@@ -204,6 +210,7 @@ test('event admission persists one bounded record and makes read-only cloud peek
   const admitted = await fixture.queue.admitEvent('issues', eventFor(target));
   assert.deepEqual(admitted, { admitted: true, idempotent: false, issueNumber: 20, status: 'admitted' });
   assert.equal(fixture.writes(), 1);
+  assert.equal(fixture.leases(), 1);
   assert.equal(fixture.state.requests[key(20)].status, 'admitted');
   assert.equal(fixture.state.requests[key(20)].workflowId, null);
   assert.equal(await fixture.queue.hasWork(), true);
@@ -220,6 +227,7 @@ test('repeated event admission is idempotent and does not create another durable
   assert.equal(duplicate.idempotent, true);
   assert.equal(duplicate.status, 'admitted');
   assert.equal(fixture.writes(), writesAfterFirst);
+  assert.equal(fixture.leases(), 1);
 });
 
 test('event admission fails closed without mutation for wrong actor, repo, lane, malformed or stale payloads', async () => {
@@ -237,6 +245,7 @@ test('event admission fails closed without mutation for wrong actor, repo, lane,
     assert.equal(result.admitted, false, entry.name);
     assert.equal(result.reason, entry.reason, entry.name);
     assert.equal(fixture.writes(), 0, entry.name);
+    assert.equal(fixture.leases(), 0, entry.name);
     assert.deepEqual(fixture.state.requests, {}, entry.name);
   }
 });
@@ -252,6 +261,7 @@ test('issue-comment admission requires an authorized exact /agent wakeup and rem
   const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: 'hello' }));
   assert.equal(rejected.reason, 'event_comment_invalid');
   assert.equal(rejectedFixture.writes(), 0);
+  assert.equal(rejectedFixture.leases(), 0);
 });
 
 test('scheduled or manual non-issue events never mutate admission state', async () => {
@@ -260,6 +270,7 @@ test('scheduled or manual non-issue events never mutate admission state', async 
   const result = await fixture.queue.admitEvent('schedule', eventFor(target));
   assert.equal(result.reason, 'event_not_admissible');
   assert.equal(fixture.writes(), 0);
+  assert.equal(fixture.leases(), 0);
 });
 
 test('tick processes an admitted record by exact issue lookup without relying on open-issue pagination', async () => {
