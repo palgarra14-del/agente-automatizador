@@ -886,6 +886,9 @@ export class GitHubStateStore extends JsonStore {
     }
     const activeRegistration = root.registrations.at(-1);
     const activeAuthorities = await this.readEpochAuthorities(activeRegistration);
+    if (root.missingNextEpochs.length > 0 && activeAuthorities.length > 0) {
+      throw new Error('cloud_state_epoch_next_missing');
+    }
     let authority = activeAuthorities.at(-1) ?? null;
     let authorityRegistration = authority ? activeRegistration : null;
     if (!authority && root.registrations.length > 1) {
@@ -952,12 +955,34 @@ export class GitHubStateStore extends JsonStore {
     const root = observedRoot ?? await this.readRootEvidence();
     const existing = root.registrationByEpoch.get(epoch);
     if (existing) {
-      if (existing.anchorSha === assertSha(stateAnchorSha) &&
-          existing.baseGeneration === baseGeneration &&
-          existing.startGeneration === startGeneration) {
-        return { root, registration: existing };
+      if (existing.anchorSha !== assertSha(stateAnchorSha) ||
+          existing.baseGeneration !== baseGeneration ||
+          existing.startGeneration !== startGeneration) {
+        throw new Error('cloud_state_epoch_registration_conflict');
       }
-      throw new Error('cloud_state_epoch_registration_conflict');
+      let repaired = false;
+      if (root.firstPointerMissing && root.registrations[0]?.epoch === epoch) {
+        const laneRoot = await this.laneRootCommit();
+        const firstError = await this.appendEpochStatus(
+          laneRoot.sha, this.laneRootContext(), this.firstEpochDescription(epoch, existing.statusAnchorSha)
+        );
+        if (firstError) throw new Error('cloud_state_lane_root_pointer_append_failed', { cause: firstError });
+        repaired = true;
+      }
+      const previous = root.registrations.find((candidate) => candidate.epoch === epoch - 1) ?? null;
+      if (previous && root.missingNextEpochs.includes(previous.epoch)) {
+        const nextError = await this.appendEpochStatus(
+          previous.statusAnchorSha, this.epochNextContext(), this.nextDescription(epoch, existing.statusAnchorSha)
+        );
+        if (nextError) throw new Error('cloud_state_epoch_next_append_failed', { cause: nextError });
+        repaired = true;
+      }
+      if (!repaired) return { root, registration: existing };
+      const afterRepair = await this.readRootEvidence();
+      if (afterRepair.firstPointerMissing || afterRepair.missingNextEpochs.length > 0) {
+        throw new Error('cloud_state_epoch_link_repair_failed');
+      }
+      return { root: afterRepair, registration: afterRepair.registrationByEpoch.get(epoch) };
     }
 
     const previousRegistration = root.registrations.at(-1) ?? null;
