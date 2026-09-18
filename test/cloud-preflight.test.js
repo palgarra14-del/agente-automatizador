@@ -195,7 +195,6 @@ function makeAdmissionQueue({
   });
   return { queue, state, writes: () => writes, leases: () => leases, openIssueCalls: () => openIssueCalls, channel };
 }
-
 test('event admission persists one bounded record and makes read-only cloud peek actionable', async () => {
   const target = issue(20);
   const fixture = makeAdmissionQueue({ currentIssue: target });
@@ -208,7 +207,6 @@ test('event admission persists one bounded record and makes read-only cloud peek
   assert.equal(await fixture.queue.hasWork(), true);
   assert.equal(fixture.writes(), 1);
 });
-
 test('repeated event admission is idempotent and does not create another durable write', async () => {
   const target = issue(21);
   const fixture = makeAdmissionQueue({ currentIssue: target });
