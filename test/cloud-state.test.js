@@ -489,6 +489,7 @@ function fakeGitHub() {
       return addStatus(targetSha, { context, description, state: options.state ?? 'success', target_url: options.target_url ?? null });
     },
     statuses(targetSha = LEDGER_ROOT_SHA) { return (statusesBySha.get(targetSha) ?? []).map(cloneState); },
+    commit(commitSha) { return cloneState(commits.get(commitSha)); },
     statusWrites() { return statusWrites.map(cloneState); },
     refWrites() { return refWrites.map(cloneState); },
     resetWriteCount() { writeCount = 0; },
@@ -1081,6 +1082,55 @@ test('same-lane authority status for a different epoch on the active anchor fail
     store.authorityDescription('f'.repeat(40), fake.mainSha)
   );
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /epoch_authority_invalid|epoch_authority_gap/);
+});
+
+test('crash after durable lane head but before first link is recoverable without treating the lane as empty', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.failNextAnyStatusWrite(500, (body) => body.context === store.laneRootContext());
+  await assert.rejects(() => publishMarker(store, 'first-attempt'), /lane_root_pointer_append_failed/);
+  const evidence = await storeFor(fake, { ownerId: 'github:2:1' }).readRootEvidence();
+  assert.equal(evidence.registrations.length, 1);
+  assert.equal(evidence.firstPointerMissing, true);
+  assert.equal(evidence.registrationByEpoch.get(0).epoch, 0);
+  const recovered = await publishMarker(storeFor(fake, { ownerId: 'github:3:1' }), 'recovered');
+  assert.equal(fake.envelopeAt(recovered).generation, 1);
+  assert.equal((await storeFor(fake, { ownerId: 'github:4:1' }).load()).marker, 'recovered');
+});
+
+test('rollover crash after lane head but before next link repairs next before new authority', async () => {
+  const fake = fakeGitHub();
+  const legacyHead = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacyHead);
+  const store = storeFor(fake);
+  const g256 = await publishMarker(store, 'g256');
+  fake.failNextAnyStatusWrite(500, (body) => body.context === store.epochNextContext());
+  await assert.rejects(() => publishMarker(store, 'g257-first-attempt'), /epoch_next_append_failed/);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  const evidence = await fresh.readEpochEvidence();
+  assert.equal(evidence.authority.stateSha, g256);
+  assert.deepEqual(evidence.missingNextEpochs, [0]);
+  const g257 = await publishMarker(fresh, 'g257-recovered');
+  assert.equal(fake.envelopeAt(g257).generation, 257);
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'g257-recovered');
+});
+
+test('metadata and authority anchor identities are bound to lane digest and epoch', async () => {
+  const fake = fakeGitHub();
+  const selfStore = storeFor(fake);
+  const other = storeFor(fake, {
+    ownerId: 'github:2:1',
+    laneId: 'website-pilot',
+    allowedProjectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+  const selfAnchors = await selfStore.createEpochStatusAnchors(0);
+  const otherAnchors = await other.createEpochStatusAnchors(0);
+  assert.notEqual(fake.commit(selfAnchors.statusAnchorSha).message, fake.commit(otherAnchors.statusAnchorSha).message);
+  assert.notEqual(fake.commit(selfAnchors.authorityAnchorSha).message, fake.commit(otherAnchors.authorityAnchorSha).message);
+  assert.match(fake.commit(selfAnchors.statusAnchorSha).message, new RegExp(selfStore.ledgerFullDigest));
+  assert.match(fake.commit(otherAnchors.statusAnchorSha).message, new RegExp(other.ledgerFullDigest));
 });
 
 test('sealed historical metadata remains one-page even when authority anchor is full', async () => {
