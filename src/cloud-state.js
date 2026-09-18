@@ -1412,6 +1412,7 @@ export class GitHubStateStore extends JsonStore {
           authorityEnvelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
         throw new Error('cloud_state_lineage_anchor_mismatch');
       }
+      await this.validateLineageAnchor(authorityEnvelope);
     }
 
     if (!stateSha) {
