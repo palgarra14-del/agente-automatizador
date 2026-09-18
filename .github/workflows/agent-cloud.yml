@@ -28,10 +28,7 @@ jobs:
         github.actor == 'palgarra14-del' &&
         (
           github.event_name != 'issue_comment' ||
-          (
-            github.event.issue.pull_request == null &&
-            startsWith(github.event.comment.body, '/agent')
-          )
+          github.event.issue.pull_request == null
         )
       )
     permissions:
@@ -39,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      active: ${{ steps.wakeup.outputs.active }}
       lanes: ${{ steps.route.outputs.lanes }}
     steps:
       - name: Checkout trusted main
@@ -47,8 +45,19 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Validate governed wakeup
+        id: wakeup
+        shell: bash
+        env:
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+          AGENT_CLOUD_COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          ACTIVE="$(node -e 'const body=(process.env.AGENT_CLOUD_COMMENT_BODY ?? "").trim(); process.stdout.write(process.env.AGENT_CLOUD_EVENT_NAME !== "issue_comment" || body === "/agent" || body.startsWith("/agent ") ? "true" : "false")')"
+          echo "active=$ACTIVE" >> "$GITHUB_OUTPUT"
+
       - name: Route event to trusted cloud lanes
         id: route
+        if: steps.wakeup.outputs.active == 'true'
         shell: bash
         env:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
@@ -62,6 +71,7 @@ jobs:
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
     needs: route
+    if: needs.route.outputs.active == 'true'
     strategy:
       fail-fast: false
       matrix:
