@@ -115,7 +115,6 @@ test('cloud preflight fails closed on malformed new requests instead of starting
   });
   assert.equal(await queue.hasWork(), false);
 });
-
 const revision = 'f'.repeat(40);
 
 function governedProject(id = 'callflow') {
