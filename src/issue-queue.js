@@ -802,6 +802,46 @@ export class SupervisedIssueQueue {
     });
   }
 
+  async claimAdmittedInitialization(issue, parsed, expectedRecord) {
+    const key = this.requestKey(issue);
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      const current = data.requests[key] ?? null;
+      if (!current) return { claimed: false, record: null };
+      validateIssueQueueRecord(current, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      if (current.requestFingerprint !== expectedRecord.requestFingerprint ||
+          current.issueBodyFingerprint !== expectedRecord.issueBodyFingerprint ||
+          current.projectFingerprint !== expectedRecord.projectFingerprint ||
+          current.controlPlaneFingerprint !== expectedRecord.controlPlaneFingerprint) {
+        throw new Error('admitted_initialization_record_changed');
+      }
+      if (current.status !== 'admitted') return { claimed: false, record: current };
+      const now = this.now();
+      const initializing = {
+        ...current,
+        status: 'initializing',
+        updatedAt: now,
+        initializationLease: { leaseId: randomUUID(), pid: process.pid, createdAt: now, ownerIdentity }
+      };
+      validateIssueQueueRecord(initializing, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      data.requests[key] = initializing;
+      return { claimed: true, record: initializing };
+    });
+  }
+
   authorized(login) {
     return typeof login === 'string' && this.allowedActors.has(login.toLowerCase());
   }
@@ -1050,6 +1090,9 @@ export class SupervisedIssueQueue {
 
   async finishInitialization(issue, parsed, seedRecord) {
     const key = this.requestKey(issue);
+    if (seedRecord?.status !== 'initializing' || !seedRecord.initializationLease) {
+      throw new Error('workflow_initialization_requires_lease');
+    }
     const project = this.projects.get(parsed.request.projectId) ?? null;
     const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
     const priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
@@ -1337,7 +1380,15 @@ export class SupervisedIssueQueue {
     if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
       return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
     }
-    if (record.status === 'admitted') return this.finishInitialization(issue, parsed, record);
+    if (record.status === 'admitted') {
+      let claim;
+      try { claim = await this.claimAdmittedInitialization(issue, parsed, record); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `admitted_initialization_claim_failed:${maskSecrets(error.message)}`);
+      }
+      if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
+      return this.finishInitialization(issue, parsed, claim.record);
+    }
     if (record.status === 'initializing') {
       let abandoned;
       try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
