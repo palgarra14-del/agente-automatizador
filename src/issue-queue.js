@@ -982,10 +982,9 @@ export class SupervisedIssueQueue {
 
     const actor = event.sender?.login;
     if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
-    if (eventName === 'issue_comment') {
-      if (event.comment?.user?.login !== actor || typeof event.comment?.body !== 'string' || event.comment.body.trim() !== '/agent') {
-        return { admitted: false, reason: 'event_comment_invalid' };
-      }
+    if (eventName === 'issue_comment' &&
+        (event.comment?.user?.login !== actor || typeof event.comment?.body !== 'string' || event.comment.body.trim() !== '/agent')) {
+      return { admitted: false, reason: 'event_comment_invalid' };
     }
 
     const eventIssue = event.issue;
@@ -1128,14 +1127,6 @@ export class SupervisedIssueQueue {
       return this.blockRequestRevalidation(issue, key, seedRecord, 'initialization_context_changed');
     }
 
-    if (this.operatorRevision) {
-      const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
-      if (remoteOperatorRevision !== this.operatorRevision) {
-        const admitted = { ...seedRecord, status: 'admitted', initializationLease: null, updatedAt: this.now() };
-        await this.saveRecord(key, admitted);
-        return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
-      }
-    }
     let workflow;
     let dryRun;
     try {
@@ -1401,6 +1392,13 @@ export class SupervisedIssueQueue {
         return this.blockRequestRevalidation(issue, key, record, `admitted_initialization_claim_failed:${maskSecrets(error.message)}`);
       }
       if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
+      if (this.operatorRevision) {
+        const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          await this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
       return this.finishInitialization(issue, parsed, claim.record);
     }
     if (record.status === 'initializing') {
