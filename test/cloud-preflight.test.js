@@ -202,8 +202,7 @@ test('event admission persists one bounded record and makes read-only cloud peek
   assert.deepEqual(admitted, { admitted: true, idempotent: false, issueNumber: 20, status: 'admitted' });
   assert.equal(fixture.writes(), 1);
   assert.equal(fixture.leases(), 1);
-  assert.equal(fixture.state.requests[key(20)].status, 'admitted');
-  assert.equal(fixture.state.requests[key(20)].workflowId, null);
+  assert.equal(fixture.state.requests[key(20)].status, 'admitted'); assert.equal(fixture.state.requests[key(20)].workflowId, null);
   assert.equal(await fixture.queue.hasWork(), true);
   assert.equal(fixture.writes(), 1);
 });
@@ -219,7 +218,6 @@ test('repeated event admission is idempotent and does not create another durable
   assert.equal(fixture.writes(), writesAfterFirst);
   assert.equal(fixture.leases(), 1);
 });
-
 test('event admission fails closed without mutation for wrong actor, repo, lane, malformed or stale payloads', async () => {
   const target = issue(22);
   const cases = [
@@ -239,7 +237,6 @@ test('event admission fails closed without mutation for wrong actor, repo, lane,
     assert.deepEqual(fixture.state.requests, {}, entry.name);
   }
 });
-
 test('issue-comment admission requires an authorized exact /agent wakeup and remains model-free', async () => {
   const target = issue(23);
   const fixture = makeAdmissionQueue({ currentIssue: target });
@@ -247,22 +244,20 @@ test('issue-comment admission requires an authorized exact /agent wakeup and rem
   assert.equal(admitted.admitted, true);
   assert.equal(fixture.state.requests[key(23)].status, 'admitted');
 
-  const rejectedFixture = makeAdmissionQueue({ currentIssue: issue(24) });
-  const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: '/agent-typo' }));
-  assert.equal(rejected.reason, 'event_comment_invalid');
-  assert.equal(rejectedFixture.writes(), 0);
-  assert.equal(rejectedFixture.leases(), 0);
+  for (const commentBody of ['/agent-typo', ' /agent']) {
+    const rejectedFixture = makeAdmissionQueue({ currentIssue: issue(24) });
+    const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody }));
+    assert.equal(rejected.reason, 'event_comment_invalid');
+    assert.equal(rejectedFixture.writes(), 0); assert.equal(rejectedFixture.leases(), 0);
+  }
 });
-
 test('scheduled or manual non-issue events never mutate admission state', async () => {
   const target = issue(25);
   const fixture = makeAdmissionQueue({ currentIssue: target });
   const result = await fixture.queue.admitEvent('schedule', eventFor(target));
   assert.equal(result.reason, 'event_not_admissible');
-  assert.equal(fixture.writes(), 0);
-  assert.equal(fixture.leases(), 0);
+  assert.equal(fixture.writes(), 0); assert.equal(fixture.leases(), 0);
 });
-
 test('tick processes an admitted record by exact issue lookup without relying on open-issue pagination', async () => {
   const target = issue(26);
   const fixture = makeAdmissionQueue({ currentIssue: target });
@@ -275,10 +270,8 @@ test('tick processes an admitted record by exact issue lookup without relying on
   };
   const result = await fixture.queue.tick();
   assert.deepEqual(result, { status: 'processed-directly' });
-  assert.equal(processed, 1);
-  assert.equal(fixture.openIssueCalls(), 0);
+  assert.equal(processed, 1); assert.equal(fixture.openIssueCalls(), 0);
 });
-
 test('admitted request acquires initialization lease before any workflow initialization can run', async () => {
   const target = issue(27);
   const fixture = makeAdmissionQueue({ currentIssue: target });
@@ -298,17 +291,21 @@ test('admitted request acquires initialization lease before any workflow initial
   assert.equal(observedSeed.initializationLease.leaseId, persisted.initializationLease.leaseId);
   assert.equal(persisted.workflowId, null);
 });
-
-test('main drift during initialization claim restores admitted state before workflow creation', async () => {
-  const target = issue(28);
-  const fixture = makeAdmissionQueue({ currentIssue: target });
-  await fixture.queue.admitEvent('issues', eventFor(target));
-  let headCall = 0;
-  fixture.channel.branchHead = async () => headCall++ === 0 ? revision : 'e'.repeat(40);
-  fixture.queue.unboundPriorAgentInitialization = async () => null;
-  fixture.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); };
-  const result = await fixture.queue.processIssue(target);
-  assert.equal(result.status, 'operator_update_pending');
-  assert.equal(fixture.state.requests[key(28)].status, 'admitted');
-  assert.equal(fixture.state.requests[key(28)].initializationLease, null);
+test('main drift or transient head error after initialization claim restores admitted state', async () => {
+  for (const mode of ['drift', 'error']) {
+    const target = issue(28), fixture = makeAdmissionQueue({ currentIssue: target });
+    await fixture.queue.admitEvent('issues', eventFor(target));
+    let headCall = 0;
+    fixture.channel.branchHead = async () => {
+      if (headCall++ === 0) return revision;
+      if (mode === 'error') throw new Error('transient_head_failure');
+      return 'e'.repeat(40);
+    };
+    fixture.queue.unboundPriorAgentInitialization = async () => null;
+    fixture.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); };
+    const result = await fixture.queue.processIssue(target);
+    assert.equal(result.status, mode === 'error' ? 'operator_revision_check_failed' : 'operator_update_pending');
+    assert.equal(fixture.state.requests[key(28)].status, 'admitted');
+    assert.equal(fixture.state.requests[key(28)].initializationLease, null);
+  }
 });
