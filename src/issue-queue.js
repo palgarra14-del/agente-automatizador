@@ -1798,6 +1798,9 @@ export class SupervisedIssueQueue {
           'issue_identity_or_state_changed'
         );
       }
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
+        return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
+      }
       const activeResult = await this.processIssue(issue);
       if (activeResult) return activeResult;
     }
