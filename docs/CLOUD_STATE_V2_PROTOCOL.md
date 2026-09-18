@@ -1,79 +1,371 @@
-# Cloud state v2 protocol
+# Cloud State v2 protocol — r6 bounded epoch authority
 
-Issue: #180
+## Purpose
 
-This document fixes the authority model before implementation. It does not widen execution, merge, deploy, model, secret, or communication authority.
+Cloud State v2 provides durable per-lane state for cloud workers without trusting process-local memory or mutable Git refs as monotonic authority.
 
-## Durable refs per lane
+The protocol is intentionally fail-closed. It must reject rollback, forks, malformed history, cross-lane substitution, secret-bearing state, and publication states that cannot be proven after a crash.
 
-Each lane owns two refs in the same repository:
+r6 replaces the rejected r5 global status ledger. r5 failed for two reasons:
 
-- `stateRef`: the existing lane state tag. It points at the newest published state commit.
-- `checkpointRef`: a new lane-specific trusted checkpoint tag. It points at the newest state commit that a completed publication has durably acknowledged.
+1. a pre-CAS intent could not prove that the state-ref CAS actually happened;
+2. repeated scans of a single ever-growing status ledger became operationally unsafe.
 
-The checkpoint ref is the cross-process watermark. Process memory is never authoritative.
+r6 uses **post-CAS canonical authority** and **bounded epochs of 256 generations**.
 
-Both refs are lane-specific and are bound to repository, lane id, state path and envelope generation.
+## Mutable refs
 
-## Read invariant
+Each lane owns three movable Git tag refs:
 
-A fresh process reads both refs by exact SHA before reading state content.
+- state ref: the configured lane tag;
+- checkpoint ref: `agent-cloud-state-v2-checkpoints/<stateTag>`;
+- witness ref: `agent-cloud-state-v2-witnesses/<stateTag>`.
 
-Let `S` be `stateRef` and `C` be `checkpointRef`.
+These refs are operational pointers only. They are not monotonic roots of trust because `contents: write` can move or remove them outside this implementation.
 
-1. If neither exists, bootstrap from the configured base branch.
-2. If `C` exists and `S` is absent, fail closed as partial/corrupt publication.
-3. If `S` exists and `C` is absent, accept only the bootstrap recovery case after validating the complete state envelope and commit ancestry; then create `C` optimistically at `S`.
-4. If both exist, require `S == C` or prove with the Git commit graph that `S` is a descendant of `C`.
-5. If `S` is an ancestor of `C`, reject `cloud_state_rollback`.
-6. If neither is ancestor of the other, reject `cloud_state_history_fork`.
-7. Validate the state file by exact commit SHA, never by a moving ref. Validate repository, lane, generation, state hash, ownership and secret boundaries.
-8. When `S` is a valid descendant of `C`, treat this as an interrupted checkpoint publication. Recovery may advance `C` to `S` only with a non-force optimistic ref update after all validation succeeds.
+All supported updates are non-force.
 
-A numerically higher generation never substitutes for ancestry proof.
+## Immutable status root
 
-## Write protocol
+Epoch metadata is written as GitHub commit statuses attached to the verified parentless repository root:
 
-Given a validated snapshot whose exact state SHA is `S0` and trusted checkpoint is `C0`:
+`b4f3b2e76e24be58d241227850a5d48ea19c2ea8`
 
-1. Re-read both refs immediately before publication and require them to still match the validated snapshot/recovery state.
-2. Create blob, tree and state commit `S1` with parent exactly `S0` (or the configured base commit for first bootstrap).
-3. Publish `stateRef -> S1` with a non-force update. A stale writer must receive a conflict.
-4. Publish `checkpointRef -> S1` with a non-force update from `C0`.
-5. Return success only after both refs resolve to `S1`.
+Before any Cloud State status is trusted, that exact Git commit must exist and have zero parents.
 
-No force updates are permitted.
+GitHub commit statuses are append-only through the API surface used by the worker. Conflicting evidence cannot erase older evidence and therefore fails closed.
 
-If step 3 fails, nothing authoritative changed. If step 4 or final verification fails, return an explicit partial-publication error. A later fresh process must recover only through the read invariant above; it must never roll `stateRef` backward or discard `S1`.
+## Lane digest
 
-## Generation rules
+Every lane derives a 128-bit lowercase digest from the canonical tuple:
 
-The envelope remains monotonic metadata, not the root of trust.
+- repository;
+- lane id;
+- state path;
+- state tag;
+- checkpoint tag;
+- witness tag.
 
-- bootstrap state commit: generation 1;
-- a valid child must have generation exactly parent generation + 1;
-- same-generation different SHA is rejected;
-- a higher-generation commit without ancestry from the trusted checkpoint is rejected;
-- a descendant with a skipped generation is rejected.
+All epoch contexts include that digest. Evidence from another lane is ignored and cannot satisfy this lane.
 
-## Concurrency
+## Epochs
 
-Two writers may prepare children from the same `S0`, but only one may advance `stateRef` non-force. The loser fails with `cloud_state_conflict` and must not advance the checkpoint. Recovery cannot convert a divergent child into accepted history.
+Epoch size is fixed at **256 generations**.
+
+For generation `G`:
+
+`epoch = floor((G - 1) / 256)`
+
+An epoch may begin in the middle of its numerical bucket during v1 migration. Example: a legacy generation 280 migrates to v2 generation 281, so the first v2 epoch is epoch 1 and begins at generation 281.
+
+Each epoch has:
+
+- one immutable registration on the repository root;
+- zero or one immutable seal on the repository root;
+- canonical generation statuses attached to that epoch's immutable anchor commit.
+
+### Registration
+
+Context:
+
+`agent-cloud-state-v2/<laneDigest>/e/<epoch>`
+
+Description:
+
+`a=<anchorSha>;b=<baseGeneration>;s=<startGeneration>`
+
+Required invariants:
+
+- `startGeneration = baseGeneration + 1`;
+- `epoch(startGeneration)` equals the context epoch;
+- first epoch anchor is the bootstrap base SHA or exact v1 migration head;
+- every later epoch anchor equals the previous epoch seal state SHA;
+- every later epoch begins exactly one generation after the previous seal.
+
+A registration is structural metadata only. **It does not authorize a state commit.**
+
+Creating a registration before the state CAS is safe because an orphan registration has no canonical authority.
+
+### Canonical authority
+
+Authority statuses are written on the epoch's anchor commit.
+
+Context:
+
+`agent-cloud-state-v2/<laneDigest>/a/<epoch>/g/<generation>`
+
+Description:
+
+`s=<stateSha>;p=<parentSha>`
+
+Authority is valid only when:
+
+- the status is `success`;
+- there is no target URL;
+- generation belongs to the registered epoch and is within its range;
+- the first generation parents the epoch anchor;
+- later generations parent the preceding canonical state;
+- there are no conflicting records for one generation.
+
+Most importantly, the canonical authority status is appended **only after a successful, proven non-force state-ref CAS**.
+
+There is no pre-CAS intent authority in r6.
+
+### Seal
+
+A full epoch is sealed before publication enters the next epoch.
+
+Context:
+
+`agent-cloud-state-v2/<laneDigest>/s/<epoch>`
+
+Description:
+
+`s=<stateSha>;g=<generation>`
+
+The sealed generation must equal the numerical end of that epoch, for example 256, 512, 768, etc.
+
+A seal may be written only after the complete active epoch lineage has been validated. The seal becomes the durable checkpoint for that historical epoch.
+
+A later epoch registration must anchor exactly to the preceding seal.
+
+## Why a pre-CAS intent is not authority
+
+A pre-CAS record only proves that a candidate existed. It cannot prove that the writer won the state-ref election.
+
+If a process crashes after a pre-CAS record but before the ref CAS, a separate `contents: write` actor could later move the ref to that candidate. Automatically canonicalizing from the old intent would incorrectly elevate mutable-ref authority.
+
+r6 therefore does not use a pre-CAS intent as proof.
+
+## Strict state-ref CAS
+
+The authority-bearing state ref uses a strict CAS path.
+
+The writer:
+
+1. validates the current authoritative snapshot;
+2. creates the candidate state commit;
+3. performs a non-force state-ref create/update from the exact expected predecessor;
+4. requires the GitHub mutation request itself to succeed;
+5. re-reads the state ref and requires the exact candidate SHA;
+6. only then appends canonical authority.
+
+An uncertain/failed state-ref mutation is never converted to success merely because a later read happens to show the candidate.
+
+Checkpoint and witness refs remain repairable operational pointers and may use ordinary forward-only recovery.
+
+## Crash boundary after CAS
+
+The hard boundary is:
+
+`state CAS succeeded -> canonical status not yet written`
+
+If the process crashes here, a future process can observe the state ref ahead of the newest canonical authority, but it cannot prove who moved that ref.
+
+Therefore:
+
+- ordinary read fails closed;
+- `repair:true` also fails closed;
+- no canonical status is synthesized;
+- the lane requires explicit operator reconciliation.
+
+This is deliberate. Availability is sacrificed rather than converting mutable ref state into durable authority.
+
+## Bootstrap
+
+For a brand-new lane:
+
+- lineage base is the exact configured base-branch SHA;
+- lineage base generation is 0;
+- first v2 generation is 1;
+- first epoch registration anchors to that base SHA.
+
+If registration exists but no state CAS has happened, the empty lane remains readable and publication may safely retry.
+
+If the state ref contains v2 state but no canonical authority exists, the state is an unproven advance and is rejected even with repair.
+
+## Legacy v1 migration
+
+v1 had no independent monotonic authority, so migration has one unavoidable trust boundary: the exact v1 state-tag head observed before the first v2 publication.
+
+For migration:
+
+- first epoch anchor is that exact v1 head;
+- base generation is the v1 envelope generation;
+- first v2 generation is legacy generation + 1;
+- inherited generation offsets are preserved.
+
+A real legacy generation must never be inferred from Git distance.
+
+If a migration registration exists but the state ref still points to the exact registered v1 anchor, migration may retry safely.
+
+If the state ref has advanced to v2 without canonical authority, the advance is rejected.
+
+## Active epoch validation
+
+Only the current active epoch requires full per-generation validation.
+
+The newest canonical authority is validated backwards to its epoch anchor using paginated GitHub GraphQL commit history.
+
+Every state in the active epoch must satisfy:
+
+- exact SHA continuity;
+- exactly one Git parent;
+- no hidden merge;
+- generation decreases by exactly one per edge;
+- repository/lane/path/ref binding;
+- unchanged persisted lineage base;
+- valid state hash;
+- project ownership boundaries;
+- secret-material boundaries;
+- exact matching canonical status for the generation and parent.
+
+The first active-epoch state must parent the registered epoch anchor.
+
+GraphQL validation is bounded to four pages of 100 commits. An epoch has at most 256 generations, so exceeding the bound is corruption or protocol drift and fails closed.
+
+## Sealed historical epochs
+
+A seal is written only after complete validation of that epoch.
+
+Git commit objects and commit statuses are immutable in the authority model, so a fresh process may trust the seal as the durable checkpoint for the sealed epoch instead of replaying every historical generation.
+
+This makes read/write cost depend on the active epoch rather than total lifetime generations.
+
+Root registrations and seals still form a contiguous chain and are all checked.
+
+## Bounded request model
+
+Root epoch metadata is read from the root status log with an explicit maximum of 20 pages.
+
+The active epoch authority log is read from its anchor with an explicit maximum of four pages.
+
+The active lineage is read with at most four GraphQL history pages.
+
+At 2,050 generations the expected root metadata is only a small number of registrations/seals and the active epoch contains only the latest few generations.
+
+The adversarial regression requires a fresh aligned load of 2,050 generations to remain below 30 fake-network requests.
+
+If pagination exceeds any configured bound, the store fails closed rather than silently truncating authority evidence.
+
+## Publication protocol
+
+### Initial bootstrap or migration
+
+1. read refs and epoch evidence;
+2. validate the empty lane or exact v1 migration head;
+3. create or reuse the exact first epoch registration;
+4. create the v2 candidate commit;
+5. prove strict non-force state-ref CAS success;
+6. append canonical authority on the epoch anchor;
+7. validate active epoch lineage;
+8. advance checkpoint and witness independently, non-force;
+9. verify final refs and canonical authority.
+
+If step 5 fails or is uncertain, no authority is appended.
+
+If step 6 fails after step 5, publication is partial and later automatic repair must not canonicalize the state.
+
+### Established v2 in the same epoch
+
+1. validate current canonical authority and active lineage;
+2. create the direct one-parent child;
+3. prove strict state-ref CAS from the exact authoritative parent;
+4. append canonical authority for the child;
+5. validate active lineage;
+6. advance checkpoint and witness;
+7. verify final pointers.
+
+Two stale writers may create sibling commits, but only one can win the non-force state-ref CAS. The loser must not append authority.
+
+### Epoch rollover
+
+Before publishing the first generation of the next epoch:
+
+1. require current authority at the exact end generation of the active epoch;
+2. validate the complete active epoch;
+3. append or verify the exact epoch seal;
+4. append or verify the next epoch registration anchored to that seal;
+5. publish the next candidate using the normal strict CAS -> authority sequence.
+
+A crash after seal or registration but before the next state CAS is harmless. The structural metadata may be reused because it carries no new state authority.
+
+## Read and repair
+
+With canonical authority present:
+
+- aligned state/checkpoint/witness refs are accepted;
+- state ref behind authority is rollback;
+- `repair:true` may only move a missing/behind ref forward, non-force, to canonical authority;
+- state ref ahead of canonical authority is an **unproven state advance** and always fails closed;
+- divergent/sibling state is a history fork;
+- checkpoint/witness ahead or divergent fail closed;
+- missing/behind checkpoint/witness may be repaired forward.
+
+Joint rollback of all movable refs does not erase the immutable canonical epoch evidence.
+
+## Exact-SHA reads
+
+State content is always read using an exact 40-hex commit SHA, never from a mutable branch/tag name.
+
+## Security boundaries
+
+The protocol preserves:
+
+- explicit project ownership;
+- secret-key rejection;
+- known secret-material rejection;
+- state-size bounds;
+- lane isolation;
+- exact path/ref binding;
+- no automatic merge authority;
+- no production deployment authority;
+- no broader communication authority.
 
 ## Required adversarial regressions
 
-Tests must use completely new `GitHubStateStore` instances so no in-memory watermark can satisfy them:
+The r6 acceptance suite includes at least:
 
-- A writes N+1; state ref is forced back to N while checkpoint remains N+1; B rejects rollback.
-- A writes N; a divergent N+1 is presented; B rejects the fork even if its generation is larger.
-- same generation with a different SHA is rejected.
-- legitimate descendant N+1 is accepted by a fresh process.
-- interruption after state-ref publication but before checkpoint publication fails the writer and is safely recovered by a fresh process without rollback.
-- interruption before state-ref publication leaves prior state intact.
-- two concurrent writers from the same snapshot yield one success and one conflict.
-- state/checkpoint refs for `self`, `callflow`, and `website-pilot` cannot satisfy another lane's validation.
-- exact-SHA content reads are retained.
+- bootstrap and v1 migration;
+- inherited legacy generation offsets;
+- failed state CAS creates no authority;
+- bootstrap crash after CAS/before authority cannot be repaired;
+- established crash after CAS/before authority cannot be repaired;
+- checkpoint/witness partial publication and safe forward repair;
+- joint rollback of all movable refs;
+- same-generation sibling substitution;
+- competing stale writers;
+- conflicting authority/registration evidence;
+- epoch rollover;
+- orphan next-epoch registration;
+- hidden two-parent merge in the active epoch;
+- malformed/truncated active-epoch envelopes;
+- lineage-anchor rewrite;
+- lane isolation;
+- exact-SHA reads;
+- bounded unrelated-status pagination;
+- explicit pagination fail-closed behavior;
+- 2,050-generation bounded-request validation;
+- lease behavior and remote state integrity.
 
-## Merge gates
+## Acceptance gate
 
-Implementation remains blocked until the exact implementation SHA passes full tests, typecheck, lint, build, prepared runtime image, real Docker boundary, and an independent adversarial review. Any P1/P2 authority, rollback, fork, TOCTOU, lane-isolation or secret-boundary finding blocks merge.
+r6 is not mergeable until:
+
+1. the candidate starts from current authoritative `main`;
+2. changed files remain exactly:
+   - `src/cloud-state.js`
+   - `test/cloud-state.test.js`
+   - `docs/CLOUD_STATE_V2_PROTOCOL.md`;
+3. the exact candidate SHA passes full CI including:
+   - tests;
+   - real Chrome/CDP smoke;
+   - adversarial Chrome smoke;
+   - typecheck;
+   - lint;
+   - build;
+   - prepared runtime image;
+   - real Docker execution boundary;
+4. a fresh frozen exact-SHA independent adversarial review reports zero unresolved P1/P2.
+
+Issue #182 grants no automatic merge or production deployment authority.
