@@ -94,6 +94,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == "issues" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+            node src/cli.js inbox cloud-admit --lane "$AGENT_CLOUD_LANE"
+          fi
           HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
           if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
             echo "invalid cloud preflight result" >&2
