@@ -497,7 +497,7 @@ export class GitHubStateStore extends JsonStore {
     const prefix = `${this.epochAuthorityPrefix}${registration.epoch}/g/`.toLowerCase();
     if (!context.startsWith(prefix)) {
       const laneAuthorityPrefix = this.epochAuthorityPrefix.toLowerCase();
-      if (context.startsWith(laneAuthorityPrefix)) return null;
+      if (context.startsWith(laneAuthorityPrefix)) throw new Error('cloud_state_epoch_authority_invalid');
       return null;
     }
     const generationText = context.slice(prefix.length);
@@ -1016,7 +1016,18 @@ export class GitHubStateStore extends JsonStore {
 
     if (!expectedStateSha) {
       if (expectedCheckpointSha || expectedWitnessSha || initialEvidence.authority) throw new Error('cloud_state_snapshot_untrusted');
-      parentSha = await this.baseBranchSha();
+      const orphanRegistration = initialEvidence.registrations.length === 1 ? initialEvidence.registrations[0] : null;
+      if (orphanRegistration) {
+        if (orphanRegistration.baseGeneration !== 0 || orphanRegistration.startGeneration !== 1) {
+          throw new Error('cloud_state_epoch_registration_invalid');
+        }
+        const currentBaseSha = await this.baseBranchSha();
+        const relation = await this.compareCommits(orphanRegistration.anchorSha, currentBaseSha);
+        if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+        parentSha = orphanRegistration.anchorSha;
+      } else {
+        parentSha = await this.baseBranchSha();
+      }
       generation = 1;
       lineageBaseSha = parentSha;
       lineageBaseGeneration = 0;
