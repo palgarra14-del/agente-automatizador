@@ -399,6 +399,10 @@ function fakeGitHub() {
     setRootParents(parentShas) {
       commits.get(LEDGER_ROOT_SHA).parents = parentShas.map((value) => ({ sha: value }));
     },
+    forceHead(branch, commitSha) {
+      assert.ok(commits.has(commitSha));
+      refs.set(`refs/heads/${branch}`, commitSha);
+    },
     setCommitParents(commitSha, parentShas) {
       const commit = commits.get(commitSha);
       assert.ok(commit);
@@ -507,6 +511,30 @@ test('fresh load of aligned r6 state is read-only', async () => {
   const loaded = await fresh.load();
   assert.equal(loaded.marker, 'one');
   assert.equal(fake.writeCount(), 0);
+});
+
+test('orphan bootstrap registration remains reusable when main advances', async () => {
+  const fake = fakeGitHub();
+  const firstAttempt = storeFor(fake);
+  fake.failNextTagWrite(stateTag, 500);
+  await assert.rejects(() => publishMarker(firstAttempt, 'failed'), /state_cas_unproven/);
+  const root = await firstAttempt.readRootEvidence();
+  const registeredAnchor = root.registrations[0].anchorSha;
+
+  const advancedMain = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 900,
+    state: blankState('main-advanced'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  fake.forceHead('main', advancedMain);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  assert.equal((await fresh.load()).marker, undefined);
+  const published = await publishMarker(fresh, 'reused-anchor');
+  assert.equal(fake.envelopeAt(published).lineageBaseSha, registeredAnchor);
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'reused-anchor');
 });
 
 test('legacy migration preserves inherited generation offsets', async () => {
@@ -776,6 +804,18 @@ test('independent lanes use disjoint epoch status contexts', async () => {
   }).load()).marker, 'website');
 });
 
+test('same-lane authority status for a different epoch on the active anchor fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'one');
+  fake.forceStatus(
+    fake.mainSha,
+    store.epochAuthorityContext(1, 257),
+    store.authorityDescription('f'.repeat(40), fake.mainSha)
+  );
+  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /epoch_authority_invalid/);
+});
+
 test('status pagination tolerates unrelated contexts within the bounded active epoch', async () => {
   const fake = fakeGitHub();
   for (let index = 0; index < 150; index += 1) {
@@ -850,20 +890,23 @@ test('global lease excludes concurrent runners and recovers after expiry', async
   const first = storeFor(fake, { ownerId: 'github:1:1', now: () => now, leaseTtlMs: 60_000 });
   const second = storeFor(fake, { ownerId: 'github:2:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = await first.claimGlobalLease();
-  await assert.rejects(() => second.claimGlobalLease(), /lease_conflict/);
+  await assert.rejects(() => second.claimGlobalLease(), /global_lease_busy/);
   now += 61_000;
   const recovered = await second.claimGlobalLease();
   assert.notEqual(recovered.leaseId, lease.leaseId);
 });
 
-test('execution leases use cloud owner identity and become recoverable only after ttl', async () => {
+test('execution leases use cloud owner identity and become recoverable only after ttl by another owner', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
-  const store = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const owner = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const observer = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = { leaseId: 'lease-1', pid: 123, ownerIdentity: 'github:77:3', createdAt: new Date(now).toISOString() };
-  assert.equal(await store.lockOwnerIsAbandoned(lease), false);
+  assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
+  assert.equal(await observer.lockOwnerIsAbandoned(lease), false);
   now += 61_000;
-  assert.equal(await store.lockOwnerIsAbandoned(lease), true);
+  assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
+  assert.equal(await observer.lockOwnerIsAbandoned(lease), true);
 });
 
 test('remote envelope integrity mismatch fails closed with matching epoch authority', async () => {
