@@ -49,6 +49,24 @@ query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $pa
   }
 }`;
 
+const STATUS_CONTEXT_QUERY = `
+query CloudStateContext($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) {
+      ... on Commit {
+        status {
+          context(name: $context) {
+            context
+            state
+            description
+            targetUrl
+          }
+        }
+      }
+    }
+  }
+}`;
+
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
   return /(^|_)(api_key|api_token|access_token|refresh_token|auth_token|github_token|vercel_token|secret|password|credential|authorization|cookie)($|_)/.test(normalized);
@@ -215,6 +233,7 @@ export class GitHubStateStore extends JsonStore {
     }))).digest('hex');
     this.ledgerDigest = this.ledgerFullDigest.slice(0, 32);
     this.epochAnchorPrefix = `${EPOCH_ANCHOR_NAMESPACE}/${this.ledgerDigest}/`;
+    this.laneInitContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/init`;
     this.laneRootContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/first`;
     this.epochRegistrationContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/epoch`;
     this.epochSealContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/seal`;
@@ -415,9 +434,67 @@ export class GitHubStateStore extends JsonStore {
     }
   }
 
+  laneInitDescription(laneRootSha) {
+    return `r=${assertSha(laneRootSha)}`;
+  }
+
+  async readLaneInitMarker() {
+    await this.verifyLedgerRoot();
+    const data = await this.graphqlRequest(STATUS_CONTEXT_QUERY, {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      oid: LEDGER_ROOT_SHA,
+      context: this.laneInitContextName
+    });
+    const context = data?.repository?.object?.status?.context ?? null;
+    if (!context) return null;
+    if (typeof context.context !== 'string' ||
+        context.context.toLowerCase() !== this.laneInitContextName.toLowerCase() ||
+        context.state !== 'SUCCESS' ||
+        context.targetUrl !== null ||
+        typeof context.description !== 'string') {
+      throw new Error('cloud_state_lane_init_invalid');
+    }
+    const match = /^r=([a-f0-9]{40})$/i.exec(context.description);
+    if (!match) throw new Error('cloud_state_lane_init_invalid');
+    return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
+  }
+
+  async ensureLaneInitMarker(laneRootSha) {
+    const expected = assertSha(laneRootSha);
+    const before = await this.readLaneInitMarker();
+    if (before) {
+      if (before.laneRootSha === expected) return;
+      throw new Error('cloud_state_lane_init_conflict');
+    }
+    let postError = null;
+    try {
+      await this.request(`/statuses/${LEDGER_ROOT_SHA}`, {
+        method: 'POST',
+        body: {
+          state: 'success',
+          context: this.laneInitContextName,
+          description: this.laneInitDescription(expected)
+        }
+      });
+    } catch (error) {
+      postError = error;
+    }
+    const after = await this.readLaneInitMarker();
+    if (after?.laneRootSha === expected) return;
+    if (after) throw new Error('cloud_state_lane_init_conflict', { cause: postError ?? undefined });
+    if (postError) throw postError;
+    throw new Error('cloud_state_lane_init_append_failed');
+  }
+
   async laneRootCommit({ create = false } = {}) {
     await this.verifyLedgerRoot();
     const spec = this.laneRootCommitSpec();
+    const marker = await this.readLaneInitMarker();
+
+    if (marker && marker.laneRootSha !== spec.sha) throw new Error('cloud_state_lane_init_conflict');
+    if (!marker && !create) return null;
+
     let commit = await this.request(`/git/commits/${spec.sha}`, { allow404: true });
     if (!commit && create) {
       const created = await this.request('/git/commits', {
@@ -435,8 +512,10 @@ export class GitHubStateStore extends JsonStore {
       }
       commit = await this.request(`/git/commits/${spec.sha}`);
     }
-    if (!commit) return null;
+    if (!commit) throw new Error('cloud_state_lane_root_missing');
     this.validateLaneRootCommit(commit, spec);
+
+    if (!marker) await this.ensureLaneInitMarker(spec.sha);
     return spec;
   }
 
