@@ -1012,7 +1012,7 @@ export class GitHubStateStore extends JsonStore {
     let generation;
     let lineageBaseSha;
     let lineageBaseGeneration;
-    let parentEnvelope = null;
+    let parentEnvelope;
 
     if (!expectedStateSha) {
       if (expectedCheckpointSha || expectedWitnessSha || initialEvidence.authority) throw new Error('cloud_state_snapshot_untrusted');
