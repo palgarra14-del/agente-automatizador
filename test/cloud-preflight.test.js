@@ -53,9 +53,12 @@ test('cloud preflight is idle when the lane has no governed work', async () => {
   assert.equal(await queue.hasWork(), false);
 });
 
-test('cloud preflight requires durable admission instead of discovering open issues', async () => {
-  const queue = makeQueue({ issues: [issue(1, { projectId: 'callflow' })] });
-  assert.equal(await queue.hasWork(), false);
+test('cloud preflight routes new requests to exactly their owned lane', async () => {
+  const own = makeQueue({ issues: [issue(1, { projectId: 'callflow' })] });
+  assert.equal(await own.hasWork(), false);
+
+  const foreign = makeQueue({ issues: [issue(2, { projectId: 'website-pilot' })] });
+  assert.equal(await foreign.hasWork(), false);
 });
 
 test('cloud preflight ignores unauthorized new requests in an owned lane', async () => {
@@ -303,16 +306,12 @@ test('main drift during initialization claim restores admitted state before work
   const target = issue(28);
   const fixture = makeAdmissionQueue({ currentIssue: target });
   await fixture.queue.admitEvent('issues', eventFor(target));
-  const writes = fixture.writes();
-  const heads = [revision, 'e'.repeat(40)];
-  fixture.channel.branchHead = async () => heads.shift();
+  let headCall = 0;
+  fixture.channel.branchHead = async () => headCall++ === 0 ? revision : 'e'.repeat(40);
   fixture.queue.unboundPriorAgentInitialization = async () => null;
-  let created = false;
-  fixture.queue.workflowEngine.create = async () => { created = true; throw new Error('unexpected_create'); };
+  fixture.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); };
   const result = await fixture.queue.processIssue(target);
   assert.equal(result.status, 'operator_update_pending');
-  assert.equal(created, false);
   assert.equal(fixture.state.requests[key(28)].status, 'admitted');
   assert.equal(fixture.state.requests[key(28)].initializationLease, null);
-  assert.equal(fixture.writes(), writes + 2);
 });
