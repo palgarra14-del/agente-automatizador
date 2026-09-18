@@ -53,12 +53,9 @@ test('cloud preflight is idle when the lane has no governed work', async () => {
   assert.equal(await queue.hasWork(), false);
 });
 
-test('cloud preflight routes new requests to exactly their owned lane', async () => {
-  const own = makeQueue({ issues: [issue(1, { projectId: 'callflow' })] });
-  assert.equal(await own.hasWork(), true);
-
-  const foreign = makeQueue({ issues: [issue(2, { projectId: 'website-pilot' })] });
-  assert.equal(await foreign.hasWork(), false);
+test('cloud preflight requires durable admission instead of discovering open issues', async () => {
+  const queue = makeQueue({ issues: [issue(1, { projectId: 'callflow' })] });
+  assert.equal(await queue.hasWork(), false);
 });
 
 test('cloud preflight ignores unauthorized new requests in an owned lane', async () => {
@@ -115,7 +112,6 @@ test('cloud preflight fails closed on malformed new requests instead of starting
   });
   assert.equal(await queue.hasWork(), false);
 });
-
 
 const revision = 'f'.repeat(40);
 
@@ -195,14 +191,7 @@ function makeAdmissionQueue({
     operatorBranch: 'main',
     includedProjectIds
   });
-  return {
-    queue,
-    state,
-    writes: () => writes,
-    leases: () => leases,
-    openIssueCalls: () => openIssueCalls,
-    channel
-  };
+  return { queue, state, writes: () => writes, leases: () => leases, openIssueCalls: () => openIssueCalls, channel };
 }
 
 test('event admission persists one bounded record and makes read-only cloud peek actionable', async () => {
@@ -259,7 +248,7 @@ test('issue-comment admission requires an authorized exact /agent wakeup and rem
   assert.equal(fixture.state.requests[key(23)].status, 'admitted');
 
   const rejectedFixture = makeAdmissionQueue({ currentIssue: issue(24) });
-  const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: 'hello' }));
+  const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: '/agent-typo' }));
   assert.equal(rejected.reason, 'event_comment_invalid');
   assert.equal(rejectedFixture.writes(), 0);
   assert.equal(rejectedFixture.leases(), 0);
@@ -290,7 +279,6 @@ test('tick processes an admitted record by exact issue lookup without relying on
   assert.equal(fixture.openIssueCalls(), 0);
 });
 
-
 test('admitted request acquires initialization lease before any workflow initialization can run', async () => {
   const target = issue(27);
   const fixture = makeAdmissionQueue({ currentIssue: target });
@@ -311,18 +299,20 @@ test('admitted request acquires initialization lease before any workflow initial
   assert.equal(persisted.workflowId, null);
 });
 
-
-test('admitted request revalidates trusted main before initialization', async () => {
+test('main drift during initialization claim restores admitted state before workflow creation', async () => {
   const target = issue(28);
   const fixture = makeAdmissionQueue({ currentIssue: target });
   await fixture.queue.admitEvent('issues', eventFor(target));
   const writes = fixture.writes();
-  fixture.channel.branchHead = async () => 'e'.repeat(40);
-  let initialized = false;
-  fixture.queue.finishInitialization = async () => { initialized = true; };
+  const heads = [revision, 'e'.repeat(40)];
+  fixture.channel.branchHead = async () => heads.shift();
+  fixture.queue.unboundPriorAgentInitialization = async () => null;
+  let created = false;
+  fixture.queue.workflowEngine.create = async () => { created = true; throw new Error('unexpected_create'); };
   const result = await fixture.queue.processIssue(target);
   assert.equal(result.status, 'operator_update_pending');
-  assert.equal(initialized, false);
+  assert.equal(created, false);
   assert.equal(fixture.state.requests[key(28)].status, 'admitted');
-  assert.equal(fixture.writes(), writes);
+  assert.equal(fixture.state.requests[key(28)].initializationLease, null);
+  assert.equal(fixture.writes(), writes + 2);
 });
