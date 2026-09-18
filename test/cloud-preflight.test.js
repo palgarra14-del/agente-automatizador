@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SupervisedIssueQueue } from '../src/issue-queue.js';
+import { configFrom } from '../src/core.js';
 
 const repository = { owner: 'palgarra14-del', name: 'agente-automatizador' };
 const key = (number) => `${repository.owner}/${repository.name}#${number}`;
@@ -113,4 +114,166 @@ test('cloud preflight fails closed on malformed new requests instead of starting
     issues: [issue(5, { body: '<!-- agent-request:v1 -->\n{"version":1,"projectId":"callflow"' })]
   });
   assert.equal(await queue.hasWork(), false);
+});
+
+
+const revision = 'f'.repeat(40);
+
+function governedProject(id = 'callflow') {
+  return configFrom({
+    id,
+    repository: { owner: 'palgarra14-del', name: 'App-llamadas' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' }
+  });
+}
+
+function eventFor(target, {
+  eventName = 'issues',
+  action = eventName === 'issue_comment' ? 'created' : 'opened',
+  actor = 'palgarra14-del',
+  repositoryOverride = repository,
+  commentBody = '/agent'
+} = {}) {
+  return {
+    action,
+    repository: {
+      name: repositoryOverride.name,
+      owner: { login: repositoryOverride.owner }
+    },
+    sender: { login: actor },
+    issue: clone(target),
+    ...(eventName === 'issue_comment' ? {
+      comment: { body: commentBody, user: { login: actor } }
+    } : {})
+  };
+}
+
+function makeAdmissionQueue({
+  state = { requests: {} },
+  currentIssue = issue(20),
+  includedProjectIds = ['callflow'],
+  remoteRevision = revision
+} = {}) {
+  let writes = 0;
+  let openIssueCalls = 0;
+  const store = {
+    async load() { return clone(state); },
+    async mutate(mutator) {
+      writes += 1;
+      return mutator(state);
+    }
+  };
+  const channel = {
+    repository,
+    async issue(number) {
+      return number === currentIssue.number ? clone(currentIssue) : null;
+    },
+    async branchHead() { return remoteRevision; },
+    async openIssues() {
+      openIssueCalls += 1;
+      return [];
+    }
+  };
+  const projects = new Map([['callflow', governedProject()]]);
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    operatorRevision: revision,
+    operatorBranch: 'main',
+    includedProjectIds
+  });
+  return {
+    queue,
+    state,
+    writes: () => writes,
+    openIssueCalls: () => openIssueCalls,
+    channel
+  };
+}
+
+test('event admission persists one bounded record and makes read-only cloud peek actionable', async () => {
+  const target = issue(20);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  const admitted = await fixture.queue.admitEvent('issues', eventFor(target));
+  assert.deepEqual(admitted, { admitted: true, idempotent: false, issueNumber: 20, status: 'admitted' });
+  assert.equal(fixture.writes(), 1);
+  assert.equal(fixture.state.requests[key(20)].status, 'admitted');
+  assert.equal(fixture.state.requests[key(20)].workflowId, null);
+  assert.equal(await fixture.queue.hasWork(), true);
+  assert.equal(fixture.writes(), 1);
+});
+
+test('repeated event admission is idempotent and does not create another durable write', async () => {
+  const target = issue(21);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  await fixture.queue.admitEvent('issues', eventFor(target));
+  const writesAfterFirst = fixture.writes();
+  const duplicate = await fixture.queue.admitEvent('issues', eventFor(target));
+  assert.equal(duplicate.admitted, false);
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(duplicate.status, 'admitted');
+  assert.equal(fixture.writes(), writesAfterFirst);
+});
+
+test('event admission fails closed without mutation for wrong actor, repo, lane, malformed or stale payloads', async () => {
+  const target = issue(22);
+  const cases = [
+    { name: 'actor', eventName: 'issues', event: eventFor(target, { actor: 'mallory' }), current: target, reason: 'event_actor_unauthorized' },
+    { name: 'repo', eventName: 'issues', event: eventFor(target, { repositoryOverride: { owner: 'other', name: repository.name } }), current: target, reason: 'event_repository_mismatch' },
+    { name: 'lane', eventName: 'issues', event: eventFor(issue(22, { projectId: 'website-pilot' })), current: issue(22, { projectId: 'website-pilot' }), reason: 'event_wrong_lane' },
+    { name: 'malformed', eventName: 'issues', event: eventFor(issue(22, { body: '<!-- agent-request:v1 -->\n{"version":1' })), current: issue(22, { body: '<!-- agent-request:v1 -->\n{"version":1' }), reason: 'event_request_invalid' },
+    { name: 'stale', eventName: 'issues', event: eventFor(target), current: issue(22, { body: requestBody('callflow').replace('maintenance change', 'different change') }), reason: 'event_issue_stale' }
+  ];
+  for (const entry of cases) {
+    const fixture = makeAdmissionQueue({ currentIssue: entry.current });
+    const result = await fixture.queue.admitEvent(entry.eventName, entry.event);
+    assert.equal(result.admitted, false, entry.name);
+    assert.equal(result.reason, entry.reason, entry.name);
+    assert.equal(fixture.writes(), 0, entry.name);
+    assert.deepEqual(fixture.state.requests, {}, entry.name);
+  }
+});
+
+test('issue-comment admission requires an authorized exact /agent wakeup and remains model-free', async () => {
+  const target = issue(23);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  const admitted = await fixture.queue.admitEvent('issue_comment', eventFor(target, { eventName: 'issue_comment' }));
+  assert.equal(admitted.admitted, true);
+  assert.equal(fixture.state.requests[key(23)].status, 'admitted');
+
+  const rejectedFixture = makeAdmissionQueue({ currentIssue: issue(24) });
+  const rejected = await rejectedFixture.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: 'hello' }));
+  assert.equal(rejected.reason, 'event_comment_invalid');
+  assert.equal(rejectedFixture.writes(), 0);
+});
+
+test('scheduled or manual non-issue events never mutate admission state', async () => {
+  const target = issue(25);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  const result = await fixture.queue.admitEvent('schedule', eventFor(target));
+  assert.equal(result.reason, 'event_not_admissible');
+  assert.equal(fixture.writes(), 0);
+});
+
+test('tick processes an admitted record by exact issue lookup without relying on open-issue pagination', async () => {
+  const target = issue(26);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  await fixture.queue.admitEvent('issues', eventFor(target));
+  let processed = 0;
+  fixture.queue.processIssue = async (observed) => {
+    processed += 1;
+    assert.equal(observed.number, target.number);
+    return { status: 'processed-directly' };
+  };
+  const result = await fixture.queue.tick();
+  assert.deepEqual(result, { status: 'processed-directly' });
+  assert.equal(processed, 1);
+  assert.equal(fixture.openIssueCalls(), 0);
 });
