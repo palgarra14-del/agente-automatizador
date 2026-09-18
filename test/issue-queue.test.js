@@ -1614,6 +1614,21 @@ test('workflow initialization failure is persisted as blocked and is not retried
   assert.equal(createCalls, 1);
 });
 
+test('active request whose issue marker disappears is durably blocked instead of spinning forever', async () => {
+  const { queue, channel } = await queueFixture();
+  const active = await queue.tick();
+  assert.ok(active);
+  assert.ok(!['blocked', 'rejected', 'completed', 'failed'].includes(active.status));
+
+  channel.issues[0].body = 'request marker intentionally removed';
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.reason, 'request_marker_removed');
+
+  const later = await queue.tick();
+  assert.equal(later, null);
+});
+
 test('issue queue watcher lease rejects a concurrent operator and recovers an abandoned owner', async () => {
   const { queue, store } = await queueFixture();
   const first = await queue.claimWatcherLease();
