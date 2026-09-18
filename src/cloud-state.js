@@ -753,6 +753,9 @@ export class GitHubStateStore extends JsonStore {
     if (!completed) throw new Error('cloud_state_epoch_metadata_limit');
     if (!registration) throw new Error('cloud_state_epoch_registration_missing');
     if (registration.statusAnchorSha !== anchorSha) throw new Error('cloud_state_epoch_anchor_invalid');
+    if (commit.message !== this.epochMetadataMessage(registration.epoch)) {
+      throw new Error('cloud_state_epoch_anchor_identity_invalid');
+    }
     if (expectedPreviousStatusAnchorSha !== undefined &&
         registration.previousStatusAnchorSha !== expectedPreviousStatusAnchorSha) {
       throw new Error('cloud_state_epoch_chain_invalid');
@@ -768,7 +771,7 @@ export class GitHubStateStore extends JsonStore {
     return { registration, seal, next };
   }
 
-  async readRootEvidence() {
+  async readRootEvidence({ repairLinks = false } = {}) {
     const laneRoot = await this.laneRootCommit();
     if (!laneRoot) {
       return {
@@ -779,14 +782,7 @@ export class GitHubStateStore extends JsonStore {
       };
     }
     const first = await this.readFirstEpochPointer(laneRoot.sha);
-    if (!first) {
-      return {
-        registrations: [],
-        registrationByEpoch: new Map(),
-        seals: new Map(),
-        statusAnchorByEpoch: new Map()
-      };
-    }
+    if (!first) throw new Error('cloud_state_lane_initialized_incomplete');
     const firstStatusAnchorSha = first.statusAnchorSha;
 
     const registrations = [];
@@ -826,7 +822,27 @@ export class GitHubStateStore extends JsonStore {
       let nextStatusAnchorSha = bundle.next?.statusAnchorSha ?? null;
       if (!nextStatusAnchorSha && bundle.seal) {
         const discovered = await this.refSha(`tags/${encodeURIComponent(this.epochAnchorTag(registration.epoch + 1))}`);
-        if (discovered) nextStatusAnchorSha = discovered;
+        if (discovered) {
+          const nextBundle = await this.readEpochBundle(discovered, registration.statusAnchorSha);
+          if (nextBundle.registration.epoch !== registration.epoch + 1 ||
+              nextBundle.registration.anchorSha !== bundle.seal.stateSha ||
+              nextBundle.registration.baseGeneration !== bundle.seal.generation ||
+              nextBundle.registration.startGeneration !== bundle.seal.generation + 1) {
+            throw new Error('cloud_state_epoch_chain_invalid');
+          }
+          if (!repairLinks) throw new Error('cloud_state_epoch_next_missing');
+          const repairError = await this.appendEpochStatus(
+            registration.statusAnchorSha,
+            this.epochNextContext(),
+            this.nextDescription(registration.epoch + 1, discovered)
+          );
+          if (repairError) throw new Error('cloud_state_epoch_next_repair_failed', { cause: repairError });
+          const repairedBundle = await this.readEpochBundle(registration.statusAnchorSha, expectedPreviousStatusAnchorSha);
+          if (repairedBundle.next?.statusAnchorSha !== discovered) {
+            throw new Error('cloud_state_epoch_next_repair_failed');
+          }
+          nextStatusAnchorSha = discovered;
+        }
       }
       if (nextStatusAnchorSha) {
         if (!bundle.seal) throw new Error('cloud_state_epoch_next_invalid');
@@ -840,8 +856,8 @@ export class GitHubStateStore extends JsonStore {
     return { registrations, registrationByEpoch, seals, statusAnchorByEpoch };
   }
 
-  async readEpochEvidence() {
-    const root = await this.readRootEvidence();
+  async readEpochEvidence({ repairLinks = false } = {}) {
+    const root = await this.readRootEvidence({ repairLinks });
     if (root.registrations.length === 0) {
       return { ...root, activeRegistration: null, activeAuthorities: [], authority: null, authorityRegistration: null };
     }
@@ -859,14 +875,24 @@ export class GitHubStateStore extends JsonStore {
     return { ...root, activeRegistration, activeAuthorities, authority, authorityRegistration };
   }
 
-  async createEpochStatusAnchors(previousStatusAnchorSha = null) {
+  epochMetadataMessage(epoch) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
+    return `Cloud State v2 metadata ${this.ledgerFullDigest} epoch ${epoch}`;
+  }
+
+  epochAuthorityMessage(epoch) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
+    return `Cloud State v2 authority ${this.ledgerFullDigest} epoch ${epoch}`;
+  }
+
+  async createEpochStatusAnchors(epoch, previousStatusAnchorSha = null) {
     const template = await this.readCommit(previousStatusAnchorSha ?? LEDGER_ROOT_SHA);
     const treeSha = assertSha(template?.tree?.sha, 'cloud_state_epoch_anchor_invalid');
     const parents = previousStatusAnchorSha ? [assertSha(previousStatusAnchorSha)] : [];
     const metadataCommit = await this.request('/git/commits', {
       method: 'POST',
       body: {
-        message: previousStatusAnchorSha ? 'Rotate Cloud State epoch metadata anchor' : 'Create Cloud State lane epoch root',
+        message: this.epochMetadataMessage(epoch),
         tree: treeSha,
         parents
       }
@@ -875,7 +901,7 @@ export class GitHubStateStore extends JsonStore {
     const authorityCommit = await this.request('/git/commits', {
       method: 'POST',
       body: {
-        message: 'Create Cloud State epoch authority anchor',
+        message: this.epochAuthorityMessage(epoch),
         tree: treeSha,
         parents: [statusAnchorSha]
       }
@@ -945,7 +971,7 @@ export class GitHubStateStore extends JsonStore {
     }
 
     const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
-    const { statusAnchorSha, authorityAnchorSha } = await this.createEpochStatusAnchors(previousStatusAnchorSha);
+    const { statusAnchorSha, authorityAnchorSha } = await this.createEpochStatusAnchors(epoch, previousStatusAnchorSha);
     await this.claimEpochAnchorRef(this.epochAnchorTag(epoch), statusAnchorSha);
 
     const registrationError = await this.appendEpochStatus(
@@ -998,6 +1024,9 @@ export class GitHubStateStore extends JsonStore {
     if (authorityCommit.parents.length !== 1 ||
         assertSha(authorityCommit.parents[0]?.sha, 'cloud_state_epoch_authority_anchor_invalid') !== registration.statusAnchorSha) {
       throw new Error('cloud_state_epoch_authority_anchor_invalid');
+    }
+    if (authorityCommit.message !== this.epochAuthorityMessage(registration.epoch)) {
+      throw new Error('cloud_state_epoch_authority_anchor_identity_invalid');
     }
 
     const byGeneration = new Map();
@@ -1182,7 +1211,6 @@ export class GitHubStateStore extends JsonStore {
     if (!authority || !Array.isArray(authorities) || authorities.length < 1) {
       throw new Error('cloud_state_epoch_authority_missing');
     }
-    if (this.validatedLineageHeads.has(authority.stateSha)) return;
     const latest = authorities.at(-1);
     if (latest.generation !== authority.generation || latest.stateSha !== authority.stateSha) {
       throw new Error('cloud_state_epoch_authority_mismatch');
@@ -1196,6 +1224,7 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_lineage_anchor_mismatch');
     }
     await this.validateLineageAnchor(stateEnvelope);
+    if (this.validatedLineageHeads.has(authority.stateSha)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
     let expectedSha = authority.stateSha;
@@ -1329,7 +1358,7 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async readSnapshot({ repair = false } = {}) {
-    const [refs, evidence] = await Promise.all([this.readRefs(), this.readEpochEvidence()]);
+    const [refs, evidence] = await Promise.all([this.readRefs(), this.readEpochEvidence({ repairLinks: repair })]);
     const { stateSha, checkpointSha, witnessSha } = refs;
 
     if (evidence.registrations.length === 0) {
@@ -1558,11 +1587,14 @@ export class GitHubStateStore extends JsonStore {
     };
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
+    await this.validateLineageAnchor(envelope);
     try {
       await this.claimGenerationStrict(generation, commitSha);
     } catch (error) {
       throw new Error('cloud_state_generation_election_failed', { cause: error });
     }
+
+    await this.validateLineageAnchor(envelope);
 
     let authorityError = null;
     let nextAuthorities = null;
