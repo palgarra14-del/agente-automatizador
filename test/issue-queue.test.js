@@ -546,8 +546,8 @@ test('issue queue config normalizes explicit cloud lanes and queue routing is mu
     now: () => '2026-09-12T00:00:00.000Z'
   });
   const cloudResult = await cloudQueue.tick();
-  assert.equal(cloudResult.status, 'awaiting_start_approval');
-  assert.equal(cloudFixture.workflowEngine.createCalls.length, 1);
+  assert.equal(cloudResult, null);
+  assert.equal(cloudFixture.workflowEngine.createCalls.length, 0);
   assert.notEqual(localQueue.controlPlaneFingerprint(), cloudQueue.controlPlaneFingerprint());
 
   assert.throws(() => new SupervisedIssueQueue({
