@@ -552,8 +552,7 @@ async function publishMarker(store, marker) {
 
 async function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
   const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
-  const statusAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha });
-  const authorityAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha: statusAnchorSha });
+  const { statusAnchorSha, authorityAnchorSha } = await store.createEpochStatusAnchors(epoch, previousStatusAnchorSha);
   fake.forceTag(store.epochAnchorTag(epoch), statusAnchorSha);
   fake.forceStatus(
     statusAnchorSha,
@@ -567,6 +566,8 @@ async function installRegistration(fake, store, epoch, stateAnchorSha, baseGener
       previousStatusAnchorSha
     )
   );
+  const laneRoot = await store.laneRootCommit({ create: true });
+  fake.forceStatus(laneRoot.sha, store.laneHeadContext(), store.firstEpochDescription(epoch, statusAnchorSha));
   if (previousRegistration) {
     fake.forceStatus(
       previousRegistration.statusAnchorSha,
@@ -574,7 +575,6 @@ async function installRegistration(fake, store, epoch, stateAnchorSha, baseGener
       store.nextDescription(epoch, statusAnchorSha)
     );
   } else {
-    const laneRoot = await store.laneRootCommit({ create: true });
     fake.forceStatus(
       laneRoot.sha,
       store.laneRootContext(),
