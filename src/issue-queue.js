@@ -983,7 +983,7 @@ export class SupervisedIssueQueue {
     const actor = event.sender?.login;
     if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
     if (eventName === 'issue_comment') {
-      if (event.comment?.user?.login !== actor || typeof event.comment?.body !== 'string' || !event.comment.body.startsWith('/agent')) {
+      if (event.comment?.user?.login !== actor || typeof event.comment?.body !== 'string' || event.comment.body.trim() !== '/agent') {
         return { admitted: false, reason: 'event_comment_invalid' };
       }
     }
@@ -1128,6 +1128,14 @@ export class SupervisedIssueQueue {
       return this.blockRequestRevalidation(issue, key, seedRecord, 'initialization_context_changed');
     }
 
+    if (this.operatorRevision) {
+      const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+      if (remoteOperatorRevision !== this.operatorRevision) {
+        const admitted = { ...seedRecord, status: 'admitted', initializationLease: null, updatedAt: this.now() };
+        await this.saveRecord(key, admitted);
+        return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+      }
+    }
     let workflow;
     let dryRun;
     try {
@@ -1732,6 +1740,7 @@ export class SupervisedIssueQueue {
       if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
     }
 
+    if (this.includedProjectIds !== null) return false;
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
@@ -1790,6 +1799,10 @@ export class SupervisedIssueQueue {
       }
       const activeResult = await this.processIssue(issue);
       if (activeResult) return activeResult;
+    }
+    if (this.includedProjectIds !== null) {
+      if (notificationError) throw notificationError;
+      return null;
     }
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
