@@ -983,7 +983,7 @@ export class SupervisedIssueQueue {
     const actor = event.sender?.login;
     if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
     if (eventName === 'issue_comment' &&
-        (event.comment?.user?.login !== actor || typeof event.comment?.body !== 'string' || event.comment.body.trim() !== '/agent')) {
+        (event.comment?.user?.login !== actor || event.comment?.body !== '/agent')) {
       return { admitted: false, reason: 'event_comment_invalid' };
     }
 
@@ -1393,9 +1393,12 @@ export class SupervisedIssueQueue {
       }
       if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
       if (this.operatorRevision) {
-        const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+        const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+        let remoteOperatorRevision;
+        try { remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch); }
+        catch { await restore(); return { status: 'operator_revision_check_failed', issueNumber: issue.number, updatedAt: this.now() }; }
         if (remoteOperatorRevision !== this.operatorRevision) {
-          await this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+          await restore();
           return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
         }
       }
