@@ -853,6 +853,8 @@ export class GitHubStateStore extends JsonStore {
       const previousRegistration = root.registrations.at(-2);
       const previousSeal = root.seals.get(previousRegistration.epoch);
       if (!previousSeal) throw new Error('cloud_state_epoch_chain_invalid');
+      const sealedEnvelope = await this.readEnvelopeAt(previousSeal.stateSha);
+      await this.validateLineageAnchor(sealedEnvelope);
       authority = { generation: previousSeal.generation, stateSha: previousSeal.stateSha, parentSha: null, sealed: true };
       authorityRegistration = previousRegistration;
     }
@@ -1182,7 +1184,6 @@ export class GitHubStateStore extends JsonStore {
     if (!authority || !Array.isArray(authorities) || authorities.length < 1) {
       throw new Error('cloud_state_epoch_authority_missing');
     }
-    if (this.validatedLineageHeads.has(authority.stateSha)) return;
     const latest = authorities.at(-1);
     if (latest.generation !== authority.generation || latest.stateSha !== authority.stateSha) {
       throw new Error('cloud_state_epoch_authority_mismatch');
@@ -1196,6 +1197,7 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_lineage_anchor_mismatch');
     }
     await this.validateLineageAnchor(stateEnvelope);
+    if (this.validatedLineageHeads.has(authority.stateSha)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
     let expectedSha = authority.stateSha;
