@@ -1020,12 +1020,15 @@ export class SupervisedIssueQueue {
       controlPlaneFingerprint: activeControlPlaneFingerprint
     });
 
-    const claimed = await this.store.mutate((data) => {
+    const persistAdmission = () => this.store.mutate((data) => {
       data.requests ??= {};
       if (data.requests[key]) return { created: false, record: data.requests[key] };
       data.requests[key] = record;
       return { created: true, record };
     });
+    const claimed = typeof this.store.withGlobalLease === 'function'
+      ? await this.store.withGlobalLease(persistAdmission)
+      : await persistAdmission();
     if (!claimed.created) {
       const raced = claimed.record;
       if (!this.ownsRecord(raced)) return { admitted: false, reason: 'existing_request_wrong_lane' };
