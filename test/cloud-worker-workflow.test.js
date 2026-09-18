@@ -119,7 +119,7 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
+test('cloud worker performs bounded event admission before read-only lane peek and gates heavy runtime', () => {
   const preflightStart = workflow.indexOf('- name: Check lane for governed work');
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
   const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick');
@@ -128,7 +128,13 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.ok(tickStart > runtimeStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(preflight, /if \[\[ "\$GITHUB_EVENT_NAME" == "issues" \|\| "\$GITHUB_EVENT_NAME" == "issue_comment" \]\]; then/);
+  assert.match(preflight, /inbox cloud-admit --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.ok(preflight.indexOf('inbox cloud-admit') < preflight.indexOf('inbox cloud-peek'));
+  const admissionGuardEnd = preflight.indexOf('\n          fi', preflight.indexOf('inbox cloud-admit'));
+  assert.ok(admissionGuardEnd > 0);
+  assert.doesNotMatch(preflight.slice(admissionGuardEnd + 1), /inbox cloud-admit/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
   assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
