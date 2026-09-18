@@ -170,7 +170,8 @@ function makeAdmissionQueue({
     async withGlobalLease(operation) {
       leases += 1;
       return operation();
-    }
+    },
+    async ownerIdentity() { return 'fixture-owner'; }
   };
   const channel = {
     repository,
@@ -287,4 +288,25 @@ test('tick processes an admitted record by exact issue lookup without relying on
   assert.deepEqual(result, { status: 'processed-directly' });
   assert.equal(processed, 1);
   assert.equal(fixture.openIssueCalls(), 0);
+});
+
+
+test('admitted request acquires initialization lease before any workflow initialization can run', async () => {
+  const target = issue(27);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  await fixture.queue.admitEvent('issues', eventFor(target));
+  let observedSeed = null;
+  fixture.queue.finishInitialization = async (_issue, _parsed, seed) => {
+    observedSeed = clone(seed);
+    throw new Error('fixture_stop_after_initialization_claim');
+  };
+
+  await assert.rejects(() => fixture.queue.processIssue(target), /fixture_stop_after_initialization_claim/);
+  const persisted = fixture.state.requests[key(27)];
+  assert.equal(persisted.status, 'initializing');
+  assert.ok(persisted.initializationLease);
+  assert.equal(persisted.initializationLease.ownerIdentity, 'fixture-owner');
+  assert.equal(observedSeed.status, 'initializing');
+  assert.equal(observedSeed.initializationLease.leaseId, persisted.initializationLease.leaseId);
+  assert.equal(persisted.workflowId, null);
 });
