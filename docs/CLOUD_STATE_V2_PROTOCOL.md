@@ -127,7 +127,9 @@ The lane has durably existed.
 
 The exact deterministic lane-root commit must also exist and validate. Missing root object is corruption/authority loss and fails closed.
 
-This distinction prevents deletion of lane refs from making an established lane look new.
+If the lane root exists but the append-only first-epoch pointer is missing, the lane is **initialized but incomplete** and also fails closed. It is never returned as an empty/new lane, including under governed repair.
+
+This distinction prevents deletion of lane refs or a crash between init-marker and first-pointer publication from making an established lane look new.
 
 ## First-epoch pointer
 
@@ -209,7 +211,9 @@ Each epoch has two exclusive immutable commits:
    - canonical generation authority statuses only;
    - normally at most 256 protocol statuses.
 
-The two commits are lane-specific. Normal traffic from another lane never lands on them.
+The two commits are lane-specific. Their Git commit messages include the full lane digest and epoch number and those identities are validated when read. The metadata message is `Cloud State v2 metadata <fullLaneDigest> epoch <epoch>`; the authority message is `Cloud State v2 authority <fullLaneDigest> epoch <epoch>`.
+
+This prevents two lanes or two epochs created with the same tree/parents/identity/timestamp from collapsing onto the same physical Git object. Normal traffic from another lane therefore cannot share the status budget accidentally.
 
 ## Epoch metadata-anchor discovery refs
 
@@ -251,9 +255,9 @@ Invariants:
 
 ## Authority-anchor binding
 
-The authority-anchor Git commit must have exactly one parent: its epoch metadata anchor.
+The authority-anchor Git commit must have exactly one parent: its epoch metadata anchor, and its Git message must carry the exact full lane digest plus epoch number.
 
-That parent binding is validated when the active authority log is read.
+Both the parent binding and the lane/epoch object identity are validated when the active authority log is read.
 
 The authority statuses therefore cannot be transplanted onto another epoch or lane without breaking either the lane contexts, registration binding or Git-parent relation.
 
@@ -319,7 +323,9 @@ Its registration must record the same previous metadata anchor.
 
 A next link without a valid previous seal is rejected.
 
-If the process crashes after creating/registering the next anchor but before writing the next link, recovery may consult the deterministic next-epoch discovery ref only because the prior epoch is already sealed; the target must still pass exact commit-parent and registration checks.
+If the process crashes after creating/registering the next anchor but before writing the next link, a normal read/write **does not follow the mutable discovery ref** and new canonical authority is blocked with `cloud_state_epoch_next_missing`.
+
+Only an explicit governed repair may consult that ref. Repair first validates the discovered metadata anchor, lane/epoch Git identity, exact parent, registration, previous seal and generation continuity; it then appends the missing immutable `next` status to the previous metadata anchor and verifies that status before the new epoch becomes traversable. No generation claim or authority append is allowed before that repair succeeds.
 
 ## State publication — same epoch
 
@@ -328,12 +334,14 @@ If the process crashes after creating/registering the next anchor but before wri
 3. Read and validate only the active authority anchor.
 4. Validate the complete active state lineage.
 5. Create the exact one-parent candidate state commit.
-6. Create the deterministic generation claim.
-7. Reread active authority and prove it has not changed.
-8. Append canonical generation status.
-9. Validate the new active lineage.
-10. Move state/checkpoint/witness refs forward, non-force.
-11. Verify canonical authority plus operational refs.
+6. Revalidate the lineage anchor against the **current mutable base branch** immediately before election.
+7. Create the deterministic generation claim.
+8. Revalidate the lineage anchor against the current base branch again after claim creation and immediately before durable authority publication.
+9. Reread active authority and prove it has not changed.
+10. Append canonical generation status.
+11. Validate the new active lineage.
+12. Move state/checkpoint/witness refs forward, non-force.
+13. Verify canonical authority plus operational refs.
 
 Canonical authority exists before operational refs move.
 
@@ -456,6 +464,8 @@ For a brand-new lane:
 
 If main advances after an orphan but valid bootstrap registration, the registered state anchor remains acceptable only while it remains in current main ancestry.
 
+Mutable bootstrap ancestry is never trusted from the immutable-lineage cache alone. A cached state head may skip replay of immutable historical edges, but current base-branch ancestry is rechecked on every relevant validation and again immediately before both the generation claim and canonical status append. A force-push between load and save therefore cannot leave new durable authority behind.
+
 ## Legacy v1 migration
 
 v1 had no independent monotonic authority.
@@ -558,9 +568,11 @@ At minimum:
 - exact lane-init context lookup;
 - init marker conflict;
 - initialized lane with missing deterministic root fails closed;
+- initialized lane with init marker but missing first pointer fails closed instead of looking empty;
 - deletion of every movable lane ref cannot erase authority;
 - first-pointer conflict;
 - metadata/authority anchor parent binding;
+- metadata/authority Git object identity binds exact lane digest + epoch and rejects cross-lane transplant;
 - bootstrap and legacy migration;
 - inherited legacy generation offsets;
 - precreated and ambiguous generation claims;
@@ -572,10 +584,13 @@ At minimum:
 - stale concurrent writers;
 - conflicting registration/authority/seal/next evidence;
 - epoch rollover;
+- crash after next registration but before immutable next link blocks normal publication;
+- governed repair validates and restores the missing next link before any new authority;
 - partial next-anchor structural publication;
 - hidden active-state merge;
 - malformed/truncated active state envelope;
 - lineage-anchor rewrite;
+- base-branch force-push between cached load and save is rejected before generation claim/canonical authority;
 - exact-SHA reads;
 - cross-lane isolation;
 - local pagination fail-closed;
