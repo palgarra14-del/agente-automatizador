@@ -13,15 +13,17 @@ const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
 const CLAIM_NAMESPACE = 'agent-cloud-state-v2-claims';
-const EPOCH_ROOT_NAMESPACE = 'agent-cloud-state-v2-epoch-roots';
 const EPOCH_ANCHOR_NAMESPACE = 'agent-cloud-state-v2-epoch-anchors';
+const LANE_ROOT_AUTHOR_NAME = 'Cloud State v2';
+const LANE_ROOT_AUTHOR_EMAIL = 'cloud-state-v2@users.noreply.github.com';
+const LANE_ROOT_AUTHOR_DATE = '2000-01-01T00:00:00Z';
+const LANE_ROOT_AUTHOR_TIMESTAMP = 946684800;
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 const LEDGER_CONTEXT_ROOT = 'agent-cloud-state-v2';
 const RESERVED_STATE_TAGS = new Set([
   CHECKPOINT_NAMESPACE,
   WITNESS_NAMESPACE,
   CLAIM_NAMESPACE,
-  EPOCH_ROOT_NAMESPACE,
   EPOCH_ANCHOR_NAMESPACE
 ]);
 
@@ -203,21 +205,23 @@ export class GitHubStateStore extends JsonStore {
     this.activeGlobalLeaseId = null;
     this.validatedLineageHeads = new Set();
     this.ledgerRootVerified = false;
-    this.ledgerDigest = createHash('sha256').update(JSON.stringify(canonical({
+    this.ledgerFullDigest = createHash('sha256').update(JSON.stringify(canonical({
       repository: `${repository.owner}/${repository.name}`,
       laneId,
       statePath,
       stateTag: tag,
       checkpointTag: this.checkpointTag,
       witnessTag: this.witnessTag
-    }))).digest('hex').slice(0, 32);
-    this.epochRootTag = `${EPOCH_ROOT_NAMESPACE}/${this.ledgerDigest}`;
+    }))).digest('hex');
+    this.ledgerDigest = this.ledgerFullDigest.slice(0, 32);
     this.epochAnchorPrefix = `${EPOCH_ANCHOR_NAMESPACE}/${this.ledgerDigest}/`;
+    this.laneRootContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/first`;
     this.epochRegistrationContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/epoch`;
     this.epochSealContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/seal`;
     this.epochNextContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/next`;
     this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/g/`;
     this.claimPrefix = `${CLAIM_NAMESPACE}/${this.ledgerDigest}/`;
+    this.ledgerRootTreeSha = null;
   }
 
   apiPath(suffix) {
@@ -366,7 +370,116 @@ export class GitHubStateStore extends JsonStore {
     if (this.ledgerRootVerified) return;
     const root = await this.readCommit(LEDGER_ROOT_SHA);
     if (root.parents.length !== 0) throw new Error('cloud_state_status_root_invalid');
+    this.ledgerRootTreeSha = assertSha(root?.tree?.sha, 'cloud_state_status_root_invalid');
     this.ledgerRootVerified = true;
+  }
+
+  laneRootCommitSpec() {
+    if (!this.ledgerRootVerified || !this.ledgerRootTreeSha) throw new Error('cloud_state_status_root_invalid');
+    const message = `Cloud State v2 lane root ${this.ledgerFullDigest}`;
+    const authorLine = `${LANE_ROOT_AUTHOR_NAME} <${LANE_ROOT_AUTHOR_EMAIL}> ${LANE_ROOT_AUTHOR_TIMESTAMP} +0000`;
+    const body = `tree ${this.ledgerRootTreeSha}\nauthor ${authorLine}\ncommitter ${authorLine}\n\n${message}`;
+    const sha = createHash('sha1')
+      .update(`commit ${Buffer.byteLength(body, "utf8")}\0${body}`)
+      .digest('hex');
+    return {
+      sha,
+      message,
+      tree: this.ledgerRootTreeSha,
+      parents: [],
+      author: {
+        name: LANE_ROOT_AUTHOR_NAME,
+        email: LANE_ROOT_AUTHOR_EMAIL,
+        date: LANE_ROOT_AUTHOR_DATE
+      },
+      committer: {
+        name: LANE_ROOT_AUTHOR_NAME,
+        email: LANE_ROOT_AUTHOR_EMAIL,
+        date: LANE_ROOT_AUTHOR_DATE
+      }
+    };
+  }
+
+  validateLaneRootCommit(commit, spec) {
+    if (!commit || assertSha(commit.sha, 'cloud_state_lane_root_invalid') !== spec.sha ||
+        assertSha(commit?.tree?.sha, 'cloud_state_lane_root_invalid') !== spec.tree ||
+        !Array.isArray(commit.parents) || commit.parents.length !== 0 ||
+        commit.message !== spec.message ||
+        commit.author?.name !== LANE_ROOT_AUTHOR_NAME ||
+        commit.author?.email !== LANE_ROOT_AUTHOR_EMAIL ||
+        commit.author?.date !== LANE_ROOT_AUTHOR_DATE ||
+        commit.committer?.name !== LANE_ROOT_AUTHOR_NAME ||
+        commit.committer?.email !== LANE_ROOT_AUTHOR_EMAIL ||
+        commit.committer?.date !== LANE_ROOT_AUTHOR_DATE) {
+      throw new Error('cloud_state_lane_root_invalid');
+    }
+  }
+
+  async laneRootCommit({ create = false } = {}) {
+    await this.verifyLedgerRoot();
+    const spec = this.laneRootCommitSpec();
+    let commit = await this.request(`/git/commits/${spec.sha}`, { allow404: true });
+    if (!commit && create) {
+      const created = await this.request('/git/commits', {
+        method: 'POST',
+        body: {
+          message: spec.message,
+          tree: spec.tree,
+          parents: [],
+          author: spec.author,
+          committer: spec.committer
+        }
+      });
+      if (assertSha(created?.sha, 'cloud_state_lane_root_invalid') !== spec.sha) {
+        throw new Error('cloud_state_lane_root_invalid');
+      }
+      commit = await this.request(`/git/commits/${spec.sha}`);
+    }
+    if (!commit) return null;
+    this.validateLaneRootCommit(commit, spec);
+    return spec;
+  }
+
+  laneRootContext() {
+    return this.laneRootContextName;
+  }
+
+  firstEpochDescription(epoch, statusAnchorSha) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
+    return `e=${epoch};a=${assertSha(statusAnchorSha)}`;
+  }
+
+  async readFirstEpochPointer(laneRootSha) {
+    let observed = null;
+    let completed = false;
+    for (let page = 1; page <= 2; page += 1) {
+      const statuses = await this.request(`/commits/${laneRootSha}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(statuses)) throw new Error('cloud_state_lane_root_invalid');
+      for (const status of statuses) {
+        const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
+        if (context !== this.laneRootContextName.toLowerCase()) continue;
+        if (status.state !== 'success' || (status.target_url !== null && status.target_url !== undefined) ||
+            typeof status.description !== 'string') {
+          throw new Error('cloud_state_lane_root_pointer_invalid');
+        }
+        const match = /^e=(0|[1-9][0-9]*);a=([a-f0-9]{40})$/i.exec(status.description);
+        if (!match) throw new Error('cloud_state_lane_root_pointer_invalid');
+        const record = {
+          epoch: Number(match[1]),
+          statusAnchorSha: assertSha(match[2], 'cloud_state_lane_root_pointer_invalid')
+        };
+        if (observed && (observed.epoch !== record.epoch || observed.statusAnchorSha !== record.statusAnchorSha)) {
+          throw new Error('cloud_state_lane_root_pointer_conflict');
+        }
+        observed = record;
+      }
+      if (statuses.length < STATUS_PAGE_SIZE) {
+        completed = true;
+        break;
+      }
+    }
+    if (!completed) throw new Error('cloud_state_lane_root_status_limit');
+    return observed;
   }
 
   epochRegistrationContext() {
@@ -577,9 +690,8 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async readRootEvidence() {
-    await this.verifyLedgerRoot();
-    const firstStatusAnchorSha = await this.refSha(`tags/${encodeURIComponent(this.epochRootTag)}`);
-    if (!firstStatusAnchorSha) {
+    const laneRoot = await this.laneRootCommit();
+    if (!laneRoot) {
       return {
         registrations: [],
         registrationByEpoch: new Map(),
@@ -587,6 +699,16 @@ export class GitHubStateStore extends JsonStore {
         statusAnchorByEpoch: new Map()
       };
     }
+    const first = await this.readFirstEpochPointer(laneRoot.sha);
+    if (!first) {
+      return {
+        registrations: [],
+        registrationByEpoch: new Map(),
+        seals: new Map(),
+        statusAnchorByEpoch: new Map()
+      };
+    }
+    const firstStatusAnchorSha = first.statusAnchorSha;
 
     const registrations = [];
     const registrationByEpoch = new Map();
@@ -601,6 +723,9 @@ export class GitHubStateStore extends JsonStore {
       seenAnchors.add(currentStatusAnchorSha);
       const bundle = await this.readEpochBundle(currentStatusAnchorSha, expectedPreviousStatusAnchorSha);
       const registration = bundle.registration;
+      if (registrations.length === 0 && registration.epoch !== first.epoch) {
+        throw new Error('cloud_state_lane_root_pointer_invalid');
+      }
       if (registrationByEpoch.has(registration.epoch)) throw new Error('cloud_state_epoch_registration_conflict');
       if (registrations.length > 0) {
         const previous = registrations.at(-1);
@@ -742,8 +867,7 @@ export class GitHubStateStore extends JsonStore {
 
     const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
     const { statusAnchorSha, authorityAnchorSha } = await this.createEpochStatusAnchors(previousStatusAnchorSha);
-    const anchorRef = previousRegistration ? this.epochAnchorTag(epoch) : this.epochRootTag;
-    await this.claimEpochAnchorRef(anchorRef, statusAnchorSha);
+    await this.claimEpochAnchorRef(this.epochAnchorTag(epoch), statusAnchorSha);
 
     const registrationError = await this.appendEpochStatus(
       statusAnchorSha,
@@ -766,6 +890,14 @@ export class GitHubStateStore extends JsonStore {
         this.nextDescription(epoch, statusAnchorSha)
       );
       if (nextError) throw new Error('cloud_state_epoch_next_append_failed', { cause: nextError });
+    } else {
+      const laneRoot = await this.laneRootCommit({ create: true });
+      const firstPointerError = await this.appendEpochStatus(
+        laneRoot.sha,
+        this.laneRootContext(),
+        this.firstEpochDescription(epoch, statusAnchorSha)
+      );
+      if (firstPointerError) throw new Error('cloud_state_lane_root_pointer_append_failed', { cause: firstPointerError });
     }
 
     const after = await this.readRootEvidence();
