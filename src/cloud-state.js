@@ -13,9 +13,10 @@ const EPOCH_STATUS_MAX_PAGES = 4;
 const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
+const CLAIM_NAMESPACE = 'agent-cloud-state-v2-claims';
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 const LEDGER_CONTEXT_ROOT = 'agent-cloud-state-v2';
-const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE]);
+const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE, CLAIM_NAMESPACE]);
 
 const HISTORY_QUERY = `
 query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
@@ -206,6 +207,7 @@ export class GitHubStateStore extends JsonStore {
     this.epochRegistrationPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/e/`;
     this.epochSealPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/s/`;
     this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/a/`;
+    this.claimPrefix = `${CLAIM_NAMESPACE}/${this.ledgerDigest}/`;
   }
 
   apiPath(suffix) {
@@ -647,17 +649,50 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_epoch_seal_append_failed');
   }
 
-  async appendEpochAuthorityAfterCas(registration, generation, stateSha, parentSha, preCasAuthorities) {
+  generationClaimTag(generation) {
+    const epoch = epochForGeneration(generation);
+    return `${this.claimPrefix}${epoch}/${generation}`;
+  }
+
+  async claimGenerationStrict(generation, candidateSha) {
+    const target = assertSha(candidateSha);
+    const claimTag = this.generationClaimTag(generation);
+    let created;
+    try {
+      created = await this.request('/git/refs', {
+        method: 'POST',
+        body: { ref: `refs/tags/${claimTag}`, sha: target }
+      });
+    } catch (error) {
+      throw new Error('cloud_state_generation_claim_failed', { cause: error });
+    }
+    const createdRef = typeof created?.ref === 'string' ? created.ref : '';
+    const createdSha = assertSha(created?.object?.sha, 'cloud_state_generation_claim_unproven');
+    if (createdRef !== `refs/tags/${claimTag}` || createdSha !== target) {
+      throw new Error('cloud_state_generation_claim_unproven');
+    }
+    const observed = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
+    if (observed !== target) throw new Error('cloud_state_generation_claim_unproven');
+    return claimTag;
+  }
+
+  async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities) {
     const desired = {
       generation,
       stateSha: assertSha(stateSha),
       parentSha: assertSha(parentSha)
     };
     if (epochForGeneration(generation) !== registration.epoch) throw new Error('cloud_state_epoch_generation_mismatch');
-    if (!Array.isArray(preCasAuthorities)) throw new Error('cloud_state_epoch_authority_invalid');
-    if (preCasAuthorities.some((record) => record.generation === generation)) {
+    if (!Array.isArray(preClaimAuthorities)) throw new Error('cloud_state_epoch_authority_invalid');
+    if (preClaimAuthorities.some((record) => record.generation === generation)) {
       throw new Error('cloud_state_epoch_authority_conflict');
     }
+
+    const before = await this.readEpochAuthorities(registration);
+    if (JSON.stringify(before) !== JSON.stringify(preClaimAuthorities)) {
+      throw new Error('cloud_state_epoch_authority_conflict');
+    }
+
     let postError = null;
     try {
       await this.request(`/statuses/${registration.anchorSha}`, {
@@ -962,22 +997,6 @@ export class GitHubStateStore extends JsonStore {
     return this.snapshotFrom(stateSha, checkpointSha, witnessSha, authorityEnvelope, authority);
   }
 
-  async advanceStateRefStrict(expectedSha, targetSha) {
-    if (expectedSha) {
-      await this.request(`/git/refs/tags/${encodeURIComponent(this.tag)}`, {
-        method: 'PATCH',
-        body: { sha: targetSha, force: false }
-      });
-    } else {
-      await this.request('/git/refs', {
-        method: 'POST',
-        body: { ref: `refs/tags/${this.tag}`, sha: targetSha }
-      });
-    }
-    const observed = await this.refSha(`tags/${encodeURIComponent(this.tag)}`);
-    if (observed !== targetSha) throw new Error('cloud_state_state_cas_unproven');
-  }
-
   async createStateCommit(envelope, parentSha) {
     const content = JSON.stringify(envelope);
     if (Buffer.byteLength(content, 'utf8') > this.maxBytes * 2) throw new Error('cloud_state_envelope_too_large');
@@ -1092,16 +1111,16 @@ export class GitHubStateStore extends JsonStore {
       }
     }
 
-    const preCasAuthorities = await this.readEpochAuthorities(registration);
+    const preClaimAuthorities = await this.readEpochAuthorities(registration);
     const expectedPreviousGeneration = generation - 1;
-    if (preCasAuthorities.some((record) => record.generation >= generation)) throw new Error('cloud_state_epoch_authority_conflict');
+    if (preClaimAuthorities.some((record) => record.generation >= generation)) throw new Error('cloud_state_epoch_authority_conflict');
     if (generation === registration.startGeneration) {
       if (registration.anchorSha !== parentSha || registration.baseGeneration !== expectedPreviousGeneration) {
         throw new Error('cloud_state_epoch_registration_conflict');
       }
-      if (preCasAuthorities.length !== 0) throw new Error('cloud_state_epoch_authority_conflict');
+      if (preClaimAuthorities.length !== 0) throw new Error('cloud_state_epoch_authority_conflict');
     } else {
-      const previous = preCasAuthorities.at(-1);
+      const previous = preClaimAuthorities.at(-1);
       if (!previous || previous.generation !== expectedPreviousGeneration || previous.stateSha !== parentSha) {
         throw new Error('cloud_state_epoch_authority_gap');
       }
@@ -1125,20 +1144,20 @@ export class GitHubStateStore extends JsonStore {
     const commitSha = await this.createStateCommit(envelope, parentSha);
 
     try {
-      await this.advanceStateRefStrict(expectedStateSha, commitSha);
+      await this.claimGenerationStrict(generation, commitSha);
     } catch (error) {
-      throw new Error('cloud_state_state_cas_unproven', { cause: error });
+      throw new Error('cloud_state_generation_election_failed', { cause: error });
     }
 
     let authorityError = null;
     let nextAuthorities = null;
     try {
-      nextAuthorities = await this.appendEpochAuthorityAfterCas(
+      nextAuthorities = await this.appendEpochAuthorityAfterClaim(
         registration,
         generation,
         commitSha,
         parentSha,
-        preCasAuthorities
+        preClaimAuthorities
       );
     } catch (error) {
       authorityError = error;
@@ -1148,8 +1167,14 @@ export class GitHubStateStore extends JsonStore {
     const authority = nextAuthorities.at(-1);
     await this.validateEpochLineage(registration, authority, nextAuthorities, root);
 
+    let stateRefError = null;
     let checkpointError = null;
     let witnessError = null;
+    try {
+      await this.advanceRef(this.tag, expectedStateSha, commitSha, 'cloud_state_partial_publication');
+    } catch (error) {
+      stateRefError = error;
+    }
     try {
       await this.advanceRef(this.checkpointTag, expectedCheckpointSha, commitSha, 'cloud_state_partial_publication');
     } catch (error) {
@@ -1168,7 +1193,7 @@ export class GitHubStateStore extends JsonStore {
       this.validatedLineageHeads.add(commitSha);
       return commitSha;
     }
-    throw new Error('cloud_state_partial_publication', { cause: checkpointError ?? witnessError ?? undefined });
+    throw new Error('cloud_state_partial_publication', { cause: stateRefError ?? checkpointError ?? witnessError ?? undefined });
   }
 
   async load() {
