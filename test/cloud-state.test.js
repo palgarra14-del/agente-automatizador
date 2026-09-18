@@ -871,6 +871,11 @@ test('2050-generation segmented history validates with bounded requests', async 
   const loaded = await fresh.load();
   assert.equal(loaded.marker, 'g2050');
   assert.ok(fake.requestCount() < 30, `expected bounded epoch validation, received ${fake.requestCount()} requests`);
+
+  fake.resetRequestCount();
+  const next = await publishMarker(fresh, 'g2051');
+  assert.equal(fake.envelopeAt(next).generation, 2051);
+  assert.ok(fake.requestCount() < 60, `expected bounded long-history write, received ${fake.requestCount()} requests`);
 });
 
 test('state content is always read by exact commit SHA', async () => {
