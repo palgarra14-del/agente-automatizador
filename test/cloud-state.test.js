@@ -688,6 +688,46 @@ test('fresh load of aligned r6 state is read-only', async () => {
   assert.equal(fake.writeCount(), 0);
 });
 
+test('cached lineage validation still rechecks mutable bootstrap ancestry before publication', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'g1');
+  await store.load();
+  const rewrittenMain = fake.makeStateCommit({
+    parentSha: LEDGER_ROOT_SHA,
+    generation: 901,
+    state: blankState('rewritten-main'),
+    lineageBaseSha: LEDGER_ROOT_SHA,
+    lineageBaseGeneration: 0
+  });
+  fake.forceHead('main', rewrittenMain);
+  await assert.rejects(() => publishMarker(store, 'must-not-publish'), /bootstrap_ancestry_invalid/);
+});
+
+test('sealed fallback authority rechecks bootstrap ancestry before it can be accepted', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, epoch0, sealedSha, 256);
+  await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0);
+  const rewrittenMain = fake.makeStateCommit({
+    parentSha: LEDGER_ROOT_SHA,
+    generation: 902,
+    state: blankState('rewritten-main'),
+    lineageBaseSha: LEDGER_ROOT_SHA,
+    lineageBaseGeneration: 0
+  });
+  fake.forceHead('main', rewrittenMain);
+  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).readEpochEvidence(), /bootstrap_ancestry_invalid/);
+});
+
 test('orphan bootstrap registration remains reusable when main advances', async () => {
   const fake = fakeGitHub();
   const firstAttempt = storeFor(fake);
