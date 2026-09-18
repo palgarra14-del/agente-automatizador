@@ -566,12 +566,6 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_epoch_chain_invalid');
     }
 
-    const authorityCommit = await this.readCommit(registration.authorityAnchorSha);
-    if (authorityCommit.parents.length !== 1 ||
-        assertSha(authorityCommit.parents[0]?.sha, 'cloud_state_epoch_authority_anchor_invalid') !== anchorSha) {
-      throw new Error('cloud_state_epoch_authority_anchor_invalid');
-    }
-
     if (seal) {
       if (seal.generation !== epochEndGeneration(registration.epoch) ||
           epochForGeneration(seal.generation) !== registration.epoch) {
