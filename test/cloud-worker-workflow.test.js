@@ -44,48 +44,23 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
   const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
   const callflowLane = queueConfig.cloudLanes.find((lane) => lane.id === 'callflow');
 
-  assert.deepEqual(selfLane, {
-    id: 'self',
-    projectIds: ['self'],
-    tag: 'agent-cloud-state-v1',
-    statePath: '.agent/cloud-state.json'
-  });
-  assert.deepEqual(websiteLane, {
-    id: 'website-pilot',
-    projectIds: ['website-pilot'],
-    tag: 'agent-cloud-state-website-pilot-v1',
-    statePath: '.agent/cloud-state-website-pilot.json'
-  });
-  assert.deepEqual(callflowLane, {
-    id: 'callflow',
-    projectIds: ['callflow'],
-    tag: 'agent-cloud-state-callflow-v1',
-    statePath: '.agent/cloud-state-callflow.json'
-  });
-
+  assert.deepEqual(selfLane, { id: 'self', projectIds: ['self'], tag: 'agent-cloud-state-v1', statePath: '.agent/cloud-state.json' });
+  assert.deepEqual(websiteLane, { id: 'website-pilot', projectIds: ['website-pilot'], tag: 'agent-cloud-state-website-pilot-v1', statePath: '.agent/cloud-state-website-pilot.json' });
+  assert.deepEqual(callflowLane, { id: 'callflow', projectIds: ['callflow'], tag: 'agent-cloud-state-callflow-v1', statePath: '.agent/cloud-state-callflow.json' });
   assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 3);
   assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 3);
   assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 3);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
-  for (const permission of [
-    'actions: write',
-    'checks: read',
-    'contents: write',
-    'issues: write',
-    'pull-requests: write',
-    'statuses: write'
-  ]) assert.match(workflow, new RegExp(`^  ${permission}$`, 'm'));
+  for (const permission of ['actions: write','checks: read','contents: write','issues: write','pull-requests: write','statuses: write']) assert.match(workflow, new RegExp(`^  ${permission}$`, 'm'));
   assert.doesNotMatch(workflow, /^\s*(deployments|id-token|packages|environments):/m);
 });
 
 test('cloud worker checks out trusted main without persisting checkout credentials', () => {
   assert.match(workflow, /uses: actions\/checkout@v5[\s\S]*?ref: main[\s\S]*?persist-credentials: false/);
   assert.match(workflow, /uses: actions\/setup-node@v4[\s\S]*?node-version: 24/);
-  const thirdPartyUses = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)]
-    .map((match) => match[1])
-    .filter((action) => !/^actions\/(checkout|setup-node)@/.test(action));
+  const thirdPartyUses = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)].map((match) => match[1]).filter((action) => !/^actions\/(checkout|setup-node)@/.test(action));
   assert.deepEqual(thirdPartyUses, []);
 });
 
@@ -108,9 +83,7 @@ test('routing job receives event data but no secrets or write credentials', () =
 });
 
 test('cloud worker uses frozen dependencies and the managed Git-enabled runtime shared by active lanes', () => {
-  assert.ok(self);
-  assert.ok(website);
-  assert.ok(callflow);
+  assert.ok(self); assert.ok(website); assert.ok(callflow);
   assert.equal(self.execution.image, 'agent-node22-pnpm11:local');
   assert.equal(website.execution.image, self.execution.image);
   assert.equal(callflow.execution.image, self.execution.image);
@@ -119,18 +92,17 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
+test('governed issue events bypass read-only peek while polling stays read-only', () => {
   const preflightStart = workflow.indexOf('- name: Check lane for governed work');
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
   const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick');
-  assert.ok(preflightStart > 0);
-  assert.ok(runtimeStart > preflightStart);
-  assert.ok(tickStart > runtimeStart);
+  assert.ok(preflightStart > 0 && runtimeStart > preflightStart && tickStart > runtimeStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
-  assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(preflight, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(preflight, /if \[\[ "\$AGENT_CLOUD_EVENT_NAME" == "issues" \|\| "\$AGENT_CLOUD_EVENT_NAME" == "issue_comment" \]\]; then\n\s+HAS_WORK=true/);
+  assert.match(preflight, /else\n\s+HAS_WORK="\$\(node src\/cli\.js inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"\)"/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
-  assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY|cloud-once/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
 });
