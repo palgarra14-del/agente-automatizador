@@ -383,7 +383,7 @@ function fakeGitHub() {
     return commitSha;
   };
 
-  const makeMetadataCommit = ({ previousStatusAnchorSha = null } = {}) => {
+  const makeMetadataCommit = ({ previousStatusAnchorSha = null, message = null } = {}) => {
     const templateSha = previousStatusAnchorSha ?? LEDGER_ROOT_SHA;
     const template = commits.get(templateSha);
     assert.ok(template);
@@ -391,7 +391,8 @@ function fakeGitHub() {
     commits.set(commitSha, {
       sha: commitSha,
       tree: { sha: template.tree.sha },
-      parents: previousStatusAnchorSha ? [{ sha: previousStatusAnchorSha }] : []
+      parents: previousStatusAnchorSha ? [{ sha: previousStatusAnchorSha }] : [],
+      ...(message ? { message } : {})
     });
     return commitSha;
   };
@@ -512,6 +513,11 @@ function fakeGitHub() {
       const commit = commits.get(commitSha);
       assert.ok(commit);
       commit.parents = parentShas.map((value) => ({ sha: value }));
+    },
+    setCommitMessage(commitSha, message) {
+      const commit = commits.get(commitSha);
+      assert.ok(commit);
+      commit.message = message;
     }
   };
 }
@@ -552,8 +558,14 @@ async function publishMarker(store, marker) {
 
 async function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
   const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
-  const statusAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha });
-  const authorityAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha: statusAnchorSha });
+  const statusAnchorSha = fake.makeMetadataCommit({
+    previousStatusAnchorSha,
+    message: store.epochMetadataMessage(epoch)
+  });
+  const authorityAnchorSha = fake.makeMetadataCommit({
+    previousStatusAnchorSha: statusAnchorSha,
+    message: store.epochAuthorityMessage(epoch)
+  });
   fake.forceTag(store.epochAnchorTag(epoch), statusAnchorSha);
   fake.forceStatus(
     statusAnchorSha,
@@ -636,6 +648,18 @@ test('lane initialization marker is looked up by exact context and binds determi
   assert.equal(initStatuses[0].description, store.laneInitDescription(root.sha));
 });
 
+test('initialized lane without first pointer fails closed instead of looking empty', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.failNextAnyStatusWrite(500, (body) => body.context === store.laneRootContextName);
+  await assert.rejects(() => publishMarker(store, 'never-published'), /lane_root_pointer_append_failed/);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.load(), /lane_initialized_incomplete/);
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /lane_initialized_incomplete/);
+  assert.equal(fake.tagSha(stateTag), null);
+});
+
 test('conflicting latest lane-init marker fails closed', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
@@ -710,6 +734,28 @@ test('orphan bootstrap registration remains reusable when main advances', async 
   const published = await publishMarker(fresh, 'reused-anchor');
   assert.equal(fake.envelopeAt(published).lineageBaseSha, registeredAnchor);
   assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'reused-anchor');
+});
+
+test('cached lineage cannot publish after base branch ancestry changes between load and save', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'one');
+
+  const snapshot = await store.readSnapshot();
+  const state = cloneState(snapshot.state);
+  state.marker = 'two';
+
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main' });
+  fake.forceHead('main', divergentMain);
+
+  await assert.rejects(() => store.writeSnapshot(state, snapshot), /bootstrap_ancestry_invalid/);
+  assert.equal(fake.tagSha(store.generationClaimTag(2)), null);
+
+  const root = await store.readRootEvidence();
+  const registration = root.registrationByEpoch.get(0);
+  const authorities = await store.readEpochAuthorities(registration);
+  assert.equal(authorities.length, 1);
+  assert.equal(authorities[0].generation, 1);
 });
 
 test('legacy migration preserves inherited generation offsets', async () => {
@@ -925,6 +971,37 @@ test('conflicting epoch registration fails closed', async () => {
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /registration_conflict/);
 });
 
+test('epoch anchor Git identities bind lane and epoch and reject cross-lane transplant', async () => {
+  const fake = fakeGitHub();
+  const selfStore = storeFor(fake);
+  const websiteStore = storeFor(fake, {
+    ownerId: 'github:2:1',
+    laneId: 'website-pilot',
+    allowedProjectIds: ['website-pilot'],
+    tag: 'agent-cloud-state-website-pilot-v1',
+    statePath: '.agent/cloud-state-website-pilot.json'
+  });
+
+  assert.notEqual(selfStore.epochMetadataMessage(0), websiteStore.epochMetadataMessage(0));
+  assert.notEqual(selfStore.epochAuthorityMessage(0), websiteStore.epochAuthorityMessage(0));
+  assert.notEqual(selfStore.epochMetadataMessage(0), selfStore.epochMetadataMessage(1));
+
+  const registration = await installRegistration(fake, selfStore, 0, fake.mainSha, 0, 1);
+  fake.setCommitMessage(registration.statusAnchorSha, websiteStore.epochMetadataMessage(0));
+  await assert.rejects(
+    () => storeFor(fake, { ownerId: 'github:3:1' }).readRootEvidence(),
+    /epoch_anchor_identity_invalid/
+  );
+});
+
+test('authority anchor Git identity is verified independently of its parent binding', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  fake.setCommitMessage(registration.authorityAnchorSha, 'foreign authority anchor');
+  await assert.rejects(() => store.readEpochAuthorities(registration), /authority_anchor_identity_invalid/);
+});
+
 test('epoch rollover seals the completed epoch and starts a bounded next epoch', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
@@ -942,6 +1019,36 @@ test('epoch rollover seals the completed epoch and starts a bounded next epoch',
   assert.equal(root.registrations[1].anchorSha, g256);
   assert.equal(root.registrations[1].startGeneration, 257);
   assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'g257');
+  assert.equal(fake.envelopeAt(g257).generation, 257);
+});
+
+test('missing immutable next link blocks authority until governed repair verifies it', async () => {
+  const fake = fakeGitHub();
+  const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacy);
+  const store = storeFor(fake);
+  const g256 = await publishMarker(store, 'g256');
+
+  fake.failNextAnyStatusWrite(500, (body) => body.context === store.epochNextContextName);
+  await assert.rejects(() => publishMarker(store, 'g257-crash'), /epoch_next_append_failed/);
+  assert.equal(fake.tagSha(stateTag), g256);
+  assert.equal(fake.tagSha(store.generationClaimTag(257)), null);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.load(), /epoch_next_missing/);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.state.marker, 'g256');
+
+  const rootAfterRepair = await fresh.readRootEvidence();
+  assert.equal(rootAfterRepair.registrations.length, 2);
+  const firstRegistration = rootAfterRepair.registrations[0];
+  const nextStatuses = fake.statuses(firstRegistration.statusAnchorSha).filter(
+    (status) => status.context === fresh.epochNextContextName
+  );
+  assert.equal(nextStatuses.length, 1);
+
+  const g257 = await publishMarker(fresh, 'g257');
   assert.equal(fake.envelopeAt(g257).generation, 257);
 });
 
