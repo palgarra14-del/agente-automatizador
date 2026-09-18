@@ -93,8 +93,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
         run: |
-          HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
+          # Governed issue events must reach queue.tick(): cloud-peek is intentionally
+          # read-only and therefore cannot discover a request that is not durable yet.
+          # Scheduled/dispatch polling remains cheap and read-only.
+          if [[ "$AGENT_CLOUD_EVENT_NAME" == "issues" || "$AGENT_CLOUD_EVENT_NAME" == "issue_comment" ]]; then
+            HAS_WORK=true
+          else
+            HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
+          fi
           if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
             echo "invalid cloud preflight result" >&2
             exit 1
