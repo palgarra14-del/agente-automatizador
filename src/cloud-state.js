@@ -8,15 +8,22 @@ const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_MAX_PAGES = 4;
 const STATUS_PAGE_SIZE = 100;
-const ROOT_STATUS_MAX_PAGES = 20;
-const EPOCH_STATUS_MAX_PAGES = 4;
+const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
 const WITNESS_NAMESPACE = 'agent-cloud-state-v2-witnesses';
 const CLAIM_NAMESPACE = 'agent-cloud-state-v2-claims';
+const EPOCH_ROOT_NAMESPACE = 'agent-cloud-state-v2-epoch-roots';
+const EPOCH_ANCHOR_NAMESPACE = 'agent-cloud-state-v2-epoch-anchors';
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 const LEDGER_CONTEXT_ROOT = 'agent-cloud-state-v2';
-const RESERVED_STATE_TAGS = new Set([CHECKPOINT_NAMESPACE, WITNESS_NAMESPACE, CLAIM_NAMESPACE]);
+const RESERVED_STATE_TAGS = new Set([
+  CHECKPOINT_NAMESPACE,
+  WITNESS_NAMESPACE,
+  CLAIM_NAMESPACE,
+  EPOCH_ROOT_NAMESPACE,
+  EPOCH_ANCHOR_NAMESPACE
+]);
 
 const HISTORY_QUERY = `
 query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
@@ -204,9 +211,12 @@ export class GitHubStateStore extends JsonStore {
       checkpointTag: this.checkpointTag,
       witnessTag: this.witnessTag
     }))).digest('hex').slice(0, 32);
-    this.epochRegistrationPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/e/`;
-    this.epochSealPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/s/`;
-    this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/a/`;
+    this.epochRootTag = `${EPOCH_ROOT_NAMESPACE}/${this.ledgerDigest}`;
+    this.epochAnchorPrefix = `${EPOCH_ANCHOR_NAMESPACE}/${this.ledgerDigest}/`;
+    this.epochRegistrationContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/epoch`;
+    this.epochSealContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/seal`;
+    this.epochNextContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/next`;
+    this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/g/`;
     this.claimPrefix = `${CLAIM_NAMESPACE}/${this.ledgerDigest}/`;
   }
 
@@ -359,27 +369,37 @@ export class GitHubStateStore extends JsonStore {
     this.ledgerRootVerified = true;
   }
 
-  epochRegistrationContext(epoch) {
-    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
-    return `${this.epochRegistrationPrefix}${epoch}`;
+  epochRegistrationContext() {
+    return this.epochRegistrationContextName;
   }
 
-  epochSealContext(epoch) {
-    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
-    return `${this.epochSealPrefix}${epoch}`;
+  epochSealContext() {
+    return this.epochSealContextName;
+  }
+
+  epochNextContext() {
+    return this.epochNextContextName;
   }
 
   epochAuthorityContext(epoch, generation) {
     if (epochForGeneration(generation) !== epoch) throw new Error('cloud_state_epoch_generation_mismatch');
-    return `${this.epochAuthorityPrefix}${epoch}/g/${generation}`;
+    return `${this.epochAuthorityPrefix}${epoch}/${generation}`;
   }
 
-  registrationDescription(anchorSha, baseGeneration, startGeneration) {
-    if (!Number.isSafeInteger(baseGeneration) || baseGeneration < 0 ||
-        !Number.isSafeInteger(startGeneration) || startGeneration !== baseGeneration + 1) {
+  epochAnchorTag(epoch) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
+    return `${this.epochAnchorPrefix}${epoch}`;
+  }
+
+  registrationDescription(epoch, stateAnchorSha, baseGeneration, startGeneration, previousStatusAnchorSha = null) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0 ||
+        !Number.isSafeInteger(baseGeneration) || baseGeneration < 0 ||
+        !Number.isSafeInteger(startGeneration) || startGeneration !== baseGeneration + 1 ||
+        epochForGeneration(startGeneration) !== epoch) {
       throw new Error('cloud_state_epoch_registration_invalid');
     }
-    return `a=${assertSha(anchorSha)};b=${baseGeneration};s=${startGeneration}`;
+    const previous = previousStatusAnchorSha ? assertSha(previousStatusAnchorSha) : '0'.repeat(40);
+    return `e=${epoch};a=${assertSha(stateAnchorSha)};b=${baseGeneration};s=${startGeneration};p=${previous}`;
   }
 
   sealDescription(stateSha, generation) {
@@ -387,155 +407,149 @@ export class GitHubStateStore extends JsonStore {
     return `s=${assertSha(stateSha)};g=${generation}`;
   }
 
+  nextDescription(epoch, statusAnchorSha) {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('cloud_state_epoch_invalid');
+    return `e=${epoch};a=${assertSha(statusAnchorSha)}`;
+  }
+
   authorityDescription(stateSha, parentSha) {
     return `s=${assertSha(stateSha)};p=${assertSha(parentSha)}`;
   }
 
-  parseRootStatus(status) {
+  parseEpochStatus(status, expectedStatusAnchorSha) {
     const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
-    const registrationPrefix = this.epochRegistrationPrefix.toLowerCase();
-    const sealPrefix = this.epochSealPrefix.toLowerCase();
-    let kind;
-    let epochText;
-    if (context.startsWith(registrationPrefix)) {
-      kind = 'registration';
-      epochText = context.slice(registrationPrefix.length);
-    } else if (context.startsWith(sealPrefix)) {
-      kind = 'seal';
-      epochText = context.slice(sealPrefix.length);
-    } else {
-      const lanePrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/`.toLowerCase();
-      if (context.startsWith(lanePrefix)) throw new Error('cloud_state_epoch_index_invalid');
+    const registrationContext = this.epochRegistrationContextName.toLowerCase();
+    const sealContext = this.epochSealContextName.toLowerCase();
+    const nextContext = this.epochNextContextName.toLowerCase();
+    const authorityPrefix = this.epochAuthorityPrefix.toLowerCase();
+
+    if (status?.state !== 'success' || (status.target_url !== null && status.target_url !== undefined) ||
+        typeof status.description !== 'string') {
+      if (context === registrationContext || context === sealContext || context === nextContext ||
+          context.startsWith(authorityPrefix)) {
+        throw new Error('cloud_state_epoch_status_invalid');
+      }
       return null;
     }
-    if (!/^(?:0|[1-9][0-9]*)$/.test(epochText)) throw new Error('cloud_state_epoch_index_invalid');
-    const epoch = Number(epochText);
-    if (!Number.isSafeInteger(epoch)) throw new Error('cloud_state_epoch_index_invalid');
-    if (status.state !== 'success' || (status.target_url !== null && status.target_url !== undefined) ||
-        typeof status.description !== 'string') {
-      throw new Error('cloud_state_epoch_index_invalid');
-    }
-    if (kind === 'registration') {
-      const match = /^a=([a-f0-9]{40});b=(0|[1-9][0-9]*);s=([1-9][0-9]*)$/i.exec(status.description);
+
+    if (context === registrationContext) {
+      const match = /^e=(0|[1-9][0-9]*);a=([a-f0-9]{40});b=(0|[1-9][0-9]*);s=([1-9][0-9]*);p=([a-f0-9]{40})$/i.exec(status.description);
       if (!match) throw new Error('cloud_state_epoch_registration_invalid');
-      const anchorSha = assertSha(match[1], 'cloud_state_epoch_registration_invalid');
-      const baseGeneration = Number(match[2]);
-      const startGeneration = Number(match[3]);
-      if (!Number.isSafeInteger(baseGeneration) || !Number.isSafeInteger(startGeneration) ||
-          startGeneration !== baseGeneration + 1 || epochForGeneration(startGeneration) !== epoch) {
+      const epoch = Number(match[1]);
+      const stateAnchorSha = assertSha(match[2], 'cloud_state_epoch_registration_invalid');
+      const baseGeneration = Number(match[3]);
+      const startGeneration = Number(match[4]);
+      const previousRaw = assertSha(match[5], 'cloud_state_epoch_registration_invalid');
+      const previousStatusAnchorSha = previousRaw === '0'.repeat(40) ? null : previousRaw;
+      if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(baseGeneration) ||
+          !Number.isSafeInteger(startGeneration) || startGeneration !== baseGeneration + 1 ||
+          epochForGeneration(startGeneration) !== epoch) {
         throw new Error('cloud_state_epoch_registration_invalid');
       }
-      return { kind, epoch, anchorSha, baseGeneration, startGeneration };
+      return {
+        kind: 'registration',
+        epoch,
+        anchorSha: stateAnchorSha,
+        baseGeneration,
+        startGeneration,
+        statusAnchorSha: assertSha(expectedStatusAnchorSha),
+        previousStatusAnchorSha
+      };
     }
-    const match = /^s=([a-f0-9]{40});g=([1-9][0-9]*)$/i.exec(status.description);
-    if (!match) throw new Error('cloud_state_epoch_seal_invalid');
-    const stateSha = assertSha(match[1], 'cloud_state_epoch_seal_invalid');
-    const generation = Number(match[2]);
-    if (!Number.isSafeInteger(generation) || epochForGeneration(generation) !== epoch ||
-        generation !== epochEndGeneration(epoch)) {
-      throw new Error('cloud_state_epoch_seal_invalid');
+
+    if (context === sealContext) {
+      const match = /^s=([a-f0-9]{40});g=([1-9][0-9]*)$/i.exec(status.description);
+      if (!match) throw new Error('cloud_state_epoch_seal_invalid');
+      const stateSha = assertSha(match[1], 'cloud_state_epoch_seal_invalid');
+      const generation = Number(match[2]);
+      if (!Number.isSafeInteger(generation)) throw new Error('cloud_state_epoch_seal_invalid');
+      return { kind: 'seal', stateSha, generation };
     }
-    return { kind, epoch, stateSha, generation };
+
+    if (context === nextContext) {
+      const match = /^e=(0|[1-9][0-9]*);a=([a-f0-9]{40})$/i.exec(status.description);
+      if (!match) throw new Error('cloud_state_epoch_next_invalid');
+      return {
+        kind: 'next',
+        epoch: Number(match[1]),
+        statusAnchorSha: assertSha(match[2], 'cloud_state_epoch_next_invalid')
+      };
+    }
+
+    if (context.startsWith(authorityPrefix)) {
+      const suffix = context.slice(authorityPrefix.length);
+      const matchContext = /^(0|[1-9][0-9]*)\/([1-9][0-9]*)$/.exec(suffix);
+      if (!matchContext) throw new Error('cloud_state_epoch_authority_invalid');
+      const epoch = Number(matchContext[1]);
+      const generation = Number(matchContext[2]);
+      if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(generation) ||
+          epochForGeneration(generation) !== epoch) {
+        throw new Error('cloud_state_epoch_authority_invalid');
+      }
+      const match = /^s=([a-f0-9]{40});p=([a-f0-9]{40})$/i.exec(status.description);
+      if (!match) throw new Error('cloud_state_epoch_authority_invalid');
+      return {
+        kind: 'authority',
+        epoch,
+        generation,
+        stateSha: assertSha(match[1], 'cloud_state_epoch_authority_invalid'),
+        parentSha: assertSha(match[2], 'cloud_state_epoch_authority_invalid')
+      };
+    }
+
+    const lanePrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/`.toLowerCase();
+    if (context.startsWith(lanePrefix)) throw new Error('cloud_state_epoch_status_invalid');
+    return null;
   }
 
-  async readRootEvidence() {
-    await this.verifyLedgerRoot();
-    const registrations = new Map();
-    const seals = new Map();
+  async readEpochBundle(statusAnchorSha, expectedPreviousStatusAnchorSha = undefined) {
+    const anchorSha = assertSha(statusAnchorSha, 'cloud_state_epoch_anchor_invalid');
+    const commit = await this.readCommit(anchorSha);
+    if (expectedPreviousStatusAnchorSha === null) {
+      if (commit.parents.length !== 0) throw new Error('cloud_state_epoch_anchor_invalid');
+    } else if (expectedPreviousStatusAnchorSha !== undefined) {
+      const previous = assertSha(expectedPreviousStatusAnchorSha, 'cloud_state_epoch_anchor_invalid');
+      if (commit.parents.length !== 1 ||
+          assertSha(commit.parents[0]?.sha, 'cloud_state_epoch_anchor_invalid') !== previous) {
+        throw new Error('cloud_state_epoch_anchor_invalid');
+      }
+    }
+
+    let registration = null;
+    let seal = null;
+    let next = null;
+    const authoritiesByGeneration = new Map();
     let completed = false;
-    for (let page = 1; page <= ROOT_STATUS_MAX_PAGES; page += 1) {
-      const statuses = await this.request(`/commits/${LEDGER_ROOT_SHA}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
-      if (!Array.isArray(statuses)) throw new Error('cloud_state_epoch_index_invalid');
-      for (const status of statuses) {
-        const record = this.parseRootStatus(status);
-        if (!record) continue;
-        const target = record.kind === 'registration' ? registrations : seals;
-        const previous = target.get(record.epoch);
-        if (previous && JSON.stringify(previous) !== JSON.stringify(record)) {
-          throw new Error(record.kind === 'registration' ? 'cloud_state_epoch_registration_conflict' : 'cloud_state_epoch_seal_conflict');
-        }
-        target.set(record.epoch, record);
-      }
-      if (statuses.length < STATUS_PAGE_SIZE) {
-        completed = true;
-        break;
-      }
-    }
-    if (!completed) throw new Error('cloud_state_epoch_index_limit');
 
-    const ordered = [...registrations.values()].sort((a, b) => a.epoch - b.epoch);
-    if (ordered.length === 0) {
-      if (seals.size) throw new Error('cloud_state_epoch_index_invalid');
-      return { registrations: ordered, registrationByEpoch: registrations, seals };
-    }
-    for (let index = 0; index < ordered.length; index += 1) {
-      const current = ordered[index];
-      if (current.startGeneration !== current.baseGeneration + 1 ||
-          epochForGeneration(current.startGeneration) !== current.epoch) {
-        throw new Error('cloud_state_epoch_registration_invalid');
-      }
-      if (index > 0) {
-        const previous = ordered[index - 1];
-        const seal = seals.get(previous.epoch);
-        if (!seal || current.epoch !== previous.epoch + 1 ||
-            current.anchorSha !== seal.stateSha ||
-            current.baseGeneration !== seal.generation ||
-            current.startGeneration !== seal.generation + 1) {
-          throw new Error('cloud_state_epoch_chain_invalid');
-        }
-      }
-    }
-    for (const seal of seals.values()) {
-      if (!registrations.has(seal.epoch)) throw new Error('cloud_state_epoch_seal_invalid');
-    }
-    for (let index = 0; index < ordered.length - 1; index += 1) {
-      if (!seals.has(ordered[index].epoch)) throw new Error('cloud_state_epoch_chain_invalid');
-    }
-    return { registrations: ordered, registrationByEpoch: registrations, seals };
-  }
-
-  parseEpochAuthority(status, registration) {
-    const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
-    const prefix = `${this.epochAuthorityPrefix}${registration.epoch}/g/`.toLowerCase();
-    if (!context.startsWith(prefix)) {
-      const laneAuthorityPrefix = this.epochAuthorityPrefix.toLowerCase();
-      if (context.startsWith(laneAuthorityPrefix)) throw new Error('cloud_state_epoch_authority_invalid');
-      return null;
-    }
-    const generationText = context.slice(prefix.length);
-    if (!/^[1-9][0-9]*$/.test(generationText)) throw new Error('cloud_state_epoch_authority_invalid');
-    const generation = Number(generationText);
-    if (!Number.isSafeInteger(generation) || epochForGeneration(generation) !== registration.epoch ||
-        generation < registration.startGeneration || generation > epochEndGeneration(registration.epoch)) {
-      throw new Error('cloud_state_epoch_authority_invalid');
-    }
-    if (status.state !== 'success' || (status.target_url !== null && status.target_url !== undefined) ||
-        typeof status.description !== 'string') {
-      throw new Error('cloud_state_epoch_authority_invalid');
-    }
-    const match = /^s=([a-f0-9]{40});p=([a-f0-9]{40})$/i.exec(status.description);
-    if (!match) throw new Error('cloud_state_epoch_authority_invalid');
-    return {
-      generation,
-      stateSha: assertSha(match[1], 'cloud_state_epoch_authority_invalid'),
-      parentSha: assertSha(match[2], 'cloud_state_epoch_authority_invalid')
-    };
-  }
-
-  async readEpochAuthorities(registration) {
-    const byGeneration = new Map();
-    let completed = false;
     for (let page = 1; page <= EPOCH_STATUS_MAX_PAGES; page += 1) {
-      const statuses = await this.request(`/commits/${registration.anchorSha}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
-      if (!Array.isArray(statuses)) throw new Error('cloud_state_epoch_authority_invalid');
+      const statuses = await this.request(`/commits/${anchorSha}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(statuses)) throw new Error('cloud_state_epoch_status_invalid');
       for (const status of statuses) {
-        const record = this.parseEpochAuthority(status, registration);
+        const record = this.parseEpochStatus(status, anchorSha);
         if (!record) continue;
-        const previous = byGeneration.get(record.generation);
-        if (previous && (previous.stateSha !== record.stateSha || previous.parentSha !== record.parentSha)) {
-          throw new Error('cloud_state_epoch_authority_conflict');
+        if (record.kind === 'registration') {
+          if (registration && JSON.stringify(registration) !== JSON.stringify(record)) {
+            throw new Error('cloud_state_epoch_registration_conflict');
+          }
+          registration = record;
+        } else if (record.kind === 'seal') {
+          if (seal && (seal.stateSha !== record.stateSha || seal.generation !== record.generation)) {
+            throw new Error('cloud_state_epoch_seal_conflict');
+          }
+          seal = record;
+        } else if (record.kind === 'next') {
+          if (next && (next.epoch !== record.epoch || next.statusAnchorSha !== record.statusAnchorSha)) {
+            throw new Error('cloud_state_epoch_next_conflict');
+          }
+          next = record;
+        } else {
+          const previous = authoritiesByGeneration.get(record.generation);
+          if (previous && (previous.stateSha !== record.stateSha || previous.parentSha !== record.parentSha ||
+              previous.epoch !== record.epoch)) {
+            throw new Error('cloud_state_epoch_authority_conflict');
+          }
+          authoritiesByGeneration.set(record.generation, record);
         }
-        byGeneration.set(record.generation, record);
       }
       if (statuses.length < STATUS_PAGE_SIZE) {
         completed = true;
@@ -543,16 +557,102 @@ export class GitHubStateStore extends JsonStore {
       }
     }
     if (!completed) throw new Error('cloud_state_epoch_status_limit');
-    const authorities = [...byGeneration.values()].sort((a, b) => a.generation - b.generation);
+    if (!registration) throw new Error('cloud_state_epoch_registration_missing');
+
+    if (registration.statusAnchorSha !== anchorSha) throw new Error('cloud_state_epoch_anchor_invalid');
+    if (expectedPreviousStatusAnchorSha !== undefined &&
+        registration.previousStatusAnchorSha !== expectedPreviousStatusAnchorSha) {
+      throw new Error('cloud_state_epoch_chain_invalid');
+    }
+    if (seal) {
+      if (seal.generation !== epochEndGeneration(registration.epoch) ||
+          epochForGeneration(seal.generation) !== registration.epoch) {
+        throw new Error('cloud_state_epoch_seal_invalid');
+      }
+    }
+    if (next && next.epoch !== registration.epoch + 1) throw new Error('cloud_state_epoch_next_invalid');
+
+    const authorities = [...authoritiesByGeneration.values()].sort((a, b) => a.generation - b.generation);
     for (let index = 0; index < authorities.length; index += 1) {
       const current = authorities[index];
       const expectedGeneration = registration.startGeneration + index;
       const expectedParent = index === 0 ? registration.anchorSha : authorities[index - 1].stateSha;
-      if (current.generation !== expectedGeneration || current.parentSha !== expectedParent) {
+      if (current.epoch !== registration.epoch ||
+          current.generation !== expectedGeneration ||
+          current.parentSha !== expectedParent) {
         throw new Error('cloud_state_epoch_authority_gap');
       }
     }
-    return authorities;
+    if (seal) {
+      const latest = authorities.at(-1);
+      if (!latest || latest.generation !== seal.generation || latest.stateSha !== seal.stateSha) {
+        throw new Error('cloud_state_epoch_seal_mismatch');
+      }
+    }
+    return { registration, seal, next, authorities };
+  }
+
+  async readRootEvidence() {
+    await this.verifyLedgerRoot();
+    const firstStatusAnchorSha = await this.refSha(`tags/${encodeURIComponent(this.epochRootTag)}`);
+    if (!firstStatusAnchorSha) {
+      return {
+        registrations: [],
+        registrationByEpoch: new Map(),
+        seals: new Map(),
+        authoritiesByEpoch: new Map(),
+        statusAnchorByEpoch: new Map()
+      };
+    }
+
+    const registrations = [];
+    const registrationByEpoch = new Map();
+    const seals = new Map();
+    const authoritiesByEpoch = new Map();
+    const statusAnchorByEpoch = new Map();
+    const seenAnchors = new Set();
+    let currentStatusAnchorSha = firstStatusAnchorSha;
+    let expectedPreviousStatusAnchorSha = null;
+
+    while (currentStatusAnchorSha) {
+      if (seenAnchors.has(currentStatusAnchorSha)) throw new Error('cloud_state_epoch_chain_invalid');
+      seenAnchors.add(currentStatusAnchorSha);
+      const bundle = await this.readEpochBundle(currentStatusAnchorSha, expectedPreviousStatusAnchorSha);
+      const registration = bundle.registration;
+      if (registrationByEpoch.has(registration.epoch)) throw new Error('cloud_state_epoch_registration_conflict');
+      if (registrations.length > 0) {
+        const previous = registrations.at(-1);
+        const previousSeal = seals.get(previous.epoch);
+        if (!previousSeal ||
+            registration.epoch !== previous.epoch + 1 ||
+            registration.anchorSha !== previousSeal.stateSha ||
+            registration.baseGeneration !== previousSeal.generation ||
+            registration.startGeneration !== previousSeal.generation + 1) {
+          throw new Error('cloud_state_epoch_chain_invalid');
+        }
+      }
+
+      registrations.push(registration);
+      registrationByEpoch.set(registration.epoch, registration);
+      statusAnchorByEpoch.set(registration.epoch, registration.statusAnchorSha);
+      authoritiesByEpoch.set(registration.epoch, bundle.authorities);
+      if (bundle.seal) seals.set(registration.epoch, { ...bundle.seal, epoch: registration.epoch });
+
+      let nextStatusAnchorSha = bundle.next?.statusAnchorSha ?? null;
+      if (!nextStatusAnchorSha && bundle.seal) {
+        const discovered = await this.refSha(`tags/${encodeURIComponent(this.epochAnchorTag(registration.epoch + 1))}`);
+        if (discovered) nextStatusAnchorSha = discovered;
+      }
+      if (nextStatusAnchorSha) {
+        if (!bundle.seal) throw new Error('cloud_state_epoch_next_invalid');
+        expectedPreviousStatusAnchorSha = registration.statusAnchorSha;
+        currentStatusAnchorSha = nextStatusAnchorSha;
+      } else {
+        currentStatusAnchorSha = null;
+      }
+    }
+
+    return { registrations, registrationByEpoch, seals, authoritiesByEpoch, statusAnchorByEpoch };
   }
 
   async readEpochEvidence() {
@@ -561,7 +661,7 @@ export class GitHubStateStore extends JsonStore {
       return { ...root, activeRegistration: null, activeAuthorities: [], authority: null, authorityRegistration: null };
     }
     const activeRegistration = root.registrations.at(-1);
-    const activeAuthorities = await this.readEpochAuthorities(activeRegistration);
+    const activeAuthorities = root.authoritiesByEpoch.get(activeRegistration.epoch) ?? [];
     let authority = activeAuthorities.at(-1) ?? null;
     let authorityRegistration = authority ? activeRegistration : null;
     if (!authority && root.registrations.length > 1) {
@@ -571,20 +671,47 @@ export class GitHubStateStore extends JsonStore {
       authority = { generation: previousSeal.generation, stateSha: previousSeal.stateSha, parentSha: null, sealed: true };
       authorityRegistration = previousRegistration;
     }
-    const activeSeal = root.seals.get(activeRegistration.epoch) ?? null;
-    if (activeSeal) {
-      const latest = activeAuthorities.at(-1);
-      if (!latest || latest.generation !== activeSeal.generation || latest.stateSha !== activeSeal.stateSha) {
-        throw new Error('cloud_state_epoch_seal_mismatch');
-      }
-    }
     return { ...root, activeRegistration, activeAuthorities, authority, authorityRegistration };
   }
 
-  async appendRootStatus(context, description) {
+  async createEpochStatusAnchor(previousStatusAnchorSha = null) {
+    const template = await this.readCommit(previousStatusAnchorSha ?? LEDGER_ROOT_SHA);
+    const treeSha = assertSha(template?.tree?.sha, 'cloud_state_epoch_anchor_invalid');
+    const parents = previousStatusAnchorSha ? [assertSha(previousStatusAnchorSha)] : [];
+    const commit = await this.request('/git/commits', {
+      method: 'POST',
+      body: {
+        message: previousStatusAnchorSha ? 'Rotate Cloud State epoch anchor' : 'Create Cloud State lane epoch root',
+        tree: treeSha,
+        parents
+      }
+    });
+    return assertSha(commit?.sha, 'cloud_state_epoch_anchor_invalid');
+  }
+
+  async claimEpochAnchorRef(refName, statusAnchorSha) {
+    const target = assertSha(statusAnchorSha);
+    let created;
+    try {
+      created = await this.request('/git/refs', {
+        method: 'POST',
+        body: { ref: `refs/tags/${refName}`, sha: target }
+      });
+    } catch (error) {
+      throw new Error('cloud_state_epoch_anchor_claim_failed', { cause: error });
+    }
+    if (created?.ref !== `refs/tags/${refName}` ||
+        assertSha(created?.object?.sha, 'cloud_state_epoch_anchor_claim_unproven') !== target) {
+      throw new Error('cloud_state_epoch_anchor_claim_unproven');
+    }
+    const observed = await this.refSha(`tags/${encodeURIComponent(refName)}`);
+    if (observed !== target) throw new Error('cloud_state_epoch_anchor_claim_unproven');
+  }
+
+  async appendEpochStatus(statusAnchorSha, context, description) {
     let postError = null;
     try {
-      await this.request(`/statuses/${LEDGER_ROOT_SHA}`, {
+      await this.request(`/statuses/${assertSha(statusAnchorSha)}`, {
         method: 'POST',
         body: { state: 'success', context, description }
       });
@@ -594,59 +721,103 @@ export class GitHubStateStore extends JsonStore {
     return postError;
   }
 
-  async ensureEpochRegistration(epoch, anchorSha, baseGeneration, startGeneration, observedRoot = null) {
-    const desired = {
-      kind: 'registration',
-      epoch,
-      anchorSha: assertSha(anchorSha),
-      baseGeneration,
-      startGeneration
-    };
+  async ensureEpochRegistration(epoch, stateAnchorSha, baseGeneration, startGeneration, observedRoot = null) {
     const root = observedRoot ?? await this.readRootEvidence();
     const existing = root.registrationByEpoch.get(epoch);
     if (existing) {
-      if (JSON.stringify(existing) === JSON.stringify(desired)) return { root, registration: existing };
+      if (existing.anchorSha === assertSha(stateAnchorSha) &&
+          existing.baseGeneration === baseGeneration &&
+          existing.startGeneration === startGeneration) {
+        return { root, registration: existing };
+      }
       throw new Error('cloud_state_epoch_registration_conflict');
     }
-    const postError = await this.appendRootStatus(
-      this.epochRegistrationContext(epoch),
-      this.registrationDescription(anchorSha, baseGeneration, startGeneration)
+
+    const previousRegistration = root.registrations.at(-1) ?? null;
+    if (previousRegistration) {
+      const previousSeal = root.seals.get(previousRegistration.epoch);
+      if (!previousSeal ||
+          epoch !== previousRegistration.epoch + 1 ||
+          stateAnchorSha !== previousSeal.stateSha ||
+          baseGeneration !== previousSeal.generation ||
+          startGeneration !== previousSeal.generation + 1) {
+        throw new Error('cloud_state_epoch_chain_invalid');
+      }
+    } else if (root.registrations.length !== 0) {
+      throw new Error('cloud_state_epoch_chain_invalid');
+    }
+
+    const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
+    const statusAnchorSha = await this.createEpochStatusAnchor(previousStatusAnchorSha);
+    const anchorRef = previousRegistration ? this.epochAnchorTag(epoch) : this.epochRootTag;
+    await this.claimEpochAnchorRef(anchorRef, statusAnchorSha);
+
+    const registrationError = await this.appendEpochStatus(
+      statusAnchorSha,
+      this.epochRegistrationContext(),
+      this.registrationDescription(epoch, stateAnchorSha, baseGeneration, startGeneration, previousStatusAnchorSha)
     );
+    if (registrationError) throw new Error('cloud_state_epoch_registration_append_failed', { cause: registrationError });
+
+    if (previousRegistration) {
+      const nextError = await this.appendEpochStatus(
+        previousRegistration.statusAnchorSha,
+        this.epochNextContext(),
+        this.nextDescription(epoch, statusAnchorSha)
+      );
+      if (nextError) throw new Error('cloud_state_epoch_next_append_failed', { cause: nextError });
+    }
+
     const after = await this.readRootEvidence();
     const observed = after.registrationByEpoch.get(epoch);
-    if (observed && JSON.stringify(observed) === JSON.stringify(desired)) return { root: after, registration: observed };
-    if (observed) throw new Error('cloud_state_epoch_registration_conflict', { cause: postError ?? undefined });
-    if (postError) throw postError;
-    throw new Error('cloud_state_epoch_registration_append_failed');
+    if (!observed ||
+        observed.statusAnchorSha !== statusAnchorSha ||
+        observed.anchorSha !== stateAnchorSha ||
+        observed.baseGeneration !== baseGeneration ||
+        observed.startGeneration !== startGeneration) {
+      throw new Error('cloud_state_epoch_registration_conflict');
+    }
+    return { root: after, registration: observed };
+  }
+
+  async readEpochAuthorities(registration) {
+    const bundle = await this.readEpochBundle(
+      registration.statusAnchorSha,
+      registration.previousStatusAnchorSha
+    );
+    if (bundle.registration.epoch !== registration.epoch ||
+        bundle.registration.anchorSha !== registration.anchorSha ||
+        bundle.registration.baseGeneration !== registration.baseGeneration ||
+        bundle.registration.startGeneration !== registration.startGeneration) {
+      throw new Error('cloud_state_epoch_registration_conflict');
+    }
+    return bundle.authorities;
   }
 
   async ensureEpochSeal(registration, authority, observedRoot = null) {
-    if (!authority || authority.generation !== epochEndGeneration(registration.epoch) ||
+    if (!authority ||
+        authority.generation !== epochEndGeneration(registration.epoch) ||
         epochForGeneration(authority.generation) !== registration.epoch) {
       throw new Error('cloud_state_epoch_seal_invalid');
     }
-    const desired = {
-      kind: 'seal',
-      epoch: registration.epoch,
-      stateSha: assertSha(authority.stateSha),
-      generation: authority.generation
-    };
     const root = observedRoot ?? await this.readRootEvidence();
     const existing = root.seals.get(registration.epoch);
     if (existing) {
-      if (JSON.stringify(existing) === JSON.stringify(desired)) return root;
+      if (existing.stateSha === authority.stateSha && existing.generation === authority.generation) return root;
       throw new Error('cloud_state_epoch_seal_conflict');
     }
-    const postError = await this.appendRootStatus(
-      this.epochSealContext(registration.epoch),
+    const postError = await this.appendEpochStatus(
+      registration.statusAnchorSha,
+      this.epochSealContext(),
       this.sealDescription(authority.stateSha, authority.generation)
     );
+    if (postError) throw new Error('cloud_state_epoch_seal_append_failed', { cause: postError });
     const after = await this.readRootEvidence();
     const observed = after.seals.get(registration.epoch);
-    if (observed && JSON.stringify(observed) === JSON.stringify(desired)) return after;
-    if (observed) throw new Error('cloud_state_epoch_seal_conflict', { cause: postError ?? undefined });
-    if (postError) throw postError;
-    throw new Error('cloud_state_epoch_seal_append_failed');
+    if (!observed || observed.stateSha !== authority.stateSha || observed.generation !== authority.generation) {
+      throw new Error('cloud_state_epoch_seal_conflict');
+    }
+    return after;
   }
 
   generationClaimTag(generation) {
@@ -695,7 +866,7 @@ export class GitHubStateStore extends JsonStore {
 
     let postError = null;
     try {
-      await this.request(`/statuses/${registration.anchorSha}`, {
+      await this.request(`/statuses/${registration.statusAnchorSha}`, {
         method: 'POST',
         body: {
           state: 'success',
