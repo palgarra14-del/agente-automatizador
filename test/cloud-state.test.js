@@ -499,11 +499,19 @@ async function publishMarker(store, marker) {
 function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
   const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
   const statusAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha });
+  const authorityAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha: statusAnchorSha });
   fake.forceTag(previousRegistration ? store.epochAnchorTag(epoch) : store.epochRootTag, statusAnchorSha);
   fake.forceStatus(
     statusAnchorSha,
     store.epochRegistrationContext(),
-    store.registrationDescription(epoch, stateAnchorSha, baseGeneration, startGeneration, previousStatusAnchorSha)
+    store.registrationDescription(
+      epoch,
+      stateAnchorSha,
+      baseGeneration,
+      startGeneration,
+      authorityAnchorSha,
+      previousStatusAnchorSha
+    )
   );
   if (previousRegistration) {
     fake.forceStatus(
@@ -519,6 +527,7 @@ function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration,
     baseGeneration,
     startGeneration,
     statusAnchorSha,
+    authorityAnchorSha,
     previousStatusAnchorSha
   };
 }
@@ -533,7 +542,7 @@ function installSeal(fake, store, registration, stateSha, generation) {
 
 function installAuthority(fake, store, registration, generation, stateSha, parentSha) {
   fake.forceStatus(
-    registration.statusAnchorSha,
+    registration.authorityAnchorSha,
     store.epochAuthorityContext(registration.epoch, generation),
     store.authorityDescription(stateSha, parentSha)
   );
@@ -575,7 +584,7 @@ test('bootstrap registers epoch, atomically claims generation, then writes canon
     typeof write.body?.ref === 'string' &&
     write.body.ref.startsWith('refs/tags/agent-cloud-state-v2-claims/')
   ));
-  const authorities = fake.statuses(registration.statusAnchorSha);
+  const authorities = fake.statuses(registration.authorityAnchorSha);
   assert.ok(authorities.some((status) => status.context === store.epochAuthorityContext(0, 1)));
   assert.equal(fake.tagSha(stateTag), sha);
   assert.equal(fake.tagSha(checkpointTag), sha);
@@ -803,7 +812,7 @@ test('conflicting canonical status for one generation fails closed', async () =>
   const root = await store.readRootEvidence();
   const registration = root.registrations[0];
   fake.forceStatus(
-    registration.statusAnchorSha,
+    registration.authorityAnchorSha,
     store.epochAuthorityContext(registration.epoch, 1),
     store.authorityDescription('f'.repeat(40), registration.anchorSha)
   );
@@ -818,7 +827,14 @@ test('conflicting epoch registration fails closed', async () => {
   fake.forceStatus(
     (await store.readRootEvidence()).registrationByEpoch.get(0).statusAnchorSha,
     store.epochRegistrationContext(),
-    store.registrationDescription(0, 'f'.repeat(40), 0, 1, null)
+    store.registrationDescription(
+      0,
+      'f'.repeat(40),
+      0,
+      1,
+      (await store.readRootEvidence()).registrationByEpoch.get(0).authorityAnchorSha,
+      null
+    )
   );
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /registration_conflict/);
 });
@@ -934,11 +950,34 @@ test('same-lane authority status for a different epoch on the active anchor fail
   const store = storeFor(fake);
   await publishMarker(store, 'one');
   fake.forceStatus(
-    (await store.readRootEvidence()).registrationByEpoch.get(0).statusAnchorSha,
+    (await store.readRootEvidence()).registrationByEpoch.get(0).authorityAnchorSha,
     store.epochAuthorityContext(1, 257),
     store.authorityDescription('f'.repeat(40), fake.mainSha)
   );
-  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /epoch_authority_invalid/);
+  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /epoch_authority_invalid|epoch_authority_gap/);
+});
+
+test('sealed historical metadata remains one-page even when authority anchor is full', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  let parentSha = fake.mainSha;
+  for (let generation = 1; generation <= 256; generation += 1) {
+    const commitSha = fake.makeStateCommit({
+      parentSha,
+      generation,
+      state: blankState(`g${generation}`),
+      lineageBaseSha: fake.mainSha,
+      lineageBaseGeneration: 0
+    });
+    installAuthority(fake, store, registration, generation, commitSha, parentSha);
+    parentSha = commitSha;
+  }
+  installSeal(fake, store, registration, parentSha, 256);
+  fake.resetRequestCount();
+  const root = await store.readRootEvidence();
+  assert.equal(root.seals.get(0).generation, 256);
+  assert.ok(fake.requestCount() < 10, `historical metadata should not scan 256 authority statuses; got ${fake.requestCount()}`);
 });
 
 test('status pagination tolerates unrelated contexts on this lane epoch anchor', async () => {
@@ -946,7 +985,7 @@ test('status pagination tolerates unrelated contexts on this lane epoch anchor',
   const store = storeFor(fake);
   const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
   for (let index = 0; index < 150; index += 1) {
-    fake.forceStatus(registration.statusAnchorSha, `unrelated/${index}`, 'not-cloud-state');
+    fake.forceStatus(registration.authorityAnchorSha, `unrelated/${index}`, 'not-cloud-state');
   }
   const snapshot = await store.readSnapshot();
   const state = cloneState(snapshot.state);
@@ -960,7 +999,7 @@ test('active epoch status scan has an explicit fail-closed page bound', async ()
   const store = storeFor(fake);
   const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
   for (let index = 0; index < 800; index += 1) {
-    fake.forceStatus(registration.statusAnchorSha, `unrelated/${index}`, 'not-cloud-state');
+    fake.forceStatus(registration.authorityAnchorSha, `unrelated/${index}`, 'not-cloud-state');
   }
   await assert.rejects(() => store.readSnapshot(), /epoch_status_limit/);
 });
