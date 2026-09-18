@@ -1,50 +1,56 @@
-# Cloud State v2 protocol — r6 isolated epoch metadata + authority anchors
+# Cloud State v2 protocol — r6 deterministic lane root + isolated epoch anchors
 
 ## Purpose
 
-Cloud State v2 provides durable, monotonic, per-lane cloud state without trusting process-local memory or movable Git refs as durable state authority.
+Cloud State v2 provides durable, monotonic, per-lane cloud state for fresh cloud workers without trusting process-local memory or movable Git refs as durable authority.
 
-The protocol is fail-closed. It rejects rollback, forks, malformed lineage, cross-lane substitution, unproven publication, ambiguous create outcomes, secret-bearing state and incomplete evidence.
+The protocol is deliberately fail-closed. It rejects rollback, forks, ambiguous publication, malformed lineage, cross-lane substitution, hidden merges, state-integrity drift, secret-bearing state, and incomplete authority evidence.
 
 The current r6 design uses:
 
 - immutable Git state commits;
+- a **deterministically addressable lane-root commit**;
+- an exact-context append-only initialization marker on the permanent repository root;
+- a lane-root append-only pointer to the first epoch;
+- one lane-specific metadata anchor and one lane-specific authority anchor per epoch;
 - deterministic create-only generation claims for single-writer election;
-- append-only GitHub commit statuses for canonical authority;
-- one **metadata anchor commit** and one **authority anchor commit** per epoch;
-- create-only lane discovery refs;
-- immutable status links between epoch metadata anchors;
+- append-only commit statuses for canonical generation authority;
 - state/checkpoint/witness refs only as repairable operational pointers.
 
-The split is deliberate: historical epoch traversal reads only tiny metadata anchors, while the up-to-256 canonical generation statuses live on a separate authority anchor that is scanned only for the active epoch.
+A fresh process can therefore recover the lane authority path even if all lane refs are deleted.
 
 ## Rejected assumptions from earlier candidates
 
-Earlier designs exposed these invalid assumptions:
+Earlier candidates exposed several invalid assumptions:
 
-1. state/checkpoint/witness refs could be rolled back together;
-2. one global status ledger required lifetime-sized scans;
-3. a pre-ref intent did not prove election;
-4. GitHub `force:false` is a fast-forward rule, not an expected-old-SHA CAS;
-5. first-epoch authority statuses on shared base commits let other lanes consume the same page budget;
-6. registrations and seals on one repository-global root created a cross-lane 2,000-status terminal cap;
-7. placing metadata and all authorities on the same per-epoch commit still caused historical reads to reread 256 statuses per sealed epoch.
+1. state/checkpoint/witness refs can all be rolled back together;
+2. a global status ledger grows without bound;
+3. a pre-ref intent does not prove writer election;
+4. GitHub `force:false` is only a fast-forward rule, not an expected-old-SHA compare-and-swap;
+5. first-epoch authorities on a shared base commit let unrelated lanes consume the same status pagination;
+6. registrations and seals on one repository-global root create a cross-lane lifetime status cap;
+7. combining metadata and all authorities on one epoch commit makes historical traversal reread up to 256 authorities per sealed epoch;
+8. discovering the first epoch only through a mutable ref lets ref deletion hide old authority from a fresh process.
 
-r6 removes all seven dependencies.
+r6 removes all eight dependencies.
 
-## Immutable template commit
+## Permanent repository root
 
-The known parentless repository commit
+The known repository root commit is:
 
 `b4f3b2e76e24be58d241227850a5d48ea19c2ea8`
 
-is verified as parentless and used only as an immutable tree/template when creating the first lane epoch metadata anchor.
+It must exist and have zero parents.
 
-Cloud State never reads authority metadata from that commit's status list. Thousands of unrelated statuses on it do not affect a lane.
+Its tree SHA is used as the immutable template for the deterministic lane-root commit.
+
+Cloud State does **not** scan this commit's complete status list. The only lane-specific information read from it is an exact status context lookup for that lane's initialization marker.
+
+Therefore thousands of unrelated statuses on this commit do not consume this lane's pagination budget.
 
 ## Lane identity
 
-Each store derives a digest from the canonical tuple:
+A full SHA-256 digest is calculated from the canonical tuple:
 
 - repository;
 - lane id;
@@ -53,11 +59,95 @@ Each store derives a digest from the canonical tuple:
 - checkpoint tag;
 - witness tag.
 
-All lane discovery refs and status contexts include this digest.
+The first 128 bits are used in bounded ref/status names. The full 256-bit digest is embedded in the deterministic lane-root commit message.
 
-Evidence from another lane/digest cannot satisfy the current lane.
+This binds durable evidence to the repository, lane, state location and all three operational refs.
 
-## Operational refs
+## Deterministic lane-root commit
+
+Every lane has a Git commit whose SHA can be calculated without reading any movable lane ref.
+
+The commit uses:
+
+- tree: exact tree from the permanent repository root;
+- no parents;
+- message: `Cloud State v2 lane root <fullLaneDigest>`;
+- fixed author and committer:
+  - name: `Cloud State v2`;
+  - email: `cloud-state-v2@users.noreply.github.com`;
+  - date: `2000-01-01T00:00:00Z`.
+
+The implementation serializes the Git commit object deterministically and calculates its SHA-1 locally before any lane initialization.
+
+When the lane-root object is read, all of the following must match the deterministic specification:
+
+- exact SHA;
+- exact tree;
+- zero parents;
+- exact message;
+- exact author;
+- exact committer;
+- exact date.
+
+If an initialization marker says a lane exists but this exact object is missing or mismatched, the store fails closed. It never silently treats that lane as empty.
+
+## Exact lane initialization marker
+
+The permanent root carries one lane initialization status with exact context:
+
+`agent-cloud-state-v2/<laneDigest>/init`
+
+Description:
+
+`r=<deterministicLaneRootSha>`
+
+The marker is read through an exact status-context lookup rather than by paginating every status on the permanent root.
+
+Required properties:
+
+- context is exactly the lane init context;
+- status state is success;
+- target URL is absent;
+- description contains the exact deterministic lane-root SHA;
+- conflicting marker evidence fails closed.
+
+### Initialization states
+
+**No init marker**
+
+The lane is not durably initialized. A read may return an empty lane.
+
+A governed first write may create the deterministic lane-root commit and append the init marker.
+
+An orphan deterministic commit without the init marker does not establish lane authority.
+
+**Init marker exists**
+
+The lane has durably existed.
+
+The exact deterministic lane-root commit must also exist and validate. Missing root object is corruption/authority loss and fails closed.
+
+This distinction prevents deletion of lane refs from making an established lane look new.
+
+## First-epoch pointer
+
+The deterministic lane-root commit carries the append-only first-epoch pointer context:
+
+`agent-cloud-state-v2/<laneDigest>/first`
+
+Description:
+
+`e=<firstEpoch>;a=<firstMetadataAnchorSha>`
+
+A fresh process follows:
+
+`permanent root exact init marker -> deterministic lane root -> first pointer -> epoch metadata chain`
+
+No movable state/checkpoint/witness or epoch discovery ref is required to find existing canonical authority.
+
+Conflicting first pointers fail closed.
+
+## Movable operational refs
 
 Each lane owns:
 
@@ -69,9 +159,11 @@ They are operational pointers only.
 
 They never create canonical authority.
 
-Governed repair may move a missing/behind operational ref only forward, non-force, to already-proven canonical authority.
+Governed repair may move a missing or behind ref only forward, non-force, to already-proven canonical authority.
 
-An operational state ref ahead of canonical authority is unproven and is rejected even under repair.
+A state ref ahead of canonical authority is unproven and is rejected even under repair.
+
+Deleting all three refs cannot delete the authority path described above.
 
 ## Generation claims
 
@@ -85,77 +177,59 @@ Generation `G` uses:
 
 The candidate state commit is created first.
 
-The writer then attempts an atomic create-only `POST /git/refs` for the deterministic claim.
+The writer then attempts an atomic create-only `POST /git/refs` for the deterministic generation claim.
 
-Rules:
+Election rules:
 
-- only an unambiguous successful create response is election victory;
-- an existing claim is a loss even if it already points to the same candidate;
-- a timeout/lost response is not recovered by rereading the ref;
+- only an unambiguous successful create response counts as victory;
+- an already-existing claim is a loss even when it points to the same candidate SHA;
+- a timeout or lost response is not upgraded to success by rereading the ref;
 - claim refs are never updated or deleted by the implementation.
 
-A claim is not durable Cloud State authority. It only grants the current governed process permission to append the next canonical authority status.
+A claim is not durable state authority. It only grants that currently executing governed writer permission to append the next canonical authority status.
+
+A malicious ref writer may precreate a claim and cause denial of service, but cannot thereby create canonical state authority.
 
 ## Epochs
 
-Epoch size is 256 generations.
+Epoch size is exactly 256 generations.
 
 `epoch = floor((generation - 1) / 256)`
 
-Legacy migration may begin partway through a numerical epoch.
+Legacy v1 migration may begin partway through a numerical epoch.
 
-Each epoch has two exclusive commits:
+Each epoch has two exclusive immutable commits:
 
 1. **metadata anchor**
-   - registration status;
+   - registration;
    - optional seal;
-   - optional immutable link to next metadata anchor.
+   - optional next-epoch link.
 
 2. **authority anchor**
    - canonical generation authority statuses only;
-   - up to 256 normal protocol statuses.
+   - normally at most 256 protocol statuses.
 
-No other lane naturally uses either commit.
+The two commits are lane-specific. Normal traffic from another lane never lands on them.
 
-## First metadata anchor discovery
+## Epoch metadata-anchor discovery refs
 
-The first metadata anchor is discovered by:
-
-`agent-cloud-state-v2-epoch-roots/<laneDigest>`
-
-The ref itself is not authority.
-
-The target must validate as:
-
-- parentless Git commit;
-- exact lane-bound registration status;
-- no previous metadata anchor;
-- valid state anchor/base generation/start generation;
-- registration bound to an exact authority-anchor SHA.
-
-If the discovery ref is moved to an arbitrary commit by a contents writer, that commit lacks the required append-only registration evidence and is rejected.
-
-## Later metadata anchors
-
-Later metadata anchors have deterministic discovery refs:
+Metadata anchors also have deterministic convenience refs:
 
 `agent-cloud-state-v2-epoch-anchors/<laneDigest>/<epoch>`
 
-A later metadata anchor must have exactly one Git parent: the preceding metadata anchor.
+These refs are structural/discovery aids only.
 
-Its registration must reference that same preceding metadata anchor.
+They are not the root of durable authority.
 
-A sealed previous metadata anchor may also contain the immutable next link:
+The first epoch is found from the deterministic lane-root status pointer.
 
-`agent-cloud-state-v2/<laneDigest>/next`
+Later epochs are normally found through immutable `next` statuses from the previous metadata anchor.
 
-with description:
+A deterministic epoch ref may only assist recovery after a sealed epoch; its target must still satisfy the exact Git-parent and append-only registration checks.
 
-`e=<nextEpoch>;a=<nextMetadataAnchorSha>`
+Deleting these refs does not erase an established authority chain.
 
-If a process crashes after creating/registering the next anchor but before writing the next-link status, a fresh process may probe the deterministic next-epoch discovery ref only after the current epoch is sealed. The discovered target must still validate its exact registration and Git parent chain.
-
-## Registration
+## Metadata registration
 
 Metadata context:
 
@@ -168,22 +242,26 @@ Description:
 Invariants:
 
 - `startGeneration = baseGeneration + 1`;
-- start generation belongs to the epoch;
+- start generation belongs to the declared epoch;
 - first metadata anchor has no previous metadata anchor;
-- later metadata anchor Git parent equals registration previous anchor;
-- later state anchor equals previous sealed state;
-- later base generation equals previous seal generation;
+- later metadata anchor Git parent equals its recorded previous metadata anchor;
+- later state anchor equals the previous epoch's sealed state;
+- later base generation equals the previous seal generation;
 - authority anchor SHA is exact and immutable.
 
-The authority-anchor Git commit must have exactly one parent: this epoch's metadata anchor.
+## Authority-anchor binding
 
-That parent check is performed whenever the active authority log is read.
+The authority-anchor Git commit must have exactly one parent: its epoch metadata anchor.
 
-For a historical sealed epoch, a fresh read trusts the seal checkpoint and does not reread the historical authority anchor.
+That parent binding is validated when the active authority log is read.
 
-## Canonical authority
+The authority statuses therefore cannot be transplanted onto another epoch or lane without breaking either the lane contexts, registration binding or Git-parent relation.
 
-Authority statuses live only on the epoch's authority-anchor commit.
+For an already sealed historical epoch, a fresh process does not reread the historical authority log: the seal is the durable checkpoint created only after the epoch passed active validation.
+
+## Canonical generation authority
+
+Authority statuses live only on the active epoch's authority anchor.
 
 Context:
 
@@ -193,25 +271,25 @@ Description:
 
 `s=<stateSha>;p=<parentStateSha>`
 
-The active authority log is valid only if:
+The active authority sequence must satisfy:
 
-- the authority-anchor commit parents the metadata anchor exactly;
-- every status has state `success`;
+- status state is success;
 - target URL is absent;
-- generation belongs to this epoch;
-- generations are consecutive from registration start;
-- first parent state SHA equals registration state anchor;
-- later parent state SHA equals the previous canonical state;
-- duplicate records agree exactly;
-- conflicting duplicates or gaps fail closed.
+- context belongs to the exact lane and epoch;
+- generation lies in the epoch;
+- generations are consecutive from the registration start;
+- first canonical parent equals the registration state anchor;
+- every later parent equals the preceding canonical state;
+- duplicate evidence agrees exactly;
+- conflicting duplicates, gaps or malformed evidence fail closed.
 
-Only the writer that won the deterministic generation claim may append the next canonical status.
+Immediately before appending the next canonical status, the writer rereads the authority log and requires it to equal the sequence observed before it won the generation claim.
 
-Immediately before append it rereads the current active authority sequence and requires it to equal the pre-claim sequence.
+This prevents a stale writer from publishing over authority that advanced during its election window.
 
 ## Seal
 
-Seal metadata context:
+Metadata context:
 
 `agent-cloud-state-v2/<laneDigest>/seal`
 
@@ -219,48 +297,87 @@ Description:
 
 `s=<stateSha>;g=<generation>`
 
-Seal is allowed only at the numerical end of the epoch: 256, 512, 768, etc.
+A seal is allowed only at the numerical end of the epoch: 256, 512, 768, and so on.
 
-Before sealing, the then-active authority anchor and full active state lineage are validated.
+Before sealing, the then-active authority log and full active state lineage must validate.
 
-The seal becomes the historical checkpoint. Once an epoch is historical, fresh reads no longer scan its 256 authority statuses.
+After seal publication, the seal is the durable checkpoint for that historical epoch.
 
-## Publication order
+## Next-epoch link
 
-### Same epoch
+Metadata context:
 
-1. Read operational refs and epoch metadata chain.
-2. Read/validate only the active authority anchor.
-3. Validate current active state lineage.
-4. Create the one-parent state candidate.
-5. Create deterministic generation claim.
-6. Reread active authority log and prove it did not change.
-7. Append canonical authority on the active authority anchor.
-8. Validate active state lineage.
-9. Move state/checkpoint/witness refs forward, non-force.
-10. Verify canonical authority and operational pointers.
+`agent-cloud-state-v2/<laneDigest>/next`
 
-### Epoch rollover
+Description:
 
-1. Require current authority at the exact epoch-end generation.
-2. Validate active authority log and state lineage.
-3. Append/verify seal on current metadata anchor.
-4. Create next metadata anchor as child of current metadata anchor.
-5. Create next authority anchor as child of the new metadata anchor.
-6. Claim deterministic next metadata-anchor discovery ref.
-7. Append registration binding state anchor + new authority anchor + previous metadata anchor.
-8. Append immutable next link to previous metadata anchor.
-9. Continue with generation claim -> canonical authority -> operational refs.
+`e=<nextEpoch>;a=<nextMetadataAnchorSha>`
+
+A later metadata anchor must have exactly one Git parent equal to the previous metadata anchor.
+
+Its registration must record the same previous metadata anchor.
+
+A next link without a valid previous seal is rejected.
+
+If the process crashes after creating/registering the next anchor but before writing the next link, recovery may consult the deterministic next-epoch discovery ref only because the prior epoch is already sealed; the target must still pass exact commit-parent and registration checks.
+
+## State publication — same epoch
+
+1. Read the exact init marker and deterministic lane root.
+2. Follow first pointer and metadata chain.
+3. Read and validate only the active authority anchor.
+4. Validate the complete active state lineage.
+5. Create the exact one-parent candidate state commit.
+6. Create the deterministic generation claim.
+7. Reread active authority and prove it has not changed.
+8. Append canonical generation status.
+9. Validate the new active lineage.
+10. Move state/checkpoint/witness refs forward, non-force.
+11. Verify canonical authority plus operational refs.
+
+Canonical authority exists before operational refs move.
+
+## Epoch rollover
+
+1. Require current canonical authority at the exact epoch-end generation.
+2. Validate the complete active authority log and state lineage.
+3. Append or verify the current seal.
+4. Create the next metadata anchor as a child of the current metadata anchor.
+5. Create the next authority anchor as a child of the new metadata anchor.
+6. Create-only claim the next epoch discovery ref.
+7. Append the new registration binding state anchor, authority anchor and previous metadata anchor.
+8. Append the immutable next link on the previous metadata anchor.
+9. Continue with normal generation claim -> canonical authority -> operational refs.
+
+The next epoch gets a fresh, physically isolated status budget.
 
 ## Crash boundaries
+
+### Before lane init marker
+
+No durable lane initialization exists.
+
+An orphan deterministic lane-root object alone does not prove prior state.
+
+### Init marker exists, lane-root object unavailable or invalid
+
+Fail closed.
+
+Never rebootstrap as empty.
+
+### Lane root exists, first pointer absent
+
+The lane is initialized but epoch publication is incomplete.
+
+It must not be mistaken for a clean new lane.
 
 ### Before generation claim
 
 No new state authority exists.
 
-### Ambiguous generation-claim creation
+### Ambiguous generation-claim create
 
-No canonical status is posted.
+No canonical authority is appended.
 
 Rereading the claim never upgrades the ambiguous request.
 
@@ -268,7 +385,7 @@ Rereading the claim never upgrades the ambiguous request.
 
 Previous canonical state remains authoritative.
 
-The surviving claim is not automatically promoted.
+The surviving claim is not promoted automatically.
 
 Operator reconciliation is required for that blocked generation.
 
@@ -276,76 +393,82 @@ Operator reconciliation is required for that blocked generation.
 
 Durable authority already exists.
 
-Governed repair may advance missing/behind state/checkpoint/witness refs to that exact canonical state.
+Governed repair may move missing/behind state/checkpoint/witness refs to that canonical state.
 
-### First metadata-anchor ref succeeds, registration fails
+### Epoch-anchor creation/ref/registration/next-link interruption
 
-The discovery ref alone is not enough.
+Structural evidence is accepted only when the deterministic discovery information, exact Git-parent topology and append-only registration/link statuses agree.
 
-Fresh read fails closed because no valid lane registration exists.
-
-### Later metadata/authority anchors exist, next link fails
-
-If the previous epoch is sealed, deterministic next-anchor discovery may be used, but only after verifying exact Git parent and append-only registration binding.
+Partial structural publication otherwise fails closed.
 
 ## Active state-lineage validation
 
-Only the active epoch state chain is replayed fully.
+Only the active epoch's state chain is replayed fully.
 
-GraphQL history is bounded to four pages of 100 commits.
+GraphQL commit history is bounded to four pages of 100 commits.
 
 Every active state must satisfy:
 
 - exact SHA continuity;
 - exactly one Git parent;
-- no merge;
-- exact generation continuity;
+- no hidden merge;
+- exact consecutive generation;
 - repository binding;
 - lane binding;
-- state path;
+- state path binding;
 - state/checkpoint/witness tag binding;
 - inherited lineage-base consistency;
-- valid state hash;
+- state hash integrity;
 - project ownership;
-- secret rejection;
-- matching canonical authority record.
+- secret-material rejection;
+- exact canonical authority match.
 
 The first active state must parent the registration state anchor.
 
 ## Historical verification
 
-For sealed epochs, fresh processes verify only the metadata-anchor chain and seal chain.
+For sealed historical epochs, fresh workers verify:
 
-Metadata anchors contain only a few protocol statuses, so each historical epoch normally costs one bounded status request instead of three pages of generation authorities.
+- deterministic lane-root initialization;
+- first pointer;
+- metadata-anchor Git-parent chain;
+- registration chain;
+- seals;
+- next links.
 
-The old authority anchor is not reread after seal because seal publication was permitted only after that epoch passed full authority + state-lineage validation.
+They do not rescan up to 256 historical authority statuses per sealed epoch.
+
+This keeps lifetime verification proportional to epoch count rather than state-generation count.
 
 ## Bootstrap
 
-New lane:
+For a brand-new lane:
 
-- state lineage base = exact configured base-branch SHA;
-- base generation = 0;
-- first generation = 1;
+- lineage base = exact configured base-branch SHA;
+- lineage base generation = 0;
+- first v2 generation = 1;
+- deterministic lane-root commit is created/verified;
+- exact init marker permanently records that lane root;
 - first metadata anchor is parentless;
-- first authority anchor parents first metadata anchor;
-- first epoch-root discovery ref is create-only;
-- registration binds both anchors and the exact bootstrap state anchor.
+- first authority anchor parents the first metadata anchor;
+- first pointer on lane root identifies the first metadata anchor;
+- registration binds the bootstrap state anchor and authority anchor.
 
-If main advances after a valid orphan registration, the registered bootstrap state anchor remains valid only while it remains in current main ancestry.
+If main advances after an orphan but valid bootstrap registration, the registered state anchor remains acceptable only while it remains in current main ancestry.
 
 ## Legacy v1 migration
 
-v1 has no independent monotonic authority.
+v1 had no independent monotonic authority.
 
-The exact legacy state-tag head observed for migration is the one-time trust boundary.
+The exact legacy state-tag head observed for first v2 publication is therefore the one-time migration trust boundary.
 
-First v2 registration binds:
+The first v2 registration binds:
 
 - state anchor = exact v1 head;
-- base generation = exact v1 generation;
+- base generation = exact v1 envelope generation;
 - start generation = legacy generation + 1;
-- lane-specific metadata/authority anchors.
+- lane-specific metadata anchor;
+- lane-specific authority anchor.
 
 Legacy generation is never inferred from Git distance.
 
@@ -353,64 +476,72 @@ Legacy generation is never inferred from Git distance.
 
 With canonical authority:
 
-- aligned refs accepted;
-- missing/behind state ref = rollback/partial publication;
-- repair may move it forward only to canonical authority;
-- state ref ahead = unproven, always reject;
-- divergent state ref = fork;
-- missing/behind checkpoint/witness may repair forward;
-- ahead/divergent checkpoint/witness fail closed.
+- aligned operational refs are accepted;
+- missing/behind state ref is rollback or partial publication;
+- governed repair may move it forward only to canonical authority;
+- state ref ahead of canonical authority is unproven and always rejected;
+- divergent state ref is a history fork;
+- missing/behind checkpoint or witness may repair forward;
+- ahead/divergent checkpoint or witness fails closed.
 
-Joint rollback of all movable refs cannot erase append-only canonical statuses on authority anchors.
+Joint deletion or rollback of state/checkpoint/witness, epoch discovery refs and generation claim refs cannot make an initialized lane appear empty because the exact root init marker and deterministic lane-root address survive independently of those refs.
 
-## Cross-lane isolation
+## Cross-lane isolation and saturation
 
-Different lanes have different digests and physically distinct metadata and authority anchor commits.
+Different lanes derive different digests and therefore different:
 
-Natural traffic from another lane cannot consume this lane's pagination.
+- deterministic lane-root objects;
+- init contexts;
+- first-pointer contexts;
+- metadata-anchor commits;
+- authority-anchor commits;
+- claim namespaces.
 
-The adversarial suite injects more than 2,000 unrelated statuses on the old repository root and requires the target lane still to:
+The permanent repository root can contain more than 2,000 unrelated statuses without affecting this lane because the init record is fetched by exact context rather than by list pagination.
 
-- bootstrap;
-- read;
-- write;
-- seal an epoch;
-- cross into the next epoch.
-
-Malformed same-lane evidence on a lane anchor still fails closed.
+The adversarial suite explicitly injects more than 2,000 unrelated root statuses and requires bootstrap, read, write and epoch rollover to continue.
 
 ## Request bounds
 
-Metadata anchor:
+Permanent root:
 
-- max 2 status pages; normal protocol uses at most registration + seal + next.
+- exact GraphQL context lookup for lane init;
+- no full status pagination.
+
+Lane-root first pointer:
+
+- at most two pages of 100, although normal protocol contains one pointer.
+
+Historical metadata anchor:
+
+- at most two pages of 100;
+- normal protocol contains registration, seal and next.
 
 Active authority anchor:
 
-- max 8 status pages; normal protocol uses at most 256 authority records.
+- at most eight pages of 100;
+- normal protocol contains at most 256 authority statuses.
 
 Active state lineage:
 
-- max 4 GraphQL pages.
+- at most four GraphQL history pages of 100.
 
 There is no repository-global status-ledger scan.
 
 At 2,050 generations, historical traversal reads small metadata anchors while only the latest authority anchor is scanned.
 
-The regression enforces bounded fresh-read and next-write request budgets.
-
 ## Exact-SHA reads
 
-State content is always read by exact 40-hex commit SHA, never by mutable branch/tag name.
+State content is always read using exact 40-hex commit SHAs, never from mutable branch/tag names.
 
-## Security boundaries
+## Security and authority boundaries
 
 r6 preserves:
 
 - explicit project ownership;
 - lane isolation;
-- state/path/ref binding;
-- state-size bounds;
+- exact path/ref binding;
+- state-size limits;
 - sensitive-key rejection;
 - known secret-material rejection;
 - non-force operational ref repair;
@@ -422,44 +553,48 @@ r6 preserves:
 
 At minimum:
 
-- immutable template-root validation;
-- first metadata-anchor authentication;
-- separate authority-anchor parent binding;
-- later metadata-anchor Git-parent chain;
-- bootstrap and v1 migration;
-- inherited generation offsets;
-- precreated/ambiguous generation claims;
+- permanent repository-root validation;
+- deterministic lane-root SHA/object validation;
+- exact lane-init context lookup;
+- init marker conflict;
+- initialized lane with missing deterministic root fails closed;
+- deletion of every movable lane ref cannot erase authority;
+- first-pointer conflict;
+- metadata/authority anchor parent binding;
+- bootstrap and legacy migration;
+- inherited legacy generation offsets;
+- precreated and ambiguous generation claims;
 - claim -> canonical crash;
 - canonical -> operational-ref crash and repair;
 - stateRef-ahead rejection;
-- joint rollback;
-- sibling/fork;
+- joint rollback and deletion;
+- same-generation sibling;
 - stale concurrent writers;
-- conflicting registration/authority/seal/next records;
+- conflicting registration/authority/seal/next evidence;
 - epoch rollover;
-- orphan next-anchor structural progress;
+- partial next-anchor structural publication;
 - hidden active-state merge;
-- malformed/truncated state envelope;
-- lineage-base rewrite;
+- malformed/truncated active state envelope;
+- lineage-anchor rewrite;
 - exact-SHA reads;
 - cross-lane isolation;
-- local authority-anchor page bound;
-- historical metadata does not rescan sealed authorities;
-- >2,000 unrelated repository-root statuses;
-- 2,050-generation read/write budgets;
+- local pagination fail-closed;
+- more than 2,000 unrelated repository-root statuses;
+- sealed metadata traversal does not rescan historical authority logs;
+- 2,050-generation fresh-read and next-write budgets;
 - lease behavior;
 - remote envelope integrity.
 
 ## Acceptance gate
 
-Not mergeable until:
+The candidate is not mergeable until:
 
-1. based on current authoritative `main`;
+1. it is based on current authoritative `main`;
 2. changed files remain exactly:
    - `src/cloud-state.js`
    - `test/cloud-state.test.js`
    - `docs/CLOUD_STATE_V2_PROTOCOL.md`;
-3. exact candidate SHA passes full CI:
+3. the exact final candidate SHA passes full CI:
    - unit/adversarial tests;
    - real Chrome/CDP;
    - adversarial Chrome;
@@ -470,4 +605,4 @@ Not mergeable until:
    - real Docker boundary;
 4. a new frozen exact-SHA independent adversarial review returns zero unresolved P1/P2.
 
-Issue #182 grants no automatic merge or production deployment authority.
+Issue #182 grants no automatic merge, deploy or production authority.
