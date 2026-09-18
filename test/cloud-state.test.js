@@ -64,6 +64,8 @@ function fakeGitHub() {
   const contentRefs = [];
   const statusesBySha = new Map();
   const truncatedBlobs = new Set();
+  let precreateNextClaim = false;
+  let loseNextClaimResponse = false;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -254,8 +256,17 @@ function fakeGitHub() {
     }
     if (method === 'POST' && path === '/git/refs') {
       refWrites.push({ method, path, body: cloneState(body) });
+      const isClaim = typeof body?.ref === 'string' && body.ref.startsWith('refs/tags/agent-cloud-state-v2-claims/');
+      if (isClaim && precreateNextClaim) {
+        precreateNextClaim = false;
+        refs.set(body.ref, body.sha);
+      }
       if (refs.has(body.ref)) return response(422, {});
       refs.set(body.ref, body.sha);
+      if (isClaim && loseNextClaimResponse) {
+        loseNextClaimResponse = false;
+        return response(500, { message: 'response lost after create' });
+      }
       return response(201, { ref: body.ref, object: { sha: body.sha } });
     }
     if (method === 'PATCH' && path.startsWith('/git/refs/tags/')) {
@@ -361,6 +372,18 @@ function fakeGitHub() {
     });
   };
 
+  const failNextClaimWrite = (status = 500) => {
+    failures.push({
+      method: 'POST',
+      status,
+      match(path, body) {
+        return path === '/git/refs' &&
+          typeof body?.ref === 'string' &&
+          body.ref.startsWith('refs/tags/agent-cloud-state-v2-claims/');
+      }
+    });
+  };
+
   return {
     fetchImpl,
     mainSha,
@@ -370,6 +393,9 @@ function fakeGitHub() {
     aliasStatePath,
     failNextTagWrite,
     failNextStatusWrite,
+    failNextClaimWrite,
+    precreateNextClaim() { precreateNextClaim = true; },
+    loseNextClaimResponse() { loseNextClaimResponse = true; },
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
     tagSha(tag) { return refs.get(fullTagRef(tag)) ?? null; },
@@ -478,6 +504,11 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
   assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], apiToken: 'secret' }), /sensitive_key/);
 });
 
+test('generation claim namespace root cannot be used as a state tag', () => {
+  const fake = fakeGitHub();
+  assert.throws(() => storeFor(fake, { tag: 'agent-cloud-state-v2-claims' }), /tag_reserved/);
+});
+
 test('epoch authority is anchored to the verified parentless repository root', async () => {
   const fake = fakeGitHub();
   fake.setRootParents([fake.mainSha]);
@@ -485,7 +516,7 @@ test('epoch authority is anchored to the verified parentless repository root', a
   await assert.rejects(() => store.readSnapshot(), /status_root_invalid/);
 });
 
-test('bootstrap registers epoch before CAS and writes canonical authority only after CAS', async () => {
+test('bootstrap registers epoch, atomically claims generation, then writes canonical authority', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const sha = await publishMarker(store, 'one');
@@ -494,6 +525,11 @@ test('bootstrap registers epoch before CAS and writes canonical authority only a
   const rootContexts = fake.statuses().map((status) => status.context);
   assert.ok(rootContexts.includes(store.epochRegistrationContext(0)));
   assert.ok(!rootContexts.some((context) => context.includes('/i/')));
+  assert.ok(fake.refWrites().some((write) =>
+    write.method === 'POST' &&
+    typeof write.body?.ref === 'string' &&
+    write.body.ref.startsWith('refs/tags/agent-cloud-state-v2-claims/')
+  ));
   const registration = (await store.readRootEvidence()).registrationByEpoch.get(0);
   const authorities = fake.statuses(registration.anchorSha);
   assert.ok(authorities.some((status) => status.context === store.epochAuthorityContext(0, 1)));
@@ -516,8 +552,8 @@ test('fresh load of aligned r6 state is read-only', async () => {
 test('orphan bootstrap registration remains reusable when main advances', async () => {
   const fake = fakeGitHub();
   const firstAttempt = storeFor(fake);
-  fake.failNextTagWrite(stateTag, 500);
-  await assert.rejects(() => publishMarker(firstAttempt, 'failed'), /state_cas_unproven/);
+  fake.failNextClaimWrite(500);
+  await assert.rejects(() => publishMarker(firstAttempt, 'failed'), /generation_election_failed/);
   const root = await firstAttempt.readRootEvidence();
   const registeredAnchor = root.registrations[0].anchorSha;
 
@@ -565,37 +601,65 @@ test('legacy generation offset does not depend on Git distance', async () => {
   assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'g6');
 });
 
-test('failed state CAS never appends canonical authority', async () => {
+test('a contents-writer precreating the exact claim cannot be mistaken for election success', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  fake.failNextTagWrite(stateTag, 500);
-  await assert.rejects(() => publishMarker(store, 'never-authoritative'), /state_cas_unproven/);
+  fake.precreateNextClaim();
+  await assert.rejects(() => publishMarker(store, 'never-authoritative'), /generation_election_failed/);
   const root = await store.readRootEvidence();
   assert.equal(root.registrations.length, 1);
   assert.equal((await store.readEpochAuthorities(root.registrations[0])).length, 0);
   assert.equal(fake.tagSha(stateTag), null);
 });
 
-test('bootstrap crash after CAS but before authority fails closed even with repair', async () => {
+test('a lost claim-create response never becomes authority by rereading the claim', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.loseNextClaimResponse();
+  await assert.rejects(() => publishMarker(store, 'uncertain-claim'), /generation_election_failed/);
+  const root = await store.readRootEvidence();
+  assert.equal((await store.readEpochAuthorities(root.registrations[0])).length, 0);
+  assert.equal(fake.tagSha(stateTag), null);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  assert.equal((await fresh.load()).marker, undefined);
+  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+});
+
+test('bootstrap crash after claim but before authority leaves no state authority and cannot auto-recover', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   fake.failNextStatusWrite(fake.mainSha, 500, (body) => body.context.includes('/a/'));
   await assert.rejects(() => publishMarker(store, 'uncertain'), /partial_publication/);
-  assert.ok(fake.tagSha(stateTag));
+  assert.equal(fake.tagSha(stateTag), null);
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
-  await assert.rejects(() => fresh.readSnapshot(), /unproven_state_advance/);
-  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /unproven_state_advance/);
+  assert.equal((await fresh.load()).marker, undefined);
+  assert.equal((await fresh.readSnapshot({ repair: true })).authoritySha, null);
+  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
 });
 
-test('established crash after CAS but before authority cannot be auto-canonicalized', async () => {
+test('established crash after claim but before authority leaves the prior authority intact', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const first = await publishMarker(store, 'one');
   fake.failNextStatusWrite(fake.mainSha, 500, (body) => body.context.endsWith('/g/2'));
   await assert.rejects(() => publishMarker(store, 'two'), /partial_publication/);
-  assert.notEqual(fake.tagSha(stateTag), first);
+  assert.equal(fake.tagSha(stateTag), first);
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
-  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /unproven_state_advance/);
+  assert.equal((await fresh.load()).marker, 'one');
+  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+});
+
+test('state-ref publication failure after authority is recoverable from canonical authority', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.failNextTagWrite(stateTag, 500);
+  await assert.rejects(() => publishMarker(store, 'authoritative'), /partial_publication/);
+  assert.equal(fake.tagSha(stateTag), null);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot(), /rollback/);
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.state.marker, 'authoritative');
+  assert.equal(fake.tagSha(stateTag), repaired.authoritySha);
 });
 
 test('checkpoint failure occurs only after authority and later governed repair completes it', async () => {
@@ -651,6 +715,23 @@ test('same-generation sibling is rejected even when all mutable refs point to it
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   await assert.rejects(() => fresh.readSnapshot({ repair: true }), /history_fork/);
   assert.notEqual(first, sibling);
+});
+
+test('contents-only direct child ahead of authority cannot be promoted by repair', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  const child = fake.makeStateCommit({
+    parentSha: first,
+    generation: 2,
+    state: blankState('contents-only'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  fake.forceTag(stateTag, child);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot(), /unproven_state_advance/);
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /unproven_state_advance/);
 });
 
 test('two stale writers yield exactly one canonical winner', async () => {
@@ -718,14 +799,14 @@ test('epoch rollover seals the completed epoch and starts a bounded next epoch',
   assert.equal(fake.envelopeAt(g257).generation, 257);
 });
 
-test('orphan next-epoch registration before CAS is harmless and reusable', async () => {
+test('orphan next-epoch registration before generation claim is harmless and reusable', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
   fake.forceTag(stateTag, legacy);
   const store = storeFor(fake);
   const g256 = await publishMarker(store, 'g256');
-  fake.failNextTagWrite(stateTag, 500);
-  await assert.rejects(() => publishMarker(store, 'failed-g257'), /state_cas_unproven/);
+  fake.failNextClaimWrite(500);
+  await assert.rejects(() => publishMarker(store, 'failed-g257'), /generation_election_failed/);
   const rootAfterFailure = await store.readRootEvidence();
   assert.ok(rootAfterFailure.seals.has(0));
   assert.ok(rootAfterFailure.registrationByEpoch.has(1));
