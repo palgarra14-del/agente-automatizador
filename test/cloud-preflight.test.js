@@ -310,3 +310,19 @@ test('admitted request acquires initialization lease before any workflow initial
   assert.equal(observedSeed.initializationLease.leaseId, persisted.initializationLease.leaseId);
   assert.equal(persisted.workflowId, null);
 });
+
+
+test('admitted request revalidates trusted main before initialization', async () => {
+  const target = issue(28);
+  const fixture = makeAdmissionQueue({ currentIssue: target });
+  await fixture.queue.admitEvent('issues', eventFor(target));
+  const writes = fixture.writes();
+  fixture.channel.branchHead = async () => 'e'.repeat(40);
+  let initialized = false;
+  fixture.queue.finishInitialization = async () => { initialized = true; };
+  const result = await fixture.queue.processIssue(target);
+  assert.equal(result.status, 'operator_update_pending');
+  assert.equal(initialized, false);
+  assert.equal(fixture.state.requests[key(28)].status, 'admitted');
+  assert.equal(fixture.writes(), writes);
+});
