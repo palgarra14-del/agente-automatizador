@@ -19,7 +19,10 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
-  assert.match(workflow, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
+  assert.doesNotMatch(workflow, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
+  assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
+  assert.match(workflow, /\.trim\(\)/);
+  assert.match(workflow, /body === "\/agent" \|\| body\.startsWith\("\/agent "\)/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
@@ -29,7 +32,8 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
   const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  cloud-once:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
-  assert.match(workflow, /outputs:\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /cloud-once:[\s\S]*if: needs\.route\.outputs\.active == 'true'/);
   assert.match(workflow, /cloud-once:[\s\S]*needs: route/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
