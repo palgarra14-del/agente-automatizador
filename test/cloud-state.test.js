@@ -30,6 +30,28 @@ function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
+function deterministicGitCommitSha(body) {
+  const author = body.author;
+  const committer = body.committer ?? author;
+  const toGitIdentity = (identity) => {
+    const timestamp = Math.floor(Date.parse(identity.date) / 1000);
+    if (!Number.isSafeInteger(timestamp)) throw new Error('invalid deterministic commit date');
+    return `${identity.name} <${identity.email}> ${timestamp} +0000`;
+  };
+  const lines = [
+    `tree ${body.tree}`,
+    ...(body.parents ?? []).map((parent) => `parent ${parent}`),
+    `author ${toGitIdentity(author)}`,
+    `committer ${toGitIdentity(committer)}`,
+    '',
+    body.message
+  ];
+  const content = lines.join('\n');
+  return createHash('sha1')
+    .update(`commit ${Buffer.byteLength(content, 'utf8')}\0${content}`)
+    .digest('hex');
+}
+
 function blankState(marker) {
   return { runs: {}, approvals: {}, events: [], ...(marker === undefined ? {} : { marker }) };
 }
@@ -166,6 +188,28 @@ function fakeGitHub() {
     };
   };
 
+  const statusContextPayload = (variables) => {
+    const statuses = statusesBySha.get(variables.oid) ?? [];
+    const wanted = String(variables.context ?? '').toLowerCase();
+    const found = statuses.find((status) => String(status.context ?? '').toLowerCase() === wanted) ?? null;
+    return {
+      data: {
+        repository: {
+          object: {
+            status: found ? {
+              context: {
+                context: found.context,
+                state: String(found.state).toUpperCase(),
+                description: found.description,
+                targetUrl: found.target_url ?? null
+              }
+            } : null
+          }
+        }
+      }
+    };
+  };
+
   const addStatus = (targetSha, { context, description, state = 'success', target_url = null }) => {
     const entry = {
       id: statusId++, state, description, target_url, context,
@@ -186,6 +230,9 @@ function fakeGitHub() {
 
     if (url.pathname === '/graphql') {
       assert.equal(method, 'POST');
+      if (typeof body?.query === 'string' && body.query.includes('CloudStateContext')) {
+        return response(200, statusContextPayload(body.variables));
+      }
       return response(200, historyPayload(body.variables));
     }
 
@@ -250,8 +297,15 @@ function fakeGitHub() {
       return response(201, { sha: id });
     }
     if (method === 'POST' && path === '/git/commits') {
-      const id = sha();
-      commits.set(id, { sha: id, tree: { sha: body.tree }, parents: body.parents.map((parent) => ({ sha: parent })) });
+      const id = body.author && body.committer ? deterministicGitCommitSha(body) : sha();
+      commits.set(id, {
+        sha: id,
+        tree: { sha: body.tree },
+        parents: (body.parents ?? []).map((parent) => ({ sha: parent })),
+        ...(body.author ? { author: cloneState(body.author) } : {}),
+        ...(body.committer ? { committer: cloneState(body.committer) } : {}),
+        ...(typeof body.message === 'string' ? { message: body.message } : {})
+      });
       return response(201, { sha: id });
     }
     if (method === 'POST' && path === '/git/refs') {
@@ -496,11 +550,11 @@ async function publishMarker(store, marker) {
   return store.writeSnapshot(state, snapshot);
 }
 
-function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
+async function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
   const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
   const statusAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha });
   const authorityAnchorSha = fake.makeMetadataCommit({ previousStatusAnchorSha: statusAnchorSha });
-  fake.forceTag(previousRegistration ? store.epochAnchorTag(epoch) : store.epochRootTag, statusAnchorSha);
+  fake.forceTag(store.epochAnchorTag(epoch), statusAnchorSha);
   fake.forceStatus(
     statusAnchorSha,
     store.epochRegistrationContext(),
@@ -518,6 +572,13 @@ function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration,
       previousRegistration.statusAnchorSha,
       store.epochNextContext(),
       store.nextDescription(epoch, statusAnchorSha)
+    );
+  } else {
+    const laneRoot = await store.laneRootCommit({ create: true });
+    fake.forceStatus(
+      laneRoot.sha,
+      store.laneRootContext(),
+      store.firstEpochDescription(epoch, statusAnchorSha)
     );
   }
   return {
@@ -560,6 +621,31 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
 test('generation claim namespace root cannot be used as a state tag', () => {
   const fake = fakeGitHub();
   assert.throws(() => storeFor(fake, { tag: 'agent-cloud-state-v2-claims' }), /tag_reserved/);
+});
+
+test('lane initialization marker is looked up by exact context and binds deterministic root', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'one');
+  const root = await store.laneRootCommit();
+  assert.ok(root?.sha);
+  const initStatuses = fake.statuses(LEDGER_ROOT_SHA).filter(
+    (status) => status.context === store.laneInitContextName
+  );
+  assert.ok(initStatuses.length >= 1);
+  assert.equal(initStatuses[0].description, store.laneInitDescription(root.sha));
+});
+
+test('conflicting latest lane-init marker fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'one');
+  fake.forceStatus(
+    LEDGER_ROOT_SHA,
+    store.laneInitContextName,
+    store.laneInitDescription('f'.repeat(40))
+  );
+  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /lane_init_conflict/);
 });
 
 test('epoch authority is anchored to the verified parentless repository root', async () => {
@@ -960,7 +1046,7 @@ test('same-lane authority status for a different epoch on the active anchor fail
 test('sealed historical metadata remains one-page even when authority anchor is full', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
   let parentSha = fake.mainSha;
   for (let generation = 1; generation <= 256; generation += 1) {
     const commitSha = fake.makeStateCommit({
@@ -983,7 +1069,7 @@ test('sealed historical metadata remains one-page even when authority anchor is 
 test('status pagination tolerates unrelated contexts on this lane epoch anchor', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
   for (let index = 0; index < 150; index += 1) {
     fake.forceStatus(registration.authorityAnchorSha, `unrelated/${index}`, 'not-cloud-state');
   }
@@ -997,11 +1083,40 @@ test('status pagination tolerates unrelated contexts on this lane epoch anchor',
 test('active epoch status scan has an explicit fail-closed page bound', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  const registration = installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
   for (let index = 0; index < 800; index += 1) {
     fake.forceStatus(registration.authorityAnchorSha, `unrelated/${index}`, 'not-cloud-state');
   }
   await assert.rejects(() => store.readSnapshot(), /epoch_status_limit/);
+});
+
+test('deleting every mutable lane ref cannot erase deterministic lane-root authority', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  const second = await publishMarker(store, 'two');
+  const root = await store.readRootEvidence();
+  const registration = root.registrations[0];
+
+  for (const tag of [
+    stateTag,
+    checkpointTag,
+    witnessTag,
+    store.epochAnchorTag(0),
+    store.generationClaimTag(1),
+    store.generationClaimTag(2)
+  ]) {
+    fake.deleteTag(tag);
+  }
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot(), /rollback/);
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.authoritySha, second);
+  assert.equal(repaired.state.marker, 'two');
+  assert.equal(fake.tagSha(stateTag), second);
+  assert.equal(registration.anchorSha, fake.mainSha);
+  assert.notEqual(first, second);
 });
 
 test('more than 2000 unrelated repository-root statuses cannot exhaust this lane', async () => {
@@ -1038,7 +1153,7 @@ test('2050-generation segmented history validates with lane-isolated bounded req
   for (let generation = 1; generation <= 2050; generation += 1) {
     const epoch = Math.floor((generation - 1) / 256);
     if (generation === 1 || (generation - 1) % 256 === 0) {
-      registration = installRegistration(
+      registration = await installRegistration(
         fake,
         store,
         epoch,
