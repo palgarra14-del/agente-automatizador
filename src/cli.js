@@ -173,7 +173,7 @@ try {
           if (/^GitHub event payload (?:must|exceeds|changed)/.test(error.message)) throw error;
           throw new Error(`Invalid GitHub event payload: ${error.message}`, { cause: error });
         }
-        console.log(JSON.stringify(await activeStore.withGlobalLease(() => queue.admitEvent(eventName, event)), null, 2));
+        console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
       } else if (action === 'cloud-peek') {
         console.log(String(await queue.hasWork()));
       } else if (action === 'cloud-once') {
