@@ -1087,14 +1087,23 @@ export class SupervisedIssueQueue {
     return { admitted: true, idempotent: false, issueNumber: current.number, status: record.status };
   }
 
-  async finishInitialization(issue, parsed, seedRecord) {
+  async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null } = {}) {
     const key = this.requestKey(issue);
     if (seedRecord?.status !== 'initializing' || !seedRecord.initializationLease) {
       throw new Error('workflow_initialization_requires_lease');
     }
     const project = this.projects.get(parsed.request.projectId) ?? null;
     const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
-    const priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
+    let priorInitialization;
+    try {
+      priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
+    } catch (error) {
+      if (restoreOnPreflightError) {
+        await restoreOnPreflightError();
+        throw new Error('workflow_initialization_preflight_failed', { cause: error });
+      }
+      throw error;
+    }
     if (priorInitialization) {
       const blocked = {
         ...seedRecord,
@@ -1392,8 +1401,8 @@ export class SupervisedIssueQueue {
         return this.blockRequestRevalidation(issue, key, record, `admitted_initialization_claim_failed:${maskSecrets(error.message)}`);
       }
       if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
+      const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
       if (this.operatorRevision) {
-        const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
         let remoteOperatorRevision;
         try { remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch); }
         catch { await restore(); return { status: 'operator_revision_check_failed', issueNumber: issue.number, updatedAt: this.now() }; }
@@ -1402,7 +1411,7 @@ export class SupervisedIssueQueue {
           return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
         }
       }
-      return this.finishInitialization(issue, parsed, claim.record);
+      return this.finishInitialization(issue, parsed, claim.record, { restoreOnPreflightError: restore });
     }
     if (record.status === 'initializing') {
       let abandoned;
