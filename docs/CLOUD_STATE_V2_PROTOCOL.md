@@ -345,7 +345,7 @@ Only an explicit governed repair may consult that ref. Repair first validates th
 
 Canonical authority exists before operational refs move.
 
-For sealed-fallback reads, mutable-ref classification never substitutes for lineage trust. The sealed lineage is revalidated against a stable current-base observation immediately before governed ref repair or successful return; if the base changes during ancestry validation, the read fails closed and publishes no repair.
+For sealed-fallback reads, mutable-ref classification never substitutes for lineage trust. The sealed lineage is freshly revalidated against the current trusted base immediately before governed ref repair or successful return; if the base has moved outside the trusted lineage, the read fails closed and publishes no repair.
 
 ## Epoch rollover
 
