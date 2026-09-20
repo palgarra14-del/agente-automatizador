@@ -325,7 +325,7 @@ A next link without a valid previous seal is rejected.
 
 If the process crashes after creating/registering the next anchor but before writing the next link, a normal read/write **does not follow the mutable discovery ref** and new canonical authority is blocked with `cloud_state_epoch_next_missing`.
 
-Only an explicit governed repair may consult that ref. Repair first validates the discovered metadata anchor, lane/epoch Git identity, exact parent, registration, previous seal and generation continuity; it then appends the missing immutable `next` status to the previous metadata anchor and verifies that status before the new epoch becomes traversable. No generation claim or authority append is allowed before that repair succeeds.
+Only an explicit governed repair may consult that ref. Repair first validates the discovered metadata anchor, lane/epoch Git identity, exact parent, registration, previous seal and generation continuity. Immediately before any immutable `next` status is appended, the sealed fallback envelope is reread and its lineage anchor is revalidated against the current trusted base; base drift or a transient base-read failure therefore publishes no repair. Only then may repair append the missing immutable `next` status to the previous metadata anchor and verify that status before the new epoch becomes traversable. No generation claim or authority append is allowed before that repair succeeds.
 
 ## State publication — same epoch
 
