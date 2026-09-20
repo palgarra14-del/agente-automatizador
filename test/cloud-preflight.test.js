@@ -121,38 +121,27 @@ const governedProject = () => configFrom({
   protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version' }, execution: { provider: 'local-sanitized' }
 });
 function eventFor(target, { eventName = 'issues', actor = 'palgarra14-del', repositoryOverride = repository, commentBody = '/agent' } = {}) {
-  return {
-    action: eventName === 'issue_comment' ? 'created' : 'opened',
-    repository: { name: repositoryOverride.name, owner: { login: repositoryOverride.owner } },
-    sender: { login: actor }, issue: clone(target),
-    ...(eventName === 'issue_comment' ? { comment: { body: commentBody, user: { login: actor } } } : {})
-  };
+  return { action: eventName === 'issue_comment' ? 'created' : 'opened',
+    repository: { name: repositoryOverride.name, owner: { login: repositoryOverride.owner } }, sender: { login: actor }, issue: clone(target),
+    ...(eventName === 'issue_comment' ? { comment: { body: commentBody, user: { login: actor } } } : {}) };
 }
 function makeAdmissionQueue({ state = { requests: {} }, currentIssue = issue(20), includedProjectIds = ['callflow'], remoteRevision = revision } = {}) {
   let writes = 0, leases = 0, openIssueCalls = 0;
-  const store = {
-    async load() { return clone(state); }, async mutate(mutator) { writes += 1; return mutator(state); },
-    async withGlobalLease(operation) { leases += 1; return operation(); }, async ownerIdentity() { return 'fixture-owner'; }
-  };
-  const channel = {
-    repository, async issue(number) { return number === currentIssue.number ? clone(currentIssue) : null; },
-    async branchHead() { return remoteRevision; }, async openIssues() { openIssueCalls += 1; return []; }
-  };
-  return {
-    queue: new SupervisedIssueQueue({
-      store, projects: new Map([['callflow', governedProject()]]), workflowEngine: {}, channel,
-      allowedActors: ['palgarra14-del'], operatorRevision: revision, operatorBranch: 'main', includedProjectIds
-    }),
-    state, channel, writes: () => writes, leases: () => leases, openIssueCalls: () => openIssueCalls
-  };
+  const store = { async load() { return clone(state); }, async mutate(fn) { writes += 1; return fn(state); },
+    async withGlobalLease(fn) { leases += 1; return fn(); }, async ownerIdentity() { return 'fixture-owner'; } };
+  const channel = { repository, async issue(number) { return number === currentIssue.number ? clone(currentIssue) : null; },
+    async branchHead() { return remoteRevision; }, async openIssues() { openIssueCalls += 1; return []; } };
+  return { queue: new SupervisedIssueQueue({
+    store, projects: new Map([['callflow', governedProject()]]), workflowEngine: {}, channel,
+    allowedActors: ['palgarra14-del'], operatorRevision: revision, operatorBranch: 'main', includedProjectIds
+  }), state, channel, writes: () => writes, leases: () => leases, openIssueCalls: () => openIssueCalls };
 }
 test('event admission is bounded, actionable and idempotent', async () => {
   const target = issue(20), fixture = makeAdmissionQueue({ currentIssue: target });
   assert.deepEqual(await fixture.queue.admitEvent('issues', eventFor(target)), { admitted: true, idempotent: false, issueNumber: 20, status: 'admitted' });
   assert.equal(fixture.state.requests[key(20)].workflowId, null); assert.equal(await fixture.queue.hasWork(), true);
   const writes = fixture.writes(), duplicate = await fixture.queue.admitEvent('issues', eventFor(target));
-  assert.equal(duplicate.idempotent, true); assert.equal(duplicate.status, 'admitted');
-  assert.equal(fixture.writes(), writes); assert.equal(fixture.leases(), 1);
+  assert.equal(duplicate.idempotent, true); assert.equal(duplicate.status, 'admitted'); assert.equal(fixture.writes(), writes); assert.equal(fixture.leases(), 1);
 });
 test('event admission rejects untrusted, malformed, cross-lane and stale events without writes', async () => {
   const target = issue(22), malformed = issue(22, { body: '<!-- agent-request:v1 -->\n{"version":1' });
@@ -173,26 +162,22 @@ test('comment admission requires exact /agent and non-issue wakeups stay read-on
   assert.equal((await fixture.queue.admitEvent('issue_comment', eventFor(target, { eventName: 'issue_comment' }))).admitted, true);
   for (const body of ['/agent-typo', ' /agent']) {
     const rejected = makeAdmissionQueue({ currentIssue: issue(24) });
-    assert.equal((await rejected.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: body }))).reason, 'event_comment_invalid');
-    assert.equal(rejected.writes(), 0);
+    assert.equal((await rejected.queue.admitEvent('issue_comment', eventFor(issue(24), { eventName: 'issue_comment', commentBody: body }))).reason, 'event_comment_invalid'); assert.equal(rejected.writes(), 0);
   }
   const scheduled = makeAdmissionQueue({ currentIssue: issue(25) });
-  assert.equal((await scheduled.queue.admitEvent('schedule', eventFor(issue(25)))).reason, 'event_not_admissible');
-  assert.equal(scheduled.writes(), 0);
+  assert.equal((await scheduled.queue.admitEvent('schedule', eventFor(issue(25)))).reason, 'event_not_admissible'); assert.equal(scheduled.writes(), 0);
 });
 test('tick exact-lookups admitted work and claims its initialization lease before workflow creation', async () => {
   const target = issue(26), fixture = makeAdmissionQueue({ currentIssue: target }); await fixture.queue.admitEvent('issues', eventFor(target));
   let seed; fixture.queue.finishInitialization = async (_issue, _parsed, observed) => { seed = clone(observed); throw new Error('stop-after-claim'); };
   await assert.rejects(() => fixture.queue.tick(), /stop-after-claim/);
   const persisted = fixture.state.requests[key(26)];
-  assert.equal(persisted.status, 'initializing'); assert.ok(persisted.initializationLease);
-  assert.equal(seed.initializationLease.leaseId, persisted.initializationLease.leaseId);
+  assert.equal(persisted.status, 'initializing'); assert.ok(persisted.initializationLease); assert.equal(seed.initializationLease.leaseId, persisted.initializationLease.leaseId);
   assert.equal(persisted.workflowId, null); assert.equal(fixture.openIssueCalls(), 0);
 });
 test('post-claim main drift or head-read failure restores admitted state', async () => {
   for (const mode of ['drift', 'error']) {
-    const target = issue(28), fixture = makeAdmissionQueue({ currentIssue: target }); await fixture.queue.admitEvent('issues', eventFor(target));
-    let calls = 0;
+    const target = issue(28), fixture = makeAdmissionQueue({ currentIssue: target }); await fixture.queue.admitEvent('issues', eventFor(target)); let calls = 0;
     fixture.channel.branchHead = async () => { if (calls++ === 0) return revision; if (mode === 'error') throw new Error('transient_head_failure'); return 'e'.repeat(40); };
     fixture.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); };
     const result = await fixture.queue.processIssue(target);
