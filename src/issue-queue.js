@@ -1004,13 +1004,6 @@ export class SupervisedIssueQueue {
     const activeProjectFingerprint = projectExecutionFingerprint(project);
     const activeControlPlaneFingerprint = this.controlPlaneFingerprint();
 
-    if (this.operatorRevision) {
-      const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
-      if (remoteOperatorRevision !== this.operatorRevision) {
-        return { admitted: false, reason: 'operator_update_pending', localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision };
-      }
-    }
-
     const current = await this.channel.issue(eventIssue.number);
     if (!current || current.number !== eventIssue.number || current.id !== eventIssue.id || current.state !== 'open' || current.pull_request ||
         current.user?.login !== eventIssue.user?.login || current.body !== eventIssue.body) {
@@ -1087,22 +1080,20 @@ export class SupervisedIssueQueue {
     return { admitted: true, idempotent: false, issueNumber: current.number, status: record.status };
   }
 
-  async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null } = {}) {
+  async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null, priorInitialization: suppliedPriorInitialization } = {}) {
     const key = this.requestKey(issue);
     if (seedRecord?.status !== 'initializing' || !seedRecord.initializationLease) {
       throw new Error('workflow_initialization_requires_lease');
     }
     const project = this.projects.get(parsed.request.projectId) ?? null;
     const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
-    let priorInitialization;
-    try {
-      priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
-    } catch (error) {
-      if (restoreOnPreflightError) {
-        await restoreOnPreflightError();
-        throw new Error('workflow_initialization_preflight_failed', { cause: error });
+    let priorInitialization = suppliedPriorInitialization;
+    if (priorInitialization === undefined) {
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) {
+        if (restoreOnPreflightError) { await restoreOnPreflightError(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
+        throw error;
       }
-      throw error;
     }
     if (priorInitialization) {
       const blocked = {
@@ -1411,6 +1402,9 @@ export class SupervisedIssueQueue {
         activeApproval: null,
         updatedAt: this.now()
       });
+      let priorInitialization;
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) { await restore(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
       let claimedRequest;
       try { claimedRequest = await this.revalidateCurrentRequest(issue, claim.record); }
       catch (error) {
@@ -1436,7 +1430,7 @@ export class SupervisedIssueQueue {
           return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
         }
       }
-      return this.finishInitialization(issue, parsed, claim.record, { restoreOnPreflightError: restore });
+      return this.finishInitialization(issue, parsed, claim.record, { restoreOnPreflightError: restore, priorInitialization });
     }
     if (record.status === 'initializing') {
       let abandoned;
