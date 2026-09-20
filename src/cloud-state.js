@@ -831,6 +831,17 @@ export class GitHubStateStore extends JsonStore {
             throw new Error('cloud_state_epoch_chain_invalid');
           }
           if (!repairLinks) throw new Error('cloud_state_epoch_next_missing');
+
+          // The mutable discovery ref is not authority. Before converting it into the
+          // immutable epoch-chain next link, revalidate the sealed fallback against
+          // the current trusted lineage. This keeps a stale/force-moved base or a
+          // transient base read from causing durable repair publication.
+          const sealedEnvelope = await this.readEnvelopeAt(bundle.seal.stateSha);
+          if (sealedEnvelope.version !== 2 || sealedEnvelope.generation !== bundle.seal.generation) {
+            throw new Error('cloud_state_epoch_seal_mismatch');
+          }
+          await this.validateLineageAnchor(sealedEnvelope);
+
           const repairError = await this.appendEpochStatus(
             registration.statusAnchorSha,
             this.epochNextContext(),
