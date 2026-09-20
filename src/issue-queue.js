@@ -1402,6 +1402,31 @@ export class SupervisedIssueQueue {
       }
       if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
       const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+      const blockClaimed = (reason) => this.saveRecord(key, {
+        ...claim.record,
+        status: 'blocked',
+        reason,
+        initializationLease: null,
+        pendingApproval: null,
+        activeApproval: null,
+        updatedAt: this.now()
+      });
+      let claimedRequest;
+      try { claimedRequest = await this.revalidateCurrentRequest(issue, claim.record); }
+      catch (error) {
+        await restore();
+        throw new Error('workflow_initialization_preflight_failed', { cause: error });
+      }
+      if (!claimedRequest.ok) return blockClaimed(claimedRequest.reason);
+      issue = claimedRequest.issue;
+      parsed = claimedRequest.parsed;
+      const claimedProject = this.projects.get(parsed.request.projectId) ?? null;
+      if (!this.ownsProject(parsed.request.projectId) ||
+          !claimedProject ||
+          projectExecutionFingerprint(claimedProject) !== claim.record.projectFingerprint ||
+          this.controlPlaneFingerprint() !== claim.record.controlPlaneFingerprint) {
+        return blockClaimed('initialization_context_changed');
+      }
       if (this.operatorRevision) {
         let remoteOperatorRevision;
         try { remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch); }

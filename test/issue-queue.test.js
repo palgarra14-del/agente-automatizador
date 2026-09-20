@@ -311,6 +311,23 @@ function persistedRequestFields(queue, issue, project, workflow = workflowPlan()
   };
 }
 
+async function seedAdmittedRequest(queue, store, issue, project) {
+  const { parsed, fields } = persistedRequestFields(queue, issue, project);
+  const key = queue.requestKey(issue);
+  await store.mutate((data) => {
+    data.requests = {
+      [key]: {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user.login,
+        ...fields, request: parsed.request, workflowId: null, workflowBindingFingerprint: null,
+        status: 'admitted', reason: null, createdAt: '2026-09-12T00:00:00.000Z', updatedAt: '2026-09-12T00:00:00.000Z',
+        pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null,
+        activeApproval: null, initializationLease: null, lastProcessedCommentId: 0
+      }
+    };
+  });
+  return { key, parsed };
+}
+
 test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'b'.repeat(40);
@@ -1597,37 +1614,7 @@ test('abandoned initialization lease blocks instead of automatically creating a 
 
 test('transient prior-comment lookup after admitted claim restores immediate retryability', async () => {
   const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
-  const parsed = parseIssueRequestBody(issue.body);
-  const key = queue.requestKey(issue);
-  const now = '2026-09-12T00:00:00.000Z';
-  await store.mutate((data) => {
-    data.requests = {
-      [key]: {
-        version: 1,
-        issueNumber: issue.number,
-        issueId: issue.id,
-        author: issue.user.login,
-        requestFingerprint: parsed.requestFingerprint,
-        issueBodyFingerprint: parsed.issueBodyFingerprint,
-        projectFingerprint: projectExecutionFingerprint(project),
-        controlPlaneFingerprint: queue.controlPlaneFingerprint(),
-        request: parsed.request,
-        workflowId: null,
-        workflowBindingFingerprint: null,
-        status: 'admitted',
-        reason: null,
-        createdAt: now,
-        updatedAt: now,
-        pendingApproval: null,
-        startApprovalFingerprint: null,
-        startApprovalCommentId: null,
-        startApprovedBy: null,
-        activeApproval: null,
-        initializationLease: null,
-        lastProcessedCommentId: 0
-      }
-    };
-  });
+  const { key } = await seedAdmittedRequest(queue, store, issue, project);
 
   let failed = false;
   channel.onCommentsRead = () => {
@@ -1649,6 +1636,56 @@ test('transient prior-comment lookup after admitted claim restores immediate ret
   assert.equal(workflowEngine.runCalls.length, 0);
 
   channel.onCommentsRead = null;
+  const retried = await queue.processIssue(issue);
+  assert.equal(retried.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.createCalls.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+});
+
+test('post-claim issue edit, close or replacement blocks before workflow/model/communication side effects', async () => {
+  const cases = [
+    ['body edit', (current) => { current.body = requestBody({ goal: 'Changed during claim' }); }, 'request_body_changed'],
+    ['marker removal', (current) => { current.body = 'marker removed during claim'; }, 'request_body_invalid'],
+    ['close', (current) => { current.state = 'closed'; }, 'issue_identity_or_state_changed'],
+    ['replacement', (current) => { current.id += 1; }, 'issue_identity_or_state_changed']
+  ];
+  for (const [name, mutate, reason] of cases) {
+    const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+    const { key } = await seedAdmittedRequest(queue, store, issue, project);
+    channel.onIssueRead = (_number, count) => { if (count === 2) mutate(channel.issues[0]); };
+    const result = await queue.processIssue(issue);
+    assert.equal(result.status, 'blocked', name);
+    assert.equal(result.reason, reason, name);
+    assert.equal(result.initializationLease, null, name);
+    assert.equal(workflowEngine.createCalls.length, 0, name);
+    assert.equal(workflowEngine.runCalls.length, 0, name);
+    assert.equal(channel.posted.length, 0, name);
+    const persisted = await queue.getRecord(key);
+    assert.equal(persisted.requestFingerprint != null, true, name);
+  }
+});
+
+test('transient exact-issue read after admitted claim restores the exact record and permits immediate retry', async () => {
+  const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+  const { key } = await seedAdmittedRequest(queue, store, issue, project);
+  const before = clone(await queue.getRecord(key));
+  channel.onIssueRead = (_number, count) => {
+    if (count === 2) throw new Error('fixture transient exact-issue failure');
+  };
+
+  await assert.rejects(() => queue.processIssue(issue), /workflow_initialization_preflight_failed/);
+  const restored = await queue.getRecord(key);
+  assert.equal(restored.status, 'admitted');
+  assert.equal(restored.initializationLease, null);
+  assert.equal(restored.requestFingerprint, before.requestFingerprint);
+  assert.equal(restored.issueBodyFingerprint, before.issueBodyFingerprint);
+  assert.equal(restored.projectFingerprint, before.projectFingerprint);
+  assert.equal(restored.controlPlaneFingerprint, before.controlPlaneFingerprint);
+  assert.equal(workflowEngine.createCalls.length, 0);
+  assert.equal(workflowEngine.runCalls.length, 0);
+  assert.equal(channel.posted.length, 0);
+
+  channel.onIssueRead = null;
   const retried = await queue.processIssue(issue);
   assert.equal(retried.status, 'awaiting_start_approval');
   assert.equal(workflowEngine.createCalls.length, 1);
