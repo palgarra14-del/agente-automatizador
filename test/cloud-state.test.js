@@ -88,9 +88,10 @@ function fakeGitHub() {
   const truncatedBlobs = new Set();
   let precreateNextClaim = false;
   let loseNextClaimResponse = false;
-  let claimCreated = false;
+  let claimCreateCount = 0;
   let moveMainAfterClaimAuthorityRead = null;
   let moveMainBeforeNextMainRead = null;
+  let moveMainAfterNextCompare = null;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -249,8 +250,8 @@ function fakeGitHub() {
     const statusGet = /^\/commits\/([a-f0-9]{40})\/statuses$/i.exec(path);
     if (method === 'GET' && statusGet) {
       const targetSha = statusGet[1].toLowerCase();
-      if (claimCreated && moveMainAfterClaimAuthorityRead) {
-        refs.set('refs/heads/main', moveMainAfterClaimAuthorityRead);
+      if (moveMainAfterClaimAuthorityRead && claimCreateCount > moveMainAfterClaimAuthorityRead.claimCountAtArm) {
+        refs.set('refs/heads/main', moveMainAfterClaimAuthorityRead.commitSha);
         moveMainAfterClaimAuthorityRead = null;
       }
       const perPage = Number(url.searchParams.get('per_page') ?? '30');
@@ -280,7 +281,12 @@ function fakeGitHub() {
     }
     if (method === 'GET' && path.startsWith('/compare/')) {
       const [baseSha, headSha] = path.slice('/compare/'.length).split('...');
-      return response(200, comparePayload(baseSha, headSha));
+      const payload = comparePayload(baseSha, headSha);
+      if (moveMainAfterNextCompare) {
+        refs.set('refs/heads/main', moveMainAfterNextCompare);
+        moveMainAfterNextCompare = null;
+      }
+      return response(200, payload);
     }
     if (method === 'GET' && path.startsWith('/contents/')) {
       const contentPath = decodeURIComponent(path.slice('/contents/'.length));
@@ -328,7 +334,7 @@ function fakeGitHub() {
       }
       if (refs.has(body.ref)) return response(422, {});
       refs.set(body.ref, body.sha);
-      if (isClaim) claimCreated = true;
+      if (isClaim) claimCreateCount += 1;
       if (isClaim && loseNextClaimResponse) {
         loseNextClaimResponse = false;
         return response(500, { message: 'response lost after create' });
@@ -501,7 +507,11 @@ function fakeGitHub() {
     loseNextClaimResponse() { loseNextClaimResponse = true; },
     moveMainAfterClaimAuthorityRead(commitSha) {
       assert.ok(commits.has(commitSha));
-      moveMainAfterClaimAuthorityRead = commitSha;
+      moveMainAfterClaimAuthorityRead = { commitSha, claimCountAtArm: claimCreateCount };
+    },
+    moveMainAfterNextCompare(commitSha) {
+      assert.ok(commits.has(commitSha));
+      moveMainAfterNextCompare = commitSha;
     },
     moveMainBeforeNextMainRead(commitSha) {
       assert.ok(commits.has(commitSha));
@@ -846,6 +856,39 @@ test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', 
     () => storeFor(fake, { ownerId: 'github:2:1' }).load(),
     /bootstrap_ancestry_invalid/
   );
+});
+
+test('sealed fallback repair rechecks bootstrap ancestry after ref classification', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, epoch0, sealedSha, 256);
+  await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0);
+  fake.forceTag(stateTag, sealedSha);
+  fake.forceTag(checkpointTag, sealedSha);
+  fake.deleteTag(witnessTag);
+
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after sealed comparison' });
+  fake.moveMainAfterNextCompare(divergentMain);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(
+    () => fresh.readSnapshot({ repair: true }),
+    /bootstrap_ancestry_invalid/
+  );
+  assert.equal(fake.tagSha(witnessTag), null);
+
+  fake.forceHead('main', fake.mainSha);
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.state.marker, 'sealed');
+  assert.equal(fake.tagSha(witnessTag), sealedSha);
 });
 
 test('next-link repair fails closed if current main moves before sealed-lineage validation', async () => {
