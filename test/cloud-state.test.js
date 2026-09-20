@@ -90,6 +90,7 @@ function fakeGitHub() {
   let loseNextClaimResponse = false;
   let claimCreated = false;
   let moveMainAfterClaimAuthorityRead = null;
+  let moveMainBeforeNextMainRead = null;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -266,6 +267,10 @@ function fakeGitHub() {
     }
     if (method === 'GET' && path.startsWith('/git/ref/')) {
       const ref = `refs/${decodeURIComponent(path.slice('/git/ref/'.length))}`;
+      if (ref === 'refs/heads/main' && moveMainBeforeNextMainRead) {
+        refs.set(ref, moveMainBeforeNextMainRead);
+        moveMainBeforeNextMainRead = null;
+      }
       const value = refs.get(ref);
       return value ? response(200, { object: { sha: value } }) : response(404, { message: 'not found' });
     }
@@ -469,6 +474,16 @@ function fakeGitHub() {
     });
   };
 
+  const failNextMainRead = (status = 500) => {
+    failures.push({
+      method: 'GET',
+      status,
+      match(path) {
+        return path === '/git/ref/heads/main';
+      }
+    });
+  };
+
   return {
     fetchImpl,
     mainSha,
@@ -481,11 +496,16 @@ function fakeGitHub() {
     failNextStatusWrite,
     failNextAnyStatusWrite,
     failNextClaimWrite,
+    failNextMainRead,
     precreateNextClaim() { precreateNextClaim = true; },
     loseNextClaimResponse() { loseNextClaimResponse = true; },
     moveMainAfterClaimAuthorityRead(commitSha) {
       assert.ok(commits.has(commitSha));
       moveMainAfterClaimAuthorityRead = commitSha;
+    },
+    moveMainBeforeNextMainRead(commitSha) {
+      assert.ok(commits.has(commitSha));
+      moveMainBeforeNextMainRead = commitSha;
     },
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
@@ -567,7 +587,16 @@ async function publishMarker(store, marker) {
   return store.writeSnapshot(state, snapshot);
 }
 
-async function installRegistration(fake, store, epoch, stateAnchorSha, baseGeneration, startGeneration, previousRegistration = null) {
+async function installRegistration(
+  fake,
+  store,
+  epoch,
+  stateAnchorSha,
+  baseGeneration,
+  startGeneration,
+  previousRegistration = null,
+  { linkPrevious = true } = {}
+) {
   const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
   const statusAnchorSha = fake.makeMetadataCommit({
     previousStatusAnchorSha,
@@ -590,13 +619,13 @@ async function installRegistration(fake, store, epoch, stateAnchorSha, baseGener
       previousStatusAnchorSha
     )
   );
-  if (previousRegistration) {
+  if (previousRegistration && linkPrevious) {
     fake.forceStatus(
       previousRegistration.statusAnchorSha,
       store.epochNextContext(),
       store.nextDescription(epoch, statusAnchorSha)
     );
-  } else {
+  } else if (!previousRegistration) {
     const laneRoot = await store.laneRootCommit({ create: true });
     fake.forceStatus(
       laneRoot.sha,
@@ -816,6 +845,78 @@ test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', 
   await assert.rejects(
     () => storeFor(fake, { ownerId: 'github:2:1' }).load(),
     /bootstrap_ancestry_invalid/
+  );
+});
+
+test('next-link repair fails closed if current main moves before sealed-lineage validation', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, epoch0, sealedSha, 256);
+  await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0, { linkPrevious: false });
+  for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, sealedSha);
+
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main before next repair' });
+  fake.moveMainBeforeNextMainRead(divergentMain);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(
+    () => fresh.readSnapshot({ repair: true }),
+    /bootstrap_ancestry_invalid/
+  );
+
+  assert.equal(
+    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
+    0
+  );
+  assert.equal(fake.tagSha(fresh.generationClaimTag(257)), null);
+
+  fake.forceHead('main', fake.mainSha);
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.state.marker, 'sealed');
+  assert.equal(
+    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
+    1
+  );
+});
+
+test('next-link repair publishes nothing when current-base read fails transiently', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, epoch0, sealedSha, 256);
+  await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0, { linkPrevious: false });
+  for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, sealedSha);
+
+  fake.failNextMainRead(500);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }));
+
+  assert.equal(
+    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
+    0
+  );
+  assert.equal(fake.tagSha(fresh.generationClaimTag(257)), null);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.state.marker, 'sealed');
+  assert.equal(
+    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
+    1
   );
 });
 
