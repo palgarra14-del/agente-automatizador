@@ -88,6 +88,8 @@ function fakeGitHub() {
   const truncatedBlobs = new Set();
   let precreateNextClaim = false;
   let loseNextClaimResponse = false;
+  let claimCreated = false;
+  let moveMainAfterClaimAuthorityRead = null;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -246,6 +248,10 @@ function fakeGitHub() {
     const statusGet = /^\/commits\/([a-f0-9]{40})\/statuses$/i.exec(path);
     if (method === 'GET' && statusGet) {
       const targetSha = statusGet[1].toLowerCase();
+      if (claimCreated && moveMainAfterClaimAuthorityRead) {
+        refs.set('refs/heads/main', moveMainAfterClaimAuthorityRead);
+        moveMainAfterClaimAuthorityRead = null;
+      }
       const perPage = Number(url.searchParams.get('per_page') ?? '30');
       const page = Number(url.searchParams.get('page') ?? '1');
       const start = (page - 1) * perPage;
@@ -317,6 +323,7 @@ function fakeGitHub() {
       }
       if (refs.has(body.ref)) return response(422, {});
       refs.set(body.ref, body.sha);
+      if (isClaim) claimCreated = true;
       if (isClaim && loseNextClaimResponse) {
         loseNextClaimResponse = false;
         return response(500, { message: 'response lost after create' });
@@ -476,6 +483,10 @@ function fakeGitHub() {
     failNextClaimWrite,
     precreateNextClaim() { precreateNextClaim = true; },
     loseNextClaimResponse() { loseNextClaimResponse = true; },
+    moveMainAfterClaimAuthorityRead(commitSha) {
+      assert.ok(commits.has(commitSha));
+      moveMainAfterClaimAuthorityRead = commitSha;
+    },
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
     tagSha(tag) { return refs.get(fullTagRef(tag)) ?? null; },
@@ -751,6 +762,30 @@ test('cached lineage cannot publish after base branch ancestry changes between l
   await assert.rejects(() => store.writeSnapshot(state, snapshot), /bootstrap_ancestry_invalid/);
   assert.equal(fake.tagSha(store.generationClaimTag(2)), null);
 
+  const root = await store.readRootEvidence();
+  const registration = root.registrationByEpoch.get(0);
+  const authorities = await store.readEpochAuthorities(registration);
+  assert.equal(authorities.length, 1);
+  assert.equal(authorities[0].generation, 1);
+});
+
+test('canonical authority publication revalidates base after the final authority scan', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  const snapshot = await store.readSnapshot();
+  const nextState = cloneState(snapshot.state);
+  nextState.marker = 'two';
+
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after claim scan' });
+  fake.moveMainAfterClaimAuthorityRead(divergentMain);
+
+  await assert.rejects(
+    () => store.writeSnapshot(nextState, snapshot),
+    /bootstrap_ancestry_invalid/
+  );
+
+  assert.equal(fake.tagSha(stateTag), first);
   const root = await store.readRootEvidence();
   const registration = root.registrationByEpoch.get(0);
   const authorities = await store.readEpochAuthorities(registration);
