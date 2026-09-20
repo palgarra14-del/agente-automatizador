@@ -821,7 +821,8 @@ test('canonical authority publication revalidates base after the final authority
 
   await assert.rejects(
     () => store.writeSnapshot(nextState, snapshot),
-    /bootstrap_ancestry_invalid/
+    (error) => error?.message === 'cloud_state_partial_publication' &&
+      error?.cause?.message === 'cloud_state_bootstrap_ancestry_invalid'
   );
 
   assert.equal(fake.tagSha(stateTag), first);
@@ -875,6 +876,14 @@ test('sealed fallback repair rechecks bootstrap ancestry after ref classificatio
   fake.forceTag(checkpointTag, sealedSha);
   fake.deleteTag(witnessTag);
 
+  const advancedMain = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 900,
+    state: blankState('advanced-main'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  fake.forceHead('main', advancedMain);
   const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after sealed comparison' });
   fake.moveMainAfterNextCompare(divergentMain);
 
@@ -885,7 +894,7 @@ test('sealed fallback repair rechecks bootstrap ancestry after ref classificatio
   );
   assert.equal(fake.tagSha(witnessTag), null);
 
-  fake.forceHead('main', fake.mainSha);
+  fake.forceHead('main', advancedMain);
   const repaired = await fresh.readSnapshot({ repair: true });
   assert.equal(repaired.state.marker, 'sealed');
   assert.equal(fake.tagSha(witnessTag), sealedSha);
