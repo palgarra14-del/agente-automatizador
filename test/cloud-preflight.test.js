@@ -137,7 +137,7 @@ function makeAdmissionQueue({ state = { requests: {} }, currentIssue = issue(20)
   }), state, channel, writes: () => writes, leases: () => leases, openIssueCalls: () => openIssueCalls };
 }
 test('event admission is bounded, actionable and idempotent', async () => {
-  const target = issue(20), fixture = makeAdmissionQueue({ currentIssue: target });
+  const target = issue(20), fixture = makeAdmissionQueue({ currentIssue: target, remoteRevision: 'e'.repeat(40) });
   assert.deepEqual(await fixture.queue.admitEvent('issues', eventFor(target)), { admitted: true, idempotent: false, issueNumber: 20, status: 'admitted' });
   assert.equal(fixture.state.requests[key(20)].workflowId, null); assert.equal(await fixture.queue.hasWork(), true);
   const writes = fixture.writes(), duplicate = await fixture.queue.admitEvent('issues', eventFor(target));
@@ -179,6 +179,7 @@ test('post-claim main drift or head-read failure restores admitted state', async
   for (const mode of ['drift', 'error']) {
     const target = issue(28), fixture = makeAdmissionQueue({ currentIssue: target }); await fixture.queue.admitEvent('issues', eventFor(target)); let calls = 0;
     fixture.channel.branchHead = async () => { if (calls++ === 0) return revision; if (mode === 'error') throw new Error('transient_head_failure'); return 'e'.repeat(40); };
+    fixture.queue.unboundPriorAgentInitialization = async () => null;
     fixture.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); };
     const result = await fixture.queue.processIssue(target);
     assert.equal(result.status, mode === 'error' ? 'operator_revision_check_failed' : 'operator_update_pending');
