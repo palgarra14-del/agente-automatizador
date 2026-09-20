@@ -1595,6 +1595,66 @@ test('abandoned initialization lease blocks instead of automatically creating a 
   assert.match(channel.posted.at(-1).body, /No automatic retry or duplicate workflow/);
 });
 
+test('transient prior-comment lookup after admitted claim restores immediate retryability', async () => {
+  const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+  const parsed = parseIssueRequestBody(issue.body);
+  const key = queue.requestKey(issue);
+  const now = '2026-09-12T00:00:00.000Z';
+  await store.mutate((data) => {
+    data.requests = {
+      [key]: {
+        version: 1,
+        issueNumber: issue.number,
+        issueId: issue.id,
+        author: issue.user.login,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectExecutionFingerprint(project),
+        controlPlaneFingerprint: queue.controlPlaneFingerprint(),
+        request: parsed.request,
+        workflowId: null,
+        workflowBindingFingerprint: null,
+        status: 'admitted',
+        reason: null,
+        createdAt: now,
+        updatedAt: now,
+        pendingApproval: null,
+        startApprovalFingerprint: null,
+        startApprovalCommentId: null,
+        startApprovedBy: null,
+        activeApproval: null,
+        initializationLease: null,
+        lastProcessedCommentId: 0
+      }
+    };
+  });
+
+  let failed = false;
+  channel.onCommentsRead = () => {
+    if (!failed) {
+      failed = true;
+      throw new Error('fixture transient comments failure');
+    }
+  };
+
+  await assert.rejects(
+    () => queue.processIssue(issue),
+    /workflow_initialization_preflight_failed/
+  );
+
+  const restored = await queue.getRecord(key);
+  assert.equal(restored.status, 'admitted');
+  assert.equal(restored.initializationLease, null);
+  assert.equal(workflowEngine.createCalls.length, 0);
+  assert.equal(workflowEngine.runCalls.length, 0);
+
+  channel.onCommentsRead = null;
+  const retried = await queue.processIssue(issue);
+  assert.equal(retried.status, 'awaiting_start_approval');
+  assert.equal(workflowEngine.createCalls.length, 1);
+  assert.equal(workflowEngine.runCalls.length, 1);
+});
+
 test('workflow initialization failure is persisted as blocked and is not retried forever', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   let createCalls = 0;
