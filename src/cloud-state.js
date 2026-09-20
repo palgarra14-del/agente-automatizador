@@ -1120,7 +1120,7 @@ export class GitHubStateStore extends JsonStore {
     return claimTag;
   }
 
-  async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities) {
+  async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities, lineageEnvelope) {
     const desired = {
       generation,
       stateSha: assertSha(stateSha),
@@ -1136,6 +1136,8 @@ export class GitHubStateStore extends JsonStore {
     if (JSON.stringify(before) !== JSON.stringify(preClaimAuthorities)) {
       throw new Error('cloud_state_epoch_authority_conflict');
     }
+
+    await this.validateLineageAnchor(lineageEnvelope);
 
     let postError = null;
     try {
@@ -1605,7 +1607,8 @@ export class GitHubStateStore extends JsonStore {
         generation,
         commitSha,
         parentSha,
-        preClaimAuthorities
+        preClaimAuthorities,
+        envelope
       );
     } catch (error) {
       authorityError = error;
