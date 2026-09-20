@@ -1186,7 +1186,10 @@ export class GitHubStateStore extends JsonStore {
     if (anchorGeneration === 0) {
       const currentBaseSha = await this.baseBranchSha();
       const relation = await this.compareCommits(anchorSha, currentBaseSha);
-      if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+      const confirmedBaseSha = await this.baseBranchSha();
+      if (confirmedBaseSha !== currentBaseSha || !['identical', 'ahead'].includes(relation)) {
+        throw new Error('cloud_state_bootstrap_ancestry_invalid');
+      }
       return { anchorSha, anchorGeneration };
     }
     const anchorEnvelope = await this.readEnvelopeAt(anchorSha);
@@ -1413,7 +1416,9 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_epoch_authority_mismatch');
     }
 
-    if (evidence.authorityRegistration === evidence.activeRegistration && evidence.activeAuthorities.length > 0) {
+    const activeEpochAuthority =
+      evidence.authorityRegistration === evidence.activeRegistration && evidence.activeAuthorities.length > 0;
+    if (activeEpochAuthority) {
       await this.validateEpochLineage(evidence.activeRegistration, authority, evidence.activeAuthorities, evidence);
     } else {
       const seal = evidence.seals.get(evidence.authorityRegistration.epoch);
@@ -1428,8 +1433,13 @@ export class GitHubStateStore extends JsonStore {
       await this.validateLineageAnchor(authorityEnvelope);
     }
 
+    const revalidateSealedFallback = async () => {
+      if (!activeEpochAuthority) await this.validateLineageAnchor(authorityEnvelope);
+    };
+
     if (!stateSha) {
       if (!repair) throw new Error('cloud_state_rollback');
+      await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
@@ -1437,6 +1447,7 @@ export class GitHubStateStore extends JsonStore {
       const relation = await this.relationToAuthority(stateSha, authority.stateSha);
       if (relation === 'behind') {
         if (!repair) throw new Error('cloud_state_rollback');
+        await revalidateSealedFallback();
         const repaired = await this.repairAllRefs(refs, authority.stateSha);
         return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
       }
@@ -1449,9 +1460,11 @@ export class GitHubStateStore extends JsonStore {
       if (!['missing', 'identical', 'behind'].includes(relation)) throw new Error('cloud_state_history_fork');
     }
     if (repair && (checkpointSha !== authority.stateSha || witnessSha !== authority.stateSha)) {
+      await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
+    await revalidateSealedFallback();
     return this.snapshotFrom(stateSha, checkpointSha, witnessSha, authorityEnvelope, authority);
   }
 
