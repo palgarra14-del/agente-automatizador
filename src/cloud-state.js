@@ -1186,10 +1186,7 @@ export class GitHubStateStore extends JsonStore {
     if (anchorGeneration === 0) {
       const currentBaseSha = await this.baseBranchSha();
       const relation = await this.compareCommits(anchorSha, currentBaseSha);
-      const confirmedBaseSha = await this.baseBranchSha();
-      if (confirmedBaseSha !== currentBaseSha || !['identical', 'ahead'].includes(relation)) {
-        throw new Error('cloud_state_bootstrap_ancestry_invalid');
-      }
+      if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
       return { anchorSha, anchorGeneration };
     }
     const anchorEnvelope = await this.readEnvelopeAt(anchorSha);
