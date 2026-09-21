@@ -492,22 +492,25 @@ test('GitHub admission intent refs are create-only, exact-target bound and backl
     /admission_intent_existing_conflict/
   );
 
+  const floodedCalls = [];
   const flooded = new GitHubIssueChannel({
     token: 'ghp_fixtureSecret',
     repository: { owner: 'x', name: 'y' },
-    fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => Array.from({ length: 100 }, (_, index) => ({
-        ref: `refs/tags/agent-admission-v1/callflow/${index + 1}/${String(index).padStart(64, '0')}`,
-        object: { sha: expectedSha }
-      }))
-    })
+    fetchImpl: async (url) => {
+      floodedCalls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => Array.from({ length: 100 }, (_, index) => ({
+          ref: `refs/tags/agent-admission-v1/callflow/${index + 1}/${String(index).padStart(64, '0')}`,
+          object: { sha: expectedSha }
+        }))
+      };
+    }
   });
-  await assert.rejects(
-    () => flooded.listAdmissionIntents(['callflow']),
-    /admission_intent_limit/
-  );
+  const fullPage = await flooded.listAdmissionIntents(['callflow']);
+  assert.equal(fullPage.length, 100);
+  assert.match(floodedCalls[0], /per_page=100/);
 });
 
 test('GitHub admission intent listing preserves the exact target sha', async () => {
