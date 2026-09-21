@@ -510,6 +510,27 @@ test('GitHub admission intent refs are create-only, exact-target bound and backl
   );
 });
 
+test('GitHub admission intent listing preserves the exact target sha', async () => {
+  const targetSha = 'c'.repeat(40);
+  const fingerprint = 'd'.repeat(64);
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [{
+        ref: `refs/tags/agent-admission-v1/callflow/42/${fingerprint}`,
+        object: { sha: targetSha }
+      }]
+    })
+  });
+  const [intent] = await channel.listAdmissionIntents(['callflow']);
+  assert.equal(intent.targetSha, targetSha);
+  assert.equal(intent.issueNumber, 42);
+  assert.equal(intent.fingerprint, fingerprint);
+});
+
 test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
   const legacy = normalizeIssueQueueConfig({
     version: 1,
