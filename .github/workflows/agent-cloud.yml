@@ -72,6 +72,10 @@ jobs:
     name: admit cloud event (${{ matrix.lane }})
     needs: route
     if: needs.route.outputs.active == 'true' && (github.event_name == 'issues' || github.event_name == 'issue_comment')
+    permissions:
+      contents: write
+      issues: read
+      statuses: write
     strategy:
       fail-fast: false
       matrix:
