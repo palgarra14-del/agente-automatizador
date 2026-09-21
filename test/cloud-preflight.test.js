@@ -163,6 +163,54 @@ test('event admission is lease-free, retryable and idempotent until governed ing
   const result = await retry.queue.admitEvent('issues', eventFor(issue(21)));
   assert.equal(result.retryable, true); assert.equal(retry.intents.size, 1); assert.deepEqual(retry.state.requests, {});
 });
+test('admission intent ingestion is crash-safe after canonical persistence', async () => {
+  const target = issue(27), f = admissionFixture(target);
+  await f.queue.admitEvent('issues', eventFor(target));
+  const originalDelete = f.channel.deleteAdmissionIntent;
+  let deleteCalls = 0;
+  f.channel.deleteAdmissionIntent = async (ref) => {
+    deleteCalls += 1;
+    if (deleteCalls === 1) throw new Error('intent_delete_transport_failed');
+    return originalDelete(ref);
+  };
+
+  await assert.rejects(() => f.queue.ingestAdmissionIntents(), /intent_delete_transport_failed/);
+  assert.equal(f.state.requests[key(27)].status, 'admitted');
+  assert.equal(f.intents.size, 1);
+
+  const retried = await f.queue.ingestAdmissionIntents();
+  assert.equal(retried, null);
+  assert.equal(Object.keys(f.state.requests).length, 1);
+  assert.equal(f.state.requests[key(27)].status, 'admitted');
+  assert.equal(f.intents.size, 0);
+});
+
+test('stale edited or closed intent is retired without canonical admission', async () => {
+  for (const mode of ['edited', 'closed']) {
+    const target = issue(28), f = admissionFixture(target);
+    await f.queue.admitEvent('issues', eventFor(target));
+    const changed = mode === 'edited'
+      ? issue(28, { body: requestBody().replace('deterministic maintenance change', 'different governed change') })
+      : { ...target, state: 'closed' };
+    f.channel.issue = async () => clone(changed);
+
+    const result = await f.queue.ingestAdmissionIntents();
+    assert.equal(result, null);
+    assert.deepEqual(f.state.requests, {});
+    assert.equal(f.intents.size, 0);
+  }
+});
+
+test('transient intent revalidation failure keeps the durable intent for recovery', async () => {
+  const target = issue(29), f = admissionFixture(target);
+  await f.queue.admitEvent('issues', eventFor(target));
+  f.channel.issue = async () => { throw new Error('transient_issue_read'); };
+
+  await assert.rejects(() => f.queue.ingestAdmissionIntents(), /admission_intent_issue_read_failed/);
+  assert.deepEqual(f.state.requests, {});
+  assert.equal(f.intents.size, 1);
+});
+
 test('event admission rejects untrusted, malformed, cross-lane and proven-stale events without state or intents', async () => {
   const target = issue(22), malformed = issue(22, { body: '<!-- agent-request:v1 -->\n{"version":1' });
   const cases = [[eventFor(target, { actor: 'mallory' }), target, 'event_actor_unauthorized'], [eventFor(malformed), malformed, 'event_request_invalid'],
