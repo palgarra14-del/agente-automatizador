@@ -655,19 +655,19 @@ async function installRegistration(
   };
 }
 
-function installSeal(fake, store, registration, stateSha, generation) {
+function installSeal(fake, store, registration, stateSha, generation, baseWitnessSha = fake.mainSha) {
   fake.forceStatus(
     registration.statusAnchorSha,
     store.epochSealContext(),
-    store.sealDescription(stateSha, generation)
+    store.sealDescription(stateSha, generation, baseWitnessSha)
   );
 }
 
-function installAuthority(fake, store, registration, generation, stateSha, parentSha) {
+function installAuthority(fake, store, registration, generation, stateSha, parentSha, baseWitnessSha = fake.mainSha) {
   fake.forceStatus(
     registration.authorityAnchorSha,
     store.epochAuthorityContext(registration.epoch, generation),
-    store.authorityDescription(stateSha, parentSha)
+    store.authorityDescription(stateSha, parentSha, baseWitnessSha)
   );
 }
 
@@ -833,7 +833,7 @@ test('canonical authority publication revalidates base after the final authority
   assert.equal(authorities[0].generation, 1);
 });
 
-test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', async () => {
+test('sealed fallback authority stays bound to its immutable base witness after main moves', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
@@ -844,7 +844,7 @@ test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', 
     lineageBaseSha: fake.mainSha,
     lineageBaseGeneration: 0
   });
-  installSeal(fake, store, epoch0, sealedSha, 256);
+  installSeal(fake, store, epoch0, sealedSha, 256, fake.mainSha);
   await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0);
   fake.forceTag(stateTag, sealedSha);
   fake.forceTag(checkpointTag, sealedSha);
@@ -853,13 +853,11 @@ test('sealed fallback authority revalidates bootstrap ancestry on fresh reads', 
   const divergentMain = fake.makeMetadataCommit({ message: 'divergent main' });
   fake.forceHead('main', divergentMain);
 
-  await assert.rejects(
-    () => storeFor(fake, { ownerId: 'github:2:1' }).load(),
-    /bootstrap_ancestry_invalid/
-  );
+  const loaded = await storeFor(fake, { ownerId: 'github:2:1' }).load();
+  assert.equal(loaded.marker, 'sealed');
 });
 
-test('sealed fallback repair rechecks bootstrap ancestry after ref classification', async () => {
+test('sealed fallback repair is stable when main moves after witness validation', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
@@ -870,37 +868,23 @@ test('sealed fallback repair rechecks bootstrap ancestry after ref classificatio
     lineageBaseSha: fake.mainSha,
     lineageBaseGeneration: 0
   });
-  installSeal(fake, store, epoch0, sealedSha, 256);
+  installSeal(fake, store, epoch0, sealedSha, 256, fake.mainSha);
   await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0);
   fake.forceTag(stateTag, sealedSha);
   fake.forceTag(checkpointTag, sealedSha);
   fake.deleteTag(witnessTag);
 
-  const advancedMain = fake.makeStateCommit({
-    parentSha: fake.mainSha,
-    generation: 900,
-    state: blankState('advanced-main'),
-    lineageBaseSha: fake.mainSha,
-    lineageBaseGeneration: 0
-  });
-  fake.forceHead('main', advancedMain);
-  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after sealed comparison' });
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after witness comparison' });
   fake.moveMainAfterNextCompare(divergentMain);
 
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
-  await assert.rejects(
-    () => fresh.readSnapshot({ repair: true }),
-    /bootstrap_ancestry_invalid/
-  );
-  assert.equal(fake.tagSha(witnessTag), null);
-
-  fake.forceHead('main', advancedMain);
   const repaired = await fresh.readSnapshot({ repair: true });
   assert.equal(repaired.state.marker, 'sealed');
   assert.equal(fake.tagSha(witnessTag), sealedSha);
+  assert.equal(fake.currentHead('main'), divergentMain);
 });
 
-test('next-link repair fails closed if current main moves before sealed-lineage validation', async () => {
+test('next-link repair is bound to the sealed base witness, not the later mutable main', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
@@ -911,35 +895,24 @@ test('next-link repair fails closed if current main moves before sealed-lineage 
     lineageBaseSha: fake.mainSha,
     lineageBaseGeneration: 0
   });
-  installSeal(fake, store, epoch0, sealedSha, 256);
+  installSeal(fake, store, epoch0, sealedSha, 256, fake.mainSha);
   await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0, { linkPrevious: false });
   for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, sealedSha);
 
   const divergentMain = fake.makeMetadataCommit({ message: 'divergent main before next repair' });
-  fake.moveMainBeforeNextMainRead(divergentMain);
+  fake.forceHead('main', divergentMain);
 
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
-  await assert.rejects(
-    () => fresh.readSnapshot({ repair: true }),
-    /bootstrap_ancestry_invalid/
-  );
-
-  assert.equal(
-    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
-    0
-  );
-  assert.equal(fake.tagSha(fresh.generationClaimTag(257)), null);
-
-  fake.forceHead('main', fake.mainSha);
   const repaired = await fresh.readSnapshot({ repair: true });
   assert.equal(repaired.state.marker, 'sealed');
   assert.equal(
     fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
     1
   );
+  assert.equal(fake.tagSha(fresh.generationClaimTag(257)), null);
 });
 
-test('next-link repair publishes nothing when current-base read fails transiently', async () => {
+test('next-link repair rejects a forged sealed base witness', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const epoch0 = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
@@ -950,26 +923,18 @@ test('next-link repair publishes nothing when current-base read fails transientl
     lineageBaseSha: fake.mainSha,
     lineageBaseGeneration: 0
   });
-  installSeal(fake, store, epoch0, sealedSha, 256);
+  const divergentWitness = fake.makeMetadataCommit({ message: 'forged base witness' });
+  installSeal(fake, store, epoch0, sealedSha, 256, divergentWitness);
   await installRegistration(fake, store, 1, sealedSha, 256, 257, epoch0, { linkPrevious: false });
   for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, sealedSha);
 
-  fake.failNextMainRead(500);
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
-  await assert.rejects(() => fresh.readSnapshot({ repair: true }));
-
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /bootstrap_ancestry_invalid/);
   assert.equal(
     fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
     0
   );
   assert.equal(fake.tagSha(fresh.generationClaimTag(257)), null);
-
-  const repaired = await fresh.readSnapshot({ repair: true });
-  assert.equal(repaired.state.marker, 'sealed');
-  assert.equal(
-    fake.statuses(epoch0.statusAnchorSha).filter((status) => status.context === fresh.epochNextContextName).length,
-    1
-  );
 });
 
 test('legacy migration preserves inherited generation offsets', async () => {
@@ -1160,7 +1125,7 @@ test('conflicting canonical status for one generation fails closed', async () =>
   fake.forceStatus(
     registration.authorityAnchorSha,
     store.epochAuthorityContext(registration.epoch, 1),
-    store.authorityDescription('f'.repeat(40), registration.anchorSha)
+    store.authorityDescription('f'.repeat(40), registration.anchorSha, fake.mainSha)
   );
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /authority_conflict/);
   assert.ok(first);
@@ -1359,7 +1324,7 @@ test('same-lane authority status for a different epoch on the active anchor fail
   fake.forceStatus(
     (await store.readRootEvidence()).registrationByEpoch.get(0).authorityAnchorSha,
     store.epochAuthorityContext(1, 257),
-    store.authorityDescription('f'.repeat(40), fake.mainSha)
+    store.authorityDescription('f'.repeat(40), fake.mainSha, fake.mainSha)
   );
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /epoch_authority_invalid|epoch_authority_gap/);
 });
