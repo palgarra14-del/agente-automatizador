@@ -19,7 +19,8 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
-  for (const pattern of [/AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/, /\.trim\(\)/, /body === "\/agent" \|\| body\.startsWith\("\/agent "\)/]) assert.match(workflow, pattern);
+  assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
+  assert.match(workflow, /\.trim\(\)[\s\S]*body\.startsWith\("\/agent "\)/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
@@ -30,7 +31,7 @@ test('cloud worker routes events through trusted main before constructing the la
   const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
   assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
-  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit\][\s\S]*if: always\(\)/);
+  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit\][\s\S]*needs\.admit\.result/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
@@ -98,7 +99,7 @@ test('cloud worker does not depend on runner cache for workflow continuity', () 
 
 test('routing job receives event data but no secrets or write credentials', () => {
   const routeStart = workflow.indexOf('  route:');
-  const cloudStart = workflow.indexOf('  cloud-once:');
+  const cloudStart = workflow.indexOf('  admit:');
   assert.ok(routeStart >= 0 && cloudStart > routeStart);
   const route = workflow.slice(routeStart, cloudStart);
   assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
@@ -119,17 +120,22 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('event admission is durable before replaceable lane concurrency and heavy runtime stays gated', () => {
-  const admitStart = workflow.indexOf('  admit:'), cloudStart = workflow.indexOf('  cloud-once:');
-  const preflightStart = workflow.indexOf('- name: Check lane for governed work'), runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
-  assert.ok(admitStart > 0 && cloudStart > admitStart && preflightStart > cloudStart && runtimeStart > preflightStart);
-  const admit = workflow.slice(admitStart, cloudStart), preflight = workflow.slice(preflightStart, runtimeStart);
-  assert.match(admit, /needs: route[\s\S]*inbox cloud-admit --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(admit, /concurrency:/);
-  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit\][\s\S]*needs\.admit\.result/);
-  assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(preflight, /inbox cloud-admit|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
-  for (const name of ['Prepare exact cloud runtime', 'Run one governed cloud queue tick']) assert.match(workflow, new RegExp(`- name: ${name}\\n\\s+if: steps\\.preflight\\.outputs\\.has_work == 'true'`));
+test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
+  const preflightStart = workflow.indexOf('- name: Check lane for governed work');
+  const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
+  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick');
+  assert.ok(preflightStart > 0);
+  assert.ok(runtimeStart > preflightStart);
+  assert.ok(tickStart > runtimeStart);
+  const preflight = workflow.slice(preflightStart, runtimeStart);
+  const admit = workflow.slice(workflow.indexOf('  admit:'), workflow.indexOf('  cloud-once:'));
+  assert.match(admit, /inbox cloud-admit --lane "\$AGENT_CLOUD_LANE"/); assert.doesNotMatch(admit, /concurrency:/);
+  assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.doesNotMatch(preflight, /cloud-admit/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(preflight, /has_work=\$HAS_WORK/);
+  assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
