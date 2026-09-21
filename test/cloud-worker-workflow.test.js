@@ -36,6 +36,7 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /timeout-minutes: 35/);
+  assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
   assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
 });
