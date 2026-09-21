@@ -134,6 +134,12 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.doesNotMatch(preflight, /cloud-admit/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  const recoveryStart = workflow.indexOf('- name: Recover missing admissions from open requests');
+  assert.ok(recoveryStart > 0 && recoveryStart < preflightStart);
+  const recovery = workflow.slice(recoveryStart, preflightStart);
+  assert.match(recovery, /if: github\.event_name == 'schedule'/);
+  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
   assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
