@@ -553,6 +553,7 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } },
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } },
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/not-a-page`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/bad#fragment`, object: { sha: trustedSha } },
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/1000001`, object: { sha: trustedSha } },
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/${oversized}`, object: { sha: trustedSha } }
           ]
@@ -566,9 +567,11 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
   assert.equal(cursor.page, 3);
   assert.equal(cursor.needsRebind, true);
   const deleted = calls.filter((call) => call.method === 'DELETE');
-  assert.equal(deleted.length, 3);
+  assert.equal(deleted.length, 4);
   assert.doesNotMatch(deleted.map((call) => call.url).join('\n'), /\/3$/m);
   assert.ok(deleted.some((call) => /\/not-a-page$/.test(call.url)));
+  assert.ok(deleted.some((call) => call.url.endsWith('/bad%23fragment')));
+  assert.doesNotMatch(deleted.map((call) => call.url).join('\n'), /#fragment/);
   assert.ok(deleted.some((call) => /\/1000001$/.test(call.url)));
   assert.ok(deleted.some((call) => call.url.endsWith('/' + oversized)));
 
@@ -625,6 +628,37 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
     ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/21`,
     sha: trustedSha
   });
+
+  const hiddenCalls = [];
+  const hidden = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      const method = options.method ?? 'GET';
+      hiddenCalls.push({ url, method, body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }]
+        };
+      }
+      if (method === 'POST') return { ok: false, status: 422, json: async () => ({}) };
+      if (method === 'GET' && url.endsWith('/tags/agent-admission-recovery-v1/' + scopeKey + '/21')) {
+        return { ok: true, status: 200, json: async () => ({ object: { sha: staleSha } }) };
+      }
+      if (method === 'PATCH') return { ok: true, status: 200, json: async () => ({}) };
+      if (method === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${method} ${url}`);
+    }
+  });
+  const reboundHidden = await hidden.setAdmissionRecoveryCursor(scopeKey, 21, trustedSha);
+  assert.equal(reboundHidden.page, 21);
+  const hiddenGet = hiddenCalls.findIndex((call) => call.method === 'GET' && call.url.endsWith('/21'));
+  const hiddenPatch = hiddenCalls.findIndex((call) => call.method === 'PATCH' && call.url.endsWith('/21'));
+  const hiddenDelete = hiddenCalls.findIndex((call) => call.method === 'DELETE');
+  assert.ok(hiddenGet >= 0 && hiddenPatch > hiddenGet && hiddenDelete > hiddenPatch);
+  assert.deepEqual(JSON.parse(hiddenCalls[hiddenPatch].body), { sha: trustedSha, force: true });
 });
 
 test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
