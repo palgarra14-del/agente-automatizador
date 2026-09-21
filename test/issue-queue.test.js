@@ -550,7 +550,8 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
           status: 200,
           json: async () => [
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } },
-            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/not-a-page`, object: { sha: trustedSha } }
           ]
         };
       }
@@ -559,9 +560,12 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
     }
   });
   const cursor = await channel.admissionRecoveryCursor(scopeKey, trustedSha);
-  assert.equal(cursor.page, 7);
-  assert.equal(calls.filter((call) => call.method === 'DELETE').length, 1);
-  assert.match(calls.find((call) => call.method === 'DELETE').url, /\/3$/);
+  assert.equal(cursor.page, 3);
+  assert.equal(cursor.needsRebind, true);
+  const deleted = calls.filter((call) => call.method === 'DELETE');
+  assert.equal(deleted.length, 2);
+  assert.ok(deleted.some((call) => /\/3$/.test(call.url)));
+  assert.ok(deleted.some((call) => /\/not-a-page$/.test(call.url)));
 
   const setCalls = [];
   const setter = new GitHubIssueChannel({
