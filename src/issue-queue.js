@@ -593,6 +593,11 @@ export class GitHubIssueChannel {
     return `/repos/${encodeURIComponent(this.repository.owner)}/${encodeURIComponent(this.repository.name)}${suffix}`;
   }
 
+  gitRefPath(ref) {
+    if (typeof ref !== 'string' || !ref.startsWith('refs/')) throw new Error('github_ref_path_invalid');
+    return ref.slice('refs/'.length).split('/').map((segment) => encodeURIComponent(segment)).join('/');
+  }
+
   async request(path, options = {}) {
     const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
     const signal = options.signal
@@ -773,7 +778,7 @@ export class GitHubIssueChannel {
       if (!match || !Number.isSafeInteger(candidate) || candidate < 1 || candidate > 1_000_000 ||
           typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
         try {
-          await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+          await this.request(this.path('/git/refs/' + this.gitRefPath(item.ref)), { method: 'DELETE' });
         } catch (error) {
           if (!/request failed: 404/.test(error.message)) throw error;
         }
@@ -808,7 +813,7 @@ export class GitHubIssueChannel {
       if (!match || !Number.isSafeInteger(candidate) || candidate < 1 || candidate > 1_000_000 ||
           typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
         try {
-          await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+          await this.request(this.path('/git/refs/' + this.gitRefPath(item.ref)), { method: 'DELETE' });
         } catch (error) {
           if (!/request failed: 404/.test(error.message)) throw error;
         }
@@ -820,7 +825,7 @@ export class GitHubIssueChannel {
     if (page === 1) {
       for (const item of valid) {
         try {
-          await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+          await this.request(this.path('/git/refs/' + this.gitRefPath(item.ref)), { method: 'DELETE' });
         } catch (error) {
           if (!/request failed: 404/.test(error.message)) throw error;
         }
@@ -832,7 +837,7 @@ export class GitHubIssueChannel {
     const existingTarget = valid.find((item) => item.ref === ref) ?? null;
     if (existingTarget) {
       if (existingTarget.sha !== trusted) {
-        await this.request(this.path('/git/refs/' + ref.slice('refs/'.length)), {
+        await this.request(this.path('/git/refs/' + this.gitRefPath(ref)), {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: trusted, force: true })
@@ -847,9 +852,17 @@ export class GitHubIssueChannel {
         });
       } catch (error) {
         if (!/request failed: 422/.test(error.message)) throw error;
-        const existing = await this.request(this.path('/git/ref/' + ref.slice('refs/'.length)));
-        if (existing?.object?.sha?.toLowerCase() !== trusted) {
+        const existing = await this.request(this.path('/git/ref/' + this.gitRefPath(ref)));
+        const existingSha = existing?.object?.sha;
+        if (typeof existingSha !== 'string' || !/^[a-f0-9]{40}$/i.test(existingSha)) {
           throw new Error('admission_recovery_cursor_conflict', { cause: error });
+        }
+        if (existingSha.toLowerCase() !== trusted) {
+          await this.request(this.path('/git/refs/' + this.gitRefPath(ref)), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sha: trusted, force: true })
+          });
         }
       }
     }
@@ -857,7 +870,7 @@ export class GitHubIssueChannel {
     for (const item of valid) {
       if (item.ref === ref) continue;
       try {
-        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        await this.request(this.path('/git/refs/' + this.gitRefPath(item.ref)), { method: 'DELETE' });
       } catch (error) {
         if (!/request failed: 404/.test(error.message)) throw error;
       }
