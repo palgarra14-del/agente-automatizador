@@ -322,10 +322,9 @@ test('scheduled recovery advances a durable page cursor across capped runs', asy
 
 test('scheduled recovery repairs an exact stale ref even when listing does not expose it', async () => {
   const target = issue(41), f = admissionFixture(target);
-  const parsed = parseIssueRequestBody(target.body);
-  const intent = f.queue.admissionIntent(target, parsed);
-  const ref = f.channel.admissionIntentRef(intent);
-  f.intents.set(ref, { ref, ...intent, targetSha: 'e'.repeat(40) });
+  await f.queue.admitEvent('issues', eventFor(target));
+  const [ref, existing] = [...f.intents.entries()][0];
+  f.intents.set(ref, { ...existing, targetSha: 'e'.repeat(40) });
 
   f.channel.listAdmissionIntents = async () => [];
   f.channel.openIssues = async () => [clone(target)];
