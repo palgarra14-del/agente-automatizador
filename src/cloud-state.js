@@ -601,9 +601,9 @@ export class GitHubStateStore extends JsonStore {
     return `e=${epoch};a=${assertSha(stateAnchorSha)};b=${baseGeneration};s=${startGeneration};u=${assertSha(authorityAnchorSha)};p=${previous}`;
   }
 
-  sealDescription(stateSha, generation) {
+  sealDescription(stateSha, generation, baseWitnessSha) {
     if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
-    return `s=${assertSha(stateSha)};g=${generation}`;
+    return `s=${assertSha(stateSha)};g=${generation};b=${assertSha(baseWitnessSha, 'cloud_state_base_witness_invalid')}`;
   }
 
   nextDescription(epoch, statusAnchorSha) {
@@ -611,8 +611,8 @@ export class GitHubStateStore extends JsonStore {
     return `e=${epoch};a=${assertSha(statusAnchorSha)}`;
   }
 
-  authorityDescription(stateSha, parentSha) {
-    return `s=${assertSha(stateSha)};p=${assertSha(parentSha)}`;
+  authorityDescription(stateSha, parentSha, baseWitnessSha) {
+    return `s=${assertSha(stateSha)};p=${assertSha(parentSha)};b=${assertSha(baseWitnessSha, 'cloud_state_base_witness_invalid')}`;
   }
 
   parseEpochStatus(status, expectedStatusAnchorSha) {
@@ -659,12 +659,13 @@ export class GitHubStateStore extends JsonStore {
     }
 
     if (context === sealContext) {
-      const match = /^s=([a-f0-9]{40});g=([1-9][0-9]*)$/i.exec(status.description);
+      const match = /^s=([a-f0-9]{40});g=([1-9][0-9]*);b=([a-f0-9]{40})$/i.exec(status.description);
       if (!match) throw new Error('cloud_state_epoch_seal_invalid');
       const stateSha = assertSha(match[1], 'cloud_state_epoch_seal_invalid');
       const generation = Number(match[2]);
+      const baseWitnessSha = assertSha(match[3], 'cloud_state_base_witness_invalid');
       if (!Number.isSafeInteger(generation)) throw new Error('cloud_state_epoch_seal_invalid');
-      return { kind: 'seal', stateSha, generation };
+      return { kind: 'seal', stateSha, generation, baseWitnessSha };
     }
 
     if (context === nextContext) {
@@ -687,14 +688,15 @@ export class GitHubStateStore extends JsonStore {
           epochForGeneration(generation) !== epoch) {
         throw new Error('cloud_state_epoch_authority_invalid');
       }
-      const match = /^s=([a-f0-9]{40});p=([a-f0-9]{40})$/i.exec(status.description);
+      const match = /^s=([a-f0-9]{40});p=([a-f0-9]{40});b=([a-f0-9]{40})$/i.exec(status.description);
       if (!match) throw new Error('cloud_state_epoch_authority_invalid');
       return {
         kind: 'authority',
         epoch,
         generation,
         stateSha: assertSha(match[1], 'cloud_state_epoch_authority_invalid'),
-        parentSha: assertSha(match[2], 'cloud_state_epoch_authority_invalid')
+        parentSha: assertSha(match[2], 'cloud_state_epoch_authority_invalid'),
+        baseWitnessSha: assertSha(match[3], 'cloud_state_base_witness_invalid')
       };
     }
 
@@ -840,7 +842,7 @@ export class GitHubStateStore extends JsonStore {
           if (sealedEnvelope.version !== 2 || sealedEnvelope.generation !== bundle.seal.generation) {
             throw new Error('cloud_state_epoch_seal_mismatch');
           }
-          await this.validateLineageAnchor(sealedEnvelope);
+          await this.validateLineageAnchor(sealedEnvelope, { baseWitnessSha: bundle.seal.baseWitnessSha });
 
           const repairError = await this.appendEpochStatus(
             registration.statusAnchorSha,
@@ -880,7 +882,13 @@ export class GitHubStateStore extends JsonStore {
       const previousRegistration = root.registrations.at(-2);
       const previousSeal = root.seals.get(previousRegistration.epoch);
       if (!previousSeal) throw new Error('cloud_state_epoch_chain_invalid');
-      authority = { generation: previousSeal.generation, stateSha: previousSeal.stateSha, parentSha: null, sealed: true };
+      authority = {
+        generation: previousSeal.generation,
+        stateSha: previousSeal.stateSha,
+        parentSha: null,
+        baseWitnessSha: previousSeal.baseWitnessSha,
+        sealed: true
+      };
       authorityRegistration = previousRegistration;
     }
     return { ...root, activeRegistration, activeAuthorities, authority, authorityRegistration };
@@ -1087,18 +1095,23 @@ export class GitHubStateStore extends JsonStore {
     const root = observedRoot ?? await this.readRootEvidence();
     const existing = root.seals.get(registration.epoch);
     if (existing) {
-      if (existing.stateSha === authority.stateSha && existing.generation === authority.generation) return root;
+      if (existing.stateSha === authority.stateSha &&
+          existing.generation === authority.generation &&
+          existing.baseWitnessSha === authority.baseWitnessSha) return root;
       throw new Error('cloud_state_epoch_seal_conflict');
     }
     const postError = await this.appendEpochStatus(
       registration.statusAnchorSha,
       this.epochSealContext(),
-      this.sealDescription(authority.stateSha, authority.generation)
+      this.sealDescription(authority.stateSha, authority.generation, authority.baseWitnessSha)
     );
     if (postError) throw new Error('cloud_state_epoch_seal_append_failed', { cause: postError });
     const after = await this.readRootEvidence();
     const observed = after.seals.get(registration.epoch);
-    if (!observed || observed.stateSha !== authority.stateSha || observed.generation !== authority.generation) {
+    if (!observed ||
+        observed.stateSha !== authority.stateSha ||
+        observed.generation !== authority.generation ||
+        observed.baseWitnessSha !== authority.baseWitnessSha) {
       throw new Error('cloud_state_epoch_seal_conflict');
     }
     return after;
@@ -1135,7 +1148,8 @@ export class GitHubStateStore extends JsonStore {
     const desired = {
       generation,
       stateSha: assertSha(stateSha),
-      parentSha: assertSha(parentSha)
+      parentSha: assertSha(parentSha),
+      baseWitnessSha: null
     };
     if (epochForGeneration(generation) !== registration.epoch) throw new Error('cloud_state_epoch_generation_mismatch');
     if (!Array.isArray(preClaimAuthorities)) throw new Error('cloud_state_epoch_authority_invalid');
@@ -1148,7 +1162,12 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_epoch_authority_conflict');
     }
 
-    await this.validateLineageAnchor(lineageEnvelope);
+    // Capture the exact base revision once and bind the immutable authority to
+    // that observation. A later movement of the mutable branch cannot
+    // retroactively invalidate or authorize this status.
+    const baseWitnessSha = await this.baseBranchSha();
+    await this.validateLineageAnchor(lineageEnvelope, { baseWitnessSha });
+    desired.baseWitnessSha = baseWitnessSha;
 
     let postError = null;
     try {
@@ -1157,7 +1176,7 @@ export class GitHubStateStore extends JsonStore {
         body: {
           state: 'success',
           context: this.epochAuthorityContext(registration.epoch, generation),
-          description: this.authorityDescription(stateSha, parentSha)
+          description: this.authorityDescription(stateSha, parentSha, baseWitnessSha)
         }
       });
     } catch (error) {
@@ -1165,7 +1184,9 @@ export class GitHubStateStore extends JsonStore {
     }
     const after = await this.readEpochAuthorities(registration);
     const observed = after.find((record) => record.generation === generation);
-    if (observed?.stateSha === desired.stateSha && observed?.parentSha === desired.parentSha) return after;
+    if (observed?.stateSha === desired.stateSha &&
+        observed?.parentSha === desired.parentSha &&
+        observed?.baseWitnessSha === desired.baseWitnessSha) return after;
     if (observed) throw new Error('cloud_state_epoch_authority_conflict', { cause: postError ?? undefined });
     if (postError) throw postError;
     throw new Error('cloud_state_epoch_authority_append_failed');
@@ -1177,24 +1198,27 @@ export class GitHubStateStore extends JsonStore {
     if (commit.parents.length !== 1) throw new Error('cloud_state_history_fork');
   }
 
-  async validateLineageAnchor(stateEnvelope) {
+  async validateLineageAnchor(stateEnvelope, { baseWitnessSha = null } = {}) {
     const anchorSha = assertSha(stateEnvelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid');
     const anchorGeneration = stateEnvelope.lineageBaseGeneration;
     if (!Number.isInteger(anchorGeneration) || anchorGeneration < 0 || anchorGeneration >= stateEnvelope.generation) {
       throw new Error('cloud_state_lineage_anchor_invalid');
     }
     if (anchorGeneration === 0) {
-      const currentBaseSha = await this.baseBranchSha();
-      const relation = await this.compareCommits(anchorSha, currentBaseSha);
+      const observedBaseSha = baseWitnessSha
+        ? assertSha(baseWitnessSha, 'cloud_state_base_witness_invalid')
+        : await this.baseBranchSha();
+      const relation = await this.compareCommits(anchorSha, observedBaseSha);
       if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
-      return { anchorSha, anchorGeneration };
+      return { anchorSha, anchorGeneration, baseWitnessSha: observedBaseSha };
     }
     const anchorEnvelope = await this.readEnvelopeAt(anchorSha);
     if (anchorEnvelope.version !== 1 || anchorEnvelope.generation !== anchorGeneration) {
       throw new Error('cloud_state_lineage_anchor_invalid');
     }
     await this.validateLegacyMigrationHead(anchorSha, anchorEnvelope);
-    return { anchorSha, anchorGeneration };
+    if (baseWitnessSha) await this.readCommit(assertSha(baseWitnessSha, 'cloud_state_base_witness_invalid'));
+    return { anchorSha, anchorGeneration, baseWitnessSha: baseWitnessSha ? assertSha(baseWitnessSha) : null };
   }
 
   async validateV2Edge(parentSha, parentEnvelope, childSha, childEnvelope) {
@@ -1236,7 +1260,7 @@ export class GitHubStateStore extends JsonStore {
         stateEnvelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
       throw new Error('cloud_state_lineage_anchor_mismatch');
     }
-    await this.validateLineageAnchor(stateEnvelope);
+    await this.validateLineageAnchor(stateEnvelope, { baseWitnessSha: latest.baseWitnessSha });
     if (this.validatedLineageHeads.has(authority.stateSha)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
@@ -1427,11 +1451,13 @@ export class GitHubStateStore extends JsonStore {
           authorityEnvelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
         throw new Error('cloud_state_lineage_anchor_mismatch');
       }
-      await this.validateLineageAnchor(authorityEnvelope);
+      await this.validateLineageAnchor(authorityEnvelope, { baseWitnessSha: authority.baseWitnessSha });
     }
 
     const revalidateSealedFallback = async () => {
-      if (!activeEpochAuthority) await this.validateLineageAnchor(authorityEnvelope);
+      if (!activeEpochAuthority) {
+        await this.validateLineageAnchor(authorityEnvelope, { baseWitnessSha: authority.baseWitnessSha });
+      }
     };
 
     if (!stateSha) {
