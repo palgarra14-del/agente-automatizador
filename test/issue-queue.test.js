@@ -539,6 +539,7 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
   const trustedSha = 'b'.repeat(40);
   const staleSha = 'c'.repeat(40);
   const calls = [];
+  const oversized = '9'.repeat(400);
   const channel = new GitHubIssueChannel({
     token: 'ghp_fixtureSecret',
     repository: { owner: 'x', name: 'y' },
@@ -551,7 +552,9 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
           json: async () => [
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } },
             { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } },
-            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/not-a-page`, object: { sha: trustedSha } }
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/not-a-page`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/1000001`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/${oversized}`, object: { sha: trustedSha } }
           ]
         };
       }
@@ -563,9 +566,36 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
   assert.equal(cursor.page, 3);
   assert.equal(cursor.needsRebind, true);
   const deleted = calls.filter((call) => call.method === 'DELETE');
-  assert.equal(deleted.length, 2);
-  assert.ok(deleted.some((call) => /\/3$/.test(call.url)));
+  assert.equal(deleted.length, 3);
+  assert.doesNotMatch(deleted.map((call) => call.url).join('\n'), /\/3$/m);
   assert.ok(deleted.some((call) => /\/not-a-page$/.test(call.url)));
+  assert.ok(deleted.some((call) => /\/1000001$/.test(call.url)));
+  assert.ok(deleted.some((call) => call.url.endsWith('/' + oversized)));
+
+  const rebindCalls = [];
+  const rebinder = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      rebindCalls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } }]
+        };
+      }
+      if ((options.method ?? 'GET') === 'PATCH') return { ok: true, status: 200, json: async () => ({}) };
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const rebound = await rebinder.setAdmissionRecoveryCursor(scopeKey, 3, trustedSha);
+  assert.equal(rebound.page, 3);
+  assert.equal(rebindCalls.filter((call) => call.method === 'DELETE').length, 0);
+  const patch = rebindCalls.find((call) => call.method === 'PATCH');
+  assert.ok(patch);
+  assert.deepEqual(JSON.parse(patch.body), { sha: trustedSha, force: true });
 
   const setCalls = [];
   const setter = new GitHubIssueChannel({
@@ -587,9 +617,10 @@ test('GitHub admission recovery cursor is target-bound and advances durably', as
   });
   const advanced = await setter.setAdmissionRecoveryCursor(scopeKey, 21, trustedSha);
   assert.equal(advanced.page, 21);
-  assert.equal(setCalls.filter((call) => call.method === 'DELETE').length, 1);
-  const create = setCalls.find((call) => call.method === 'POST');
-  assert.ok(create);
+  const createIndex = setCalls.findIndex((call) => call.method === 'POST');
+  const deleteIndex = setCalls.findIndex((call) => call.method === 'DELETE');
+  assert.ok(createIndex >= 0 && deleteIndex > createIndex);
+  const create = setCalls[createIndex];
   assert.deepEqual(JSON.parse(create.body), {
     ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/21`,
     sha: trustedSha
