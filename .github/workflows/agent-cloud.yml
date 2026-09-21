@@ -68,10 +68,32 @@ jobs:
           node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
           echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
 
+  admit:
+    name: admit cloud event (${{ matrix.lane }})
+    needs: route
+    if: needs.route.outputs.active == 'true' && (github.event_name == 'issues' || github.event_name == 'issue_comment')
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: main, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts
+      - name: Persist bounded event admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: node src/cli.js inbox cloud-admit --lane "$AGENT_CLOUD_LANE"
+
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
-    needs: route
-    if: needs.route.outputs.active == 'true'
+    needs: [route, admit]
+    if: always() && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -104,9 +126,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "issues" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
-            node src/cli.js inbox cloud-admit --lane "$AGENT_CLOUD_LANE"
-          fi
           HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
           if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
             echo "invalid cloud preflight result" >&2
