@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { humanApprovalDependencyFingerprint, maskSecrets, normalizeBusinessBrief, readBoundedRegularFile, WorkflowStepStatus } from './core.js';
 
 export const ISSUE_REQUEST_MARKER = '<!-- agent-request:v1 -->';
+const ADMISSION_INTENT_NAMESPACE = 'agent-admission-v1';
 const ISSUE_REQUEST_MAX_BYTES = 80 * 1024;
 const approvalPattern = /^\/agent\s+(approve|reject)\s+([a-f0-9]{64})$/i;
 
@@ -435,7 +436,7 @@ function workflowApprovalMessage(workflow, step, token, { recovered = false } = 
   ].join('\n');
 }
 
-const requestStatuses = new Set(['initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
+const requestStatuses = new Set(['admitted', 'initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
 
 export function validateIssueQueueRecord(record, { issue, requestFingerprint, issueBodyFingerprint, projectFingerprint, controlPlaneFingerprint } = {}) {
   if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== 1) throw new Error('issue queue record version is invalid');
@@ -489,6 +490,10 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
   if (typeof record.author !== 'string' || !record.author.trim()) throw new Error('issue queue record author is invalid');
   if (!Number.isFinite(Date.parse(record.createdAt ?? '')) || !Number.isFinite(Date.parse(record.updatedAt ?? ''))) throw new Error('issue queue record timestamps are invalid');
   const terminal = ['completed', 'failed', 'blocked', 'rejected'].includes(record.status);
+  if (record.status === 'admitted' &&
+      (record.workflowId != null || record.workflowBindingFingerprint != null || record.pendingApproval != null || record.activeApproval != null || record.initializationLease != null)) {
+    throw new Error('admitted issue queue state is inconsistent');
+  }
   if (record.status === 'initializing' &&
       (record.workflowId != null || record.workflowBindingFingerprint != null || record.pendingApproval != null || record.activeApproval != null)) {
     throw new Error('initializing issue queue state is inconsistent');
@@ -643,6 +648,73 @@ export class GitHubIssueChannel {
     return sha.toLowerCase();
   }
 
+  admissionIntentRef({ projectId, issueNumber, fingerprint: intentFingerprint }) {
+    if (typeof projectId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(projectId) ||
+        !Number.isInteger(issueNumber) || issueNumber < 1 ||
+        typeof intentFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(intentFingerprint)) {
+      throw new Error('admission_intent_identity_invalid');
+    }
+    return 'refs/tags/' + ADMISSION_INTENT_NAMESPACE + '/' + projectId + '/' + issueNumber + '/' + intentFingerprint;
+  }
+
+  async createAdmissionIntent(intent, targetSha) {
+    const ref = this.admissionIntentRef(intent);
+    const sha = typeof targetSha === 'string' && /^[a-f0-9]{40}$/i.test(targetSha) ? targetSha.toLowerCase() : null;
+    if (!sha) throw new Error('admission_intent_target_invalid');
+    try {
+      await this.request(this.path('/git/refs'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref, sha })
+      });
+      return { created: true, ref };
+    } catch (error) {
+      if (!/request failed: 422/.test(error.message)) throw error;
+      const existing = await this.request(this.path('/git/ref/' + ref.slice('refs/'.length)));
+      const existingSha = existing?.object?.sha;
+      if (typeof existingSha !== 'string' || existingSha.toLowerCase() !== sha) {
+        throw new Error('admission_intent_existing_conflict', { cause: error });
+      }
+      return { created: false, ref };
+    }
+  }
+
+  async listAdmissionIntents(projectIds, { maxPerProject = 99 } = {}) {
+    if (!Array.isArray(projectIds) || projectIds.length < 1 ||
+        projectIds.some((projectId) => typeof projectId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(projectId)) ||
+        !Number.isInteger(maxPerProject) || maxPerProject < 1 || maxPerProject > 99) {
+      throw new Error('admission_intent_query_invalid');
+    }
+    const intents = [];
+    for (const projectId of [...new Set(projectIds)].sort()) {
+      const prefix = 'tags/' + ADMISSION_INTENT_NAMESPACE + '/' + projectId + '/';
+      const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
+      if (!Array.isArray(batch)) throw new Error('admission_intent_response_invalid');
+      if (batch.length > maxPerProject) throw new Error('admission_intent_limit');
+      for (const item of batch) {
+        const match = /^refs\/tags\/agent-admission-v1\/([a-z0-9-]{1,80})\/([1-9][0-9]*)\/([a-f0-9]{64})$/.exec(item?.ref ?? '');
+        if (!match || match[1] !== projectId || !/^[a-f0-9]{40}$/i.test(item?.object?.sha ?? '')) {
+          throw new Error('admission_intent_ref_invalid');
+        }
+        intents.push({ ref: item.ref, projectId, issueNumber: Number(match[2]), fingerprint: match[3] });
+      }
+    }
+    return intents.sort((a, b) => a.issueNumber - b.issueNumber || a.fingerprint.localeCompare(b.fingerprint));
+  }
+
+  async deleteAdmissionIntent(ref) {
+    if (typeof ref !== 'string' || !/^refs\/tags\/agent-admission-v1\/[a-z0-9-]{1,80}\/[1-9][0-9]*\/[a-f0-9]{64}$/.test(ref)) {
+      throw new Error('admission_intent_ref_invalid');
+    }
+    try {
+      await this.request(this.path('/git/refs/' + ref.slice('refs/'.length)), { method: 'DELETE' });
+      return true;
+    } catch (error) {
+      if (/request failed: 404/.test(error.message)) return false;
+      throw error;
+    }
+  }
+
   async comment(number, body) {
     const result = await this.request(this.path(`/issues/${encodeURIComponent(number)}/comments`), {
       method: 'POST',
@@ -720,6 +792,100 @@ export class SupervisedIssueQueue {
     return this.ownsProject(record?.request?.projectId ?? null);
   }
 
+  admissionIntent(issue, parsed) {
+    const projectId = parsed?.request?.projectId;
+    if (!this.ownsProject(projectId) || !Number.isInteger(issue?.number) || !issue?.id ||
+        typeof issue?.user?.login !== 'string' || !this.authorized(issue.user.login)) {
+      throw new Error('admission_intent_identity_invalid');
+    }
+    return {
+      projectId,
+      issueNumber: issue.number,
+      fingerprint: fingerprint({
+        version: 1,
+        repository: this.channel.repository,
+        projectId,
+        issueNumber: issue.number,
+        issueId: String(issue.id),
+        author: issue.user.login,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint
+      })
+    };
+  }
+
+  async pendingAdmissionIntents() {
+    if (this.includedProjectIds === null || typeof this.channel.listAdmissionIntents !== 'function') return [];
+    return this.channel.listAdmissionIntents([...this.includedProjectIds]);
+  }
+
+  async ingestAdmissionIntents({ max = 20 } = {}) {
+    if (!Number.isInteger(max) || max < 1 || max > 50) throw new Error('admission_intent_ingest_limit_invalid');
+    const intents = await this.pendingAdmissionIntents();
+    for (const intent of intents.slice(0, max)) {
+      let issue;
+      try { issue = await this.channel.issue(intent.issueNumber); }
+      catch (error) { throw new Error('admission_intent_issue_read_failed', { cause: error }); }
+
+      if (!issue || issue.state !== 'open' || issue.pull_request ||
+          !this.authorized(issue.user?.login) || typeof issue.body !== 'string' ||
+          !issue.body.includes(ISSUE_REQUEST_MARKER)) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      let parsed;
+      try { parsed = parseIssueRequestBody(issue.body); }
+      catch {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      if (!this.ownsProject(parsed.request.projectId) || parsed.request.projectId !== intent.projectId) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      const expected = this.admissionIntent(issue, parsed);
+      if (expected.fingerprint !== intent.fingerprint) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      const key = this.requestKey(issue);
+      const existing = await this.getRecord(key);
+      if (existing) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      const project = this.projects.get(parsed.request.projectId) ?? null;
+      if (!project) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      const now = this.now();
+      const record = {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user.login,
+        requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectExecutionFingerprint(project), controlPlaneFingerprint: this.controlPlaneFingerprint(),
+        request: parsed.request, workflowId: null, workflowBindingFingerprint: null,
+        status: 'admitted', reason: null, createdAt: now, updatedAt: now, pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null,
+        initializationLease: null, lastProcessedCommentId: 0
+      };
+      validateIssueQueueRecord(record, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: record.projectFingerprint,
+        controlPlaneFingerprint: record.controlPlaneFingerprint
+      });
+      await this.saveRecord(key, record);
+      await this.channel.deleteAdmissionIntent(intent.ref);
+      return record;
+    }
+    return null;
+  }
+
   controlPlaneFingerprint() {
     return fingerprint({
       repository: this.channel.repository,
@@ -795,6 +961,46 @@ export class SupervisedIssueQueue {
       };
       data.requests[key] = record;
       return { claimed: true, record };
+    });
+  }
+
+  async claimAdmittedInitialization(issue, parsed, expectedRecord) {
+    const key = this.requestKey(issue);
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      const current = data.requests[key] ?? null;
+      if (!current) return { claimed: false, record: null };
+      validateIssueQueueRecord(current, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      if (current.requestFingerprint !== expectedRecord.requestFingerprint ||
+          current.issueBodyFingerprint !== expectedRecord.issueBodyFingerprint ||
+          current.projectFingerprint !== expectedRecord.projectFingerprint ||
+          current.controlPlaneFingerprint !== expectedRecord.controlPlaneFingerprint) {
+        throw new Error('admitted_initialization_record_changed');
+      }
+      if (current.status !== 'admitted') return { claimed: false, record: current };
+      const now = this.now();
+      const initializing = {
+        ...current,
+        status: 'initializing',
+        updatedAt: now,
+        initializationLease: { leaseId: randomUUID(), pid: process.pid, createdAt: now, ownerIdentity }
+      };
+      validateIssueQueueRecord(initializing, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      data.requests[key] = initializing;
+      return { claimed: true, record: initializing };
     });
   }
 
@@ -920,16 +1126,89 @@ export class SupervisedIssueQueue {
     return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
   }
 
-  async initializeIssue(issue, parsed) {
-    if (!this.authorized(issue.user?.login)) return null;
+  async admitEvent(eventName, event) {
+    if (!['issues', 'issue_comment'].includes(eventName)) return { admitted: false, reason: 'event_not_admissible' };
+    if (!event || typeof event !== 'object' || Array.isArray(event)) return { admitted: false, reason: 'event_invalid' };
+    const action = event.action;
+    if (eventName === 'issues' && !['opened', 'edited', 'reopened'].includes(action)) return { admitted: false, reason: 'event_action_not_admissible' };
+    if (eventName === 'issue_comment' && action !== 'created') return { admitted: false, reason: 'event_action_not_admissible' };
+
+    const repository = event.repository;
+    const expectedOwner = this.channel.repository.owner.toLowerCase();
+    const expectedName = this.channel.repository.name.toLowerCase();
+    const eventOwner = repository?.owner?.login ?? repository?.owner?.name ?? null;
+    if (typeof eventOwner !== 'string' || typeof repository?.name !== 'string' ||
+        eventOwner.toLowerCase() !== expectedOwner || repository.name.toLowerCase() !== expectedName) {
+      return { admitted: false, reason: 'event_repository_mismatch' };
+    }
+
+    const actor = event.sender?.login;
+    if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
+    if (eventName === 'issue_comment' &&
+        (event.comment?.user?.login !== actor || String(event.comment?.body ?? '').trim() !== '/agent')) {
+      return { admitted: false, reason: 'event_comment_invalid' };
+    }
+
+    const eventIssue = event.issue;
+    if (!Number.isInteger(eventIssue?.number) || !eventIssue?.id || eventIssue.state !== 'open' || eventIssue.pull_request ||
+        typeof eventIssue.body !== 'string' || !this.authorized(eventIssue.user?.login)) {
+      return { admitted: false, reason: 'event_issue_invalid' };
+    }
+    if (!eventIssue.body.includes(ISSUE_REQUEST_MARKER)) return { admitted: false, reason: 'event_not_agent_request' };
+
+    let parsed;
+    try { parsed = parseIssueRequestBody(eventIssue.body); }
+    catch { return { admitted: false, reason: 'event_request_invalid' }; }
+    if (!this.ownsProject(parsed.request.projectId)) return { admitted: false, reason: 'event_wrong_lane' };
+
+    const project = this.projects.get(parsed.request.projectId) ?? null;
+    if (!project) return { admitted: false, reason: 'event_unknown_project' };
+
+    let current;
+    let retryableIssueRead = false;
+    try { current = await this.channel.issue(eventIssue.number); }
+    catch { current = eventIssue; retryableIssueRead = true; }
+    if (!retryableIssueRead && (!current || current.number !== eventIssue.number || current.id !== eventIssue.id || current.state !== 'open' || current.pull_request ||
+        current.user?.login !== eventIssue.user?.login || current.body !== eventIssue.body)) {
+      return { admitted: false, reason: 'event_issue_stale' };
+    }
+    let currentParsed;
+    try { currentParsed = parseIssueRequestBody(current.body); }
+    catch { return { admitted: false, reason: 'event_request_invalid' }; }
+    if (currentParsed.requestFingerprint !== parsed.requestFingerprint || currentParsed.issueBodyFingerprint !== parsed.issueBodyFingerprint) {
+      return { admitted: false, reason: 'event_issue_stale' };
+    }
+
+    const intent = this.admissionIntent(current, currentParsed);
+    const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    const created = await this.channel.createAdmissionIntent(intent, targetSha);
+    return {
+      admitted: created.created,
+      idempotent: !created.created,
+      issueNumber: current.number,
+      status: 'intent',
+      ...(retryableIssueRead ? { retryable: true } : {})
+    };
+  }
+
+  async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null, priorInitialization: suppliedPriorInitialization } = {}) {
+    const key = this.requestKey(issue);
+    if (seedRecord?.status !== 'initializing' || !seedRecord.initializationLease) {
+      throw new Error('workflow_initialization_requires_lease');
+    }
     const project = this.projects.get(parsed.request.projectId) ?? null;
     const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
-    const priorInitialization = await this.unboundPriorAgentInitialization(issue.number);
-    const claim = await this.claimInitialization(issue, parsed, activeProjectFingerprint);
-    if (!claim.claimed) return claim.record;
+    let priorInitialization = suppliedPriorInitialization;
+    if (priorInitialization === undefined) {
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) {
+        if (restoreOnPreflightError) { await restoreOnPreflightError(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
+        throw error;
+      }
+    }
     if (priorInitialization) {
       const blocked = {
-        ...claim.record,
+        ...seedRecord,
         status: 'blocked',
         reason: 'unbound_prior_agent_initialization',
         initializationLease: null,
@@ -937,22 +1216,28 @@ export class SupervisedIssueQueue {
       };
       return this.finalizeTerminal(
         issue,
-        this.requestKey(issue),
+        key,
         blocked,
         'Agent request blocked because this issue already contains trusted evidence of a prior agent workflow, but the active durable queue state has no binding for it. No duplicate workflow was created. Submit a new request only after reconciling or intentionally retiring the prior workflow.'
       );
     }
     if (!project) {
       const rejected = {
-        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
-        requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
-        projectFingerprint: null, controlPlaneFingerprint: this.controlPlaneFingerprint(),
-        request: parsed.request, workflowId: null, workflowBindingFingerprint: null,
-        status: 'rejected', reason: 'unknown_project', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
-        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null, lastProcessedCommentId: 0
+        ...seedRecord,
+        projectFingerprint: null,
+        status: 'rejected', reason: 'unknown_project', updatedAt: this.now(), pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null,
+        lastProcessedCommentId: 0
       };
-      return this.finalizeTerminal(issue, this.requestKey(issue), rejected, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
+      return this.finalizeTerminal(issue, key, rejected, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
     }
+    if (seedRecord.requestFingerprint !== parsed.requestFingerprint ||
+        seedRecord.issueBodyFingerprint !== parsed.issueBodyFingerprint ||
+        seedRecord.projectFingerprint !== activeProjectFingerprint ||
+        seedRecord.controlPlaneFingerprint !== this.controlPlaneFingerprint()) {
+      return this.blockRequestRevalidation(issue, key, seedRecord, 'initialization_context_changed');
+    }
+
     let workflow;
     let dryRun;
     try {
@@ -966,16 +1251,15 @@ export class SupervisedIssueQueue {
       dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
     } catch (error) {
       const blocked = {
-        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
-        requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
-        projectFingerprint: activeProjectFingerprint, controlPlaneFingerprint: this.controlPlaneFingerprint(),
-        request: parsed.request, workflowId: workflow?.id ?? null,
+        ...seedRecord,
+        projectFingerprint: activeProjectFingerprint,
+        status: 'blocked', reason: 'workflow_initialization_failed', updatedAt: this.now(),
+        workflowId: workflow?.id ?? null,
         workflowBindingFingerprint: workflow ? workflowBindingFingerprint(workflow) : null,
-        status: 'blocked', reason: 'workflow_initialization_failed', createdAt: this.now(), updatedAt: this.now(),
         pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null,
         lastProcessedCommentId: 0
       };
-      return this.finalizeTerminal(issue, this.requestKey(issue), blocked, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
+      return this.finalizeTerminal(issue, key, blocked, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
     }
     const binding = workflowBindingFingerprint(workflow);
     const token = startApprovalFingerprint({
@@ -986,21 +1270,29 @@ export class SupervisedIssueQueue {
       workflow,
       dryRun
     });
-    const record = {
-      version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
-      requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
-      projectFingerprint: activeProjectFingerprint, controlPlaneFingerprint: this.controlPlaneFingerprint(),
-      request: parsed.request, workflowId: workflow.id, workflowBindingFingerprint: binding,
-      status: 'awaiting_start_approval', reason: null, createdAt: this.now(), updatedAt: this.now(),
+    const initialized = {
+      ...seedRecord,
+      projectFingerprint: activeProjectFingerprint,
+      workflowId: workflow.id, workflowBindingFingerprint: binding,
+      status: 'awaiting_start_approval', reason: null, updatedAt: this.now(),
       pendingApproval: { kind: 'start', stepId: 'start', fingerprint: token },
       startApprovalFingerprint: token,
       startApprovalCommentId: null,
       startApprovedBy: null, activeApproval: null, initializationLease: null,
       lastProcessedCommentId: 0
     };
-    await this.saveRecord(this.requestKey(issue), record);
+    await this.saveRecord(key, initialized);
     await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
-    return record;
+    return initialized;
+  }
+
+  async initializeIssue(issue, parsed) {
+    if (!this.authorized(issue.user?.login)) return null;
+    const project = this.projects.get(parsed.request.projectId) ?? null;
+    const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
+    const claim = await this.claimInitialization(issue, parsed, activeProjectFingerprint);
+    if (!claim.claimed) return claim.record;
+    return this.finishInitialization(issue, parsed, claim.record);
   }
 
   async findDecision(issueNumber, record) {
@@ -1197,6 +1489,59 @@ export class SupervisedIssueQueue {
     }
     if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
       return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
+    }
+    if (record.status === 'admitted') {
+      if (this.operatorRevision) {
+        const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
+      let claim;
+      try { claim = await this.claimAdmittedInitialization(issue, parsed, record); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `admitted_initialization_claim_failed:${maskSecrets(error.message)}`);
+      }
+      if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
+      const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+      const blockClaimed = (reason) => this.saveRecord(key, {
+        ...claim.record,
+        status: 'blocked',
+        reason,
+        initializationLease: null,
+        pendingApproval: null,
+        activeApproval: null,
+        updatedAt: this.now()
+      });
+      let priorInitialization;
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) { await restore(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
+      let claimedRequest;
+      try { claimedRequest = await this.revalidateCurrentRequest(issue, claim.record); }
+      catch (error) {
+        await restore();
+        throw new Error('workflow_initialization_preflight_failed', { cause: error });
+      }
+      if (!claimedRequest.ok) return blockClaimed(claimedRequest.reason);
+      issue = claimedRequest.issue;
+      parsed = claimedRequest.parsed;
+      const claimedProject = this.projects.get(parsed.request.projectId) ?? null;
+      if (!this.ownsProject(parsed.request.projectId) ||
+          !claimedProject ||
+          projectExecutionFingerprint(claimedProject) !== claim.record.projectFingerprint ||
+          this.controlPlaneFingerprint() !== claim.record.controlPlaneFingerprint) {
+        return blockClaimed('initialization_context_changed');
+      }
+      if (this.operatorRevision) {
+        let remoteOperatorRevision;
+        try { remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch); }
+        catch { await restore(); return { status: 'operator_revision_check_failed', issueNumber: issue.number, updatedAt: this.now() }; }
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          await restore();
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
+      return this.finishInitialization(issue, parsed, claim.record, { restoreOnPreflightError: restore, priorInitialization });
     }
     if (record.status === 'initializing') {
       let abandoned;
@@ -1535,6 +1880,7 @@ export class SupervisedIssueQueue {
       if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
     }
 
+    if (this.includedProjectIds !== null) return (await this.pendingAdmissionIntents()).length > 0;
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
@@ -1591,6 +1937,15 @@ export class SupervisedIssueQueue {
           'issue_identity_or_state_changed'
         );
       }
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
+        return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
+      }
+      const activeResult = await this.processIssue(issue);
+      if (activeResult) return activeResult;
+    }
+    if (this.includedProjectIds !== null) {
+      if (notificationError) throw notificationError;
+      return null;
     }
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
