@@ -625,6 +625,23 @@ export class GitHubIssueChannel {
     throw new Error('GitHub issue queue pagination limit exceeded');
   }
 
+  async openIssuePage(page, { perPage = 100, sort = 'updated', direction = 'desc' } = {}) {
+    if (!Number.isInteger(page) || page < 1 ||
+        !Number.isInteger(perPage) || perPage < 1 || perPage > 100 ||
+        !['created', 'updated', 'comments'].includes(sort) ||
+        !['asc', 'desc'].includes(direction)) {
+      throw new Error('GitHub issue recovery page query is invalid');
+    }
+    const batch = await this.request(this.path(
+      `/issues?state=open&sort=${sort}&direction=${direction}&per_page=${perPage}&page=${page}`
+    ));
+    if (!Array.isArray(batch)) throw new Error('GitHub issue recovery page response is invalid');
+    return {
+      issues: batch.filter((issue) => !issue.pull_request),
+      hasMore: batch.length === perPage
+    };
+  }
+
   async issue(number) {
     return this.request(this.path(`/issues/${encodeURIComponent(number)}`));
   }
@@ -679,18 +696,17 @@ export class GitHubIssueChannel {
     }
   }
 
-  async listAdmissionIntents(projectIds, { maxPerProject = 99 } = {}) {
+  async listAdmissionIntents(projectIds, { maxPerProject = 100 } = {}) {
     if (!Array.isArray(projectIds) || projectIds.length < 1 ||
         projectIds.some((projectId) => typeof projectId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(projectId)) ||
-        !Number.isInteger(maxPerProject) || maxPerProject < 1 || maxPerProject > 99) {
+        !Number.isInteger(maxPerProject) || maxPerProject < 1 || maxPerProject > 100) {
       throw new Error('admission_intent_query_invalid');
     }
     const intents = [];
     for (const projectId of [...new Set(projectIds)].sort()) {
       const prefix = 'tags/' + ADMISSION_INTENT_NAMESPACE + '/' + projectId + '/';
-      const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
+      const batch = await this.request(this.path('/git/matching-refs/' + prefix + `?per_page=${maxPerProject}`));
       if (!Array.isArray(batch)) throw new Error('admission_intent_response_invalid');
-      if (batch.length > maxPerProject) throw new Error('admission_intent_limit');
       for (const item of batch) {
         const match = /^refs\/tags\/agent-admission-v1\/([a-z0-9-]{1,80})\/([1-9][0-9]*)\/([a-f0-9]{64})$/.exec(item?.ref ?? '');
         if (!match || match[1] !== projectId || !/^[a-f0-9]{40}$/i.test(item?.object?.sha ?? '')) {
@@ -825,13 +841,18 @@ export class SupervisedIssueQueue {
     return this.channel.listAdmissionIntents([...this.includedProjectIds]);
   }
 
-  async recoverAdmissionIntents({ max = 50 } = {}) {
-    if (this.includedProjectIds === null) return { scanned: 0, created: 0, existing: 0, skipped: 0, staleRetired: 0 };
-    if (!Number.isInteger(max) || max < 1 || max > 100) throw new Error('admission_intent_recovery_limit_invalid');
+  async recoverAdmissionIntents({ max = 50, maxPages = 20 } = {}) {
+    if (this.includedProjectIds === null) {
+      return { scanned: 0, created: 0, existing: 0, skipped: 0, staleRetired: 0, pages: 0, truncated: false };
+    }
+    if (!Number.isInteger(max) || max < 1 || max > 100 ||
+        !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 50) {
+      throw new Error('admission_intent_recovery_limit_invalid');
+    }
     const state = await this.store.load();
-    const issues = await this.channel.openIssues();
     const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
-    let scanned = 0, created = 0, existing = 0, skipped = 0, staleRetired = 0;
+    let scanned = 0, created = 0, existing = 0, skipped = 0, staleRetired = 0, pages = 0;
+    let truncated = false;
 
     for (const intent of await this.pendingAdmissionIntents()) {
       if (intent.targetSha === targetSha) continue;
@@ -839,33 +860,52 @@ export class SupervisedIssueQueue {
       staleRetired += 1;
     }
 
-    for (const issue of issues) {
+    const processIssue = async (issue) => {
       if (!issue || issue.state !== 'open' || issue.pull_request ||
           typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER) ||
           !this.authorized(issue.user?.login)) {
         skipped += 1;
-        continue;
+        return false;
       }
       let parsed;
       try { parsed = parseIssueRequestBody(issue.body); }
-      catch { skipped += 1; continue; }
+      catch { skipped += 1; return false; }
       if (!this.ownsProject(parsed.request.projectId) || !this.projects.has(parsed.request.projectId)) {
         skipped += 1;
-        continue;
+        return false;
       }
       const key = this.requestKey(issue);
       if (state.requests?.[key]) {
         existing += 1;
-        continue;
+        return false;
       }
-      if (scanned >= max) break;
+      if (scanned >= max) return true;
       scanned += 1;
       const intent = this.admissionIntent(issue, parsed);
       const result = await this.channel.createAdmissionIntent(intent, targetSha);
       if (result.created) created += 1;
       else existing += 1;
+      return scanned >= max;
+    };
+
+    if (typeof this.channel.openIssuePage === 'function') {
+      for (let page = 1; page <= maxPages; page += 1) {
+        const batch = await this.channel.openIssuePage(page);
+        pages = page;
+        for (const issue of batch.issues) {
+          if (await processIssue(issue)) return { scanned, created, existing, skipped, staleRetired, pages, truncated: false };
+        }
+        if (!batch.hasMore) return { scanned, created, existing, skipped, staleRetired, pages, truncated: false };
+        if (page === maxPages) truncated = true;
+      }
+    } else {
+      const issues = await this.channel.openIssues();
+      pages = 1;
+      for (const issue of issues) {
+        if (await processIssue(issue)) break;
+      }
     }
-    return { scanned, created, existing, skipped, staleRetired };
+    return { scanned, created, existing, skipped, staleRetired, pages, truncated };
   }
 
   async ingestAdmissionIntents({ max = 20 } = {}) {
@@ -879,7 +919,13 @@ export class SupervisedIssueQueue {
       }
       let issue;
       try { issue = await this.channel.issue(intent.issueNumber); }
-      catch (error) { throw new Error('admission_intent_issue_read_failed', { cause: error }); }
+      catch (error) {
+        if (/request failed: 404/.test(error.message)) {
+          await this.channel.deleteAdmissionIntent(intent.ref);
+          continue;
+        }
+        throw new Error('admission_intent_issue_read_failed', { cause: error });
+      }
 
       if (!issue || issue.state !== 'open' || issue.pull_request ||
           !this.authorized(issue.user?.login) || typeof issue.body !== 'string' ||
