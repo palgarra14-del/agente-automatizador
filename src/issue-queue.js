@@ -758,25 +758,38 @@ export class GitHubIssueChannel {
       throw new Error('admission_recovery_cursor_invalid');
     }
     const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
+    const fullPrefix = 'refs/' + prefix;
     const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
     if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
     let page = null;
+    let needsRebind = false;
     for (const item of batch) {
-      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)$').exec(item?.ref ?? '');
+      if (typeof item?.ref !== 'string' || !item.ref.startsWith(fullPrefix)) {
+        throw new Error('admission_recovery_cursor_response_invalid');
+      }
+      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)$').exec(item.ref);
       const sha = item?.object?.sha;
       if (!match || typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
-        throw new Error('admission_recovery_cursor_ref_invalid');
-      }
-      if (sha.toLowerCase() !== trustedSha.toLowerCase()) {
-        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        try {
+          await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        } catch (error) {
+          if (!/request failed: 404/.test(error.message)) throw error;
+        }
         continue;
       }
       const candidate = Number(match[1]);
       page = page === null ? candidate : Math.min(page, candidate);
+      if (sha.toLowerCase() !== trustedSha.toLowerCase()) {
+        try {
+          await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        } catch (error) {
+          if (!/request failed: 404/.test(error.message)) throw error;
+        }
+        needsRebind = true;
+      }
     }
-    return { page: page ?? 1 };
+    return { page: page ?? 1, needsRebind };
   }
-
   async setAdmissionRecoveryCursor(scopeKey, page, trustedSha) {
     if (typeof scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(scopeKey) ||
         !Number.isInteger(page) || page < 1 || page > 1_000_000 ||
@@ -784,11 +797,13 @@ export class GitHubIssueChannel {
       throw new Error('admission_recovery_cursor_invalid');
     }
     const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
+    const fullPrefix = 'refs/' + prefix;
     const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
     if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
     for (const item of batch) {
-      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)$').exec(item?.ref ?? '');
-      if (!match) throw new Error('admission_recovery_cursor_ref_invalid');
+      if (typeof item?.ref !== 'string' || !item.ref.startsWith(fullPrefix)) {
+        throw new Error('admission_recovery_cursor_response_invalid');
+      }
       try {
         await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
       } catch (error) {
@@ -986,7 +1001,10 @@ export class SupervisedIssueQueue {
     if (typeof this.channel.openIssuePage === 'function') {
       const cursor = typeof this.channel.admissionRecoveryCursor === 'function'
         ? await this.channel.admissionRecoveryCursor(scopeKey, targetSha)
-        : { page: 1 };
+        : { page: 1, needsRebind: false };
+      if (cursor.needsRebind && typeof this.channel.setAdmissionRecoveryCursor === 'function') {
+        await this.channel.setAdmissionRecoveryCursor(scopeKey, cursor.page, targetSha);
+      }
       let page = cursor.page;
       for (let count = 0; count < maxPages; count += 1) {
         const batch = await this.channel.openIssuePage(page, { sort: 'created', direction: 'asc' });
