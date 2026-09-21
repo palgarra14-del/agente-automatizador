@@ -264,6 +264,9 @@ function fakeGitHub() {
     const statusPost = /^\/statuses\/([a-f0-9]{40})$/i.exec(path);
     if (method === 'POST' && statusPost) {
       const targetSha = statusPost[1].toLowerCase();
+      if (typeof body?.description !== 'string' || body.description.length > 140) {
+        return response(422, { message: 'status description exceeds GitHub limit' });
+      }
       statusWrites.push({ targetSha, ...cloneState(body) });
       return response(201, addStatus(targetSha, body));
     }
@@ -743,6 +746,20 @@ test('epoch authority is anchored to the verified parentless repository root', a
   fake.setRootParents([fake.mainSha]);
   const store = storeFor(fake);
   await assert.rejects(() => store.readSnapshot(), /status_root_invalid/);
+});
+
+test('epoch registration descriptions stay inside GitHub status description limit', () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const description = store.registrationDescription(
+    999999,
+    'a'.repeat(40),
+    255999999,
+    256000000,
+    'b'.repeat(40)
+  );
+  assert.ok(description.length <= 140, `registration description length: ${description.length}`);
+  assert.doesNotMatch(description, /;p=/);
 });
 
 test('bootstrap registers epoch, atomically claims generation, then writes canonical authority', async () => {
