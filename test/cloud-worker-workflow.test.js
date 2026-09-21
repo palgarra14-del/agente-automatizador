@@ -19,7 +19,8 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
-  assert.match(workflow, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
+  assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
+  assert.match(workflow, /\.trim\(\)[\s\S]*body\.startsWith\("\/agent "\)/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
@@ -27,14 +28,15 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /route:[\s\S]*permissions:\n\s+contents: read/);
   assert.match(workflow, /route:[\s\S]*uses: actions\/checkout@v5[\s\S]*ref: main[\s\S]*persist-credentials: false/);
   assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
-  const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  cloud-once:'));
+  const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
-  assert.match(workflow, /outputs:\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
-  assert.match(workflow, /cloud-once:[\s\S]*needs: route/);
+  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit\][\s\S]*needs\.admit\.result/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /timeout-minutes: 35/);
+  assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
   assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
 });
@@ -98,7 +100,7 @@ test('cloud worker does not depend on runner cache for workflow continuity', () 
 
 test('routing job receives event data but no secrets or write credentials', () => {
   const routeStart = workflow.indexOf('  route:');
-  const cloudStart = workflow.indexOf('  cloud-once:');
+  const cloudStart = workflow.indexOf('  admit:');
   assert.ok(routeStart >= 0 && cloudStart > routeStart);
   const route = workflow.slice(routeStart, cloudStart);
   assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
@@ -127,21 +129,25 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.ok(runtimeStart > preflightStart);
   assert.ok(tickStart > runtimeStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
+  const admit = workflow.slice(workflow.indexOf('  admit:'), workflow.indexOf('  cloud-once:'));
+  assert.match(admit, /timeout-minutes: 10[\s\S]*run: node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(preflight, /cloud-admit/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
   assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /ingestAdmissionIntents\(\)[\s\S]*queue\.tick\(\)/);
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 2);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 3);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 2);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 3);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
