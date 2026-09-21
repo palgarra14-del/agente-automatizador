@@ -760,10 +760,58 @@ export class GitHubIssueChannel {
     const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
     const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
     if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
-    let page = 1;
+    let page = null;
     for (const item of batch) {
-      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)
+      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)$').exec(item?.ref ?? '');
+      const sha = item?.object?.sha;
+      if (!match || typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
+        throw new Error('admission_recovery_cursor_ref_invalid');
+      }
+      if (sha.toLowerCase() !== trustedSha.toLowerCase()) {
+        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        continue;
+      }
+      const candidate = Number(match[1]);
+      page = page === null ? candidate : Math.min(page, candidate);
+    }
+    return { page: page ?? 1 };
+  }
 
+  async setAdmissionRecoveryCursor(scopeKey, page, trustedSha) {
+    if (typeof scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(scopeKey) ||
+        !Number.isInteger(page) || page < 1 || page > 1_000_000 ||
+        typeof trustedSha !== 'string' || !/^[a-f0-9]{40}$/i.test(trustedSha)) {
+      throw new Error('admission_recovery_cursor_invalid');
+    }
+    const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
+    const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
+    if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
+    for (const item of batch) {
+      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)$').exec(item?.ref ?? '');
+      if (!match) throw new Error('admission_recovery_cursor_ref_invalid');
+      try {
+        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+      } catch (error) {
+        if (!/request failed: 404/.test(error.message)) throw error;
+      }
+    }
+    if (page === 1) return { page };
+    const ref = 'refs/' + prefix + page;
+    try {
+      await this.request(this.path('/git/refs'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref, sha: trustedSha.toLowerCase() })
+      });
+    } catch (error) {
+      if (!/request failed: 422/.test(error.message)) throw error;
+      const existing = await this.request(this.path('/git/ref/' + ref.slice('refs/'.length)));
+      if (existing?.object?.sha?.toLowerCase() !== trustedSha.toLowerCase()) {
+        throw new Error('admission_recovery_cursor_conflict', { cause: error });
+      }
+    }
+    return { page };
+  }
   async comment(number, body) {
     const result = await this.request(this.path(`/issues/${encodeURIComponent(number)}/comments`), {
       method: 'POST',
