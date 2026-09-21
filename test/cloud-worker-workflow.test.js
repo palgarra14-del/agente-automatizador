@@ -130,7 +130,7 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.ok(tickStart > runtimeStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
   const admit = workflow.slice(workflow.indexOf('  admit:'), workflow.indexOf('  cloud-once:'));
-  assert.match(admit, /timeout-minutes: 10[\s\S]*run: node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.doesNotMatch(preflight, /cloud-admit/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
