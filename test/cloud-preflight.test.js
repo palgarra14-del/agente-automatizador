@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SupervisedIssueQueue } from '../src/issue-queue.js';
+import { configFrom } from '../src/core.js';
 
 const repository = { owner: 'palgarra14-del', name: 'agente-automatizador' };
 const key = (number) => `${repository.owner}/${repository.name}#${number}`;
@@ -54,7 +55,7 @@ test('cloud preflight is idle when the lane has no governed work', async () => {
 
 test('cloud preflight routes new requests to exactly their owned lane', async () => {
   const own = makeQueue({ issues: [issue(1, { projectId: 'callflow' })] });
-  assert.equal(await own.hasWork(), true);
+  assert.equal(await own.hasWork(), false);
 
   const foreign = makeQueue({ issues: [issue(2, { projectId: 'website-pilot' })] });
   assert.equal(await foreign.hasWork(), false);
@@ -113,4 +114,84 @@ test('cloud preflight fails closed on malformed new requests instead of starting
     issues: [issue(5, { body: '<!-- agent-request:v1 -->\n{"version":1,"projectId":"callflow"' })]
   });
   assert.equal(await queue.hasWork(), false);
+});
+
+const revision = 'f'.repeat(40);
+const governedProject = () => configFrom({ id: 'callflow', repository: { owner: 'palgarra14-del', name: 'App-llamadas' }, defaultBranch: 'main',
+  protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version' }, execution: { provider: 'local-sanitized' } });
+function eventFor(target, { eventName = 'issues', actor = 'palgarra14-del', repositoryOverride = repository, commentBody = '/agent' } = {}) {
+  return { action: eventName === 'issue_comment' ? 'created' : 'opened', repository: { name: repositoryOverride.name, owner: { login: repositoryOverride.owner } },
+    sender: { login: actor }, issue: clone(target), ...(eventName === 'issue_comment' ? { comment: { body: commentBody, user: { login: actor } } } : {}) };
+}
+function admissionFixture(currentIssue = issue(20)) {
+  const state = { requests: {} }; let writes = 0, leases = 0;
+  const intents = new Map();
+  const store = {
+    async load() { return clone(state); },
+    async mutate(fn) { writes += 1; return fn(state); },
+    async withGlobalLease(fn) { leases += 1; return fn(); },
+    async ownerIdentity() { return 'fixture-owner'; }
+  };
+  const channel = {
+    repository,
+    async issue(n) { return n === currentIssue.number ? clone(currentIssue) : null; },
+    async branchHead() { return revision; },
+    async openIssues() { return []; },
+    async createAdmissionIntent(intent) {
+      const ref = `refs/tags/agent-admission-v1/${intent.projectId}/${intent.issueNumber}/${intent.fingerprint}`;
+      const created = !intents.has(ref); intents.set(ref, { ref, ...intent });
+      return { created, ref };
+    },
+    async listAdmissionIntents(projectIds) {
+      return [...intents.values()].filter((intent) => projectIds.includes(intent.projectId));
+    },
+    async deleteAdmissionIntent(ref) { return intents.delete(ref); }
+  };
+  const queue = new SupervisedIssueQueue({ store, projects: new Map([['callflow', governedProject()]]), workflowEngine: {}, channel,
+    allowedActors: ['palgarra14-del'], operatorRevision: revision, operatorBranch: 'main', includedProjectIds: ['callflow'] });
+  return { queue, state, channel, intents, writes: () => writes, leases: () => leases };
+}
+test('event admission is lease-free, retryable and idempotent until governed ingestion', async () => {
+  const target = issue(20), f = admissionFixture(target);
+  assert.equal((await f.queue.admitEvent('issues', eventFor(target))).admitted, true);
+  assert.deepEqual(f.state.requests, {}); assert.equal(f.writes(), 0); assert.equal(f.leases(), 0); assert.equal(await f.queue.hasWork(), true);
+  assert.equal((await f.queue.admitEvent('issues', eventFor(target))).idempotent, true); assert.equal(f.intents.size, 1);
+  const ingested = await f.queue.ingestAdmissionIntents();
+  assert.equal(ingested.status, 'admitted'); assert.equal(f.state.requests[key(20)].status, 'admitted'); assert.equal(f.intents.size, 0);
+
+  const retry = admissionFixture(issue(21)); retry.channel.issue = async () => { throw new Error('transient issue read'); };
+  const result = await retry.queue.admitEvent('issues', eventFor(issue(21)));
+  assert.equal(result.retryable, true); assert.equal(retry.intents.size, 1); assert.deepEqual(retry.state.requests, {});
+});
+test('event admission rejects untrusted, malformed, cross-lane and proven-stale events without state or intents', async () => {
+  const target = issue(22), malformed = issue(22, { body: '<!-- agent-request:v1 -->\n{"version":1' });
+  const cases = [[eventFor(target, { actor: 'mallory' }), target, 'event_actor_unauthorized'], [eventFor(malformed), malformed, 'event_request_invalid'],
+    [eventFor(issue(22, { projectId: 'website-pilot' })), issue(22, { projectId: 'website-pilot' }), 'event_wrong_lane'],
+    [eventFor(target), issue(22, { body: requestBody().replace('maintenance change', 'different change') }), 'event_issue_stale']];
+  for (const [event, currentIssue, reason] of cases) {
+    const f = admissionFixture(currentIssue), result = await f.queue.admitEvent('issues', event);
+    assert.equal(result.reason, reason); assert.equal(f.writes(), 0); assert.equal(f.intents.size, 0);
+  }
+});
+test('comment admission trims exact /agent but rejects non-admission wakeups', async () => {
+  for (const body of ['/agent', ' /agent', '/agent\n']) {
+    const target = issue(23), f = admissionFixture(target);
+    assert.equal((await f.queue.admitEvent('issue_comment', eventFor(target, { eventName: 'issue_comment', commentBody: body }))).admitted, true);
+    assert.equal(f.intents.size, 1); assert.equal(f.writes(), 0);
+  }
+  for (const body of ['/agent-typo', '/agent approve token']) {
+    const target = issue(24), f = admissionFixture(target);
+    assert.equal((await f.queue.admitEvent('issue_comment', eventFor(target, { eventName: 'issue_comment', commentBody: body }))).reason, 'event_comment_invalid');
+    assert.equal(f.intents.size, 0); assert.equal(f.writes(), 0);
+  }
+});
+
+test('admitted work claims a lease and trusted-main drift restores it before creation', async () => {
+  for (const mode of ['claim', 'drift']) {
+    const target = issue(26), f = admissionFixture(target); await f.queue.admitEvent('issues', eventFor(target)); await f.queue.ingestAdmissionIntents(); f.queue.unboundPriorAgentInitialization = async () => null;
+    if (mode === 'claim') f.queue.finishInitialization = async (_i, _p, record) => { assert.ok(record.initializationLease); throw new Error('stop-after-claim'); };
+    else { let calls = 0; f.channel.branchHead = async () => calls++ === 0 ? revision : 'e'.repeat(40); f.queue.workflowEngine.create = async () => { throw new Error('unexpected_create'); }; }
+    if (mode === 'claim') await assert.rejects(() => f.queue.tick(), /stop-after-claim/); else assert.equal((await f.queue.processIssue(target)).status, 'operator_update_pending');
+    assert.equal(f.state.requests[key(26)].status, mode === 'claim' ? 'initializing' : 'admitted');
+  }
 });
