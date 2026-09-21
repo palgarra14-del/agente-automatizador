@@ -736,7 +736,11 @@ export class GitHubStateStore extends JsonStore {
           }
           registration = record;
         } else if (record.kind === 'seal') {
-          if (seal && (seal.stateSha !== record.stateSha || seal.generation !== record.generation)) {
+          if (seal && (
+            seal.stateSha !== record.stateSha ||
+            seal.generation !== record.generation ||
+            seal.baseWitnessSha !== record.baseWitnessSha
+          )) {
             throw new Error('cloud_state_epoch_seal_conflict');
           }
           seal = record;
@@ -1063,7 +1067,11 @@ export class GitHubStateStore extends JsonStore {
           throw new Error('cloud_state_epoch_authority_invalid');
         }
         const previous = byGeneration.get(record.generation);
-        if (previous && (previous.stateSha !== record.stateSha || previous.parentSha !== record.parentSha)) {
+        if (previous && (
+          previous.stateSha !== record.stateSha ||
+          previous.parentSha !== record.parentSha ||
+          previous.baseWitnessSha !== record.baseWitnessSha
+        )) {
           throw new Error('cloud_state_epoch_authority_conflict');
         }
         byGeneration.set(record.generation, record);
