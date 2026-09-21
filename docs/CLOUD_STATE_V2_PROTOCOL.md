@@ -273,7 +273,9 @@ Context:
 
 Description:
 
-`s=<stateSha>;p=<parentStateSha>`
+`s=<stateSha>;p=<parentStateSha>;b=<validatedBaseSha>`
+
+The `b` field is an **immutable base witness**: the exact base-branch commit observed and lineage-validated by the winning writer immediately before authority publication. Canonical authority is validated against that exact commit, not against whatever the mutable branch happens to point to later. This removes the impossible cross-API requirement that a branch ref stay unchanged between a read and a subsequent append-only status POST.
 
 The active authority sequence must satisfy:
 
@@ -299,7 +301,9 @@ Metadata context:
 
 Description:
 
-`s=<stateSha>;g=<generation>`
+`s=<stateSha>;g=<generation>;b=<validatedBaseSha>`
+
+The seal carries forward the final generation's immutable base witness. Historical verification and later governed repair therefore do not reacquire authority from the current mutable branch.
 
 A seal is allowed only at the numerical end of the epoch: 256, 512, 768, and so on.
 
@@ -325,7 +329,7 @@ A next link without a valid previous seal is rejected.
 
 If the process crashes after creating/registering the next anchor but before writing the next link, a normal read/write **does not follow the mutable discovery ref** and new canonical authority is blocked with `cloud_state_epoch_next_missing`.
 
-Only an explicit governed repair may consult that ref. Repair first validates the discovered metadata anchor, lane/epoch Git identity, exact parent, registration, previous seal and generation continuity. Immediately before any immutable `next` status is appended, the sealed fallback envelope is reread and its lineage anchor is revalidated against the current trusted base; base drift or a transient base-read failure therefore publishes no repair. Only then may repair append the missing immutable `next` status to the previous metadata anchor and verify that status before the new epoch becomes traversable. No generation claim or authority append is allowed before that repair succeeds.
+Only an explicit governed repair may consult that ref. Repair first validates the discovered metadata anchor, lane/epoch Git identity, exact parent, registration, previous seal and generation continuity. The sealed fallback envelope is then validated against the **base witness already bound into the immutable seal**. The mutable discovery ref contributes no authority and the current branch tip contributes no retroactive authority either. Only then may repair append the missing immutable `next` status to the previous metadata anchor and verify that status before the new epoch becomes traversable. No generation claim or authority append is allowed before that repair succeeds.
 
 ## State publication — same epoch
 
@@ -334,18 +338,20 @@ Only an explicit governed repair may consult that ref. Repair first validates th
 3. Read and validate only the active authority anchor.
 4. Validate the complete active state lineage.
 5. Create the exact one-parent candidate state commit.
-6. Revalidate the lineage anchor against the **current mutable base branch** immediately before election.
+6. Revalidate the lineage anchor against the current base before election.
 7. Create the deterministic generation claim.
-8. Revalidate the lineage anchor against the current base branch again after claim creation and immediately before durable authority publication.
-9. Reread active authority and prove it has not changed.
+8. Reread active authority and prove it has not changed.
+9. Read the exact current base SHA once, validate the lineage against that SHA, and bind that SHA into the canonical authority status as `b=<validatedBaseSha>`.
 10. Append canonical generation status.
-11. Validate the new active lineage.
+11. Validate the new active lineage against the authority's immutable base witness.
 12. Move state/checkpoint/witness refs forward, non-force.
 13. Verify canonical authority plus operational refs.
 
 Canonical authority exists before operational refs move.
 
-For sealed-fallback reads, mutable-ref classification never substitutes for lineage trust. The sealed lineage is freshly revalidated against the current trusted base immediately before governed ref repair or successful return; if the base has moved outside the trusted lineage, the read fails closed and publishes no repair.
+The publication boundary deliberately does **not** claim an impossible atomic transaction with the mutable base ref. Instead, the durable authority records the exact base observation it validated. A later branch movement cannot retroactively poison or bless that authority; fresh readers verify the immutable witness itself.
+
+For sealed-fallback reads and operational-ref repair, mutable-ref classification never substitutes for lineage trust. The sealed lineage is validated against the immutable base witness carried by the seal, so a later change to the branch tip cannot create a TOCTOU repair race.
 
 ## Epoch rollover
 
@@ -464,9 +470,9 @@ For a brand-new lane:
 - first pointer on lane root identifies the first metadata anchor;
 - registration binds the bootstrap state anchor and authority anchor.
 
-If main advances after an orphan but valid bootstrap registration, the registered state anchor remains acceptable only while it remains in current main ancestry.
+Before the first canonical authority exists, an orphan bootstrap registration is still checked against the current base before it may be extended.
 
-Mutable bootstrap ancestry is never trusted from the immutable-lineage cache alone. A cached state head may skip replay of immutable historical edges, but current base-branch ancestry is rechecked on every relevant validation and again immediately before both the generation claim and canonical status append. A force-push between load and save therefore cannot leave new durable authority behind.
+Once canonical authority exists, mutable bootstrap ancestry is no longer reinterpreted from the latest branch tip. Each authority generation records the exact validated base witness that governed its publication, and sealed epochs preserve the final witness. A cached state head may skip replay of immutable historical edges, but authority/base-witness binding is rechecked on every relevant validation and again immediately before both the generation claim and canonical status append. A force-push between load and save therefore cannot leave new durable authority behind.
 
 ## Legacy v1 migration
 
