@@ -139,7 +139,7 @@ function admissionFixture(currentIssue = issue(20)) {
     async openIssues() { return []; },
     async createAdmissionIntent(intent) {
       const ref = `refs/tags/agent-admission-v1/${intent.projectId}/${intent.issueNumber}/${intent.fingerprint}`;
-      const created = !intents.has(ref); intents.set(ref, { ref, ...intent });
+      const created = !intents.has(ref); intents.set(ref, { ref, ...intent, targetSha: revision });
       return { created, ref };
     },
     async listAdmissionIntents(projectIds) {
@@ -163,6 +163,40 @@ test('event admission is lease-free, retryable and idempotent until governed ing
   const result = await retry.queue.admitEvent('issues', eventFor(issue(21)));
   assert.equal(result.retryable, true); assert.equal(retry.intents.size, 1); assert.deepEqual(retry.state.requests, {});
 });
+test('ingestion rejects an intent tag whose target sha is not the trusted operator revision', async () => {
+  const target = issue(37), f = admissionFixture(target);
+  await f.queue.admitEvent('issues', eventFor(target));
+  const [ref, intent] = [...f.intents.entries()][0];
+  f.intents.set(ref, { ...intent, targetSha: 'e'.repeat(40) });
+  f.channel.listAdmissionIntents = async () => [...f.intents.values()];
+
+  const result = await f.queue.ingestAdmissionIntents();
+  assert.equal(result, null);
+  assert.deepEqual(f.state.requests, {});
+  assert.equal(f.intents.size, 0);
+});
+
+test('scheduled recovery recreates a missing intent for valid unpersisted work only', async () => {
+  const target = issue(38), f = admissionFixture(target);
+  f.channel.openIssues = async () => [clone(target)];
+  f.channel.listAdmissionIntents = async () => [...f.intents.values()];
+  const recovered = await f.queue.recoverAdmissionIntents();
+
+  assert.equal(recovered.scanned, 1);
+  assert.equal(recovered.created, 1);
+  assert.equal(f.intents.size, 1);
+  assert.deepEqual(f.state.requests, {});
+  assert.equal(await f.queue.hasWork(), true);
+
+  const ingested = await f.queue.ingestAdmissionIntents();
+  assert.equal(ingested.status, 'admitted');
+  assert.equal(f.state.requests[key(38)].status, 'admitted');
+
+  const afterCanonical = await f.queue.recoverAdmissionIntents();
+  assert.equal(afterCanonical.created, 0);
+  assert.equal(afterCanonical.existing, 1);
+});
+
 test('admission intent ingestion is crash-safe after canonical persistence', async () => {
   const target = issue(27), f = admissionFixture(target);
   await f.queue.admitEvent('issues', eventFor(target));
