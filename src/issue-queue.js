@@ -696,7 +696,13 @@ export class GitHubIssueChannel {
         if (!match || match[1] !== projectId || !/^[a-f0-9]{40}$/i.test(item?.object?.sha ?? '')) {
           throw new Error('admission_intent_ref_invalid');
         }
-        intents.push({ ref: item.ref, projectId, issueNumber: Number(match[2]), fingerprint: match[3] });
+        intents.push({
+          ref: item.ref,
+          projectId,
+          issueNumber: Number(match[2]),
+          fingerprint: match[3],
+          targetSha: item.object.sha.toLowerCase()
+        });
       }
     }
     return intents.sort((a, b) => a.issueNumber - b.issueNumber || a.fingerprint.localeCompare(b.fingerprint));
@@ -819,10 +825,52 @@ export class SupervisedIssueQueue {
     return this.channel.listAdmissionIntents([...this.includedProjectIds]);
   }
 
+  async recoverAdmissionIntents({ max = 50 } = {}) {
+    if (this.includedProjectIds === null) return { scanned: 0, created: 0, existing: 0, skipped: 0 };
+    if (!Number.isInteger(max) || max < 1 || max > 100) throw new Error('admission_intent_recovery_limit_invalid');
+    const state = await this.store.load();
+    const issues = await this.channel.openIssues();
+    const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    let scanned = 0, created = 0, existing = 0, skipped = 0;
+
+    for (const issue of issues) {
+      if (scanned >= max) break;
+      if (!issue || issue.state !== 'open' || issue.pull_request ||
+          typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER) ||
+          !this.authorized(issue.user?.login)) {
+        skipped += 1;
+        continue;
+      }
+      scanned += 1;
+      let parsed;
+      try { parsed = parseIssueRequestBody(issue.body); }
+      catch { skipped += 1; continue; }
+      if (!this.ownsProject(parsed.request.projectId) || !this.projects.has(parsed.request.projectId)) {
+        skipped += 1;
+        continue;
+      }
+      const key = this.requestKey(issue);
+      if (state.requests?.[key]) {
+        existing += 1;
+        continue;
+      }
+      const intent = this.admissionIntent(issue, parsed);
+      const result = await this.channel.createAdmissionIntent(intent, targetSha);
+      if (result.created) created += 1;
+      else existing += 1;
+    }
+    return { scanned, created, existing, skipped };
+  }
+
   async ingestAdmissionIntents({ max = 20 } = {}) {
     if (!Number.isInteger(max) || max < 1 || max > 50) throw new Error('admission_intent_ingest_limit_invalid');
     const intents = await this.pendingAdmissionIntents();
+    const trustedTargetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
     for (const intent of intents.slice(0, max)) {
+      if (intent.targetSha !== trustedTargetSha) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
       let issue;
       try { issue = await this.channel.issue(intent.issueNumber); }
       catch (error) { throw new Error('admission_intent_issue_read_failed', { cause: error }); }
