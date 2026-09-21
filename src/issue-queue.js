@@ -724,6 +724,21 @@ export class GitHubIssueChannel {
     return intents.sort((a, b) => a.issueNumber - b.issueNumber || a.fingerprint.localeCompare(b.fingerprint));
   }
 
+  async admissionIntentTarget(ref) {
+    if (typeof ref !== 'string' || !/^refs\/tags\/agent-admission-v1\/[a-z0-9-]{1,80}\/[1-9][0-9]*\/[a-f0-9]{64}$/.test(ref)) {
+      throw new Error('admission_intent_ref_invalid');
+    }
+    try {
+      const existing = await this.request(this.path('/git/ref/' + ref.slice('refs/'.length)));
+      const sha = existing?.object?.sha;
+      if (typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) throw new Error('admission_intent_ref_invalid');
+      return sha.toLowerCase();
+    } catch (error) {
+      if (/request failed: 404/.test(error.message)) return null;
+      throw error;
+    }
+  }
+
   async deleteAdmissionIntent(ref) {
     if (typeof ref !== 'string' || !/^refs\/tags\/agent-admission-v1\/[a-z0-9-]{1,80}\/[1-9][0-9]*\/[a-f0-9]{64}$/.test(ref)) {
       throw new Error('admission_intent_ref_invalid');
@@ -735,6 +750,1488 @@ export class GitHubIssueChannel {
       if (/request failed: 404/.test(error.message)) return false;
       throw error;
     }
+  }
+
+  async admissionRecoveryCursor(scopeKey, trustedSha) {
+    if (typeof scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(scopeKey) ||
+        typeof trustedSha !== 'string' || !/^[a-f0-9]{40}$/i.test(trustedSha)) {
+      throw new Error('admission_recovery_cursor_invalid');
+    }
+    const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
+    const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
+    if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
+    let page = 1;
+    for (const item of batch) {
+      const match = new RegExp('^refs/tags/agent-admission-recovery-v1/' + scopeKey + '/([1-9][0-9]*)
+
+  async comment(number, body) {
+    const result = await this.request(this.path(`/issues/${encodeURIComponent(number)}/comments`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body })
+    });
+    return { id: result.id, url: result.html_url ?? null };
+  }
+}
+
+function validateWatcherLease(lease) {
+  if (!lease || typeof lease !== 'object' || Array.isArray(lease) ||
+      typeof lease.leaseId !== 'string' || !lease.leaseId ||
+      !Number.isInteger(lease.pid) || lease.pid <= 0 ||
+      !Number.isFinite(Date.parse(lease.createdAt ?? '')) ||
+      !(
+        lease.ownerIdentity === null ||
+        lease.ownerIdentity === undefined ||
+        (typeof lease.ownerIdentity === 'string' && lease.ownerIdentity.length > 0)
+      )) {
+    throw new Error('issue_queue_watcher_lease_invalid');
+  }
+  return lease;
+}
+
+export class SupervisedIssueQueue {
+  constructor({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors,
+    operatorRevision = null,
+    operatorBranch = 'main',
+    includedProjectIds = null,
+    excludedProjectIds = [],
+    now = () => new Date().toISOString()
+  } = {}) {
+    if (!store || !projects || !workflowEngine || !channel) throw new Error('SupervisedIssueQueue requires store, projects, workflowEngine, and channel');
+    if (!Array.isArray(allowedActors) || !allowedActors.length) throw new Error('SupervisedIssueQueue requires at least one allowed actor');
+    if (operatorRevision !== null && (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision))) {
+      throw new Error('SupervisedIssueQueue operatorRevision must be a 40-character commit sha');
+    }
+    if (typeof operatorBranch !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(operatorBranch) || operatorBranch.includes('..')) {
+      throw new Error('SupervisedIssueQueue operatorBranch is invalid');
+    }
+    this.store = store;
+    this.projects = projects;
+    this.workflowEngine = workflowEngine;
+    this.channel = channel;
+    this.allowedActors = new Set(allowedActors.map((actor) => boundedString(actor, 'allowed actor', { required: true, max: 80 }).toLowerCase()));
+    if (includedProjectIds !== null && (!Array.isArray(includedProjectIds) || includedProjectIds.some((id) => typeof id !== 'string' || !/^[a-z0-9-]+$/.test(id)))) {
+      throw new Error('SupervisedIssueQueue includedProjectIds must be null or an array of valid project ids');
+    }
+    if (!Array.isArray(excludedProjectIds) || excludedProjectIds.some((id) => typeof id !== 'string' || !/^[a-z0-9-]+$/.test(id))) {
+      throw new Error('SupervisedIssueQueue excludedProjectIds must be an array of valid project ids');
+    }
+    this.includedProjectIds = includedProjectIds === null ? null : new Set(includedProjectIds);
+    this.excludedProjectIds = new Set(excludedProjectIds);
+    if (this.includedProjectIds && [...this.includedProjectIds].some((id) => this.excludedProjectIds.has(id))) {
+      throw new Error('SupervisedIssueQueue project routing overlaps include/exclude sets');
+    }
+    this.operatorRevision = operatorRevision?.toLowerCase() ?? null;
+    this.operatorBranch = operatorBranch;
+    this.now = now;
+  }
+
+  ownsProject(projectId) {
+    if (typeof projectId !== 'string' || !projectId) return this.includedProjectIds === null;
+    if (this.excludedProjectIds.has(projectId)) return false;
+    return this.includedProjectIds === null || this.includedProjectIds.has(projectId);
+  }
+
+  ownsRecord(record) {
+    return this.ownsProject(record?.request?.projectId ?? null);
+  }
+
+  admissionIntent(issue, parsed) {
+    const projectId = parsed?.request?.projectId;
+    if (!this.ownsProject(projectId) || !Number.isInteger(issue?.number) || !issue?.id ||
+        typeof issue?.user?.login !== 'string' || !this.authorized(issue.user.login)) {
+      throw new Error('admission_intent_identity_invalid');
+    }
+    return {
+      projectId,
+      issueNumber: issue.number,
+      fingerprint: fingerprint({
+        version: 1,
+        repository: this.channel.repository,
+        projectId,
+        issueNumber: issue.number,
+        issueId: String(issue.id),
+        author: issue.user.login,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint
+      })
+    };
+  }
+
+  async pendingAdmissionIntents() {
+    if (this.includedProjectIds === null || typeof this.channel.listAdmissionIntents !== 'function') return [];
+    return this.channel.listAdmissionIntents([...this.includedProjectIds]);
+  }
+
+  async recoverAdmissionIntents({ max = 50, maxPages = 20 } = {}) {
+    if (this.includedProjectIds === null) {
+      return { scanned: 0, created: 0, existing: 0, skipped: 0, deferred: 0, staleRetired: 0, pages: 0, truncated: false };
+    }
+    if (!Number.isInteger(max) || max < 1 || max > 100 ||
+        !Number.isInteger(maxPages) || maxPages < 1 || maxPages > 50) {
+      throw new Error('admission_intent_recovery_limit_invalid');
+    }
+    const state = await this.store.load();
+    const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    const scopeKey = fingerprint({
+      repository: this.channel.repository,
+      projectIds: [...this.includedProjectIds].sort()
+    });
+    let scanned = 0, created = 0, existing = 0, skipped = 0, deferred = 0, staleRetired = 0, pages = 0;
+    let truncated = false;
+
+    for (const intent of await this.pendingAdmissionIntents()) {
+      if (intent.targetSha === targetSha) continue;
+      await this.channel.deleteAdmissionIntent(intent.ref);
+      staleRetired += 1;
+    }
+
+    const createRecoveredIntent = async (issue, parsed) => {
+      const intent = this.admissionIntent(issue, parsed);
+      try {
+        return await this.channel.createAdmissionIntent(intent, targetSha);
+      } catch (error) {
+        if (error.message !== 'admission_intent_existing_conflict' ||
+            typeof this.channel.admissionIntentTarget !== 'function') throw error;
+        const ref = this.channel.admissionIntentRef(intent);
+        const existingTarget = await this.channel.admissionIntentTarget(ref);
+        if (existingTarget === targetSha) return { created: false, ref };
+        await this.channel.deleteAdmissionIntent(ref);
+        return this.channel.createAdmissionIntent(intent, targetSha);
+      }
+    };
+
+    const processIssue = async (issue) => {
+      if (!issue || issue.state !== 'open' || issue.pull_request ||
+          typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER) ||
+          !this.authorized(issue.user?.login)) {
+        skipped += 1;
+        return;
+      }
+      let parsed;
+      try { parsed = parseIssueRequestBody(issue.body); }
+      catch { skipped += 1; return; }
+      if (!this.ownsProject(parsed.request.projectId) || !this.projects.has(parsed.request.projectId)) {
+        skipped += 1;
+        return;
+      }
+      const key = this.requestKey(issue);
+      if (state.requests?.[key]) {
+        existing += 1;
+        return;
+      }
+      if (scanned >= max) {
+        deferred += 1;
+        return;
+      }
+      scanned += 1;
+      const result = await createRecoveredIntent(issue, parsed);
+      if (result.created) created += 1;
+      else existing += 1;
+    };
+
+    if (typeof this.channel.openIssuePage === 'function') {
+      const cursor = typeof this.channel.admissionRecoveryCursor === 'function'
+        ? await this.channel.admissionRecoveryCursor(scopeKey, targetSha)
+        : { page: 1 };
+      let page = cursor.page;
+      for (let count = 0; count < maxPages; count += 1) {
+        const batch = await this.channel.openIssuePage(page, { sort: 'created', direction: 'asc' });
+        pages += 1;
+        for (const issue of batch.issues) await processIssue(issue);
+        const nextPage = batch.hasMore ? page + 1 : 1;
+        if (typeof this.channel.setAdmissionRecoveryCursor === 'function') {
+          await this.channel.setAdmissionRecoveryCursor(scopeKey, nextPage, targetSha);
+        }
+        if (!batch.hasMore) {
+          truncated = false;
+          return { scanned, created, existing, skipped, deferred, staleRetired, pages, truncated };
+        }
+        page = nextPage;
+      }
+      truncated = true;
+      return { scanned, created, existing, skipped, deferred, staleRetired, pages, truncated };
+    }
+
+    const issues = await this.channel.openIssues();
+    pages = 1;
+    for (const issue of issues) await processIssue(issue);
+    return { scanned, created, existing, skipped, deferred, staleRetired, pages, truncated };
+  }
+
+  async ingestAdmissionIntents({ max = 20 } = {}) {
+    if (!Number.isInteger(max) || max < 1 || max > 50) throw new Error('admission_intent_ingest_limit_invalid');
+    const intents = await this.pendingAdmissionIntents();
+    const trustedTargetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    for (const intent of intents.slice(0, max)) {
+      if (intent.targetSha !== trustedTargetSha) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      let issue;
+      try { issue = await this.channel.issue(intent.issueNumber); }
+      catch (error) {
+        if (/request failed: 404/.test(error.message)) {
+          await this.channel.deleteAdmissionIntent(intent.ref);
+          continue;
+        }
+        throw new Error('admission_intent_issue_read_failed', { cause: error });
+      }
+
+      if (!issue || issue.state !== 'open' || issue.pull_request ||
+          !this.authorized(issue.user?.login) || typeof issue.body !== 'string' ||
+          !issue.body.includes(ISSUE_REQUEST_MARKER)) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      let parsed;
+      try { parsed = parseIssueRequestBody(issue.body); }
+      catch {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      if (!this.ownsProject(parsed.request.projectId) || parsed.request.projectId !== intent.projectId) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      const expected = this.admissionIntent(issue, parsed);
+      if (expected.fingerprint !== intent.fingerprint) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      const key = this.requestKey(issue);
+      const existing = await this.getRecord(key);
+      if (existing) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+
+      const project = this.projects.get(parsed.request.projectId) ?? null;
+      if (!project) {
+        await this.channel.deleteAdmissionIntent(intent.ref);
+        continue;
+      }
+      const now = this.now();
+      const record = {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user.login,
+        requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectExecutionFingerprint(project), controlPlaneFingerprint: this.controlPlaneFingerprint(),
+        request: parsed.request, workflowId: null, workflowBindingFingerprint: null,
+        status: 'admitted', reason: null, createdAt: now, updatedAt: now, pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null,
+        initializationLease: null, lastProcessedCommentId: 0
+      };
+      validateIssueQueueRecord(record, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: record.projectFingerprint,
+        controlPlaneFingerprint: record.controlPlaneFingerprint
+      });
+      await this.saveRecord(key, record);
+      await this.channel.deleteAdmissionIntent(intent.ref);
+      return record;
+    }
+    return null;
+  }
+
+  controlPlaneFingerprint() {
+    return fingerprint({
+      repository: this.channel.repository,
+      allowedActors: [...this.allowedActors].sort(),
+      includedProjectIds: this.includedProjectIds ? [...this.includedProjectIds].sort() : null,
+      excludedProjectIds: [...this.excludedProjectIds].sort()
+    });
+  }
+
+  async claimWatcherLease() {
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate(async (data) => {
+      const existing = data.issueQueueWatcherLease ?? null;
+      if (existing) {
+        validateWatcherLease(existing);
+        if (!(await this.store.lockOwnerIsAbandoned(existing))) throw new Error('issue_queue_watcher_already_running');
+      }
+      const lease = {
+        leaseId: randomUUID(),
+        pid: process.pid,
+        createdAt: this.now(),
+        ownerIdentity
+      };
+      data.issueQueueWatcherLease = lease;
+      return lease;
+    });
+  }
+
+  async releaseWatcherLease(leaseId) {
+    if (typeof leaseId !== 'string' || !leaseId) throw new Error('issue_queue_watcher_lease_id_invalid');
+    return this.store.mutate((data) => {
+      const existing = data.issueQueueWatcherLease ?? null;
+      if (!existing) return false;
+      validateWatcherLease(existing);
+      if (existing.leaseId !== leaseId) return false;
+      data.issueQueueWatcherLease = null;
+      return true;
+    });
+  }
+
+  requestKey(issue) {
+    return `${this.channel.repository.owner}/${this.channel.repository.name}#${issue.number}`;
+  }
+
+  async getRecord(key) {
+    return (await this.store.load()).requests?.[key] ?? null;
+  }
+
+  async saveRecord(key, record) {
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      data.requests[key] = record;
+      return record;
+    });
+  }
+
+  async claimInitialization(issue, parsed, projectFingerprintValue) {
+    const key = this.requestKey(issue);
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      if (data.requests[key]) return { claimed: false, record: data.requests[key] };
+      const now = this.now();
+      const record = {
+        version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
+        requestFingerprint: parsed.requestFingerprint, issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: projectFingerprintValue, controlPlaneFingerprint: this.controlPlaneFingerprint(),
+        request: parsed.request, workflowId: null, workflowBindingFingerprint: null,
+        status: 'initializing', reason: null, createdAt: now, updatedAt: now, pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null,
+        initializationLease: { leaseId: randomUUID(), pid: process.pid, createdAt: now, ownerIdentity },
+        lastProcessedCommentId: 0
+      };
+      data.requests[key] = record;
+      return { claimed: true, record };
+    });
+  }
+
+  async claimAdmittedInitialization(issue, parsed, expectedRecord) {
+    const key = this.requestKey(issue);
+    const ownerIdentity = await this.store.ownerIdentity(process.pid);
+    return this.store.mutate((data) => {
+      data.requests ??= {};
+      const current = data.requests[key] ?? null;
+      if (!current) return { claimed: false, record: null };
+      validateIssueQueueRecord(current, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      if (current.requestFingerprint !== expectedRecord.requestFingerprint ||
+          current.issueBodyFingerprint !== expectedRecord.issueBodyFingerprint ||
+          current.projectFingerprint !== expectedRecord.projectFingerprint ||
+          current.controlPlaneFingerprint !== expectedRecord.controlPlaneFingerprint) {
+        throw new Error('admitted_initialization_record_changed');
+      }
+      if (current.status !== 'admitted') return { claimed: false, record: current };
+      const now = this.now();
+      const initializing = {
+        ...current,
+        status: 'initializing',
+        updatedAt: now,
+        initializationLease: { leaseId: randomUUID(), pid: process.pid, createdAt: now, ownerIdentity }
+      };
+      validateIssueQueueRecord(initializing, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint,
+        projectFingerprint: expectedRecord.projectFingerprint,
+        controlPlaneFingerprint: expectedRecord.controlPlaneFingerprint
+      });
+      data.requests[key] = initializing;
+      return { claimed: true, record: initializing };
+    });
+  }
+
+  authorized(login) {
+    return typeof login === 'string' && this.allowedActors.has(login.toLowerCase());
+  }
+
+  instructionPublisher(login) {
+    if (typeof login !== 'string') return false;
+    const normalized = login.toLowerCase();
+    return this.allowedActors.has(normalized) || normalized === 'github-actions[bot]';
+  }
+
+  priorAgentInitializationComment(comment) {
+    if (!comment || typeof comment.body !== 'string' || !this.instructionPublisher(comment.user?.login)) return false;
+    if (!/^(?:Agent dry-run prepared|Agent dry-run approval instruction recovered)\./.test(comment.body)) return false;
+    return /Workflow:\s*`workflow-[a-f0-9-]+`/i.test(comment.body);
+  }
+
+  async unboundPriorAgentInitialization(issueNumber) {
+    const comments = await this.channel.comments(issueNumber);
+    return comments.find((comment) => this.priorAgentInitializationComment(comment)) ?? null;
+  }
+
+  async post(number, text) {
+    return this.channel.comment(number, text);
+  }
+
+  async deliverTerminalNotification(issue, key, record) {
+    validateIssueQueueRecord(record);
+    const notification = record.terminalNotification;
+    if (!notification || notification.sentAt) return record;
+    const comments = await this.channel.comments(issue.number);
+    const existing = comments.find((comment) =>
+      Number.isInteger(comment.id) &&
+      typeof comment.body === 'string' &&
+      comment.body === notification.body &&
+      this.instructionPublisher(comment.user?.login)
+    );
+    const posted = existing ? { id: existing.id } : await this.post(issue.number, notification.body);
+    const next = {
+      ...record,
+      terminalNotification: {
+        ...notification,
+        attempts: notification.attempts + 1,
+        commentId: posted.id ?? null,
+        sentAt: this.now()
+      },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return next;
+  }
+
+  async reconcileTerminalWorkflow(workflowId, status) {
+    if (!workflowId || !['failed', 'blocked', 'rejected'].includes(status)) return;
+    const workflow = await this.workflowEngine.get(workflowId);
+    if (workflow && ![WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(workflow.status)) {
+      await this.workflowEngine.cancel(workflowId, { reason: `issue_queue_${status}` });
+    }
+  }
+
+  async finalizeTerminal(issue, key, record, text) {
+    await this.reconcileTerminalWorkflow(record.workflowId, record.status);
+    const body = maskSecrets(String(text)).slice(0, 12_000);
+    const next = {
+      ...record,
+      pendingApproval: null,
+      activeApproval: null,
+      terminalNotification: { body, attempts: 0, commentId: null, sentAt: null },
+      updatedAt: this.now()
+    };
+    await this.saveRecord(key, next);
+    return this.deliverTerminalNotification(issue, key, next);
+  }
+
+  async revalidateCurrentRequest(issue, record) {
+    const current = await this.channel.issue(issue.number);
+    if (!current || current.state !== 'open' || current.pull_request ||
+        current.number !== record.issueNumber || current.id !== record.issueId ||
+        current.user?.login !== record.author) {
+      return { ok: false, reason: 'issue_identity_or_state_changed' };
+    }
+    let parsed;
+    try {
+      parsed = parseIssueRequestBody(current.body);
+    } catch {
+      return { ok: false, reason: 'request_body_invalid' };
+    }
+    if (parsed.requestFingerprint !== record.requestFingerprint || parsed.issueBodyFingerprint !== record.issueBodyFingerprint) {
+      return { ok: false, reason: 'request_body_changed' };
+    }
+    return { ok: true, issue: current, parsed };
+  }
+
+  async blockRequestRevalidation(issue, key, record, reason) {
+    await this.reconcileTerminalWorkflow(record?.workflowId ?? null, 'blocked');
+    const now = this.now();
+    const next = {
+      version: 1,
+      issueNumber: Number.isInteger(issue?.number) ? issue.number : record?.issueNumber,
+      issueId: issue?.id ?? record?.issueId ?? null,
+      author: issue?.user?.login ?? record?.author ?? null,
+      requestFingerprint: null,
+      issueBodyFingerprint: null,
+      projectFingerprint: null,
+      controlPlaneFingerprint: this.controlPlaneFingerprint(),
+      request: null,
+      workflowId: null,
+      workflowBindingFingerprint: null,
+      status: 'blocked',
+      reason,
+      createdAt: typeof record?.createdAt === 'string' ? record.createdAt : now,
+      updatedAt: now,
+      pendingApproval: null,
+      activeApproval: null,
+      startApprovalFingerprint: null,
+      startApprovalCommentId: null,
+      startApprovedBy: null,
+      initializationLease: null,
+      lastProcessedCommentId: 0
+    };
+    return this.finalizeTerminal(issue, key, next, 'Agent request blocked: the accepted request/control context changed or can no longer be verified exactly. No further execution was authorized.');
+  }
+
+  async admitEvent(eventName, event) {
+    if (!['issues', 'issue_comment'].includes(eventName)) return { admitted: false, reason: 'event_not_admissible' };
+    if (!event || typeof event !== 'object' || Array.isArray(event)) return { admitted: false, reason: 'event_invalid' };
+    const action = event.action;
+    if (eventName === 'issues' && !['opened', 'edited', 'reopened'].includes(action)) return { admitted: false, reason: 'event_action_not_admissible' };
+    if (eventName === 'issue_comment' && action !== 'created') return { admitted: false, reason: 'event_action_not_admissible' };
+
+    const repository = event.repository;
+    const expectedOwner = this.channel.repository.owner.toLowerCase();
+    const expectedName = this.channel.repository.name.toLowerCase();
+    const eventOwner = repository?.owner?.login ?? repository?.owner?.name ?? null;
+    if (typeof eventOwner !== 'string' || typeof repository?.name !== 'string' ||
+        eventOwner.toLowerCase() !== expectedOwner || repository.name.toLowerCase() !== expectedName) {
+      return { admitted: false, reason: 'event_repository_mismatch' };
+    }
+
+    const actor = event.sender?.login;
+    if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
+    if (eventName === 'issue_comment' &&
+        (event.comment?.user?.login !== actor || String(event.comment?.body ?? '').trim() !== '/agent')) {
+      return { admitted: false, reason: 'event_comment_invalid' };
+    }
+
+    const eventIssue = event.issue;
+    if (!Number.isInteger(eventIssue?.number) || !eventIssue?.id || eventIssue.state !== 'open' || eventIssue.pull_request ||
+        typeof eventIssue.body !== 'string' || !this.authorized(eventIssue.user?.login)) {
+      return { admitted: false, reason: 'event_issue_invalid' };
+    }
+    if (!eventIssue.body.includes(ISSUE_REQUEST_MARKER)) return { admitted: false, reason: 'event_not_agent_request' };
+
+    let parsed;
+    try { parsed = parseIssueRequestBody(eventIssue.body); }
+    catch { return { admitted: false, reason: 'event_request_invalid' }; }
+    if (!this.ownsProject(parsed.request.projectId)) return { admitted: false, reason: 'event_wrong_lane' };
+
+    const project = this.projects.get(parsed.request.projectId) ?? null;
+    if (!project) return { admitted: false, reason: 'event_unknown_project' };
+
+    let current;
+    let retryableIssueRead = false;
+    try { current = await this.channel.issue(eventIssue.number); }
+    catch { current = eventIssue; retryableIssueRead = true; }
+    if (!retryableIssueRead && (!current || current.number !== eventIssue.number || current.id !== eventIssue.id || current.state !== 'open' || current.pull_request ||
+        current.user?.login !== eventIssue.user?.login || current.body !== eventIssue.body)) {
+      return { admitted: false, reason: 'event_issue_stale' };
+    }
+    let currentParsed;
+    try { currentParsed = parseIssueRequestBody(current.body); }
+    catch { return { admitted: false, reason: 'event_request_invalid' }; }
+    if (currentParsed.requestFingerprint !== parsed.requestFingerprint || currentParsed.issueBodyFingerprint !== parsed.issueBodyFingerprint) {
+      return { admitted: false, reason: 'event_issue_stale' };
+    }
+
+    const intent = this.admissionIntent(current, currentParsed);
+    const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    const created = await this.channel.createAdmissionIntent(intent, targetSha);
+    return {
+      admitted: created.created,
+      idempotent: !created.created,
+      issueNumber: current.number,
+      status: 'intent',
+      ...(retryableIssueRead ? { retryable: true } : {})
+    };
+  }
+
+  async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null, priorInitialization: suppliedPriorInitialization } = {}) {
+    const key = this.requestKey(issue);
+    if (seedRecord?.status !== 'initializing' || !seedRecord.initializationLease) {
+      throw new Error('workflow_initialization_requires_lease');
+    }
+    const project = this.projects.get(parsed.request.projectId) ?? null;
+    const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
+    let priorInitialization = suppliedPriorInitialization;
+    if (priorInitialization === undefined) {
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) {
+        if (restoreOnPreflightError) { await restoreOnPreflightError(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
+        throw error;
+      }
+    }
+    if (priorInitialization) {
+      const blocked = {
+        ...seedRecord,
+        status: 'blocked',
+        reason: 'unbound_prior_agent_initialization',
+        initializationLease: null,
+        updatedAt: this.now()
+      };
+      return this.finalizeTerminal(
+        issue,
+        key,
+        blocked,
+        'Agent request blocked because this issue already contains trusted evidence of a prior agent workflow, but the active durable queue state has no binding for it. No duplicate workflow was created. Submit a new request only after reconciling or intentionally retiring the prior workflow.'
+      );
+    }
+    if (!project) {
+      const rejected = {
+        ...seedRecord,
+        projectFingerprint: null,
+        status: 'rejected', reason: 'unknown_project', updatedAt: this.now(), pendingApproval: null,
+        startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null,
+        lastProcessedCommentId: 0
+      };
+      return this.finalizeTerminal(issue, key, rejected, `Agent request rejected: unknown registered project \`${parsed.request.projectId}\`.`);
+    }
+    if (seedRecord.requestFingerprint !== parsed.requestFingerprint ||
+        seedRecord.issueBodyFingerprint !== parsed.issueBodyFingerprint ||
+        seedRecord.projectFingerprint !== activeProjectFingerprint ||
+        seedRecord.controlPlaneFingerprint !== this.controlPlaneFingerprint()) {
+      return this.blockRequestRevalidation(issue, key, seedRecord, 'initialization_context_changed');
+    }
+
+    let workflow;
+    let dryRun;
+    try {
+      workflow = await this.workflowEngine.create({
+        profile: parsed.request.profile,
+        projectId: parsed.request.projectId,
+        goal: parsed.request.goal,
+        scope: parsed.request.scope,
+        ...(parsed.request.input ? { input: parsed.request.input } : {})
+      });
+      dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
+    } catch (error) {
+      const blocked = {
+        ...seedRecord,
+        projectFingerprint: activeProjectFingerprint,
+        status: 'blocked', reason: 'workflow_initialization_failed', updatedAt: this.now(),
+        workflowId: workflow?.id ?? null,
+        workflowBindingFingerprint: workflow ? workflowBindingFingerprint(workflow) : null,
+        pendingApproval: null, startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null,
+        lastProcessedCommentId: 0
+      };
+      return this.finalizeTerminal(issue, key, blocked, `Agent request blocked during workflow initialization/dry-run: \`${maskSecrets(error.message)}\`. No real execution was authorized.`);
+    }
+    const binding = workflowBindingFingerprint(workflow);
+    const token = startApprovalFingerprint({
+      requestFingerprint: parsed.requestFingerprint,
+      issueBodyFingerprint: parsed.issueBodyFingerprint,
+      projectFingerprint: activeProjectFingerprint,
+      controlPlaneFingerprint: this.controlPlaneFingerprint(),
+      workflow,
+      dryRun
+    });
+    const initialized = {
+      ...seedRecord,
+      projectFingerprint: activeProjectFingerprint,
+      workflowId: workflow.id, workflowBindingFingerprint: binding,
+      status: 'awaiting_start_approval', reason: null, updatedAt: this.now(),
+      pendingApproval: { kind: 'start', stepId: 'start', fingerprint: token },
+      startApprovalFingerprint: token,
+      startApprovalCommentId: null,
+      startApprovedBy: null, activeApproval: null, initializationLease: null,
+      lastProcessedCommentId: 0
+    };
+    await this.saveRecord(key, initialized);
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
+    return initialized;
+  }
+
+  async initializeIssue(issue, parsed) {
+    if (!this.authorized(issue.user?.login)) return null;
+    const project = this.projects.get(parsed.request.projectId) ?? null;
+    const activeProjectFingerprint = project ? projectExecutionFingerprint(project) : null;
+    const claim = await this.claimInitialization(issue, parsed, activeProjectFingerprint);
+    if (!claim.claimed) return claim.record;
+    return this.finishInitialization(issue, parsed, claim.record);
+  }
+
+  async findDecision(issueNumber, record) {
+    const comments = await this.channel.comments(issueNumber);
+    const instruction = record.pendingApproval?.fingerprint ? approvalInstruction(record.pendingApproval.fingerprint) : null;
+    const instructionPresent = Boolean(instruction && comments.some((comment) =>
+      typeof comment.body === 'string' &&
+      this.instructionPublisher(comment.user?.login) &&
+      comment.body.includes(instruction)
+    ));
+    const eligible = comments
+      .filter((comment) => Number.isInteger(comment.id) && comment.id > (record.lastProcessedCommentId ?? 0))
+      .sort((a, b) => a.id - b.id);
+    let highest = record.lastProcessedCommentId ?? 0;
+    let decision = null;
+    for (const comment of eligible) {
+      highest = Math.max(highest, comment.id);
+      const parsed = parseApprovalComment(comment.body);
+      if (!parsed || !this.authorized(comment.user?.login)) continue;
+      if (parsed.approvalFingerprint !== record.pendingApproval?.fingerprint) continue;
+      decision = { ...parsed, commentId: comment.id, actor: comment.user.login };
+    }
+    return { decision, highestCommentId: highest, instructionPresent };
+  }
+
+  async historicalDecision(issueNumber, approvalFingerprint) {
+    const comments = await this.channel.comments(issueNumber);
+    let decision = null;
+    for (const comment of comments
+      .filter((candidate) => Number.isInteger(candidate.id))
+      .sort((a, b) => a.id - b.id)) {
+      const parsed = parseApprovalComment(comment.body);
+      if (parsed?.approvalFingerprint === approvalFingerprint && this.authorized(comment.user?.login)) {
+        decision = { ...parsed, commentId: comment.id, actor: comment.user.login };
+      }
+    }
+    return decision;
+  }
+
+  async revalidateActiveApproval(issue, key, record) {
+    if (!record.activeApproval) return { ok: true, record };
+    const latest = await this.historicalDecision(issue.number, record.activeApproval.fingerprint);
+    if (latest?.decision === 'reject') {
+      const next = {
+        ...record,
+        status: 'rejected',
+        reason: `rejected_by:${latest.actor}`,
+        pendingApproval: null,
+        activeApproval: null,
+        lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, latest.commentId),
+        updatedAt: this.now()
+      };
+      const finalized = await this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latest.actor}\` before continuation. No further execution will occur.`);
+      return { ok: false, record: finalized };
+    }
+    if (latest?.decision !== 'approve') {
+      const next = {
+        ...record,
+        status: 'blocked',
+        reason: 'active_approval_no_longer_provable',
+        pendingApproval: null,
+        activeApproval: null,
+        updatedAt: this.now()
+      };
+      const finalized = await this.finalizeTerminal(issue, key, next, 'Agent continuation blocked because the approval that authorized the current transition can no longer be proven from GitHub.');
+      return { ok: false, record: finalized };
+    }
+    return { ok: true, record, latest };
+  }
+
+  workflowIsPristine(workflow) {
+    if ((workflow.modelUsage?.calls ?? 0) !== 0 || workflow.workspace) return false;
+    return workflow.steps.every((step, index) => index === 0 ? step.status === WorkflowStepStatus.READY : step.status === WorkflowStepStatus.PENDING);
+  }
+
+  async persistPendingWorkflowApproval(issue, key, record, workflow) {
+    const step = workflow.steps.find((candidate) => stepNeedsHumanApproval(candidate));
+    if (!step) throw new Error('workflow reports human approval is needed without an approvable step');
+    const token = workflowApprovalFingerprint({
+      requestFingerprint: record.requestFingerprint,
+      issueBodyFingerprint: record.issueBodyFingerprint,
+      projectFingerprint: record.projectFingerprint,
+      controlPlaneFingerprint: record.controlPlaneFingerprint,
+      workflow,
+      stepId: step.id
+    });
+    const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
+    let approvalMessage = null;
+    if (!already) {
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+      }
+    }
+    const next = {
+      ...record,
+      status: 'awaiting_workflow_approval',
+      reason: null,
+      updatedAt: this.now(),
+      pendingApproval: { kind: 'workflow-step', stepId: step.id, fingerprint: token },
+      activeApproval: null
+    };
+    await this.saveRecord(key, next);
+    if (approvalMessage) await this.post(issue.number, approvalMessage);
+    return next;
+  }
+
+  async settleWorkflow(issue, key, record, workflow) {
+    const interruptedApproval = workflow.status === WorkflowStepStatus.BLOCKED &&
+      workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+    if (workflow.status === WorkflowStepStatus.AWAITING_APPROVAL || interruptedApproval) return this.persistPendingWorkflowApproval(issue, key, record, workflow);
+    const resumableObservation = workflow.status === WorkflowStepStatus.BLOCKED &&
+      workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error));
+    if (resumableObservation) {
+      const next = { ...record, status: 'running', reason: 'resumable_publication_observation', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+      await this.saveRecord(key, next);
+      return next;
+    }
+    if (workflow.status === WorkflowStepStatus.COMPLETED) {
+      const published = publicationSummary(workflow);
+      const next = { ...record, status: 'completed', reason: null, updatedAt: this.now(), pendingApproval: null, activeApproval: null, publication: published };
+      return this.finalizeTerminal(issue, key, next, [
+        'Agent workflow completed its Definition of Done.',
+        published?.pullRequest ? `Pull request: ${published.pullRequest}` : 'Pull request: not recorded',
+        published?.previewUrl ? `Preview: ${published.previewUrl}` : 'Preview: not recorded',
+        'No merge or production deployment was performed by the issue queue.'
+      ].join('\n'));
+    }
+    if (workflow.status === WorkflowStepStatus.FAILED || workflow.status === WorkflowStepStatus.BLOCKED) {
+      const reason = safeIssueInline(workflow.result?.error ?? workflow.status);
+      const failure = workflowFailureSummary(workflow);
+      const detail = [
+        `Agent workflow stopped with status \`${workflow.status}\`: \`${reason}\`.`,
+        failure.stepId ? `Step: \`${safeIssueInline(failure.stepId, 200)}\`.` : null,
+        failure.skill ? `Skill: \`${safeIssueInline(failure.skill, 200)}\`.` : null,
+        failure.specialist ? `Specialist: \`${safeIssueInline(failure.specialist, 200)}\`.` : null,
+        failure.attempts !== null ? `Attempts: \`${failure.attempts}${failure.maxAttempts !== null ? `/${failure.maxAttempts}` : ''}\`.` : null,
+        failure.detail ? `Cause: \`${failure.detail}\`.` : 'Cause: no executor detail was recorded.',
+        'No automatic merge/production action was attempted.'
+      ].filter(Boolean).join('\n');
+      const next = { ...record, status: workflow.status, reason, updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+      return this.finalizeTerminal(issue, key, next, detail);
+    }
+    const next = { ...record, status: 'running', reason: null, updatedAt: this.now(), pendingApproval: null };
+    await this.saveRecord(key, next);
+    return next;
+  }
+
+  async processExisting(issue, parsed, record) {
+    const key = this.requestKey(issue);
+    if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
+    const currentRequest = await this.revalidateCurrentRequest(issue, record);
+    if (!currentRequest.ok) return this.blockRequestRevalidation(issue, key, record, currentRequest.reason);
+    issue = currentRequest.issue;
+    parsed = currentRequest.parsed;
+    const activeProject = this.projects.get(parsed.request.projectId) ?? null;
+    try {
+      validateIssueQueueRecord(record, {
+        issue,
+        requestFingerprint: parsed.requestFingerprint,
+        issueBodyFingerprint: parsed.issueBodyFingerprint
+      });
+    } catch (error) {
+      const now = this.now();
+      const next = {
+        version: 1,
+        issueNumber: issue.number,
+        issueId: issue.id,
+        author: issue.user?.login ?? null,
+        requestFingerprint: null,
+        issueBodyFingerprint: null,
+        projectFingerprint: null,
+        controlPlaneFingerprint: this.controlPlaneFingerprint(),
+        request: null,
+        workflowId: null,
+        workflowBindingFingerprint: null,
+        status: 'blocked',
+        reason: 'queue_state_invalid',
+        createdAt: typeof record?.createdAt === 'string' ? record.createdAt : now,
+        updatedAt: now,
+        pendingApproval: null,
+        activeApproval: null,
+        startApprovalFingerprint: null,
+        startApprovalCommentId: null,
+        startApprovedBy: null,
+        initializationLease: null,
+        lastProcessedCommentId: 0
+      };
+      return this.finalizeTerminal(issue, key, next, `Agent request blocked because local queue state failed validation: \`${maskSecrets(error.message)}\`. The corrupt local record was quarantined and will not be resumed.`);
+    }
+    if (!activeProject) return this.blockRequestRevalidation(issue, key, record, 'project_removed');
+    if (projectExecutionFingerprint(activeProject) !== record.projectFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'project_config_changed');
+    }
+    if (this.controlPlaneFingerprint() !== record.controlPlaneFingerprint) {
+      return this.blockRequestRevalidation(issue, key, record, 'control_plane_changed');
+    }
+    if (record.status === 'admitted') {
+      if (this.operatorRevision) {
+        const remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
+      let claim;
+      try { claim = await this.claimAdmittedInitialization(issue, parsed, record); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `admitted_initialization_claim_failed:${maskSecrets(error.message)}`);
+      }
+      if (!claim.claimed) return claim.record ?? this.blockRequestRevalidation(issue, key, record, 'admitted_initialization_missing');
+      const restore = () => this.saveRecord(key, { ...claim.record, status: 'admitted', initializationLease: null, updatedAt: this.now() });
+      const blockClaimed = (reason) => this.saveRecord(key, {
+        ...claim.record,
+        status: 'blocked',
+        reason,
+        initializationLease: null,
+        pendingApproval: null,
+        activeApproval: null,
+        updatedAt: this.now()
+      });
+      let priorInitialization;
+      try { priorInitialization = await this.unboundPriorAgentInitialization(issue.number); }
+      catch (error) { await restore(); throw new Error('workflow_initialization_preflight_failed', { cause: error }); }
+      let claimedRequest;
+      try { claimedRequest = await this.revalidateCurrentRequest(issue, claim.record); }
+      catch (error) {
+        await restore();
+        throw new Error('workflow_initialization_preflight_failed', { cause: error });
+      }
+      if (!claimedRequest.ok) return blockClaimed(claimedRequest.reason);
+      issue = claimedRequest.issue;
+      parsed = claimedRequest.parsed;
+      const claimedProject = this.projects.get(parsed.request.projectId) ?? null;
+      if (!this.ownsProject(parsed.request.projectId) ||
+          !claimedProject ||
+          projectExecutionFingerprint(claimedProject) !== claim.record.projectFingerprint ||
+          this.controlPlaneFingerprint() !== claim.record.controlPlaneFingerprint) {
+        return blockClaimed('initialization_context_changed');
+      }
+      if (this.operatorRevision) {
+        let remoteOperatorRevision;
+        try { remoteOperatorRevision = await this.channel.branchHead(this.operatorBranch); }
+        catch { await restore(); return { status: 'operator_revision_check_failed', issueNumber: issue.number, updatedAt: this.now() }; }
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          await restore();
+          return { status: 'operator_update_pending', issueNumber: issue.number, localRevision: this.operatorRevision, remoteRevision: remoteOperatorRevision, updatedAt: this.now() };
+        }
+      }
+      return this.finishInitialization(issue, parsed, claim.record, { restoreOnPreflightError: restore, priorInitialization });
+    }
+    if (record.status === 'initializing') {
+      let abandoned;
+      try { abandoned = await this.store.lockOwnerIsAbandoned(record.initializationLease); }
+      catch (error) {
+        return this.blockRequestRevalidation(issue, key, record, `initialization_lease_check_failed:${maskSecrets(error.message)}`);
+      }
+      if (!abandoned) return record;
+      const next = { ...record, status: 'blocked', reason: 'initialization_interrupted', initializationLease: null, updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+      return this.finalizeTerminal(issue, key, next, 'Agent request blocked because initialization was interrupted. No automatic retry or duplicate workflow was created; submit a new request after inspection.');
+    }
+
+    if (record.pendingApproval) {
+      const { decision, highestCommentId, instructionPresent } = await this.findDecision(issue.number, record);
+      if (!decision && highestCommentId > (record.lastProcessedCommentId ?? 0)) {
+        record = await this.saveRecord(key, { ...record, lastProcessedCommentId: highestCommentId, updatedAt: this.now() });
+      }
+      if (!decision) {
+        if (!instructionPresent) {
+          const workflow = await this.workflowEngine.get(record.workflowId);
+          if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+            const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+            return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+          }
+          let recoveredMessage;
+          if (record.pendingApproval.kind === 'start') {
+            if (!this.workflowIsPristine(workflow)) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be recovered because the workflow is no longer pristine.');
+            }
+            const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
+            const expected = startApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              dryRun
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
+            }
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+          } else {
+            const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
+            if (!stepNeedsHumanApproval(targetStep)) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval cannot be recovered because the target step no longer requires approval.');
+            }
+            const expected = workflowApprovalFingerprint({
+              requestFingerprint: record.requestFingerprint,
+              issueBodyFingerprint: record.issueBodyFingerprint,
+              projectFingerprint: record.projectFingerprint,
+              controlPlaneFingerprint: record.controlPlaneFingerprint,
+              workflow,
+              stepId: targetStep.id
+            });
+            if (expected !== record.pendingApproval.fingerprint) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
+            }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            catch (error) {
+              return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
+            }
+          }
+          await this.post(issue.number, recoveredMessage);
+        }
+        return record;
+      }
+      if (decision.decision === 'reject') {
+        const next = { ...record, status: 'rejected', reason: `rejected_by:${decision.actor}`, updatedAt: this.now(), pendingApproval: null };
+        return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${decision.actor}\`. No further execution will occur.`);
+      }
+      if (record.pendingApproval.kind === 'start') {
+        const workflow = await this.workflowEngine.get(record.workflowId);
+        if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+        }
+        if (!this.workflowIsPristine(workflow)) {
+          const next = { ...record, status: 'blocked', reason: 'start_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent start approval cannot be applied because the workflow is no longer pristine. Manual inspection is required.');
+        }
+        const dryRun = await this.workflowEngine.run(record.workflowId, { dryRun: true });
+        const expected = startApprovalFingerprint({
+          requestFingerprint: record.requestFingerprint,
+          issueBodyFingerprint: record.issueBodyFingerprint,
+          projectFingerprint: record.projectFingerprint,
+          controlPlaneFingerprint: record.controlPlaneFingerprint,
+          workflow,
+          dryRun
+        });
+        if (expected !== record.pendingApproval.fingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
+        }
+        const currentBeforeExecution = await this.revalidateCurrentRequest(issue, record);
+        if (!currentBeforeExecution.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeExecution.reason);
+        issue = currentBeforeExecution.issue;
+        const latestDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
+        if (latestDecision?.decision === 'reject') {
+          const next = { ...record, status: 'rejected', reason: `rejected_by:${latestDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before execution. No further execution will occur.`);
+        }
+        if (latestDecision?.decision !== 'approve') return record;
+        record = await this.saveRecord(key, {
+          ...record,
+          status: 'running',
+          pendingApproval: null,
+          startApprovalFingerprint: expected,
+          startApprovalCommentId: latestDecision.commentId,
+          startApprovedBy: latestDecision.actor,
+          activeApproval: { kind: 'start', stepId: 'start', fingerprint: expected, commentId: latestDecision.commentId, actor: latestDecision.actor },
+          lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, latestDecision.commentId),
+          updatedAt: this.now()
+        });
+        const activeStart = await this.revalidateActiveApproval(issue, key, record);
+        if (!activeStart.ok) return activeStart.record;
+        const result = await this.workflowEngine.run(record.workflowId, { refreshPristineDeadline: true });
+        return this.settleWorkflow(issue, key, record, result);
+      }
+      if (record.pendingApproval.kind === 'workflow-step') {
+        const workflow = await this.workflowEngine.get(record.workflowId);
+        if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+        }
+        const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
+        if (!stepNeedsHumanApproval(targetStep)) {
+          const proof = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
+          if (proof?.decision === 'reject') {
+            const next = { ...record, status: 'rejected', reason: `rejected_by:${proof.actor}`, updatedAt: this.now(), pendingApproval: null };
+            return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${proof.actor}\` during approval recovery. No further execution will occur.`);
+          }
+          if (proof?.decision === 'approve') {
+            const externalFingerprint = targetStep?.type === 'checkpoint'
+              ? targetStep.evidence?.externalApprovalFingerprint
+              : targetStep?.evidence?.sensitiveApproval?.externalApprovalFingerprint ?? targetStep?.evidence?.externalApprovalFingerprint;
+            const approvedDependencyFingerprint = targetStep?.type === 'checkpoint'
+              ? targetStep.evidence?.approvedDependencyEvidenceFingerprint
+              : targetStep?.evidence?.sensitiveApproval?.approvedDependencyEvidenceFingerprint ?? targetStep?.evidence?.approvedDependencyEvidenceFingerprint;
+            const currentDependencyFingerprint = (() => {
+              try { return targetStep ? humanApprovalDependencyFingerprint(workflow, targetStep.id) : null; }
+              catch { return null; }
+            })();
+            const appliedState = targetStep?.status === WorkflowStepStatus.COMPLETED || targetStep?.status === WorkflowStepStatus.READY;
+            if (appliedState &&
+                externalFingerprint === record.pendingApproval.fingerprint &&
+                approvedDependencyFingerprint === currentDependencyFingerprint) {
+              const currentBeforeRecovery = await this.revalidateCurrentRequest(issue, record);
+              if (!currentBeforeRecovery.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeRecovery.reason);
+              issue = currentBeforeRecovery.issue;
+              record = await this.saveRecord(key, {
+                ...record,
+                status: 'running',
+                reason: 'workflow_approval_already_applied',
+                pendingApproval: null,
+                activeApproval: {
+                  kind: 'workflow-step',
+                  stepId: targetStep.id,
+                  fingerprint: record.pendingApproval.fingerprint,
+                  commentId: proof.commentId,
+                  actor: proof.actor
+                },
+                lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, proof.commentId),
+                updatedAt: this.now()
+              });
+              const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
+              if (!recoveredApproval.ok) return recoveredApproval.record;
+              const result = await this.workflowEngine.run(record.workflowId);
+              return this.settleWorkflow(issue, key, record, result);
+            }
+            if (appliedState) {
+              const next = { ...record, status: 'blocked', reason: 'workflow_approval_recovery_mismatch', updatedAt: this.now(), pendingApproval: null };
+              return this.finalizeTerminal(issue, key, next, 'Agent cannot prove that the persisted workflow state is the exact state authorized before the crash. Manual inspection is required.');
+            }
+          }
+          const next = { ...record, status: 'blocked', reason: 'workflow_approval_state_diverged', updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow approval state diverged from the pending queue checkpoint. Manual inspection is required; the approval will not be replayed.');
+        }
+        const expected = workflowApprovalFingerprint({
+          requestFingerprint: record.requestFingerprint,
+          issueBodyFingerprint: record.issueBodyFingerprint,
+          projectFingerprint: record.projectFingerprint,
+          controlPlaneFingerprint: record.controlPlaneFingerprint,
+          workflow,
+          stepId: record.pendingApproval.stepId
+        });
+        if (expected !== record.pendingApproval.fingerprint) {
+          const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted workflow state changed. Manual inspection is required.');
+        }
+        const currentBeforeApproval = await this.revalidateCurrentRequest(issue, record);
+        if (!currentBeforeApproval.ok) return this.blockRequestRevalidation(issue, key, record, currentBeforeApproval.reason);
+        issue = currentBeforeApproval.issue;
+        const latestDecision = await this.historicalDecision(issue.number, record.pendingApproval.fingerprint);
+        if (latestDecision?.decision === 'reject') {
+          const next = { ...record, status: 'rejected', reason: `rejected_by:${latestDecision.actor}`, updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before workflow approval. No further execution will occur.`);
+        }
+        if (latestDecision?.decision !== 'approve') return record;
+        await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId, { externalApprovalFingerprint: record.pendingApproval.fingerprint });
+        record = await this.saveRecord(key, {
+          ...record,
+          status: 'running',
+          pendingApproval: null,
+          activeApproval: {
+            kind: 'workflow-step',
+            stepId: record.pendingApproval.stepId,
+            fingerprint: record.pendingApproval.fingerprint,
+            commentId: latestDecision.commentId,
+            actor: latestDecision.actor
+          },
+          lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, latestDecision.commentId),
+          updatedAt: this.now()
+        });
+        const activeWorkflowApproval = await this.revalidateActiveApproval(issue, key, record);
+        if (!activeWorkflowApproval.ok) return activeWorkflowApproval.record;
+        const result = await this.workflowEngine.run(record.workflowId);
+        return this.settleWorkflow(issue, key, record, result);
+      }
+    }
+
+    if (!record.pendingApproval && record.status === 'running' && record.activeApproval) {
+      const active = await this.revalidateActiveApproval(issue, key, record);
+      if (!active.ok) return active.record;
+    }
+
+    const workflow = await this.workflowEngine.get(record.workflowId);
+    if (!workflow) {
+      const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
+      return this.finalizeTerminal(issue, key, next, 'Agent workflow state is missing. Manual inspection is required; no continuation was attempted.');
+    }
+    if (workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
+      const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
+      return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
+    }
+    if (workflow.status === WorkflowStepStatus.PENDING) {
+      if (this.workflowIsPristine(workflow)) {
+        const dryRun = await this.workflowEngine.run(workflow.id, { dryRun: true });
+        const expectedStart = startApprovalFingerprint({
+          requestFingerprint: record.requestFingerprint,
+          issueBodyFingerprint: record.issueBodyFingerprint,
+          projectFingerprint: record.projectFingerprint,
+          controlPlaneFingerprint: record.controlPlaneFingerprint,
+          workflow,
+          dryRun
+        });
+        const proof = await this.historicalDecision(issue.number, expectedStart);
+        if (proof?.decision === 'reject') {
+          const next = { ...record, status: 'rejected', reason: `rejected_by:${proof.actor}`, updatedAt: this.now(), pendingApproval: null };
+          return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${proof.actor}\` before recovered start execution. No further execution will occur.`);
+        }
+        if (proof?.decision !== 'approve') {
+          const already = record.status === 'awaiting_start_approval' && record.pendingApproval?.fingerprint === expectedStart;
+          const next = {
+            ...record,
+            status: 'awaiting_start_approval',
+            reason: null,
+            startApprovalFingerprint: expectedStart,
+            pendingApproval: { kind: 'start', stepId: 'start', fingerprint: expectedStart },
+            updatedAt: this.now()
+          };
+          await this.saveRecord(key, next);
+          if (!already) await this.post(issue.number, `Agent start authorization is missing or stale. Approve the current dry-run with exactly:\n\`${approvalInstruction(expectedStart)}\``);
+          return next;
+        }
+        record = await this.saveRecord(key, {
+          ...record,
+          status: 'running',
+          startApprovalFingerprint: expectedStart,
+          startApprovalCommentId: proof.commentId,
+          startApprovedBy: proof.actor,
+          pendingApproval: null,
+          activeApproval: { kind: 'start', stepId: 'start', fingerprint: expectedStart, commentId: proof.commentId, actor: proof.actor },
+          lastProcessedCommentId: Math.max(record.lastProcessedCommentId ?? 0, proof.commentId),
+          updatedAt: this.now()
+        });
+        const recoveredStart = await this.revalidateActiveApproval(issue, key, record);
+        if (!recoveredStart.ok) return recoveredStart.record;
+      }
+      const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
+      return this.settleWorkflow(issue, key, record, result);
+    }
+    if (workflow.status === WorkflowStepStatus.RUNNING) {
+      const result = await this.workflowEngine.resume(workflow.id);
+      return this.settleWorkflow(issue, key, record, result);
+    }
+    if (workflow.status === WorkflowStepStatus.BLOCKED &&
+        workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
+      const result = await this.workflowEngine.resume(workflow.id);
+      return this.settleWorkflow(issue, key, record, result);
+    }
+    return this.settleWorkflow(issue, key, record, workflow);
+  }
+
+  async processIssue(issue) {
+    if (!Number.isInteger(issue?.number) || !issue.id || issue.state !== 'open' || issue.pull_request) return null;
+    if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) return null;
+    let parsed;
+    try { parsed = parseIssueRequestBody(issue.body); }
+    catch (error) {
+      const key = this.requestKey(issue);
+      const existing = await this.getRecord(key);
+      if (existing && !['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) {
+        return this.blockRequestRevalidation(issue, key, existing, 'request_body_invalid');
+      }
+      if (!existing && this.authorized(issue.user?.login)) {
+        const rejected = {
+          version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user?.login ?? null,
+          requestFingerprint: null, issueBodyFingerprint: null, projectFingerprint: null,
+          controlPlaneFingerprint: this.controlPlaneFingerprint(), request: null, workflowId: null,
+          workflowBindingFingerprint: null, status: 'rejected',
+          reason: 'invalid_request', createdAt: this.now(), updatedAt: this.now(), pendingApproval: null,
+          startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null, initializationLease: null, lastProcessedCommentId: 0
+        };
+        return this.finalizeTerminal(issue, key, rejected, `Agent request rejected during parsing: \`${maskSecrets(error.message)}\`.`);
+      }
+      return null;
+    }
+    const key = this.requestKey(issue);
+    const existing = await this.getRecord(key);
+    return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
+  }
+
+  async hasWork() {
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) || !this.ownsRecord(record)) continue;
+      if (!terminal.has(record.status)) return true;
+      if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
+    }
+
+    if (this.includedProjectIds !== null) return (await this.pendingAdmissionIntents()).length > 0;
+    const issues = await this.channel.openIssues();
+    for (const issue of issues) {
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      let routingRequest;
+      try {
+        routingRequest = parseIssueRequestBody(issue.body).request;
+      } catch {
+        if (this.includedProjectIds !== null) continue;
+        if (this.authorized(issue.user?.login)) return true;
+        continue;
+      }
+      if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
+      const existing = state.requests?.[this.requestKey(issue)] ?? null;
+      if (existing && !this.ownsRecord(existing)) continue;
+      if (existing && terminal.has(existing.status)) continue;
+      if (!existing && !this.authorized(issue.user?.login)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  async tick() {
+    let notificationError = null;
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) ||
+          !this.ownsRecord(record) ||
+          !['completed', 'failed', 'blocked', 'rejected'].includes(record.status) ||
+          !record.terminalNotification ||
+          record.terminalNotification.sentAt) continue;
+      try {
+        const issue = await this.channel.issue(record.issueNumber);
+        return await this.deliverTerminalNotification(issue ?? { number: record.issueNumber }, key, record);
+      } catch (error) {
+        notificationError ??= error;
+      }
+    }
+    for (const [key, record] of Object.entries(state.requests ?? {})) {
+      if (!key.startsWith(keyPrefix) ||
+          !this.ownsRecord(record) ||
+          ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
+      const issue = await this.channel.issue(record.issueNumber);
+      if (!issue ||
+          issue.state !== 'open' ||
+          issue.pull_request ||
+          issue.number !== record.issueNumber ||
+          issue.id !== record.issueId ||
+          issue.user?.login !== record.author) {
+        return this.blockRequestRevalidation(
+          issue ?? { number: record.issueNumber, id: record.issueId, user: { login: record.author } },
+          key,
+          record,
+          'issue_identity_or_state_changed'
+        );
+      }
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
+        return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
+      }
+      const activeResult = await this.processIssue(issue);
+      if (activeResult) return activeResult;
+    }
+    if (this.includedProjectIds !== null) {
+      if (notificationError) throw notificationError;
+      return null;
+    }
+    const issues = await this.channel.openIssues();
+    let remoteOperatorRevision = null;
+    for (const issue of issues) {
+      if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
+      let routingRequest = null;
+      try { routingRequest = parseIssueRequestBody(issue.body).request; }
+      catch {
+        if (this.includedProjectIds !== null) continue;
+      }
+      if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
+      const existing = await this.getRecord(this.requestKey(issue));
+      if (existing && !this.ownsRecord(existing)) continue;
+      if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
+      if (!existing && this.operatorRevision) {
+        remoteOperatorRevision ??= await this.channel.branchHead(this.operatorBranch);
+        if (remoteOperatorRevision !== this.operatorRevision) {
+          return {
+            status: 'operator_update_pending',
+            issueNumber: issue.number,
+            localRevision: this.operatorRevision,
+            remoteRevision: remoteOperatorRevision,
+            updatedAt: this.now()
+          };
+        }
+      }
+      const result = await this.processIssue(issue);
+      if (result) return result;
+    }
+    if (notificationError) throw notificationError;
+    return null;
+  }
+}
+
+export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
+  if (!queue || typeof queue.claimWatcherLease !== 'function' || typeof queue.releaseWatcherLease !== 'function') {
+    throw new Error('watchIssueQueue requires a lease-capable queue');
+  }
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
+  if (beforeTick !== undefined && typeof beforeTick !== 'function') throw new Error('issue queue beforeTick must be a function');
+  if (signal?.aborted) return;
+  const lease = await queue.claimWatcherLease();
+  let operationError = null;
+  try {
+    while (!signal?.aborted) {
+      if (beforeTick && await beforeTick() === false) break;
+      if (signal?.aborted) break;
+      try {
+        const result = await queue.tick();
+        await onTick?.(result);
+      } catch (error) {
+        await onError?.(error);
+      }
+      if (signal?.aborted) break;
+      await new Promise((resolveSleep) => {
+        let timer = null;
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (timer !== null) clearTimeout(timer);
+          signal?.removeEventListener?.('abort', finish);
+          resolveSleep();
+        };
+        timer = setTimeout(finish, pollIntervalMs);
+        if (signal) {
+          if (signal.aborted) return finish();
+          signal.addEventListener?.('abort', finish, { once: true });
+          if (signal.aborted) finish();
+        }
+      });
+    }
+  } catch (error) {
+    operationError = error;
+  }
+  let released = false;
+  let releaseError = null;
+  try { released = await queue.releaseWatcherLease(lease.leaseId); }
+  catch (error) { releaseError = error; }
+  if (releaseError) throw new Error('issue_queue_watcher_lease_release_failed', { cause: releaseError });
+  if (!released) throw new Error('issue_queue_watcher_lease_lost', { cause: operationError ?? undefined });
+  if (operationError) throw operationError;
+}
+).exec(item?.ref ?? '');
+      const sha = item?.object?.sha;
+      if (!match || typeof sha !== 'string' || !/^[a-f0-9]{40}$/i.test(sha)) {
+        throw new Error('admission_recovery_cursor_ref_invalid');
+      }
+      if (sha.toLowerCase() !== trustedSha.toLowerCase()) {
+        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+        continue;
+      }
+      page = Math.min(page === 1 ? Number(match[1]) : page, Number(match[1]));
+    }
+    return { page };
+  }
+
+  async setAdmissionRecoveryCursor(scopeKey, page, trustedSha) {
+    if (typeof scopeKey !== 'string' || !/^[a-f0-9]{64}$/.test(scopeKey) ||
+        !Number.isInteger(page) || page < 1 || page > 1_000_000 ||
+        typeof trustedSha !== 'string' || !/^[a-f0-9]{40}$/i.test(trustedSha)) {
+      throw new Error('admission_recovery_cursor_invalid');
+    }
+    const prefix = 'tags/agent-admission-recovery-v1/' + scopeKey + '/';
+    const batch = await this.request(this.path('/git/matching-refs/' + prefix + '?per_page=100'));
+    if (!Array.isArray(batch)) throw new Error('admission_recovery_cursor_response_invalid');
+    for (const item of batch) {
+      if (typeof item?.ref !== 'string' || !item.ref.startsWith('refs/' + prefix)) {
+        throw new Error('admission_recovery_cursor_ref_invalid');
+      }
+      try {
+        await this.request(this.path('/git/refs/' + item.ref.slice('refs/'.length)), { method: 'DELETE' });
+      } catch (error) {
+        if (!/request failed: 404/.test(error.message)) throw error;
+      }
+    }
+    if (page === 1) return { page };
+    const ref = 'refs/' + prefix + page;
+    try {
+      await this.request(this.path('/git/refs'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref, sha: trustedSha.toLowerCase() })
+      });
+    } catch (error) {
+      if (!/request failed: 422/.test(error.message)) throw error;
+      const existing = await this.request(this.path('/git/ref/' + ref.slice('refs/'.length)));
+      if (existing?.object?.sha?.toLowerCase() !== trustedSha.toLowerCase()) throw error;
+    }
+    return { page };
   }
 
   async comment(number, body) {
