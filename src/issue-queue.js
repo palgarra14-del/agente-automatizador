@@ -983,7 +983,7 @@ export class SupervisedIssueQueue {
     const actor = event.sender?.login;
     if (!this.authorized(actor)) return { admitted: false, reason: 'event_actor_unauthorized' };
     if (eventName === 'issue_comment' &&
-        (event.comment?.user?.login !== actor || event.comment?.body !== '/agent')) {
+        (event.comment?.user?.login !== actor || String(event.comment?.body ?? '').trim() !== '/agent')) {
       return { admitted: false, reason: 'event_comment_invalid' };
     }
 
@@ -1004,9 +1004,12 @@ export class SupervisedIssueQueue {
     const activeProjectFingerprint = projectExecutionFingerprint(project);
     const activeControlPlaneFingerprint = this.controlPlaneFingerprint();
 
-    const current = await this.channel.issue(eventIssue.number);
-    if (!current || current.number !== eventIssue.number || current.id !== eventIssue.id || current.state !== 'open' || current.pull_request ||
-        current.user?.login !== eventIssue.user?.login || current.body !== eventIssue.body) {
+    let current;
+    let retryableIssueRead = false;
+    try { current = await this.channel.issue(eventIssue.number); }
+    catch { current = eventIssue; retryableIssueRead = true; }
+    if (!retryableIssueRead && (!current || current.number !== eventIssue.number || current.id !== eventIssue.id || current.state !== 'open' || current.pull_request ||
+        current.user?.login !== eventIssue.user?.login || current.body !== eventIssue.body)) {
       return { admitted: false, reason: 'event_issue_stale' };
     }
     let currentParsed;
@@ -1077,7 +1080,7 @@ export class SupervisedIssueQueue {
       }
       return { admitted: false, idempotent: true, issueNumber: current.number, status: raced.status };
     }
-    return { admitted: true, idempotent: false, issueNumber: current.number, status: record.status };
+    return { admitted: true, idempotent: false, issueNumber: current.number, status: record.status, ...(retryableIssueRead ? { retryable: true } : {}) };
   }
 
   async finishInitialization(issue, parsed, seedRecord, { restoreOnPreflightError = null, priorInitialization: suppliedPriorInitialization } = {}) {
