@@ -137,11 +137,18 @@ function admissionFixture(currentIssue = issue(20)) {
     async issue(n) { return n === currentIssue.number ? clone(currentIssue) : null; },
     async branchHead() { return revision; },
     async openIssues() { return []; },
-    async createAdmissionIntent(intent) {
-      const ref = `refs/tags/agent-admission-v1/${intent.projectId}/${intent.issueNumber}/${intent.fingerprint}`;
-      const created = !intents.has(ref); intents.set(ref, { ref, ...intent, targetSha: revision });
+    admissionIntentRef(intent) {
+      return `refs/tags/agent-admission-v1/${intent.projectId}/${intent.issueNumber}/${intent.fingerprint}`;
+    },
+    async createAdmissionIntent(intent, targetSha = revision) {
+      const ref = this.admissionIntentRef(intent);
+      const existing = intents.get(ref);
+      if (existing && existing.targetSha !== targetSha) throw new Error('admission_intent_existing_conflict');
+      const created = !existing;
+      intents.set(ref, { ref, ...intent, targetSha });
       return { created, ref };
     },
+    async admissionIntentTarget(ref) { return intents.get(ref)?.targetSha ?? null; },
     async listAdmissionIntents(projectIds) {
       return [...intents.values()].filter((intent) => projectIds.includes(intent.projectId));
     },
@@ -273,6 +280,60 @@ test('scheduled recovery paginates beyond five full issue pages to reach lost wo
   assert.equal(recovered.created, 1);
   assert.equal(recovered.truncated, false);
   assert.equal([...f.intents.values()][0].issueNumber, 601);
+});
+
+test('scheduled recovery advances a durable page cursor across capped runs', async () => {
+  const fresh = issue(2101), f = admissionFixture(fresh);
+  for (let number = 1; number <= 2000; number += 1) {
+    f.state.requests[key(number)] = { status: 'completed', request: { projectId: 'callflow' } };
+  }
+  let cursorPage = 1;
+  f.channel.listAdmissionIntents = async () => [];
+  f.channel.admissionRecoveryCursor = async () => ({ page: cursorPage });
+  f.channel.setAdmissionRecoveryCursor = async (_scopeKey, page) => {
+    cursorPage = page;
+    return { page };
+  };
+  f.channel.openIssuePage = async (page) => {
+    if (page <= 20) {
+      const start = (page - 1) * 100 + 1;
+      return {
+        issues: Array.from({ length: 100 }, (_, index) => issue(start + index)),
+        hasMore: true
+      };
+    }
+    if (page === 21) return { issues: [clone(fresh)], hasMore: false };
+    throw new Error('unexpected_page');
+  };
+
+  const first = await f.queue.recoverAdmissionIntents({ max: 50, maxPages: 20 });
+  assert.equal(first.truncated, true);
+  assert.equal(first.pages, 20);
+  assert.equal(first.created, 0);
+  assert.equal(cursorPage, 21);
+
+  const second = await f.queue.recoverAdmissionIntents({ max: 50, maxPages: 20 });
+  assert.equal(second.truncated, false);
+  assert.equal(second.pages, 1);
+  assert.equal(second.created, 1);
+  assert.equal(cursorPage, 1);
+  assert.equal([...f.intents.values()][0].issueNumber, 2101);
+});
+
+test('scheduled recovery repairs an exact stale ref even when listing does not expose it', async () => {
+  const target = issue(41), f = admissionFixture(target);
+  const parsed = parseIssueRequestBody(target.body);
+  const intent = f.queue.admissionIntent(target, parsed);
+  const ref = f.channel.admissionIntentRef(intent);
+  f.intents.set(ref, { ref, ...intent, targetSha: 'e'.repeat(40) });
+
+  f.channel.listAdmissionIntents = async () => [];
+  f.channel.openIssues = async () => [clone(target)];
+
+  const recovered = await f.queue.recoverAdmissionIntents();
+  assert.equal(recovered.created, 1);
+  assert.equal(f.intents.size, 1);
+  assert.equal(f.intents.get(ref).targetSha, revision);
 });
 
 test('admission intent ingestion is crash-safe after canonical persistence', async () => {
