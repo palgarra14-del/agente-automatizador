@@ -588,8 +588,7 @@ export class GitHubStateStore extends JsonStore {
     stateAnchorSha,
     baseGeneration,
     startGeneration,
-    authorityAnchorSha,
-    previousStatusAnchorSha = null
+    authorityAnchorSha
   ) {
     if (!Number.isSafeInteger(epoch) || epoch < 0 ||
         !Number.isSafeInteger(baseGeneration) || baseGeneration < 0 ||
@@ -597,8 +596,7 @@ export class GitHubStateStore extends JsonStore {
         epochForGeneration(startGeneration) !== epoch) {
       throw new Error('cloud_state_epoch_registration_invalid');
     }
-    const previous = previousStatusAnchorSha ? assertSha(previousStatusAnchorSha) : '0'.repeat(40);
-    return `e=${epoch};a=${assertSha(stateAnchorSha)};b=${baseGeneration};s=${startGeneration};u=${assertSha(authorityAnchorSha)};p=${previous}`;
+    return `e=${epoch};a=${assertSha(stateAnchorSha)};b=${baseGeneration};s=${startGeneration};u=${assertSha(authorityAnchorSha)}`;
   }
 
   sealDescription(stateSha, generation, baseWitnessSha) {
@@ -632,15 +630,13 @@ export class GitHubStateStore extends JsonStore {
     }
 
     if (context === registrationContext) {
-      const match = /^e=(0|[1-9][0-9]*);a=([a-f0-9]{40});b=(0|[1-9][0-9]*);s=([1-9][0-9]*);u=([a-f0-9]{40});p=([a-f0-9]{40})$/i.exec(status.description);
+      const match = /^e=(0|[1-9][0-9]*);a=([a-f0-9]{40});b=(0|[1-9][0-9]*);s=([1-9][0-9]*);u=([a-f0-9]{40})$/i.exec(status.description);
       if (!match) throw new Error('cloud_state_epoch_registration_invalid');
       const epoch = Number(match[1]);
       const stateAnchorSha = assertSha(match[2], 'cloud_state_epoch_registration_invalid');
       const baseGeneration = Number(match[3]);
       const startGeneration = Number(match[4]);
       const authorityAnchorSha = assertSha(match[5], 'cloud_state_epoch_registration_invalid');
-      const previousRaw = assertSha(match[6], 'cloud_state_epoch_registration_invalid');
-      const previousStatusAnchorSha = previousRaw === '0'.repeat(40) ? null : previousRaw;
       if (!Number.isSafeInteger(epoch) || !Number.isSafeInteger(baseGeneration) ||
           !Number.isSafeInteger(startGeneration) || startGeneration !== baseGeneration + 1 ||
           epochForGeneration(startGeneration) !== epoch) {
@@ -653,8 +649,7 @@ export class GitHubStateStore extends JsonStore {
         baseGeneration,
         startGeneration,
         statusAnchorSha: assertSha(expectedStatusAnchorSha),
-        authorityAnchorSha,
-        previousStatusAnchorSha
+        authorityAnchorSha
       };
     }
 
@@ -731,10 +726,14 @@ export class GitHubStateStore extends JsonStore {
         if (!record) continue;
         if (record.kind === 'authority') throw new Error('cloud_state_epoch_status_invalid');
         if (record.kind === 'registration') {
-          if (registration && JSON.stringify(registration) !== JSON.stringify(record)) {
+          const previousStatusAnchorSha = commit.parents.length === 1
+            ? assertSha(commit.parents[0]?.sha, 'cloud_state_epoch_anchor_invalid')
+            : null;
+          const normalizedRegistration = { ...record, previousStatusAnchorSha };
+          if (registration && JSON.stringify(registration) !== JSON.stringify(normalizedRegistration)) {
             throw new Error('cloud_state_epoch_registration_conflict');
           }
-          registration = record;
+          registration = normalizedRegistration;
         } else if (record.kind === 'seal') {
           if (seal && (
             seal.stateSha !== record.stateSha ||
@@ -1005,8 +1004,7 @@ export class GitHubStateStore extends JsonStore {
         stateAnchorSha,
         baseGeneration,
         startGeneration,
-        authorityAnchorSha,
-        previousStatusAnchorSha
+        authorityAnchorSha
       )
     );
     if (registrationError) throw new Error('cloud_state_epoch_registration_append_failed', { cause: registrationError });
