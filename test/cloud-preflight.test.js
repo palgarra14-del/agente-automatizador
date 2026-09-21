@@ -245,6 +245,36 @@ test('scheduled recovery cannot starve new work behind more than fifty canonical
   assert.equal([...f.intents.values()][0].issueNumber, 99);
 });
 
+test('scheduled recovery paginates beyond five full issue pages to reach lost work', async () => {
+  const fresh = issue(601), f = admissionFixture(fresh);
+  for (let number = 1; number <= 500; number += 1) {
+    f.state.requests[key(number)] = {
+      status: 'completed',
+      request: { projectId: 'callflow' }
+    };
+  }
+  f.channel.listAdmissionIntents = async () => [...f.intents.values()];
+  f.channel.openIssuePage = async (page) => {
+    if (page <= 5) {
+      const start = (page - 1) * 100 + 1;
+      return {
+        issues: Array.from({ length: 100 }, (_, index) => issue(start + index)),
+        hasMore: true
+      };
+    }
+    if (page === 6) return { issues: [clone(fresh)], hasMore: false };
+    throw new Error('unexpected_page');
+  };
+
+  const recovered = await f.queue.recoverAdmissionIntents({ max: 50, maxPages: 20 });
+  assert.equal(recovered.pages, 6);
+  assert.equal(recovered.existing, 500);
+  assert.equal(recovered.scanned, 1);
+  assert.equal(recovered.created, 1);
+  assert.equal(recovered.truncated, false);
+  assert.equal([...f.intents.values()][0].issueNumber, 601);
+});
+
 test('admission intent ingestion is crash-safe after canonical persistence', async () => {
   const target = issue(27), f = admissionFixture(target);
   await f.queue.admitEvent('issues', eventFor(target));
@@ -281,6 +311,17 @@ test('stale edited or closed intent is retired without canonical admission', asy
     assert.deepEqual(f.state.requests, {});
     assert.equal(f.intents.size, 0);
   }
+});
+
+test('definitive missing issue retires its intent instead of wedging the lane', async () => {
+  const target = issue(40), f = admissionFixture(target);
+  await f.queue.admitEvent('issues', eventFor(target));
+  f.channel.issue = async () => { throw new Error('GitHub issue queue request failed: 404'); };
+
+  const result = await f.queue.ingestAdmissionIntents();
+  assert.equal(result, null);
+  assert.deepEqual(f.state.requests, {});
+  assert.equal(f.intents.size, 0);
 });
 
 test('transient intent revalidation failure keeps the durable intent for recovery', async () => {
