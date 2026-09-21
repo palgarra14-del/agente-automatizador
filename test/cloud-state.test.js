@@ -550,6 +550,9 @@ function fakeGitHub() {
       assert.ok(commits.has(commitSha));
       refs.set(`refs/heads/${branch}`, commitSha);
     },
+    currentHead(branch) {
+      return refs.get(`refs/heads/${branch}`) ?? null;
+    },
     setCommitParents(commitSha, parentShas) {
       const commit = commits.get(commitSha);
       assert.ok(commit);
