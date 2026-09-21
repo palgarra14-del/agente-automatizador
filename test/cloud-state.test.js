@@ -1147,6 +1147,50 @@ test('conflicting canonical status for one generation fails closed', async () =>
   assert.ok(first);
 });
 
+test('conflicting canonical base witness for one generation fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  const root = await store.readRootEvidence();
+  const registration = root.registrations[0];
+  const authority = (await store.readEpochAuthorities(registration))[0];
+  const divergentWitness = fake.makeMetadataCommit({ message: 'divergent authority witness' });
+  fake.forceStatus(
+    registration.authorityAnchorSha,
+    store.epochAuthorityContext(registration.epoch, authority.generation),
+    store.authorityDescription(authority.stateSha, authority.parentSha, divergentWitness)
+  );
+  await assert.rejects(
+    () => storeFor(fake, { ownerId: 'github:2:1' }).load(),
+    /authority_conflict/
+  );
+  assert.ok(first);
+});
+
+test('conflicting seal base witness fails closed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  const sealedSha = fake.makeStateCommit({
+    parentSha: fake.mainSha,
+    generation: 256,
+    state: blankState('sealed'),
+    lineageBaseSha: fake.mainSha,
+    lineageBaseGeneration: 0
+  });
+  installSeal(fake, store, registration, sealedSha, 256, fake.mainSha);
+  const divergentWitness = fake.makeMetadataCommit({ message: 'divergent seal witness' });
+  fake.forceStatus(
+    registration.statusAnchorSha,
+    store.epochSealContext(),
+    store.sealDescription(sealedSha, 256, divergentWitness)
+  );
+  await assert.rejects(
+    () => storeFor(fake, { ownerId: 'github:2:1' }).readRootEvidence(),
+    /seal_conflict/
+  );
+});
+
 test('conflicting epoch registration fails closed', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
