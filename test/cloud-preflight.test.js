@@ -320,6 +320,31 @@ test('scheduled recovery advances a durable page cursor across capped runs', asy
   assert.equal([...f.intents.values()][0].issueNumber, 2101);
 });
 
+test('scheduled recovery rebinds the existing cursor page when trusted revision changes', async () => {
+  const fresh = issue(2101), f = admissionFixture(fresh);
+  const setCalls = [];
+  f.channel.listAdmissionIntents = async () => [];
+  f.channel.admissionRecoveryCursor = async () => ({ page: 21, needsRebind: true });
+  f.channel.setAdmissionRecoveryCursor = async (_scopeKey, page, targetSha) => {
+    setCalls.push({ page, targetSha });
+    return { page };
+  };
+  f.channel.openIssuePage = async (page) => {
+    assert.equal(page, 21);
+    return { issues: [clone(fresh)], hasMore: false };
+  };
+
+  const recovered = await f.queue.recoverAdmissionIntents({ max: 50, maxPages: 20 });
+  assert.equal(recovered.created, 1);
+  assert.equal(recovered.pages, 1);
+  assert.equal(recovered.truncated, false);
+  assert.deepEqual(setCalls, [
+    { page: 21, targetSha: revision },
+    { page: 1, targetSha: revision }
+  ]);
+  assert.equal([...f.intents.values()][0].issueNumber, 2101);
+});
+
 test('scheduled recovery repairs an exact stale ref even when listing does not expose it', async () => {
   const target = issue(41), f = admissionFixture(target);
   await f.queue.admitEvent('issues', eventFor(target));
