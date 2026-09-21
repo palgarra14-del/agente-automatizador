@@ -75,7 +75,6 @@ jobs:
     permissions:
       contents: write
       issues: read
-      statuses: write
     strategy:
       fail-fast: false
       matrix:
