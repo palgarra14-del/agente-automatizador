@@ -92,7 +92,7 @@ function fakeGitHub() {
   let moveMainAfterClaimAuthorityRead = null;
   let moveMainBeforeNextMainRead = null;
   let moveMainAfterNextCompare = null;
-  let moveMainBeforeNextTagPatch = null;
+  let moveMainBeforeNextTagWrite = null;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -328,6 +328,10 @@ function fakeGitHub() {
     }
     if (method === 'POST' && path === '/git/refs') {
       refWrites.push({ method, path, body: cloneState(body) });
+      if (moveMainBeforeNextTagWrite && typeof body?.ref === 'string' && body.ref.startsWith('refs/tags/')) {
+        refs.set('refs/heads/main', moveMainBeforeNextTagWrite);
+        moveMainBeforeNextTagWrite = null;
+      }
       const isClaim = typeof body?.ref === 'string' && body.ref.startsWith('refs/tags/agent-cloud-state-v2-claims/');
       if (isClaim && precreateNextClaim) {
         precreateNextClaim = false;
@@ -344,9 +348,9 @@ function fakeGitHub() {
     }
     if (method === 'PATCH' && path.startsWith('/git/refs/tags/')) {
       refWrites.push({ method, path, body: cloneState(body) });
-      if (moveMainBeforeNextTagPatch) {
-        refs.set('refs/heads/main', moveMainBeforeNextTagPatch);
-        moveMainBeforeNextTagPatch = null;
+      if (moveMainBeforeNextTagWrite) {
+        refs.set('refs/heads/main', moveMainBeforeNextTagWrite);
+        moveMainBeforeNextTagWrite = null;
       }
       const ref = `refs/tags/${decodeURIComponent(path.slice('/git/refs/tags/'.length))}`;
       const current = refs.get(ref);
@@ -518,9 +522,9 @@ function fakeGitHub() {
       assert.ok(commits.has(commitSha));
       moveMainAfterNextCompare = commitSha;
     },
-    moveMainBeforeNextTagPatch(commitSha) {
+    moveMainBeforeNextTagWrite(commitSha) {
       assert.ok(commits.has(commitSha));
-      moveMainBeforeNextTagPatch = commitSha;
+      moveMainBeforeNextTagWrite = commitSha;
     },
     moveMainBeforeNextMainRead(commitSha) {
       assert.ok(commits.has(commitSha));
@@ -887,7 +891,7 @@ test('sealed fallback repair is stable when main moves after witness validation'
   fake.deleteTag(witnessTag);
 
   const divergentMain = fake.makeMetadataCommit({ message: 'divergent main at ref-repair boundary' });
-  fake.moveMainBeforeNextTagPatch(divergentMain);
+  fake.moveMainBeforeNextTagWrite(divergentMain);
 
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   const repaired = await fresh.readSnapshot({ repair: true });
