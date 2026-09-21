@@ -130,9 +130,6 @@ try {
           allowedProjectIds: cloudLane.projectIds,
           tag: cloudLane.tag,
           statePath: cloudLane.statePath,
-          // Must stay strictly above the 35-minute GitHub cloud-worker timeout:
-          // admission retries may recover an abandoned lease, but can never expire
-          // a worker that GitHub can still legitimately keep running.
           leaseTtlMs: 45 * 60 * 1000
         })
         : store;
