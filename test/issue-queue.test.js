@@ -534,6 +534,64 @@ test('GitHub admission intent listing preserves the exact target sha', async () 
   assert.equal(intent.fingerprint, fingerprint);
 });
 
+test('GitHub admission recovery cursor is target-bound and advances durably', async () => {
+  const scopeKey = 'a'.repeat(64);
+  const trustedSha = 'b'.repeat(40);
+  const staleSha = 'c'.repeat(40);
+  const calls = [];
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }
+          ]
+        };
+      }
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const cursor = await channel.admissionRecoveryCursor(scopeKey, trustedSha);
+  assert.equal(cursor.page, 7);
+  assert.equal(calls.filter((call) => call.method === 'DELETE').length, 1);
+  assert.match(calls.find((call) => call.method === 'DELETE').url, /\/3$/);
+
+  const setCalls = [];
+  const setter = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      setCalls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }]
+        };
+      }
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      if ((options.method ?? 'GET') === 'POST') return { ok: true, status: 201, json: async () => ({}) };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const advanced = await setter.setAdmissionRecoveryCursor(scopeKey, 21, trustedSha);
+  assert.equal(advanced.page, 21);
+  assert.equal(setCalls.filter((call) => call.method === 'DELETE').length, 1);
+  const create = setCalls.find((call) => call.method === 'POST');
+  assert.ok(create);
+  assert.deepEqual(JSON.parse(create.body), {
+    ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/21`,
+    sha: trustedSha
+  });
+});
+
 test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
   const legacy = normalizeIssueQueueConfig({
     version: 1,
