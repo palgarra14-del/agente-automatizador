@@ -311,6 +311,18 @@ function persistedRequestFields(queue, issue, project, workflow = workflowPlan()
   };
 }
 
+async function seedAdmittedRequest(queue, store, issue, project) {
+  const { parsed, fields } = persistedRequestFields(queue, issue, project), key = queue.requestKey(issue);
+  await store.mutate((data) => { data.requests = { [key]: {
+    version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user.login, ...fields,
+    request: parsed.request, workflowId: null, workflowBindingFingerprint: null, status: 'admitted', reason: null,
+    createdAt: '2026-09-12T00:00:00.000Z', updatedAt: '2026-09-12T00:00:00.000Z', pendingApproval: null,
+    startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null,
+    initializationLease: null, lastProcessedCommentId: 0
+  } }; });
+  return { key, parsed };
+}
+
 test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'b'.repeat(40);
@@ -546,8 +558,8 @@ test('issue queue config normalizes explicit cloud lanes and queue routing is mu
     now: () => '2026-09-12T00:00:00.000Z'
   });
   const cloudResult = await cloudQueue.tick();
-  assert.equal(cloudResult.status, 'awaiting_start_approval');
-  assert.equal(cloudFixture.workflowEngine.createCalls.length, 1);
+  assert.equal(cloudResult, null);
+  assert.equal(cloudFixture.workflowEngine.createCalls.length, 0);
   assert.notEqual(localQueue.controlPlaneFingerprint(), cloudQueue.controlPlaneFingerprint());
 
   assert.throws(() => new SupervisedIssueQueue({
@@ -1595,6 +1607,42 @@ test('abandoned initialization lease blocks instead of automatically creating a 
   assert.match(channel.posted.at(-1).body, /No automatic retry or duplicate workflow/);
 });
 
+test('transient post-claim reads restore the exact admitted record and permit immediate retry', async () => {
+  for (const mode of ['comments', 'issue']) {
+    const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+    const { key } = await seedAdmittedRequest(queue, store, issue, project), before = clone(await queue.getRecord(key));
+    if (mode === 'comments') {
+      let failed = false; channel.onCommentsRead = () => { if (!failed) { failed = true; throw new Error('transient comments failure'); } };
+    } else channel.onIssueRead = (_number, count) => { if (count === 2) throw new Error('transient issue failure'); };
+    await assert.rejects(() => queue.processIssue(issue), /workflow_initialization_preflight_failed/);
+    const restored = await queue.getRecord(key);
+    assert.equal(restored.status, 'admitted'); assert.equal(restored.initializationLease, null);
+    for (const field of ['requestFingerprint', 'issueBodyFingerprint', 'projectFingerprint', 'controlPlaneFingerprint']) assert.equal(restored[field], before[field], mode);
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length, channel.posted.length], [0, 0, 0]);
+    channel.onCommentsRead = null; channel.onIssueRead = null;
+    const retried = await queue.processIssue(issue);
+    assert.equal(retried.status, 'awaiting_start_approval');
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length], [1, 1]);
+  }
+});
+
+test('post-claim issue edit, close or replacement blocks before workflow or communication side effects', async () => {
+  const cases = [
+    [(current) => { current.body = requestBody({ goal: 'Changed during claim' }); }, 'request_body_changed'],
+    [(current) => { current.body = 'marker removed during claim'; }, 'request_body_invalid'],
+    [(current) => { current.state = 'closed'; }, 'issue_identity_or_state_changed'],
+    [(current) => { current.id += 1; }, 'issue_identity_or_state_changed']
+  ];
+  for (const [mutate, reason] of cases) {
+    const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+    await seedAdmittedRequest(queue, store, issue, project);
+    channel.onIssueRead = (_number, count) => { if (count === 2) mutate(channel.issues[0]); };
+    const result = await queue.processIssue(issue);
+    assert.equal(result.status, 'blocked'); assert.equal(result.reason, reason); assert.equal(result.initializationLease, null);
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length, channel.posted.length], [0, 0, 0]);
+  }
+});
+
 test('workflow initialization failure is persisted as blocked and is not retried forever', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   let createCalls = 0;
@@ -1612,6 +1660,15 @@ test('workflow initialization failure is persisted as blocked and is not retried
   const later = await queue.tick();
   assert.equal(later, null);
   assert.equal(createCalls, 1);
+});
+
+test('active request whose marker disappears is durably blocked instead of spinning', async () => {
+  const { queue, channel } = await queueFixture();
+  const active = await queue.tick(); assert.ok(active); assert.ok(!['blocked', 'rejected', 'completed', 'failed'].includes(active.status));
+  channel.issues[0].body = 'request marker intentionally removed';
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.reason, 'request_marker_removed');
+  assert.equal(await queue.tick(), null);
 });
 
 test('issue queue watcher lease rejects a concurrent operator and recovers an abandoned owner', async () => {
