@@ -169,6 +169,7 @@ test('comment admission requires exact /agent and non-issue wakeups stay read-on
 });
 test('tick exact-lookups admitted work and claims its initialization lease before workflow creation', async () => {
   const target = issue(26), fixture = makeAdmissionQueue({ currentIssue: target }); await fixture.queue.admitEvent('issues', eventFor(target));
+  fixture.queue.unboundPriorAgentInitialization = async () => null;
   let seed; fixture.queue.finishInitialization = async (_issue, _parsed, observed) => { seed = clone(observed); throw new Error('stop-after-claim'); };
   await assert.rejects(() => fixture.queue.tick(), /stop-after-claim/);
   const persisted = fixture.state.requests[key(26)];
