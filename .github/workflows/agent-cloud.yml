@@ -28,10 +28,7 @@ jobs:
         github.actor == 'palgarra14-del' &&
         (
           github.event_name != 'issue_comment' ||
-          (
-            github.event.issue.pull_request == null &&
-            startsWith(github.event.comment.body, '/agent')
-          )
+          github.event.issue.pull_request == null
         )
       )
     permissions:
@@ -39,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      active: ${{ steps.wakeup.outputs.active }}
       lanes: ${{ steps.route.outputs.lanes }}
     steps:
       - name: Checkout trusted main
@@ -47,8 +45,19 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Validate governed wakeup
+        id: wakeup
+        shell: bash
+        env:
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+          AGENT_CLOUD_COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          ACTIVE="$(node -e 'const body=(process.env.AGENT_CLOUD_COMMENT_BODY ?? "").trim(); process.stdout.write(process.env.AGENT_CLOUD_EVENT_NAME !== "issue_comment" || body === "/agent" || body.startsWith("/agent ") ? "true" : "false")')"
+          echo "active=$ACTIVE" >> "$GITHUB_OUTPUT"
+
       - name: Route event to trusted cloud lanes
         id: route
+        if: steps.wakeup.outputs.active == 'true'
         shell: bash
         env:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
@@ -59,9 +68,63 @@ jobs:
           node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
           echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
 
+  admit:
+    name: admit cloud event (${{ matrix.lane }})
+    needs: route
+    if: needs.route.outputs.active == 'true' && (github.event_name == 'issues' || github.event_name == 'issue_comment')
+    permissions:
+      contents: write
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: main, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts
+      - name: Persist create-only event intent
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: for _ in {1..30}; do node src/cli.js inbox cloud-admit --lane "$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1
+
+  recover:
+    name: recover cloud admissions (${{ matrix.lane }})
+    needs: route
+    if: needs.route.outputs.active == 'true' && github.event_name == 'schedule'
+    permissions:
+      contents: write
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
+    concurrency:
+      group: agent-${{ matrix.lane }}-cloud
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: main, persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts
+      - name: Recover missing admissions from open requests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
+
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
-    needs: route
+    needs: [route, admit, recover]
+    if: always() && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped') && (needs.recover.result == 'success' || needs.recover.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:

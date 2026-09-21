@@ -311,6 +311,18 @@ function persistedRequestFields(queue, issue, project, workflow = workflowPlan()
   };
 }
 
+async function seedAdmittedRequest(queue, store, issue, project) {
+  const { parsed, fields } = persistedRequestFields(queue, issue, project), key = queue.requestKey(issue);
+  await store.mutate((data) => { data.requests = { [key]: {
+    version: 1, issueNumber: issue.number, issueId: issue.id, author: issue.user.login, ...fields,
+    request: parsed.request, workflowId: null, workflowBindingFingerprint: null, status: 'admitted', reason: null,
+    createdAt: '2026-09-12T00:00:00.000Z', updatedAt: '2026-09-12T00:00:00.000Z', pendingApproval: null,
+    startApprovalFingerprint: null, startApprovalCommentId: null, startApprovedBy: null, activeApproval: null,
+    initializationLease: null, lastProcessedCommentId: 0
+  } }; });
+  return { key, parsed };
+}
+
 test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'b'.repeat(40);
@@ -447,6 +459,208 @@ test('GitHubIssueChannel reads and validates the configured branch head', async 
   await assert.rejects(malformed.branchHead('main'), /branch response is invalid/);
 });
 
+test('GitHub admission intent refs are create-only, exact-target bound and backlog bounded', async () => {
+  const fingerprint = 'd'.repeat(64);
+  const intent = { projectId: 'callflow', issueNumber: 41, fingerprint };
+  const expectedSha = 'a'.repeat(40);
+  const otherSha = 'b'.repeat(40);
+
+  const idempotentResponses = [
+    { ok: false, status: 422, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({ object: { sha: expectedSha } }) }
+  ];
+  const idempotent = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => idempotentResponses.shift()
+  });
+  const repeated = await idempotent.createAdmissionIntent(intent, expectedSha);
+  assert.equal(repeated.created, false);
+  assert.match(repeated.ref, /^refs\/tags\/agent-admission-v1\/callflow\/41\//);
+
+  const conflictResponses = [
+    { ok: false, status: 422, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({ object: { sha: otherSha } }) }
+  ];
+  const conflict = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => conflictResponses.shift()
+  });
+  await assert.rejects(
+    () => conflict.createAdmissionIntent(intent, expectedSha),
+    /admission_intent_existing_conflict/
+  );
+
+  const floodedCalls = [];
+  const flooded = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url) => {
+      floodedCalls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => Array.from({ length: 100 }, (_, index) => ({
+          ref: `refs/tags/agent-admission-v1/callflow/${index + 1}/${String(index).padStart(64, '0')}`,
+          object: { sha: expectedSha }
+        }))
+      };
+    }
+  });
+  const fullPage = await flooded.listAdmissionIntents(['callflow']);
+  assert.equal(fullPage.length, 100);
+  assert.match(floodedCalls[0], /per_page=100/);
+});
+
+test('GitHub admission intent listing preserves the exact target sha', async () => {
+  const targetSha = 'c'.repeat(40);
+  const fingerprint = 'd'.repeat(64);
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [{
+        ref: `refs/tags/agent-admission-v1/callflow/42/${fingerprint}`,
+        object: { sha: targetSha }
+      }]
+    })
+  });
+  const [intent] = await channel.listAdmissionIntents(['callflow']);
+  assert.equal(intent.targetSha, targetSha);
+  assert.equal(intent.issueNumber, 42);
+  assert.equal(intent.fingerprint, fingerprint);
+});
+
+test('GitHub admission recovery cursor is target-bound and advances durably', async () => {
+  const scopeKey = 'a'.repeat(64);
+  const trustedSha = 'b'.repeat(40);
+  const staleSha = 'c'.repeat(40);
+  const calls = [];
+  const oversized = '9'.repeat(400);
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/not-a-page`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/bad#fragment`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/1000001`, object: { sha: trustedSha } },
+            { ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/${oversized}`, object: { sha: trustedSha } }
+          ]
+        };
+      }
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const cursor = await channel.admissionRecoveryCursor(scopeKey, trustedSha);
+  assert.equal(cursor.page, 3);
+  assert.equal(cursor.needsRebind, true);
+  const deleted = calls.filter((call) => call.method === 'DELETE');
+  assert.equal(deleted.length, 4);
+  assert.doesNotMatch(deleted.map((call) => call.url).join('\n'), /\/3$/m);
+  assert.ok(deleted.some((call) => /\/not-a-page$/.test(call.url)));
+  assert.ok(deleted.some((call) => call.url.endsWith('/bad%23fragment')));
+  assert.doesNotMatch(deleted.map((call) => call.url).join('\n'), /#fragment/);
+  assert.ok(deleted.some((call) => /\/1000001$/.test(call.url)));
+  assert.ok(deleted.some((call) => call.url.endsWith('/' + oversized)));
+
+  const rebindCalls = [];
+  const rebinder = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      rebindCalls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/3`, object: { sha: staleSha } }]
+        };
+      }
+      if ((options.method ?? 'GET') === 'PATCH') return { ok: true, status: 200, json: async () => ({}) };
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const rebound = await rebinder.setAdmissionRecoveryCursor(scopeKey, 3, trustedSha);
+  assert.equal(rebound.page, 3);
+  assert.equal(rebindCalls.filter((call) => call.method === 'DELETE').length, 0);
+  const patch = rebindCalls.find((call) => call.method === 'PATCH');
+  assert.ok(patch);
+  assert.deepEqual(JSON.parse(patch.body), { sha: trustedSha, force: true });
+
+  const setCalls = [];
+  const setter = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      setCalls.push({ url, method: options.method ?? 'GET', body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }]
+        };
+      }
+      if ((options.method ?? 'GET') === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      if ((options.method ?? 'GET') === 'POST') return { ok: true, status: 201, json: async () => ({}) };
+      throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
+    }
+  });
+  const advanced = await setter.setAdmissionRecoveryCursor(scopeKey, 21, trustedSha);
+  assert.equal(advanced.page, 21);
+  const createIndex = setCalls.findIndex((call) => call.method === 'POST');
+  const deleteIndex = setCalls.findIndex((call) => call.method === 'DELETE');
+  assert.ok(createIndex >= 0 && deleteIndex > createIndex);
+  const create = setCalls[createIndex];
+  assert.deepEqual(JSON.parse(create.body), {
+    ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/21`,
+    sha: trustedSha
+  });
+
+  const hiddenCalls = [];
+  const hidden = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async (url, options = {}) => {
+      const method = options.method ?? 'GET';
+      hiddenCalls.push({ url, method, body: options.body ?? null });
+      if (url.includes('/git/matching-refs/')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ ref: `refs/tags/agent-admission-recovery-v1/${scopeKey}/7`, object: { sha: trustedSha } }]
+        };
+      }
+      if (method === 'POST') return { ok: false, status: 422, json: async () => ({}) };
+      if (method === 'GET' && url.endsWith('/tags/agent-admission-recovery-v1/' + scopeKey + '/21')) {
+        return { ok: true, status: 200, json: async () => ({ object: { sha: staleSha } }) };
+      }
+      if (method === 'PATCH') return { ok: true, status: 200, json: async () => ({}) };
+      if (method === 'DELETE') return { ok: true, status: 204, json: async () => null };
+      throw new Error(`unexpected request ${method} ${url}`);
+    }
+  });
+  const reboundHidden = await hidden.setAdmissionRecoveryCursor(scopeKey, 21, trustedSha);
+  assert.equal(reboundHidden.page, 21);
+  const hiddenGet = hiddenCalls.findIndex((call) => call.method === 'GET' && call.url.endsWith('/21'));
+  const hiddenPatch = hiddenCalls.findIndex((call) => call.method === 'PATCH' && call.url.endsWith('/21'));
+  const hiddenDelete = hiddenCalls.findIndex((call) => call.method === 'DELETE');
+  assert.ok(hiddenGet >= 0 && hiddenPatch > hiddenGet && hiddenDelete > hiddenPatch);
+  assert.deepEqual(JSON.parse(hiddenCalls[hiddenPatch].body), { sha: trustedSha, force: true });
+});
+
 test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
   const legacy = normalizeIssueQueueConfig({
     version: 1,
@@ -546,8 +760,8 @@ test('issue queue config normalizes explicit cloud lanes and queue routing is mu
     now: () => '2026-09-12T00:00:00.000Z'
   });
   const cloudResult = await cloudQueue.tick();
-  assert.equal(cloudResult.status, 'awaiting_start_approval');
-  assert.equal(cloudFixture.workflowEngine.createCalls.length, 1);
+  assert.equal(cloudResult, null);
+  assert.equal(cloudFixture.workflowEngine.createCalls.length, 0);
   assert.notEqual(localQueue.controlPlaneFingerprint(), cloudQueue.controlPlaneFingerprint());
 
   assert.throws(() => new SupervisedIssueQueue({
@@ -1595,6 +1809,42 @@ test('abandoned initialization lease blocks instead of automatically creating a 
   assert.match(channel.posted.at(-1).body, /No automatic retry or duplicate workflow/);
 });
 
+test('transient post-claim reads restore the exact admitted record and permit immediate retry', async () => {
+  for (const mode of ['comments', 'issue']) {
+    const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+    const { key } = await seedAdmittedRequest(queue, store, issue, project), before = clone(await queue.getRecord(key));
+    if (mode === 'comments') {
+      let failed = false; channel.onCommentsRead = () => { if (!failed) { failed = true; throw new Error('transient comments failure'); } };
+    } else channel.onIssueRead = (_number, count) => { if (count === 2) throw new Error('transient issue failure'); };
+    await assert.rejects(() => queue.processIssue(issue), /workflow_initialization_preflight_failed/);
+    const restored = await queue.getRecord(key);
+    assert.equal(restored.status, 'admitted'); assert.equal(restored.initializationLease, null);
+    for (const field of ['requestFingerprint', 'issueBodyFingerprint', 'projectFingerprint', 'controlPlaneFingerprint']) assert.equal(restored[field], before[field], mode);
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length, channel.posted.length], [0, 0, 0]);
+    channel.onCommentsRead = null; channel.onIssueRead = null;
+    const retried = await queue.processIssue(issue);
+    assert.equal(retried.status, 'awaiting_start_approval');
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length], [1, 1]);
+  }
+});
+
+test('post-claim issue edit, close or replacement blocks before workflow or communication side effects', async () => {
+  const cases = [
+    [(current) => { current.body = requestBody({ goal: 'Changed during claim' }); }, 'request_body_changed'],
+    [(current) => { current.body = 'marker removed during claim'; }, 'request_body_invalid'],
+    [(current) => { current.state = 'closed'; }, 'issue_identity_or_state_changed'],
+    [(current) => { current.id += 1; }, 'issue_identity_or_state_changed']
+  ];
+  for (const [mutate, reason] of cases) {
+    const { queue, store, channel, workflowEngine, issue, project } = await queueFixture();
+    await seedAdmittedRequest(queue, store, issue, project);
+    channel.onIssueRead = (_number, count) => { if (count === 2) mutate(channel.issues[0]); };
+    const result = await queue.processIssue(issue);
+    assert.equal(result.status, 'blocked'); assert.equal(result.reason, reason); assert.equal(result.initializationLease, null);
+    assert.deepEqual([workflowEngine.createCalls.length, workflowEngine.runCalls.length, channel.posted.length], [0, 0, 0]);
+  }
+});
+
 test('workflow initialization failure is persisted as blocked and is not retried forever', async () => {
   const { queue, channel, workflowEngine } = await queueFixture();
   let createCalls = 0;
@@ -1612,6 +1862,15 @@ test('workflow initialization failure is persisted as blocked and is not retried
   const later = await queue.tick();
   assert.equal(later, null);
   assert.equal(createCalls, 1);
+});
+
+test('active request whose marker disappears is durably blocked instead of spinning', async () => {
+  const { queue, channel } = await queueFixture();
+  const active = await queue.tick(); assert.ok(active); assert.ok(!['blocked', 'rejected', 'completed', 'failed'].includes(active.status));
+  channel.issues[0].body = 'request marker intentionally removed';
+  const blocked = await queue.tick();
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.reason, 'request_marker_removed');
+  assert.equal(await queue.tick(), null);
 });
 
 test('issue queue watcher lease rejects a concurrent operator and recovers an abandoned owner', async () => {
