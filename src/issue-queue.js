@@ -826,22 +826,26 @@ export class SupervisedIssueQueue {
   }
 
   async recoverAdmissionIntents({ max = 50 } = {}) {
-    if (this.includedProjectIds === null) return { scanned: 0, created: 0, existing: 0, skipped: 0 };
+    if (this.includedProjectIds === null) return { scanned: 0, created: 0, existing: 0, skipped: 0, staleRetired: 0 };
     if (!Number.isInteger(max) || max < 1 || max > 100) throw new Error('admission_intent_recovery_limit_invalid');
     const state = await this.store.load();
     const issues = await this.channel.openIssues();
     const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
-    let scanned = 0, created = 0, existing = 0, skipped = 0;
+    let scanned = 0, created = 0, existing = 0, skipped = 0, staleRetired = 0;
+
+    for (const intent of await this.pendingAdmissionIntents()) {
+      if (intent.targetSha === targetSha) continue;
+      await this.channel.deleteAdmissionIntent(intent.ref);
+      staleRetired += 1;
+    }
 
     for (const issue of issues) {
-      if (scanned >= max) break;
       if (!issue || issue.state !== 'open' || issue.pull_request ||
           typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER) ||
           !this.authorized(issue.user?.login)) {
         skipped += 1;
         continue;
       }
-      scanned += 1;
       let parsed;
       try { parsed = parseIssueRequestBody(issue.body); }
       catch { skipped += 1; continue; }
@@ -854,12 +858,14 @@ export class SupervisedIssueQueue {
         existing += 1;
         continue;
       }
+      if (scanned >= max) break;
+      scanned += 1;
       const intent = this.admissionIntent(issue, parsed);
       const result = await this.channel.createAdmissionIntent(intent, targetSha);
       if (result.created) created += 1;
       else existing += 1;
     }
-    return { scanned, created, existing, skipped };
+    return { scanned, created, existing, skipped, staleRetired };
   }
 
   async ingestAdmissionIntents({ max = 20 } = {}) {
