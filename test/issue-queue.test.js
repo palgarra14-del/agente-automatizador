@@ -459,6 +459,57 @@ test('GitHubIssueChannel reads and validates the configured branch head', async 
   await assert.rejects(malformed.branchHead('main'), /branch response is invalid/);
 });
 
+test('GitHub admission intent refs are create-only, exact-target bound and backlog bounded', async () => {
+  const fingerprint = 'd'.repeat(64);
+  const intent = { projectId: 'callflow', issueNumber: 41, fingerprint };
+  const expectedSha = 'a'.repeat(40);
+  const otherSha = 'b'.repeat(40);
+
+  const idempotentResponses = [
+    { ok: false, status: 422, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({ object: { sha: expectedSha } }) }
+  ];
+  const idempotent = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => idempotentResponses.shift()
+  });
+  const repeated = await idempotent.createAdmissionIntent(intent, expectedSha);
+  assert.equal(repeated.created, false);
+  assert.match(repeated.ref, /^refs\/tags\/agent-admission-v1\/callflow\/41\//);
+
+  const conflictResponses = [
+    { ok: false, status: 422, json: async () => ({}) },
+    { ok: true, status: 200, json: async () => ({ object: { sha: otherSha } }) }
+  ];
+  const conflict = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => conflictResponses.shift()
+  });
+  await assert.rejects(
+    () => conflict.createAdmissionIntent(intent, expectedSha),
+    /admission_intent_existing_conflict/
+  );
+
+  const flooded = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => Array.from({ length: 100 }, (_, index) => ({
+        ref: `refs/tags/agent-admission-v1/callflow/${index + 1}/${String(index).padStart(64, '0')}`,
+        object: { sha: expectedSha }
+      }))
+    })
+  });
+  await assert.rejects(
+    () => flooded.listAdmissionIntents(['callflow']),
+    /admission_intent_limit/
+  );
+});
+
 test('issue queue config normalizes explicit cloud lanes and queue routing is mutually exclusive', async () => {
   const legacy = normalizeIssueQueueConfig({
     version: 1,
