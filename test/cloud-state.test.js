@@ -92,6 +92,7 @@ function fakeGitHub() {
   let moveMainAfterClaimAuthorityRead = null;
   let moveMainBeforeNextMainRead = null;
   let moveMainAfterNextCompare = null;
+  let moveMainBeforeNextTagPatch = null;
 
   const fullTagRef = (value) => value.startsWith('refs/') ? value : `refs/tags/${value}`;
   const ancestorDistances = (startSha) => {
@@ -343,6 +344,10 @@ function fakeGitHub() {
     }
     if (method === 'PATCH' && path.startsWith('/git/refs/tags/')) {
       refWrites.push({ method, path, body: cloneState(body) });
+      if (moveMainBeforeNextTagPatch) {
+        refs.set('refs/heads/main', moveMainBeforeNextTagPatch);
+        moveMainBeforeNextTagPatch = null;
+      }
       const ref = `refs/tags/${decodeURIComponent(path.slice('/git/refs/tags/'.length))}`;
       const current = refs.get(ref);
       if (!current || body.force !== false || !isAncestor(current, body.sha)) return response(422, {});
@@ -512,6 +517,10 @@ function fakeGitHub() {
     moveMainAfterNextCompare(commitSha) {
       assert.ok(commits.has(commitSha));
       moveMainAfterNextCompare = commitSha;
+    },
+    moveMainBeforeNextTagPatch(commitSha) {
+      assert.ok(commits.has(commitSha));
+      moveMainBeforeNextTagPatch = commitSha;
     },
     moveMainBeforeNextMainRead(commitSha) {
       assert.ok(commits.has(commitSha));
@@ -877,8 +886,8 @@ test('sealed fallback repair is stable when main moves after witness validation'
   fake.forceTag(checkpointTag, sealedSha);
   fake.deleteTag(witnessTag);
 
-  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main after witness comparison' });
-  fake.moveMainAfterNextCompare(divergentMain);
+  const divergentMain = fake.makeMetadataCommit({ message: 'divergent main at ref-repair boundary' });
+  fake.moveMainBeforeNextTagPatch(divergentMain);
 
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   const repaired = await fresh.readSnapshot({ repair: true });
