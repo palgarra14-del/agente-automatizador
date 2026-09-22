@@ -299,6 +299,30 @@ test('capped resume enforces its deadline inside execution-lease persistence', a
   assert.equal(typeof observed.options.beforeClaimCommit, 'function');
 });
 
+test('nested resume uses the effective earlier deadline for its lease claim', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  let observedDeadline = null;
+  instance.store = {
+    async withExecutionLease(_collection, _id, _kind, _operation, options) {
+      observedDeadline = options.deadlineAt;
+      throw new Error('stop_after_observation');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.withExecutionDeadlineCap(
+      'nested-resume',
+      1_000,
+      () => instance.resume('nested-resume', { deadlineCapAt: 5_000 })
+    ),
+    /stop_after_observation/
+  );
+  assert.equal(observedDeadline, 1_000);
+});
+
 test('durable deadline context protects internal updates during resume prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
   instance.preparingDurableCheckpoints = new Set();
