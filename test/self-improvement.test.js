@@ -8,6 +8,7 @@ import {
 } from '../src/self-improvement.js';
 
 const REV_A = 'a'.repeat(40);
+const REV_B = 'b'.repeat(40);
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
