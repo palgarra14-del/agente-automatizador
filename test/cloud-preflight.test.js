@@ -170,6 +170,25 @@ test('event admission is lease-free, retryable and idempotent until governed ing
   const result = await retry.queue.admitEvent('issues', eventFor(issue(21)));
   assert.equal(result.retryable, true); assert.equal(retry.intents.size, 1); assert.deepEqual(retry.state.requests, {});
 });
+test('event admission repairs an exact stale intent after trusted main advances', async () => {
+  const target = issue(25), f = admissionFixture(target);
+  const first = await f.queue.admitEvent('issues', eventFor(target));
+  assert.equal(first.admitted, true);
+  const [ref, existing] = [...f.intents.entries()][0];
+  f.intents.set(ref, { ...existing, targetSha: 'e'.repeat(40) });
+
+  const rebound = await f.queue.admitEvent('issues', eventFor(target));
+  assert.equal(rebound.admitted, true);
+  assert.equal(rebound.idempotent, false);
+  assert.equal(f.intents.size, 1);
+  assert.equal(f.intents.get(ref).targetSha, revision);
+
+  const repeated = await f.queue.admitEvent('issues', eventFor(target));
+  assert.equal(repeated.admitted, false);
+  assert.equal(repeated.idempotent, true);
+  assert.equal(f.intents.get(ref).targetSha, revision);
+});
+
 test('ingestion rejects an intent tag whose target sha is not the trusted operator revision', async () => {
   const target = issue(37), f = admissionFixture(target);
   await f.queue.admitEvent('issues', eventFor(target));
