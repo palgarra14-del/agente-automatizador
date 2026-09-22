@@ -47,10 +47,35 @@ function normalizeAutopilot(value) {
   };
 }
 
-function policyFingerprint(workflowId, baseRevision) {
+function policyFingerprint(workflowId, baseRevision, stepId) {
   return createHash('sha256')
-    .update(`autonomous-maintenance-release-policy-v1|${workflowId}|${baseRevision}`)
+    .update(`autonomous-maintenance-policy-v1|${workflowId}|${baseRevision}|${stepId}`)
     .digest('hex');
+}
+
+function pathWithin(root, path) {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function pathAllowedForAutopilot(path) {
+  const allowed = AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths.some((root) => pathWithin(root, path));
+  const forbidden = AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths.some((root) => pathWithin(root, path));
+  return allowed && !forbidden;
+}
+
+export function autonomousSensitiveImplementationAllowed(step) {
+  if (!step ||
+      step.id !== 'implementation' ||
+      step.status !== 'awaiting_approval' ||
+      step.error !== 'workflow_sensitive_change_requires_approval') return false;
+  const policy = step.evidence?.changePolicy;
+  const changeSet = step.evidence?.changeSet;
+  const paths = Array.isArray(policy?.paths) ? policy.paths : changeSet?.paths;
+  if (policy?.ok !== true || policy.classification !== 'sensitive' || !Array.isArray(paths) || paths.length < 1) return false;
+  if (changeSet?.sensitiveContent === true || policy.reason === 'sensitive_change:security_or_auth_content') return false;
+  if (typeof policy.reason !== 'string' || !policy.reason.startsWith('sensitive_change:src')) return false;
+  if (!paths.every((path) => typeof path === 'string' && pathAllowedForAutopilot(path))) return false;
+  return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
 }
 
 function resultSummary(plan) {
@@ -179,53 +204,73 @@ export class AutonomousSelfImprovement {
     if (!workflowId) {
       workflowId = await this.createWorkflow();
       if (!workflowId) {
+        const refreshed = await this.readState();
         return {
-          status: state.waitingForMerge?.baseRevision === this.operatorRevision ? 'waiting_for_merge' : 'idle',
+          status: refreshed.waitingForMerge?.baseRevision === this.operatorRevision ? 'waiting_for_merge' : 'idle',
           workflowId: null
         };
       }
       state = await this.readState();
     }
 
-    let plan = await this.workflowEngine.get(workflowId);
-    if (!plan) {
-      await this.writeState((current) => ({
-        ...current,
-        activeWorkflowId: null,
-        activeBaseRevision: null,
-        suspendedUntil: new Date(this.now() + COOLDOWN_MS).toISOString()
-      }));
-      return { status: 'missing_workflow', workflowId };
-    }
-    if (plan.profile !== PROFILE || plan.projectId !== 'self') {
-      await this.writeState((current) => ({
-        ...current,
-        activeWorkflowId: null,
-        activeBaseRevision: null,
-        suspendedUntil: new Date(this.now() + BILLING_BACKOFF_MS).toISOString()
-      }));
-      return { status: 'workflow_binding_invalid', workflowId };
-    }
-
-    if (TERMINAL.has(plan.status)) {
-      await this.settle(plan, { baseRevision: state.activeBaseRevision ?? this.operatorRevision });
-      return { status: plan.status, ...resultSummary(plan) };
-    }
-
-    if (plan.status === 'awaiting_approval') {
-      const awaiting = plan.steps.filter((step) => step.status === 'awaiting_approval');
-      if (awaiting.length !== 1 || awaiting[0].id !== 'release-readiness') {
-        return { status: 'human_gate_required', workflowId, stepId: awaiting[0]?.id ?? null };
+    const baseRevision = state.activeBaseRevision ?? this.operatorRevision;
+    for (let transition = 0; transition < 4; transition += 1) {
+      let plan = await this.workflowEngine.get(workflowId);
+      if (!plan) {
+        await this.writeState((current) => ({
+          ...current,
+          activeWorkflowId: null,
+          activeBaseRevision: null,
+          suspendedUntil: new Date(this.now() + COOLDOWN_MS).toISOString()
+        }));
+        return { status: 'missing_workflow', workflowId };
       }
-      plan = await this.workflowEngine.approve(workflowId, 'release-readiness', {
-        externalApprovalFingerprint: policyFingerprint(workflowId, state.activeBaseRevision ?? this.operatorRevision)
-      });
+      if (plan.profile !== PROFILE || plan.projectId !== 'self') {
+        await this.writeState((current) => ({
+          ...current,
+          activeWorkflowId: null,
+          activeBaseRevision: null,
+          suspendedUntil: new Date(this.now() + BILLING_BACKOFF_MS).toISOString()
+        }));
+        return { status: 'workflow_binding_invalid', workflowId };
+      }
+
+      if (TERMINAL.has(plan.status)) {
+        await this.settle(plan, { baseRevision });
+        return { ...resultSummary(plan), status: plan.status };
+      }
+
+      if (plan.status === 'awaiting_approval') {
+        const awaiting = plan.steps.filter((step) => step.status === 'awaiting_approval');
+        if (awaiting.length !== 1) {
+          return { status: 'human_gate_required', workflowId, stepId: null };
+        }
+        const step = awaiting[0];
+        const releaseReady = step.id === 'release-readiness';
+        const boundedSensitiveImplementation = autonomousSensitiveImplementationAllowed(step);
+        if (!releaseReady && !boundedSensitiveImplementation) {
+          return { status: 'human_gate_required', workflowId, stepId: step.id };
+        }
+        plan = await this.workflowEngine.approve(workflowId, step.id, {
+          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id)
+        });
+        if (TERMINAL.has(plan.status)) {
+          await this.settle(plan, { baseRevision });
+          return { ...resultSummary(plan), status: plan.status };
+        }
+        continue;
+      }
+
+      plan = await this.workflowEngine.run(workflowId);
+      if (TERMINAL.has(plan.status)) {
+        await this.settle(plan, { baseRevision });
+        return { ...resultSummary(plan), status: plan.status };
+      }
+      if (plan.status === 'awaiting_approval') continue;
+      return { ...resultSummary(plan), status: plan.status };
     }
 
-    plan = await this.workflowEngine.run(workflowId);
-    if (TERMINAL.has(plan.status)) {
-      await this.settle(plan, { baseRevision: state.activeBaseRevision ?? this.operatorRevision });
-    }
-    return { ...resultSummary(plan), status: plan.status };
+    const current = await this.workflowEngine.get(workflowId);
+    return { ...resultSummary(current), status: current?.status ?? 'transition_budget_exhausted' };
   }
 }
