@@ -155,13 +155,29 @@ export class AutonomousSelfImprovement {
     )].sort();
   }
 
+  cooldownApplies(state, starts = this.recentStarts(state)) {
+    const lastStart = starts.at(-1);
+    if (!lastStart) return false;
+    const lastStartAt = Date.parse(lastStart);
+    if (!Number.isFinite(lastStartAt) || this.now() - lastStartAt >= COOLDOWN_MS) return false;
+    const latest = state.history.at(-1);
+    const completedAt = Date.parse(latest?.completedAt ?? '');
+    const completedLatestStart =
+      Number.isFinite(completedAt) &&
+      completedAt >= lastStartAt &&
+      typeof latest?.baseRevision === 'string' &&
+      /^[a-f0-9]{40}$/i.test(latest.baseRevision);
+    if (completedLatestStart && latest.baseRevision.toLowerCase() !== this.operatorRevision) return false;
+    return true;
+  }
+
   async hasWork() {
     const state = await this.readState();
     if (state.activeWorkflowId) return true;
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return false;
-    if (this.recentStarts(state).length >= MAX_STARTS_PER_24H) return false;
-    const lastStart = this.recentStarts(state).at(-1);
-    if (lastStart && this.now() - Date.parse(lastStart) < COOLDOWN_MS) return false;
+    const starts = this.recentStarts(state);
+    if (starts.length >= MAX_STARTS_PER_24H) return false;
+    if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
 
@@ -189,8 +205,7 @@ export class AutonomousSelfImprovement {
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return null;
     const starts = this.recentStarts(state);
     if (starts.length >= MAX_STARTS_PER_24H) return null;
-    const lastStart = starts.at(-1);
-    if (lastStart && this.now() - Date.parse(lastStart) < COOLDOWN_MS) return null;
+    if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
     const workflow = await this.workflowEngine.create({
