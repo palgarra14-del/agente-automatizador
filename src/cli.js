@@ -117,7 +117,7 @@ try {
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
-      const cloudAction = action === 'cloud-once' || action === 'cloud-peek' || action === 'cloud-admit' || action === 'cloud-recover';
+      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-peek' || action === 'cloud-admit' || action === 'cloud-recover';
       const requestedLaneId = take('--lane') ?? 'self';
       const cloudLane = cloudAction
         ? queueConfig.cloudLanes.find((lane) => lane.id === requestedLaneId)
@@ -185,6 +185,9 @@ try {
           return queue.tick();
         });
         console.log(JSON.stringify(view(result), null, 2));
+      } else if (action === 'cloud-drain') {
+        const result = await activeStore.withGlobalLease(() => queue.drain());
+        console.log(JSON.stringify({ ...result, last: view(result.last) }, null, 2));
       } else if (action === 'watch') {
         const controller = new AbortController();
         const stop = () => controller.abort();
@@ -216,7 +219,7 @@ try {
         if (checkoutReloadRevision) {
           console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
-      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-recover [--lane <id>]|cloud-peek [--lane <id>]|cloud-once [--lane <id>]|watch|status>');
+      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-recover [--lane <id>]|cloud-peek [--lane <id>]|cloud-once [--lane <id>]|cloud-drain [--lane <id>]|watch|status>');
     }
   } else if (command === 'service') {
     const action = args[1] ?? 'status';
@@ -282,7 +285,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-recover|cloud-peek|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-recover|cloud-peek|cloud-once|cloud-drain|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
