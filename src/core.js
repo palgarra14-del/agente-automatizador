@@ -857,10 +857,11 @@ export class JsonStore {
     if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('state_deadline_invalid');
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
+    const serialized = JSON.stringify(data, null, 2);
     let committed = false;
     let operationError = null;
     try {
-      await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
+      await writeFile(temporary, serialized, { mode: 0o600 });
       if (beforeCommit) await beforeCommit();
       if (deadlineAt === null) {
         await rename(temporary, this.file);
@@ -874,8 +875,13 @@ export class JsonStore {
           killGraceMs: 0,
           outputLimit: 1_000
         });
-        if (result.timedOut) throw new Error('workflow_deadline_cap_exceeded');
-        if (!result.ok) throw new Error('state_commit_failed');
+        if (result.timedOut) {
+          let observed = null;
+          try { observed = await readFile(this.file, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          if (observed !== serialized) throw new Error('workflow_deadline_cap_exceeded');
+        } else if (!result.ok) {
+          throw new Error('state_commit_failed');
+        }
       }
       committed = true;
     } catch (error) {
@@ -3355,6 +3361,12 @@ export class WorkflowEngine {
   }
 
   async resume(id, options = {}) {
+    const leaseOptions = {
+      deadlineAt: options.deadlineCapAt ?? null,
+      beforeClaimCommit: typeof options.beforeLeaseClaimCommit === 'function'
+        ? options.beforeLeaseClaimCommit
+        : null
+    };
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
@@ -3463,7 +3475,7 @@ export class WorkflowEngine {
         }
       }
       return this.runUnlocked(id, options);
-    });
+    }, leaseOptions);
   }
 
   remainingMs(plan) { return plan.deadlineAt - this.now(); }
@@ -4955,7 +4967,8 @@ export class LocalGitAdapter {
       timeoutMs: this.gitTimeoutMs(project, deadlineAt),
       outputLimit,
       captureOutputDigest,
-      env: { ...networkEnvironment, ...env }
+      env: { ...networkEnvironment, ...env },
+      killGraceMs: deadlineAt === null || deadlineAt === undefined ? 1_000 : 0
     });
     if (!allowExitCodes.includes(result.exitCode) || result.timedOut) throw new Error(`Git ${args[0]} failed: ${clip(result.stderr || result.stdout)}`);
     return result;
