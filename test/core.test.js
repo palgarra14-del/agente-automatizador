@@ -405,6 +405,34 @@ test('JsonStore rejects a capped save when the rename process reaches the deadli
   assert.equal(existsSync(file), false);
 });
 
+test('JsonStore reconciles a deadline timeout when the rename already committed the intended state', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-deadline-state-reconcile-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file, {
+    now: () => 1_000,
+    processRunner: async (_binary, args) => {
+      await rename(args.at(-2), args.at(-1));
+      return { ok: false, exitCode: null, timedOut: true, stdout: '', stderr: '', durationMs: 1_000 };
+    }
+  });
+  await store.save({ reconciled: true }, { deadlineAt: 2_000 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).reconciled, true);
+});
+
+test('LocalGitAdapter uses zero kill grace for deadline-bound git commands', async () => {
+  const calls = [];
+  const git = new LocalGitAdapter({
+    now: () => 1_000,
+    processRunner: async (_binary, _args, options) => {
+      calls.push(options);
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 };
+    }
+  });
+  await git.git(['status', '--porcelain'], project(), { deadlineAt: 2_000 });
+  assert.equal(calls[0].timeoutMs, 1_000);
+  assert.equal(calls[0].killGraceMs, 0);
+});
+
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
   const run = { status: RunStatus.CREATED };
   transition(run, RunStatus.PLANNING);
