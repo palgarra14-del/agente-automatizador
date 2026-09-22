@@ -3537,7 +3537,10 @@ export class WorkflowEngine {
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.runUnlocked(id, options));
   }
 
-  async runUnlocked(id, { dryRun = false, refreshPristineDeadline = false } = {}) {
+  async runUnlocked(id, { dryRun = false, refreshPristineDeadline = false, deadlineCapAt = null } = {}) {
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) {
+      throw new Error('workflow_deadline_cap_invalid');
+    }
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
     const project = this.projects.get(plan.projectId);
@@ -3581,7 +3584,14 @@ export class WorkflowEngine {
         ['pending', 'not_required'].includes(plan.bootstrap?.status);
       if (!pristine) throw new Error('workflow_start_deadline_refresh_not_pristine');
       plan = await this.update(id, (saved) => {
-        saved.deadlineAt = this.now() + saved.budgets.timeoutMs;
+        const refreshedDeadlineAt = this.now() + saved.budgets.timeoutMs;
+        saved.deadlineAt = deadlineCapAt === null
+          ? refreshedDeadlineAt
+          : Math.min(refreshedDeadlineAt, deadlineCapAt);
+      });
+    } else if (deadlineCapAt !== null && plan.deadlineAt > deadlineCapAt) {
+      plan = await this.update(id, (saved) => {
+        saved.deadlineAt = Math.min(saved.deadlineAt, deadlineCapAt);
       });
     }
     if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
