@@ -91,12 +91,14 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
 
   async update(id, mutator) {
     this.assertExecutionDeadline(id);
+    const deadlineAt = this.executionDeadlineCap(id);
     return super.update(id, (saved) => {
       this.assertExecutionDeadline(id);
       mutator(saved);
       this.assertExecutionDeadline(id);
     }, {
-      beforeCommit: () => this.assertExecutionDeadline(id)
+      beforeCommit: () => this.assertExecutionDeadline(id),
+      deadlineAt
     });
   }
 
@@ -111,7 +113,10 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
         id,
         'workflow',
         async () => super.runUnlocked(id, options),
-        { beforeClaimCommit: () => this.assertExecutionDeadline(id) }
+        {
+          beforeClaimCommit: () => this.assertExecutionDeadline(id),
+          deadlineAt: this.executionDeadlineCap(id, options.deadlineCapAt)
+        }
       );
     });
   }
@@ -359,7 +364,8 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
           branch: plan.workspace.workingBranch,
           baseHead: plan.workspace.baseHead,
           remote: plan.workspace.remote,
-          changeSetFingerprint: candidate.changeSetFingerprint
+          changeSetFingerprint: candidate.changeSetFingerprint,
+          deadlineAt: this.executionDeadlineCap(id, deadlineCapAt)
         });
         guard();
         const expectedPaths = exactPaths(candidate.implementation.evidence?.changeSet?.paths);
@@ -373,7 +379,8 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
           push = await this.publicationBridge.push(workspaceProject, {
             branch: plan.workspace.workingBranch,
             commitHead: commit.finalHead,
-            remote: plan.workspace.remote
+            remote: plan.workspace.remote,
+            deadlineAt: this.executionDeadlineCap(id, deadlineCapAt)
           });
         } catch (error) {
           guard();
