@@ -171,7 +171,7 @@ jobs:
           node src/cli.js runtime sync
           docker run --rm --entrypoint git agent-node22-pnpm11:local --version
 
-      - name: Run one governed cloud queue tick
+      - name: Run governed cloud queue
         if: steps.preflight.outputs.has_work == 'true'
         shell: bash
         env:
@@ -179,4 +179,9 @@ jobs:
           AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
+          AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$AGENT_CLOUD_EVENT_NAME" == "schedule" ]]; then
+            exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
+          fi
+          exec node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE"
