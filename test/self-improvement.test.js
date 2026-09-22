@@ -129,6 +129,10 @@ test('autopilot creates one bounded autonomous workflow, reaches a reviewed PR a
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('.github'));
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('config'));
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('package.json'));
+  assert.ok(calls.create[0].scope.forbiddenPaths.includes('src/self-improvement.js'));
+  assert.ok(calls.create[0].scope.forbiddenPaths.includes('src/core.js'));
+  assert.ok(calls.create[0].scope.forbiddenPaths.includes('src/cloud-state.js'));
+  assert.deepEqual(calls.create[0].scope.allowedPaths, ['src', 'test/autonomous']);
   assert.equal(calls.approve.length, 1);
   assert.equal(calls.approve[0].stepId, 'release-readiness');
   assert.match(calls.approve[0].options.externalApprovalFingerprint, /^[a-f0-9]{64}$/);
@@ -142,7 +146,7 @@ test('autopilot creates one bounded autonomous workflow, reaches a reviewed PR a
 
 test('bounded src/test sensitivity can be auto-approved only from exact governed evidence', async () => {
   const safe = sensitiveImplementation({
-    paths: ['src/recovery.js', 'test/recovery.test.js'],
+    paths: ['src/recovery.js', 'test/autonomous/recovery.test.js'],
     reason: 'sensitive_change:src/recovery.js'
   });
   assert.equal(autonomousSensitiveImplementationAllowed(safe), true);
@@ -157,6 +161,14 @@ test('bounded src/test sensitivity can be auto-approved only from exact governed
   assert.equal(autonomousSensitiveImplementationAllowed(sensitiveImplementation({
     paths: ['package.json'],
     reason: 'sensitive_change:package.json'
+  })), false);
+  assert.equal(autonomousSensitiveImplementationAllowed(sensitiveImplementation({
+    paths: ['src/core.js'],
+    reason: 'sensitive_change:src/core.js'
+  })), false);
+  assert.equal(autonomousSensitiveImplementationAllowed(sensitiveImplementation({
+    paths: ['test/existing.test.js'],
+    reason: 'sensitive_change:src/recovery.js'
   })), false);
   const mismatched = sensitiveImplementation({
     paths: ['src/recovery.js'],
@@ -189,7 +201,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
     projectId: 'self',
     status: 'awaiting_approval',
     result: null,
-    steps: [sensitiveImplementation({ paths: ['src/recovery.js', 'test/recovery.test.js'], reason: 'sensitive_change:src/recovery.js' })]
+    steps: [sensitiveImplementation({ paths: ['src/recovery.js', 'test/autonomous/recovery.test.js'], reason: 'sensitive_change:src/recovery.js' })]
   };
   const approvals = [];
   const engine = {
