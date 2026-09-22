@@ -335,6 +335,50 @@ test('published autopilot work cannot spawn again until authoritative main advan
   assert.equal(store.state.autopilotSelfImprovement.waitingForMerge, null);
 });
 
+test('autopilot enforces cooldown and a hard daily start budget', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const recentStarts = [
+    '2026-09-23T02:00:00.000Z',
+    '2026-09-23T04:00:00.000Z',
+    '2026-09-23T06:00:00.000Z',
+    '2026-09-23T08:00:00.000Z'
+  ];
+  const budgetStore = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: null,
+      activeBaseRevision: null,
+      sequence: 4,
+      starts: recentStarts,
+      history: [],
+      waitingForMerge: null,
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const noCreate = { async create() { throw new Error('daily budget must block creation'); } };
+  const budgeted = new AutonomousSelfImprovement({ store: budgetStore, workflowEngine: noCreate, operatorRevision: REV_A, now: () => now });
+  assert.equal(await budgeted.hasWork(), false);
+  assert.equal((await budgeted.tick()).status, 'idle');
+
+  const cooldownStore = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: null,
+      activeBaseRevision: null,
+      sequence: 1,
+      starts: ['2026-09-23T11:45:00.000Z'],
+      history: [],
+      waitingForMerge: null,
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const cooling = new AutonomousSelfImprovement({ store: cooldownStore, workflowEngine: noCreate, operatorRevision: REV_A, now: () => now });
+  assert.equal(await cooling.hasWork(), false);
+  assert.equal((await cooling.tick()).status, 'idle');
+});
+
 test('billing failures back off instead of creating a costly retry loop', async () => {
   const store = fakeStore({
     autopilotSelfImprovement: {
