@@ -238,6 +238,7 @@ function fakeGitHub() {
       if (typeof body?.query === 'string' && body.query.includes('CloudStateContext')) {
         return response(200, statusContextPayload(body.variables));
       }
+      assert.match(body.query, /history\(first:\s*\$first,\s*after:\s*\$after,\s*path:\s*\$path\)/);
       return response(200, historyPayload(body.variables));
     }
 

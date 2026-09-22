@@ -33,7 +33,7 @@ query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $pa
   repository(owner: $owner, name: $name) {
     object(oid: $oid) {
       ... on Commit {
-        history(first: $first, after: $after) {
+        history(first: $first, after: $after, path: $path) {
           nodes {
             oid
             parents(first: 2) { totalCount nodes { oid } }
