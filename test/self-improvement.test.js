@@ -371,6 +371,65 @@ test('autopilot enforces cooldown and a hard daily start budget', async () => {
   assert.equal((await cooling.tick()).status, 'idle');
 });
 
+test('completed failed cycle can retry immediately after authoritative main advances', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const state = {
+    version: 1,
+    activeWorkflowId: null,
+    activeBaseRevision: null,
+    sequence: 1,
+    starts: ['2026-09-23T11:50:00.000Z'],
+    history: [{
+      workflowId: 'workflow-old',
+      status: 'failed',
+      error: 'read_only_repository_context_failed',
+      changedPaths: [],
+      pullRequestNumber: null,
+      pullRequestUrl: null,
+      finalHead: null,
+      baseRevision: REV_A,
+      completedAt: '2026-09-23T11:55:00.000Z'
+    }],
+    suspendedUntil: null,
+    updatedAt: null
+  };
+
+  const sameRevision = new AutonomousSelfImprovement({
+    store: fakeStore({ autopilotSelfImprovement: state }),
+    workflowEngine: { async create() { throw new Error('same revision must remain cooled down'); } },
+    operatorRevision: REV_A,
+    now: () => now
+  });
+  assert.equal(await sameRevision.hasWork(), false);
+
+  let creates = 0;
+  const advancedStore = fakeStore({ autopilotSelfImprovement: state });
+  const advancedRevision = new AutonomousSelfImprovement({
+    store: advancedStore,
+    workflowEngine: {
+      async create() {
+        creates += 1;
+        return { id: 'workflow-new' };
+      },
+      async get() {
+        return {
+          id: 'workflow-new',
+          profile: 'autonomous-maintenance',
+          projectId: 'self',
+          status: 'failed',
+          result: { error: 'fixture_stop' },
+          steps: []
+        };
+      }
+    },
+    operatorRevision: REV_B,
+    now: () => now
+  });
+  assert.equal(await advancedRevision.hasWork(), true);
+  assert.equal((await advancedRevision.tick()).status, 'failed');
+  assert.equal(creates, 1);
+});
+
 test('billing failures back off instead of creating a costly retry loop', async () => {
   const store = fakeStore({
     autopilotSelfImprovement: {
