@@ -1273,7 +1273,7 @@ export class GitHubStateStore extends JsonStore {
         throw new Error('cloud_state_history_fork');
       }
       const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      const envelope = await this.readEnvelopeAt(expectedSha);
+      const envelope = step === 0 ? stateEnvelope : await this.readEnvelopeAt(expectedSha);
       if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
         throw new Error('cloud_state_generation_discontinuity');
       }
