@@ -365,6 +365,22 @@ test('overlapping deadline contexts for the same workflow remain async-isolated'
   assert.equal(instance.executionDeadlineCap('shared'), null);
 });
 
+test('durable publication threads the active deadline into commit and push contexts', () => {
+  const source = readFileSync(new URL('../src/cloud-workflow-engine.js', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /publicationBridge\.commit\([\s\S]*deadlineAt: this\.executionDeadlineCap\(id, deadlineCapAt\)/
+  );
+  assert.match(
+    source,
+    /publicationBridge\.push\([\s\S]*deadlineAt: this\.executionDeadlineCap\(id, deadlineCapAt\)/
+  );
+  assert.match(
+    source,
+    /withExecutionLease\([\s\S]*deadlineAt: this\.executionDeadlineCap\(id, options\.deadlineCapAt\)/
+  );
+});
+
 test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
