@@ -70,11 +70,19 @@ export function autonomousSensitiveImplementationAllowed(step) {
       step.error !== 'workflow_sensitive_change_requires_approval') return false;
   const policy = step.evidence?.changePolicy;
   const changeSet = step.evidence?.changeSet;
-  const paths = Array.isArray(policy?.paths) ? policy.paths : changeSet?.paths;
-  if (policy?.ok !== true || policy.classification !== 'sensitive' || !Array.isArray(paths) || paths.length < 1) return false;
+  const policyPaths = Array.isArray(policy?.paths) ? [...policy.paths].sort() : null;
+  const changePaths = Array.isArray(changeSet?.paths) ? [...changeSet.paths].sort() : null;
+  if (policy?.ok !== true || policy.classification !== 'sensitive' || !policyPaths?.length || !changePaths?.length) return false;
+  if (JSON.stringify(policyPaths) !== JSON.stringify(changePaths)) return false;
   if (changeSet?.sensitiveContent === true || policy.reason === 'sensitive_change:security_or_auth_content') return false;
   if (typeof policy.reason !== 'string' || !policy.reason.startsWith('sensitive_change:src')) return false;
-  if (!paths.every((path) => typeof path === 'string' && pathAllowedForAutopilot(path))) return false;
+  if (!policyPaths.every((path) =>
+    typeof path === 'string' &&
+    !path.includes('..') &&
+    !path.includes('\\\\') &&
+    !path.startsWith('/') &&
+    pathAllowedForAutopilot(path)
+  )) return false;
   return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
 }
 
@@ -136,7 +144,7 @@ export class AutonomousSelfImprovement {
 
   async settle(plan, { baseRevision }) {
     const summary = resultSummary(plan);
-    const billingUnavailable = /billing/i.test(String(summary.error ?? ''));
+    const billingUnavailable = /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(summary.error ?? ''));
     return this.writeState((state) => ({
       ...state,
       activeWorkflowId: null,
@@ -249,6 +257,13 @@ export class AutonomousSelfImprovement {
         const releaseReady = step.id === 'release-readiness';
         const boundedSensitiveImplementation = autonomousSensitiveImplementationAllowed(step);
         if (!releaseReady && !boundedSensitiveImplementation) {
+          if (typeof this.workflowEngine.cancel === 'function') {
+            const cancelled = await this.workflowEngine.cancel(workflowId, {
+              reason: 'autonomous_maintenance_human_gate_required'
+            });
+            await this.settle(cancelled, { baseRevision });
+            return { ...resultSummary(cancelled), status: cancelled.status, humanGateStepId: step.id };
+          }
           return { status: 'human_gate_required', workflowId, stepId: step.id };
         }
         plan = await this.workflowEngine.approve(workflowId, step.id, {
