@@ -272,6 +272,33 @@ test('explicit durable get keeps its deadline context active through nested prew
   );
 });
 
+test('capped resume enforces its deadline inside execution-lease persistence', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let observed = null;
+  instance.now = () => now;
+  instance.store = {
+    async withExecutionLease(collection, id, kind, _operation, options) {
+      observed = { collection, id, kind, options };
+      now = 2_000;
+      await options.beforeClaimCommit();
+      throw new Error('unexpected_resume_after_deadline');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.resume('resume-deadline', { deadlineCapAt: 1_000 }),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(observed.collection, 'workflows');
+  assert.equal(observed.id, 'resume-deadline');
+  assert.equal(observed.kind, 'workflow');
+  assert.equal(observed.options.deadlineAt, 1_000);
+  assert.equal(typeof observed.options.beforeClaimCommit, 'function');
+});
+
 test('durable deadline context protects internal updates during resume prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
   instance.preparingDurableCheckpoints = new Set();
