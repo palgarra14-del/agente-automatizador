@@ -102,6 +102,24 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     });
   }
 
+  async cancel(id, options = {}) {
+    return this.withExecutionDeadlineCap(id, options.deadlineCapAt ?? null, () => super.cancel(id, {
+      ...options,
+      deadlineCapAt: this.executionDeadlineCap(id, options.deadlineCapAt ?? null),
+      beforeLeaseClaimCommit: () => this.assertExecutionDeadline(id),
+      beforeCommit: () => this.assertExecutionDeadline(id)
+    }));
+  }
+
+  async approve(id, stepId, options = {}) {
+    return this.withExecutionDeadlineCap(id, options.deadlineCapAt ?? null, () => super.approve(id, stepId, {
+      ...options,
+      deadlineCapAt: this.executionDeadlineCap(id, options.deadlineCapAt ?? null),
+      beforeLeaseClaimCommit: () => this.assertExecutionDeadline(id),
+      beforeCommit: () => this.assertExecutionDeadline(id)
+    }));
+  }
+
   async run(id, options = {}) {
     if (options.dryRun || options.deadlineCapAt === null || options.deadlineCapAt === undefined) {
       return super.run(id, options);
