@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { JsonStore } from './core.js';
 
@@ -221,6 +222,7 @@ export class GitHubStateStore extends JsonStore {
     this.ownerId = ownerId;
     this.now = now;
     this.activeGlobalLeaseId = null;
+    this.mutationDeadlineContext = new AsyncLocalStorage();
     this.validatedLineageHeads = new Set();
     this.ledgerRootVerified = false;
     this.ledgerFullDigest = createHash('sha256').update(JSON.stringify(canonical({
@@ -248,6 +250,14 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async request(suffix, { method = 'GET', body, allow404 = false } = {}) {
+    const deadlineAt = method === 'GET' ? null : this.mutationDeadlineContext?.getStore() ?? null;
+    let timeoutMs = 30_000;
+    if (deadlineAt !== null) {
+      if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+      const remainingMs = Math.floor(deadlineAt - this.now());
+      if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
+      timeoutMs = Math.min(timeoutMs, remainingMs);
+    }
     let response;
     try {
       response = await this.fetchImpl(this.apiPath(suffix), {
@@ -258,7 +268,7 @@ export class GitHubStateStore extends JsonStore {
           'Content-Type': 'application/json'
         },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: globalThis.AbortSignal.timeout(30_000)
+        signal: globalThis.AbortSignal.timeout(timeoutMs)
       });
     } catch (error) {
       throw new Error('cloud_state_github_request_failed', { cause: error });
@@ -1712,30 +1722,37 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_direct_save_forbidden');
   }
 
-  async mutateInternal(mutator, { requireLease, beforeCommit = null }) {
+  async mutateInternal(mutator, { requireLease, beforeCommit = null, deadlineAt = null }) {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
-    const snapshot = await this.readSnapshot({ repair: true });
-    const data = snapshot.state;
-    if (requireLease) {
-      const lease = data.cloudExecutionLease;
-      const expiresAt = Date.parse(lease?.expiresAt ?? '');
-      if (!this.activeGlobalLeaseId ||
-          lease?.leaseId !== this.activeGlobalLeaseId ||
-          lease?.ownerId !== this.ownerId ||
-          !Number.isFinite(expiresAt) ||
-          expiresAt <= this.now()) {
-        throw new Error('cloud_global_lease_lost');
+    if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('cloud_state_deadline_invalid');
+    const operation = async () => {
+      const snapshot = await this.readSnapshot({ repair: true });
+      const data = snapshot.state;
+      if (requireLease) {
+        const lease = data.cloudExecutionLease;
+        const expiresAt = Date.parse(lease?.expiresAt ?? '');
+        if (!this.activeGlobalLeaseId ||
+            lease?.leaseId !== this.activeGlobalLeaseId ||
+            lease?.ownerId !== this.ownerId ||
+            !Number.isFinite(expiresAt) ||
+            expiresAt <= this.now()) {
+          throw new Error('cloud_global_lease_lost');
+        }
+        lease.expiresAt = new Date(this.now() + this.leaseTtlMs).toISOString();
       }
-      lease.expiresAt = new Date(this.now() + this.leaseTtlMs).toISOString();
-    }
-    const output = await mutator(data);
-    sanitizeRemoteOnlyEvidence(data);
-    await this.writeSnapshot(data, snapshot, { beforeCommit });
-    return output;
+      const output = await mutator(data);
+      sanitizeRemoteOnlyEvidence(data);
+      if (beforeCommit) await beforeCommit();
+      await this.writeSnapshot(data, snapshot, { beforeCommit });
+      return output;
+    };
+    if (deadlineAt === null) return operation();
+    if (this.now() >= deadlineAt) throw new Error('workflow_deadline_cap_exceeded');
+    return this.mutationDeadlineContext.run(deadlineAt, operation);
   }
 
-  async mutate(mutator, { beforeCommit = null } = {}) {
-    return this.mutateInternal(mutator, { requireLease: true, beforeCommit });
+  async mutate(mutator, { beforeCommit = null, deadlineAt = null } = {}) {
+    return this.mutateInternal(mutator, { requireLease: true, beforeCommit, deadlineAt });
   }
 
   async ownerIdentity() {
