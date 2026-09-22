@@ -207,7 +207,7 @@ test('one-iteration state survives restart and tampered serialized state fails c
 
   const tampered = mutable(state);
   tampered.cycles[0].correctionRequest.allowedPaths[0] = 'evil.js';
-  assert.throws(() => new BrowserQaAutocorrectionCoordinator({ state: tampered }), /state|scope|fingerprint/);
+  assert.throws(() => new BrowserQaAutocorrectionCoordinator({ state: tampered }), /state|scope|fingerprint|authorization/);
 });
 
 test('publication provenance must prove ancestry and exact changed-path scope', () => {
