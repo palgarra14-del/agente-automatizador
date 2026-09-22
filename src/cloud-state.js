@@ -7,6 +7,7 @@ const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
+const LANE_INIT_STATUS_MAX_PAGES = 32;
 const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
@@ -27,23 +28,6 @@ const RESERVED_STATE_TAGS = new Set([
 ]);
 
 
-const STATUS_CONTEXT_QUERY = `
-query CloudStateContext($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
-  repository(owner: $owner, name: $name) {
-    object(oid: $oid) {
-      ... on Commit {
-        status {
-          context(name: $context) {
-            context
-            state
-            description
-            targetUrl
-          }
-        }
-      }
-    }
-  }
-}`;
 
 function sensitiveKey(key) {
   const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
@@ -255,29 +239,6 @@ export class GitHubStateStore extends JsonStore {
     return response.status === 204 ? null : response.json();
   }
 
-  async graphqlRequest(query, variables) {
-    let response;
-    try {
-      response = await this.fetchImpl('https://api.github.com/graphql', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query, variables }),
-        signal: globalThis.AbortSignal.timeout(30_000)
-      });
-    } catch (error) {
-      throw new Error('cloud_state_github_request_failed', { cause: error });
-    }
-    if (!response.ok) throw responseError(response.status);
-    const payload = await response.json();
-    if (!payload || typeof payload !== 'object' || (Array.isArray(payload.errors) && payload.errors.length > 0)) {
-      throw new Error('cloud_state_history_query_failed');
-    }
-    return payload.data;
-  }
 
   async refSha(ref) {
     const result = await this.request(`/git/ref/${ref}`, { allow404: true });
@@ -427,24 +388,25 @@ export class GitHubStateStore extends JsonStore {
 
   async readLaneInitMarker() {
     await this.verifyLedgerRoot();
-    const data = await this.graphqlRequest(STATUS_CONTEXT_QUERY, {
-      owner: this.repository.owner,
-      name: this.repository.name,
-      oid: LEDGER_ROOT_SHA,
-      context: this.laneInitContextName
-    });
-    const context = data?.repository?.object?.status?.context ?? null;
-    if (!context) return null;
-    if (typeof context.context !== 'string' ||
-        context.context.toLowerCase() !== this.laneInitContextName.toLowerCase() ||
-        context.state !== 'SUCCESS' ||
-        context.targetUrl !== null ||
-        typeof context.description !== 'string') {
-      throw new Error('cloud_state_lane_init_invalid');
+    const wanted = this.laneInitContextName.toLowerCase();
+    for (let page = 1; page <= LANE_INIT_STATUS_MAX_PAGES; page += 1) {
+      const statuses = await this.request(`/commits/${LEDGER_ROOT_SHA}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
+      if (!Array.isArray(statuses)) throw new Error('cloud_state_lane_init_invalid');
+      for (const status of statuses) {
+        const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
+        if (context !== wanted) continue;
+        if (String(status.state ?? '').toLowerCase() !== 'success' ||
+            (status.target_url !== null && status.target_url !== undefined) ||
+            typeof status.description !== 'string') {
+          throw new Error('cloud_state_lane_init_invalid');
+        }
+        const match = /^r=([a-f0-9]{40})$/i.exec(status.description);
+        if (!match) throw new Error('cloud_state_lane_init_invalid');
+        return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
+      }
+      if (statuses.length < STATUS_PAGE_SIZE) return null;
     }
-    const match = /^r=([a-f0-9]{40})$/i.exec(context.description);
-    if (!match) throw new Error('cloud_state_lane_init_invalid');
-    return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
+    throw new Error('cloud_state_lane_init_status_limit');
   }
 
   async ensureLaneInitMarker(laneRootSha) {
