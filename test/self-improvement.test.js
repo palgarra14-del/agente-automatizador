@@ -8,7 +8,6 @@ import {
 } from '../src/self-improvement.js';
 
 const REV_A = 'a'.repeat(40);
-const REV_B = 'b'.repeat(40);
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -68,7 +67,7 @@ function sensitiveImplementation({ reason = 'sensitive_change:src/core.js', path
   };
 }
 
-test('autopilot creates one bounded autonomous workflow, reaches a reviewed PR and then waits for main', async () => {
+test('autopilot creates one bounded autonomous workflow and records a reviewed PR without merge authority', async () => {
   const store = fakeStore();
   let plan = null;
   const calls = { create: [], run: [], approve: [] };
@@ -139,8 +138,8 @@ test('autopilot creates one bounded autonomous workflow, reaches a reviewed PR a
 
   const persisted = store.state.autopilotSelfImprovement;
   assert.equal(persisted.activeWorkflowId, null);
-  assert.equal(persisted.waitingForMerge.pullRequestNumber, 231);
-  assert.equal(persisted.waitingForMerge.baseRevision, REV_A);
+  assert.equal(persisted.history.at(-1).pullRequestNumber, 231);
+  assert.equal(persisted.history.at(-1).baseRevision, REV_A);
   assert.equal(await autopilot.hasWork(), false);
 });
 
@@ -272,31 +271,34 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
   assert.equal(blockedStore.state.autopilotSelfImprovement.activeWorkflowId, null);
 });
 
-test('published autopilot work cannot spawn again until authoritative main advances', async () => {
+test('completed autonomous PRs do not halt the loop and their files are excluded from later cycles', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
   const store = fakeStore({
     autopilotSelfImprovement: {
       version: 1,
       activeWorkflowId: null,
       activeBaseRevision: null,
       sequence: 1,
-      starts: ['2026-09-22T20:00:00.000Z'],
-      history: [],
-      waitingForMerge: {
+      starts: ['2026-09-23T10:00:00.000Z'],
+      history: [{
         workflowId: 'workflow-old',
-        baseRevision: REV_A,
+        status: 'completed',
+        error: null,
+        changedPaths: ['src/runtime.js', 'test/autonomous/runtime.test.js'],
         pullRequestNumber: 200,
         pullRequestUrl: 'https://github.com/example/repo/pull/200',
         finalHead: 'c'.repeat(40),
-        since: '2026-09-22T20:10:00.000Z'
-      },
+        baseRevision: REV_A,
+        completedAt: '2026-09-23T10:20:00.000Z'
+      }],
       suspendedUntil: null,
       updatedAt: null
     }
   });
-  let creates = 0;
+  let createdInput = null;
   const engine = {
-    async create() {
-      creates += 1;
+    async create(input) {
+      createdInput = clone(input);
       return { id: 'workflow-new' };
     },
     async get() {
@@ -308,31 +310,23 @@ test('published autopilot work cannot spawn again until authoritative main advan
         result: { error: 'fixture_stop' },
         steps: []
       };
-    },
-    async run() { throw new Error('terminal plan should settle before run'); }
+    }
   };
-
-  const sameMain = new AutonomousSelfImprovement({
+  const autopilot = new AutonomousSelfImprovement({
     store,
     workflowEngine: engine,
     operatorRevision: REV_A,
-    now: () => Date.parse('2026-09-23T00:00:00Z')
+    now: () => now
   });
-  assert.equal(await sameMain.hasWork(), false);
-  assert.equal((await sameMain.tick()).status, 'waiting_for_merge');
-  assert.equal(creates, 0);
 
-  const advancedMain = new AutonomousSelfImprovement({
-    store,
-    workflowEngine: engine,
-    operatorRevision: REV_B,
-    now: () => Date.parse('2026-09-23T01:00:00Z')
-  });
-  assert.equal(await advancedMain.hasWork(), true);
-  const result = await advancedMain.tick();
-  assert.equal(creates, 1);
+  assert.equal(await autopilot.hasWork(), true);
+  const result = await autopilot.tick();
   assert.equal(result.status, 'failed');
-  assert.equal(store.state.autopilotSelfImprovement.waitingForMerge, null);
+  assert.ok(createdInput.scope.forbiddenPaths.includes('src/runtime.js'));
+  assert.ok(createdInput.scope.forbiddenPaths.includes('test/autonomous/runtime.test.js'));
+  assert.match(createdInput.goal, /Do not revisit these files/);
+  assert.match(createdInput.goal, /src\/runtime\.js/);
+  assert.equal(createdInput.scope.forbiddenPaths.includes('src/core.js'), true);
 });
 
 test('autopilot enforces cooldown and a hard daily start budget', async () => {
@@ -351,7 +345,6 @@ test('autopilot enforces cooldown and a hard daily start budget', async () => {
       sequence: 4,
       starts: recentStarts,
       history: [],
-      waitingForMerge: null,
       suspendedUntil: null,
       updatedAt: null
     }
@@ -369,7 +362,6 @@ test('autopilot enforces cooldown and a hard daily start budget', async () => {
       sequence: 1,
       starts: ['2026-09-23T11:45:00.000Z'],
       history: [],
-      waitingForMerge: null,
       suspendedUntil: null,
       updatedAt: null
     }
@@ -388,7 +380,6 @@ test('billing failures back off instead of creating a costly retry loop', async 
       sequence: 1,
       starts: ['2026-09-23T00:00:00.000Z'],
       history: [],
-      waitingForMerge: null,
       suspendedUntil: null,
       updatedAt: null
     }
