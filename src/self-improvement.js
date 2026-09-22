@@ -39,7 +39,6 @@ function emptyAutopilot() {
     sequence: 0,
     starts: [],
     history: [],
-    waitingForMerge: null,
     suspendedUntil: null,
     updatedAt: null
   };
@@ -95,11 +94,15 @@ export function autonomousSensitiveImplementationAllowed(step) {
 }
 
 function resultSummary(plan) {
+  const implementation = plan?.steps?.find((step) => step.id === 'implementation');
   const publication = plan?.steps?.find((step) => step.id === 'publication');
   return {
     workflowId: plan?.id ?? null,
     status: plan?.status ?? null,
     error: plan?.result?.error ?? null,
+    changedPaths: Array.isArray(implementation?.evidence?.changeSet?.paths)
+      ? [...implementation.evidence.changeSet.paths].sort()
+      : [],
     pullRequestNumber: publication?.evidence?.pullRequest?.number ?? null,
     pullRequestUrl: publication?.evidence?.pullRequest?.url ?? null,
     finalHead: publication?.evidence?.commit?.finalHead ?? null
@@ -139,10 +142,22 @@ export class AutonomousSelfImprovement {
     return state.starts.filter((value) => Date.parse(value) >= cutoff);
   }
 
+  recentProposalPaths(state) {
+    const cutoff = this.now() - 24 * 60 * 60 * 1000;
+    return [...new Set(state.history
+      .filter((entry) =>
+        entry?.status === 'completed' &&
+        Number.isFinite(Date.parse(entry.completedAt)) &&
+        Date.parse(entry.completedAt) >= cutoff
+      )
+      .flatMap((entry) => Array.isArray(entry.changedPaths) ? entry.changedPaths : [])
+      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path))
+    )].sort();
+  }
+
   async hasWork() {
     const state = await this.readState();
     if (state.activeWorkflowId) return true;
-    if (state.waitingForMerge?.baseRevision === this.operatorRevision) return false;
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return false;
     if (this.recentStarts(state).length >= MAX_STARTS_PER_24H) return false;
     const lastStart = this.recentStarts(state).at(-1);
@@ -162,16 +177,6 @@ export class AutonomousSelfImprovement {
         baseRevision,
         completedAt: new Date(this.now()).toISOString()
       }].slice(-HISTORY_LIMIT),
-      waitingForMerge: summary.status === 'completed'
-        ? {
-            workflowId: summary.workflowId,
-            baseRevision,
-            pullRequestNumber: summary.pullRequestNumber,
-            pullRequestUrl: summary.pullRequestUrl,
-            finalHead: summary.finalHead,
-            since: new Date(this.now()).toISOString()
-          }
-        : null,
       suspendedUntil: billingUnavailable
         ? new Date(this.now() + BILLING_BACKOFF_MS).toISOString()
         : state.suspendedUntil
@@ -181,20 +186,25 @@ export class AutonomousSelfImprovement {
   async createWorkflow() {
     const state = await this.readState();
     if (state.activeWorkflowId) return state.activeWorkflowId;
-    if (state.waitingForMerge?.baseRevision === this.operatorRevision) return null;
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return null;
     const starts = this.recentStarts(state);
     if (starts.length >= MAX_STARTS_PER_24H) return null;
     const lastStart = starts.at(-1);
     if (lastStart && this.now() - Date.parse(lastStart) < COOLDOWN_MS) return null;
 
+    const recentProposalPaths = this.recentProposalPaths(state);
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
       projectId: 'self',
-      goal: AUTONOMOUS_MAINTENANCE_GOAL,
+      goal: recentProposalPaths.length
+        ? `${AUTONOMOUS_MAINTENANCE_GOAL} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
+        : AUTONOMOUS_MAINTENANCE_GOAL,
       scope: {
         allowedPaths: [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths],
-        forbiddenPaths: [...AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths]
+        forbiddenPaths: [...new Set([
+          ...AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths,
+          ...recentProposalPaths
+        ])]
       }
     });
     const startedAt = new Date(this.now()).toISOString();
@@ -204,7 +214,6 @@ export class AutonomousSelfImprovement {
       activeBaseRevision: this.operatorRevision,
       sequence: current.sequence + 1,
       starts: [...this.recentStarts(current), startedAt],
-      waitingForMerge: current.waitingForMerge?.baseRevision === this.operatorRevision ? current.waitingForMerge : null,
       suspendedUntil: null
     }));
     return workflow.id;
@@ -212,19 +221,12 @@ export class AutonomousSelfImprovement {
 
   async tick() {
     let state = await this.readState();
-    if (state.waitingForMerge && state.waitingForMerge.baseRevision !== this.operatorRevision) {
-      state = await this.writeState((current) => ({ ...current, waitingForMerge: null }));
-    }
 
     let workflowId = state.activeWorkflowId;
     if (!workflowId) {
       workflowId = await this.createWorkflow();
       if (!workflowId) {
-        const refreshed = await this.readState();
-        return {
-          status: refreshed.waitingForMerge?.baseRevision === this.operatorRevision ? 'waiting_for_merge' : 'idle',
-          workflowId: null
-        };
+        return { status: 'idle', workflowId: null };
       }
       state = await this.readState();
     }
