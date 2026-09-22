@@ -243,6 +243,38 @@ test('durable get rechecks the cap after a slow store read before checkpoint pre
   assert.equal(checkpointCalls, 0);
 });
 
+test('explicit durable get keeps its deadline context active through nested prework', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.executionDeadlineCaps = new Map();
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let mutations = 0;
+  instance.now = () => now;
+  instance.store = {
+    async mutate() {
+      mutations += 1;
+      throw new Error('unexpected_mutation');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.withExecutionDeadlineCap('nested-get', 1_000, async () => {
+      assert.equal(instance.executionDeadlineCaps.get('nested-get'), 1_000);
+      now = 2_000;
+      await instance.update('nested-get', () => {});
+    }),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(mutations, 0);
+
+  const source = readFileSync(new URL('../src/cloud-workflow-engine.js', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /options\.deadlineCapAt[\s\S]*withExecutionDeadlineCap\([\s\S]*\(\) => this\.get\(id\)/
+  );
+});
+
 test('durable deadline context protects internal updates during resume prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
   instance.executionDeadlineCaps = new Map();
