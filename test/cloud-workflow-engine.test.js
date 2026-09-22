@@ -191,7 +191,6 @@ test('cloud rehydration fails closed if the remote working branch moved', async 
 
 test('durable deadline cap blocks get and resume before any prework when already expired', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
-  instance.executionDeadlineCaps = new Map();
   instance.preparingDurableCheckpoints = new Set();
   instance.suppressDurability = 0;
   instance.now = () => 10_000;
@@ -219,7 +218,6 @@ test('durable deadline cap blocks get and resume before any prework when already
 
 test('durable get rechecks the cap after a slow store read before checkpoint prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
-  instance.executionDeadlineCaps = new Map();
   instance.preparingDurableCheckpoints = new Set();
   instance.suppressDurability = 0;
   let now = 0;
@@ -245,7 +243,6 @@ test('durable get rechecks the cap after a slow store read before checkpoint pre
 
 test('explicit durable get keeps its deadline context active through nested prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
-  instance.executionDeadlineCaps = new Map();
   instance.preparingDurableCheckpoints = new Set();
   instance.suppressDurability = 0;
   let now = 0;
@@ -260,7 +257,7 @@ test('explicit durable get keeps its deadline context active through nested prew
 
   await assert.rejects(
     () => instance.withExecutionDeadlineCap('nested-get', 1_000, async () => {
-      assert.equal(instance.executionDeadlineCaps.get('nested-get'), 1_000);
+      assert.equal(instance.executionDeadlineContext.getStore().get('nested-get'), 1_000);
       now = 2_000;
       await instance.update('nested-get', () => {});
     }),
@@ -277,7 +274,6 @@ test('explicit durable get keeps its deadline context active through nested prew
 
 test('durable deadline context protects internal updates during resume prework', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
-  instance.executionDeadlineCaps = new Map();
   instance.preparingDurableCheckpoints = new Set();
   instance.suppressDurability = 0;
   let now = 0;
@@ -299,6 +295,74 @@ test('durable deadline context protects internal updates during resume prework',
     /workflow_deadline_cap_exceeded/
   );
   assert.equal(mutations, 0);
+});
+
+test('durable update rechecks the active cap inside the store mutation', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let saved = false;
+  instance.now = () => now;
+  instance.store = {
+    async mutate(mutator) {
+      now = 2_000;
+      const data = { workflows: { guarded: { id: 'guarded' } } };
+      mutator(data);
+      saved = true;
+      return data.workflows.guarded;
+    }
+  };
+
+  await assert.rejects(
+    () => instance.withExecutionDeadlineCap(
+      'guarded',
+      1_000,
+      () => instance.update('guarded', () => {})
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(saved, false);
+});
+
+test('overlapping deadline contexts for the same workflow remain async-isolated', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+
+  let releaseA;
+  let releaseB;
+  let startedA;
+  let startedB;
+  const aStarted = new Promise((resolve) => { startedA = resolve; });
+  const bStarted = new Promise((resolve) => { startedB = resolve; });
+  const waitA = new Promise((resolve) => { releaseA = resolve; });
+  const waitB = new Promise((resolve) => { releaseB = resolve; });
+
+  const a = instance.withExecutionDeadlineCap('shared', 1_000, async () => {
+    assert.equal(instance.executionDeadlineCap('shared'), 1_000);
+    startedA();
+    await waitA;
+    assert.equal(instance.executionDeadlineCap('shared'), 1_000);
+  });
+  await aStarted;
+
+  const b = instance.withExecutionDeadlineCap('shared', 500, async () => {
+    assert.equal(instance.executionDeadlineCap('shared'), 500);
+    startedB();
+    await waitB;
+    assert.equal(instance.executionDeadlineCap('shared'), 500);
+  });
+  await bStarted;
+
+  releaseA();
+  await a;
+  assert.equal(instance.executionDeadlineCap('shared'), null);
+
+  releaseB();
+  await b;
+  assert.equal(instance.executionDeadlineCap('shared'), null);
 });
 
 test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
