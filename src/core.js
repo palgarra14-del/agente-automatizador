@@ -850,11 +850,21 @@ export class JsonStore {
     }
   }
 
-  async save(data) {
+  async save(data, { beforeCommit = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
-    await rename(temporary, this.file);
+    let committed = false;
+    try {
+      await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
+      if (beforeCommit) await beforeCommit();
+      await rename(temporary, this.file);
+      committed = true;
+    } finally {
+      if (!committed) {
+        try { await unlink(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+    }
   }
 
   async ownerIdentity(pid) {
@@ -939,14 +949,15 @@ export class JsonStore {
     }
   }
 
-  async mutate(mutator) {
+  async mutate(mutator, { beforeCommit = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
     await this.acquireLock();
     let output;
     let operationError = null;
     try {
       const data = await this.load();
       output = await mutator(data);
-      await this.save(data);
+      await this.save(data, { beforeCommit });
     } catch (error) {
       operationError = error;
     }
@@ -958,7 +969,7 @@ export class JsonStore {
     return output;
   }
 
-  async claimExecutionLease(collection, id, kind) {
+  async claimExecutionLease(collection, id, kind, { beforeCommit = null } = {}) {
     if (!['runs', 'workflows'].includes(collection) || !['run', 'workflow'].includes(kind)) throw new Error('execution_lease_scope_invalid');
     return this.mutate(async (data) => {
       const entity = data[collection]?.[id];
@@ -981,7 +992,7 @@ export class JsonStore {
       };
       entity.executionLease = lease;
       return lease;
-    });
+    }, { beforeCommit });
   }
 
   async releaseExecutionLease(collection, id, leaseId) {
@@ -995,8 +1006,8 @@ export class JsonStore {
     });
   }
 
-  async withExecutionLease(collection, id, kind, operation) {
-    const lease = await this.claimExecutionLease(collection, id, kind);
+  async withExecutionLease(collection, id, kind, operation, { beforeClaimCommit = null } = {}) {
+    const lease = await this.claimExecutionLease(collection, id, kind, { beforeCommit: beforeClaimCommit });
     let output;
     let operationError = null;
     try { output = await operation(lease); }
@@ -1935,12 +1946,12 @@ export class WorkflowEngine {
     });
   }
 
-  async update(id, mutator) {
+  async update(id, mutator, { beforeCommit = null } = {}) {
     return this.store.mutate((data) => {
       const plan = data.workflows?.[id];
       if (!plan) throw new Error('Workflow not found');
       mutator(plan); plan.updatedAt = new Date().toISOString(); return plan;
-    });
+    }, { beforeCommit });
   }
 
   readySteps(plan) {
