@@ -1374,6 +1374,18 @@ function workflowBudget(input = {}) {
   };
 }
 
+export function boundedWorkflowDeadlineAt(nowMs, timeoutMs, deadlineCapAt = null) {
+  if (!Number.isFinite(nowMs) || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error('workflow_deadline_inputs_invalid');
+  }
+  const refreshedDeadlineAt = nowMs + timeoutMs;
+  if (deadlineCapAt === null) return refreshedDeadlineAt;
+  if (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0) {
+    throw new Error('workflow_deadline_cap_invalid');
+  }
+  return Math.min(refreshedDeadlineAt, deadlineCapAt);
+}
+
 const websiteQualityCommands = Object.freeze(['test', 'typecheck', 'lint', 'build']);
 const workflowVerificationCommands = Object.freeze({
   'website-build': Object.freeze({ quality: websiteQualityCommands }),
@@ -3584,10 +3596,7 @@ export class WorkflowEngine {
         ['pending', 'not_required'].includes(plan.bootstrap?.status);
       if (!pristine) throw new Error('workflow_start_deadline_refresh_not_pristine');
       plan = await this.update(id, (saved) => {
-        const refreshedDeadlineAt = this.now() + saved.budgets.timeoutMs;
-        saved.deadlineAt = deadlineCapAt === null
-          ? refreshedDeadlineAt
-          : Math.min(refreshedDeadlineAt, deadlineCapAt);
+        saved.deadlineAt = boundedWorkflowDeadlineAt(this.now(), saved.budgets.timeoutMs, deadlineCapAt);
       });
     } else if (deadlineCapAt !== null && plan.deadlineAt > deadlineCapAt) {
       plan = await this.update(id, (saved) => {
