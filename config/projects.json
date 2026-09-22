@@ -32,7 +32,6 @@
         "forbiddenPaths": [],
         "sensitivePaths": [
           "config",
-          "src",
           "scripts"
         ],
         "budgets": {
