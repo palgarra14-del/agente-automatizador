@@ -9,19 +9,27 @@ const MAX_STARTS_PER_24H = 4;
 const HISTORY_LIMIT = 20;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
-  allowedPaths: Object.freeze(['src', 'test']),
+  allowedPaths: Object.freeze(['src', 'test/autonomous']),
   forbiddenPaths: Object.freeze([
     '.github',
     'config',
     'scripts',
     'package.json',
     'package-lock.json',
-    'docs'
+    'docs',
+    'src/self-improvement.js',
+    'src/core.js',
+    'src/cloud-state.js',
+    'src/cloud-workflow-engine.js',
+    'src/cli.js',
+    'src/issue-queue.js',
+    'src/capabilities.js',
+    'src/specialists.js'
   ])
 });
 
 export const AUTONOMOUS_MAINTENANCE_GOAL =
-  "Inspect authoritative main and implement exactly one bounded, high-impact improvement to the agent's 24/7 autonomy, reliability, recovery or observability. Prefer a concrete defect, warning, inefficiency or missing regression over speculative refactoring. Keep all changes inside src/ and test/. Do not change workflows, config, scripts, dependency manifests, deployment, authentication, secrets or external communication behavior. Add adversarial regression coverage, preserve all merge/production safety boundaries, and stop after one coherent improvement.";
+  "Inspect authoritative main and implement exactly one bounded, high-impact improvement to the agent's 24/7 reliability, recovery, runtime, Browser QA or observability. Prefer a concrete defect, warning, inefficiency or missing regression over speculative refactoring. Treat the autonomy controller, workflow core, Cloud State, CLI, issue queue, capability/specialist registries, workflows, config, scripts, dependencies, deployment, authentication, secrets and external communications as immutable roots of trust. Never edit existing baseline tests; add any new regression only under test/autonomous/. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
 
 function emptyAutopilot() {
   return {
