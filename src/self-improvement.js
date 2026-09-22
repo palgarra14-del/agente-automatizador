@@ -79,7 +79,7 @@ export function autonomousSensitiveImplementationAllowed(step) {
   if (!policyPaths.every((path) =>
     typeof path === 'string' &&
     !path.includes('..') &&
-    !path.includes('\\\\') &&
+    !path.includes('\\') &&
     !path.startsWith('/') &&
     pathAllowedForAutopilot(path)
   )) return false;
