@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { WorkflowEngine, WorkflowStepStatus, maskSecrets, validateWorkflowPlan } from './core.js';
@@ -59,14 +60,14 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     super(options);
     this.preparingDurableCheckpoints = new Set();
     this.suppressDurability = 0;
-    this.executionDeadlineCaps = new Map();
+    this.executionDeadlineContext = new AsyncLocalStorage();
   }
 
   executionDeadlineCap(id, explicit = null) {
     if (explicit !== null && (!Number.isFinite(explicit) || explicit <= 0)) {
       throw new Error('workflow_deadline_cap_invalid');
     }
-    const active = this.executionDeadlineCaps?.get(id) ?? null;
+    const active = this.executionDeadlineContext?.getStore()?.get(id) ?? null;
     if (explicit === null) return active;
     return active === null ? explicit : Math.min(active, explicit);
   }
@@ -81,20 +82,20 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     const cap = this.executionDeadlineCap(id, explicit ?? null);
     if (cap === null) return task();
     this.assertExecutionDeadline(id, cap);
-    this.executionDeadlineCaps ??= new Map();
-    const previous = this.executionDeadlineCaps.get(id);
-    this.executionDeadlineCaps.set(id, cap);
-    try {
-      return await task();
-    } finally {
-      if (previous === undefined) this.executionDeadlineCaps.delete(id);
-      else this.executionDeadlineCaps.set(id, previous);
-    }
+    this.executionDeadlineContext ??= new AsyncLocalStorage();
+    const parent = this.executionDeadlineContext.getStore();
+    const scoped = new Map(parent ?? []);
+    scoped.set(id, cap);
+    return this.executionDeadlineContext.run(scoped, task);
   }
 
   async update(id, mutator) {
     this.assertExecutionDeadline(id);
-    return super.update(id, mutator);
+    return super.update(id, (saved) => {
+      this.assertExecutionDeadline(id);
+      mutator(saved);
+      this.assertExecutionDeadline(id);
+    });
   }
 
   async resume(id, options = {}) {
