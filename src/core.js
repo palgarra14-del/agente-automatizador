@@ -834,12 +834,14 @@ export async function loadProjects(file, registry = defaultToolSkillRegistry) {
 }
 
 export class JsonStore {
-  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10, processRunner = runProcess, now = () => Date.now() } = {}) {
     this.file = file;
     this.lockFile = `${file}.lock`;
     this.recoveryLockFile = `${file}.lock.recovery`;
     this.lockTimeoutMs = lockTimeoutMs;
     this.lockPollMs = lockPollMs;
+    this.processRunner = processRunner;
+    this.now = now;
   }
 
   async load() {
@@ -850,8 +852,9 @@ export class JsonStore {
     }
   }
 
-  async save(data, { beforeCommit = null } = {}) {
+  async save(data, { beforeCommit = null, deadlineAt = null } = {}) {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
+    if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('state_deadline_invalid');
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     let committed = false;
@@ -859,7 +862,21 @@ export class JsonStore {
     try {
       await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
       if (beforeCommit) await beforeCommit();
-      await rename(temporary, this.file);
+      if (deadlineAt === null) {
+        await rename(temporary, this.file);
+      } else {
+        const remainingMs = Math.floor(deadlineAt - this.now());
+        if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
+        const script = "const fs=require('node:fs');fs.renameSync(process.argv[1],process.argv[2]);";
+        const result = await this.processRunner(process.execPath, ['-e', script, temporary, this.file], {
+          cwd: dirname(this.file),
+          timeoutMs: remainingMs,
+          killGraceMs: 0,
+          outputLimit: 1_000
+        });
+        if (result.timedOut) throw new Error('workflow_deadline_cap_exceeded');
+        if (!result.ok) throw new Error('state_commit_failed');
+      }
       committed = true;
     } catch (error) {
       operationError = error;
@@ -956,15 +973,16 @@ export class JsonStore {
     }
   }
 
-  async mutate(mutator, { beforeCommit = null } = {}) {
+  async mutate(mutator, { beforeCommit = null, deadlineAt = null } = {}) {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
+    if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('state_deadline_invalid');
     await this.acquireLock();
     let output;
     let operationError = null;
     try {
       const data = await this.load();
       output = await mutator(data);
-      await this.save(data, { beforeCommit });
+      await this.save(data, { beforeCommit, deadlineAt });
     } catch (error) {
       operationError = error;
     }
@@ -976,7 +994,7 @@ export class JsonStore {
     return output;
   }
 
-  async claimExecutionLease(collection, id, kind, { beforeCommit = null } = {}) {
+  async claimExecutionLease(collection, id, kind, { beforeCommit = null, deadlineAt = null } = {}) {
     if (!['runs', 'workflows'].includes(collection) || !['run', 'workflow'].includes(kind)) throw new Error('execution_lease_scope_invalid');
     return this.mutate(async (data) => {
       const entity = data[collection]?.[id];
@@ -999,7 +1017,7 @@ export class JsonStore {
       };
       entity.executionLease = lease;
       return lease;
-    }, { beforeCommit });
+    }, { beforeCommit, deadlineAt });
   }
 
   async releaseExecutionLease(collection, id, leaseId) {
@@ -1013,8 +1031,8 @@ export class JsonStore {
     });
   }
 
-  async withExecutionLease(collection, id, kind, operation, { beforeClaimCommit = null } = {}) {
-    const lease = await this.claimExecutionLease(collection, id, kind, { beforeCommit: beforeClaimCommit });
+  async withExecutionLease(collection, id, kind, operation, { beforeClaimCommit = null, deadlineAt = null } = {}) {
+    const lease = await this.claimExecutionLease(collection, id, kind, { beforeCommit: beforeClaimCommit, deadlineAt });
     let output;
     let operationError = null;
     try { output = await operation(lease); }
@@ -1953,12 +1971,12 @@ export class WorkflowEngine {
     });
   }
 
-  async update(id, mutator, { beforeCommit = null } = {}) {
+  async update(id, mutator, { beforeCommit = null, deadlineAt = null } = {}) {
     return this.store.mutate((data) => {
       const plan = data.workflows?.[id];
       if (!plan) throw new Error('Workflow not found');
       mutator(plan); plan.updatedAt = new Date().toISOString(); return plan;
-    }, { beforeCommit });
+    }, { beforeCommit, deadlineAt });
   }
 
   readySteps(plan) {
