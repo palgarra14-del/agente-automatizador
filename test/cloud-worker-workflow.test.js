@@ -124,7 +124,7 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
 test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
   const preflightStart = workflow.indexOf('- name: Check lane for governed work');
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
-  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick');
+  const tickStart = workflow.indexOf('- name: Run governed cloud queue');
   assert.ok(preflightStart > 0);
   assert.ok(runtimeStart > preflightStart);
   assert.ok(tickStart > runtimeStart);
@@ -148,8 +148,12 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.match(preflight, /has_work=\$HAS_WORK/);
   assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
-  assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
-  assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /ingestAdmissionIntents\(\)[\s\S]*queue\.tick\(\)/);
+  assert.match(workflow, /- name: Run governed cloud queue\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(workflow, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
+  assert.match(workflow, /if \[\[ "\$AGENT_CLOUD_EVENT_NAME" == "schedule" \]\]; then[\s\S]*inbox cloud-once[\s\S]*inbox cloud-drain/);
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /action === 'cloud-drain'/);
+  assert.match(cli, /withGlobalLease\(\(\) => queue\.drain\(\)\)/);
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
@@ -163,7 +167,18 @@ test('model and cross-repo credentials exist only at the governed queue step', (
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
-  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /exec node src\/cli\.js inbox cloud-once --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /exec node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+});
+
+test('cloud drain caps every real workflow run and resume while leaving dry-runs uncapped', () => {
+  const queue = readFileSync(new URL('../src/issue-queue.js', import.meta.url), 'utf8');
+  assert.match(queue, /workflowExecutionOptions\(executionGuard, \{ refreshPristineDeadline: true \}\)/);
+  assert.ok((queue.match(/workflowExecutionOptions\(executionGuard/g) ?? []).length >= 6);
+  assert.ok((queue.match(/workflowEngine\.resume\([\s\S]{0,180}workflowExecutionOptions\(executionGuard\)/g) ?? []).length >= 2);
+  assert.ok((queue.match(/workflowEngine\.run\([^;]{0,320}workflowExecutionOptions\(executionGuard/g) ?? []).length >= 3);
+  assert.ok((queue.match(/workflowEngine\.run\([^;\n]+, \{ dryRun: true \}\)/g) ?? []).length >= 2);
+  assert.doesNotMatch(queue, /workflowEngine\.resume\(workflow\.id\);/);
 });
 
 test('cloud worker has no merge or production deployment command surface', () => {
