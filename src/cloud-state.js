@@ -6,8 +6,6 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
-const HISTORY_PAGE_SIZE = 100;
-const HISTORY_MAX_PAGES = 4;
 const STATUS_PAGE_SIZE = 100;
 const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
@@ -28,27 +26,6 @@ const RESERVED_STATE_TAGS = new Set([
   EPOCH_ANCHOR_NAMESPACE
 ]);
 
-const HISTORY_QUERY = `
-query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    object(oid: $oid) {
-      ... on Commit {
-        history(first: $first, after: $after, path: $path) {
-          nodes {
-            oid
-            parents(first: 2) { totalCount nodes { oid } }
-            file(path: $path) {
-              object {
-                ... on Blob { oid byteSize isBinary isTruncated text }
-              }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
-      }
-    }
-  }
-}`;
 
 const STATUS_CONTEXT_QUERY = `
 query CloudStateContext($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
@@ -1284,61 +1261,40 @@ export class GitHubStateStore extends JsonStore {
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
     let expectedSha = authority.stateSha;
     let expectedGeneration = authority.generation;
-    let after = null;
-    const seenCursors = new Set();
-    let done = false;
-
-    for (let page = 1; page <= HISTORY_MAX_PAGES && !done; page += 1) {
-      const data = await this.graphqlRequest(HISTORY_QUERY, {
-        owner: this.repository.owner,
-        name: this.repository.name,
-        oid: authority.stateSha,
-        path: this.statePath,
-        first: HISTORY_PAGE_SIZE,
-        after
-      });
-      const history = data?.repository?.object?.history;
-      if (!history || !Array.isArray(history.nodes) || !history.pageInfo || history.nodes.length < 1) {
-        throw new Error('cloud_state_history_query_invalid');
-      }
-      for (const node of history.nodes) {
-        if (done) break;
-        const oid = assertSha(node?.oid, 'cloud_state_history_query_invalid');
-        if (oid !== expectedSha) throw new Error('cloud_state_history_fork');
-        const parents = node?.parents;
-        if (!parents || parents.totalCount !== 1 || !Array.isArray(parents.nodes) || parents.nodes.length !== 1) {
-          throw new Error('cloud_state_history_fork');
-        }
-        const parentSha = assertSha(parents.nodes[0]?.oid, 'cloud_state_parent_invalid');
-        const envelope = this.parseHistoryBlob(node?.file?.object);
-        if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
-          throw new Error('cloud_state_generation_discontinuity');
-        }
-        if (assertSha(envelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== firstRegistration.anchorSha ||
-            envelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
-          throw new Error('cloud_state_lineage_anchor_mismatch');
-        }
-        const authorityRecord = authorityByGeneration.get(expectedGeneration);
-        if (!authorityRecord || authorityRecord.stateSha !== oid || authorityRecord.parentSha !== parentSha) {
-          throw new Error('cloud_state_epoch_authority_mismatch');
-        }
-        if (expectedGeneration === registration.startGeneration) {
-          if (parentSha !== registration.anchorSha) throw new Error('cloud_state_history_invalid');
-          done = true;
-          break;
-        }
-        expectedSha = parentSha;
-        expectedGeneration -= 1;
-      }
-      if (done) break;
-      if (history.pageInfo.hasNextPage !== true || typeof history.pageInfo.endCursor !== 'string' || !history.pageInfo.endCursor) {
-        throw new Error('cloud_state_history_incomplete');
-      }
-      if (seenCursors.has(history.pageInfo.endCursor)) throw new Error('cloud_state_history_query_invalid');
-      seenCursors.add(history.pageInfo.endCursor);
-      after = history.pageInfo.endCursor;
+    const stepCount = authority.generation - registration.startGeneration + 1;
+    if (!Number.isSafeInteger(stepCount) || stepCount < 1 || stepCount > EPOCH_SIZE) {
+      throw new Error('cloud_state_history_page_limit');
     }
-    if (!done) throw new Error('cloud_state_history_page_limit');
+
+    let done = false;
+    for (let step = 0; step < stepCount; step += 1) {
+      const commit = await this.readCommit(expectedSha);
+      if (!Array.isArray(commit.parents) || commit.parents.length !== 1) {
+        throw new Error('cloud_state_history_fork');
+      }
+      const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
+      const envelope = await this.readEnvelopeAt(expectedSha);
+      if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
+        throw new Error('cloud_state_generation_discontinuity');
+      }
+      if (assertSha(envelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== firstRegistration.anchorSha ||
+          envelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
+        throw new Error('cloud_state_lineage_anchor_mismatch');
+      }
+      const authorityRecord = authorityByGeneration.get(expectedGeneration);
+      if (!authorityRecord || authorityRecord.stateSha !== expectedSha || authorityRecord.parentSha !== parentSha) {
+        throw new Error('cloud_state_epoch_authority_mismatch');
+      }
+      if (expectedGeneration === registration.startGeneration) {
+        if (parentSha !== registration.anchorSha) throw new Error('cloud_state_history_invalid');
+        done = true;
+        break;
+      }
+      expectedSha = parentSha;
+      expectedGeneration -= 1;
+    }
+
+    if (!done) throw new Error('cloud_state_history_incomplete');
     this.validatedLineageHeads.add(authority.stateSha);
   }
 
