@@ -1066,7 +1066,7 @@ const workflowPlanStatuses = new Set([
   WorkflowStepStatus.PENDING, WorkflowStepStatus.RUNNING, WorkflowStepStatus.COMPLETED,
   WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED, WorkflowStepStatus.AWAITING_APPROVAL
 ]);
-const governedImplementationProfiles = new Set(['app-improvement', 'website-build']);
+const governedImplementationProfiles = new Set(['app-improvement', 'autonomous-maintenance', 'website-build']);
 function boundedText(value, label, { required = false, max = 500 } = {}) {
   if (value === undefined || value === null || value === '') {
     if (required) throw new Error(`${label} is required`);
@@ -1401,6 +1401,10 @@ const workflowProfiles = Object.freeze({
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
     steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['plan-change', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
   },
+  'autonomous-maintenance': {
+    definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
+    steps: [['inspect-project', 'placeholder'], ['diagnose', 'placeholder'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['tests', 'verification'], ['verification', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder']]
+  },
   'data-analysis': {
     definitionOfDone: [{ id: 'inputValidated', steps: ['validate-data'] }, { id: 'analysisCompleted', steps: ['analysis'] }, { id: 'outputProduced', steps: ['output'] }, { id: 'findingsValidated', steps: ['validation'] }],
     steps: [['inspect-data', 'placeholder'], ['validate-data', 'verification'], ['analysis', 'placeholder'], ['findings', 'placeholder'], ['output', 'placeholder'], ['validation', 'verification']]
@@ -1432,6 +1436,7 @@ const websiteQualityCommands = Object.freeze(['test', 'typecheck', 'lint', 'buil
 const workflowVerificationCommands = Object.freeze({
   'website-build': Object.freeze({ quality: websiteQualityCommands }),
   'app-improvement': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
+  'autonomous-maintenance': Object.freeze({ tests: ['test'], verification: ['typecheck', 'lint', 'build'] }),
   'data-analysis': Object.freeze({ 'validate-data': ['test'], validation: ['typecheck', 'lint', 'build'] })
 });
 
@@ -1457,6 +1462,17 @@ const workflowStepSkills = Object.freeze({
     'inspect-project': 'code.inspect',
     diagnose: 'code.diagnose',
     'plan-change': 'human.approval',
+    implementation: 'code.implement',
+    'dependency-refresh': 'project.dependencies.refresh',
+    review: 'code.review',
+    tests: 'project.verify',
+    verification: 'project.verify',
+    'release-readiness': 'human.approval',
+    publication: 'release.publish-reviewed-workflow'
+  }),
+  'autonomous-maintenance': Object.freeze({
+    'inspect-project': 'code.inspect',
+    diagnose: 'code.diagnose',
     implementation: 'code.implement',
     'dependency-refresh': 'project.dependencies.refresh',
     review: 'code.review',
@@ -1491,6 +1507,17 @@ const workflowStepSpecialists = Object.freeze({
     'inspect-project': 'code-inspector',
     diagnose: 'diagnostician',
     'plan-change': 'human-supervisor',
+    implementation: 'implementer',
+    'dependency-refresh': 'dependency-manager',
+    review: 'change-critic',
+    tests: 'verifier',
+    verification: 'verifier',
+    'release-readiness': 'human-supervisor',
+    publication: 'release-manager'
+  }),
+  'autonomous-maintenance': Object.freeze({
+    'inspect-project': 'code-inspector',
+    diagnose: 'diagnostician',
     implementation: 'implementer',
     'dependency-refresh': 'dependency-manager',
     review: 'change-critic',
