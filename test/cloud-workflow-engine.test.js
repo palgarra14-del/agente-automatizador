@@ -189,6 +189,86 @@ test('cloud rehydration fails closed if the remote working branch moved', async 
   assert.equal(calls.some((call) => call[0] === 'git' && call[1] === 'switch'), false);
 });
 
+test('durable deadline cap blocks get and resume before any prework when already expired', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.executionDeadlineCaps = new Map();
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 10_000;
+  let loads = 0;
+  let leases = 0;
+  let mutations = 0;
+  instance.store = {
+    async load() { loads += 1; return { workflows: {} }; },
+    async mutate() { mutations += 1; throw new Error('unexpected_mutation'); },
+    async withExecutionLease() { leases += 1; throw new Error('unexpected_lease'); }
+  };
+
+  await assert.rejects(
+    () => instance.get('workflow-expired', { deadlineCapAt: 9_999 }),
+    /workflow_deadline_cap_exceeded/
+  );
+  await assert.rejects(
+    () => instance.resume('workflow-expired', { deadlineCapAt: 9_999 }),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(loads, 0);
+  assert.equal(mutations, 0);
+  assert.equal(leases, 0);
+});
+
+test('durable get rechecks the cap after a slow store read before checkpoint prework', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.executionDeadlineCaps = new Map();
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let checkpointCalls = 0;
+  instance.now = () => now;
+  instance.store = {
+    async load() {
+      now = 2_000;
+      return { workflows: { slow: releasePlan({ id: 'slow' }) } };
+    }
+  };
+  instance.ensureDurableReleaseCheckpoint = async () => {
+    checkpointCalls += 1;
+    throw new Error('unexpected_checkpoint');
+  };
+
+  await assert.rejects(
+    () => instance.get('slow', { deadlineCapAt: 1_000 }),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(checkpointCalls, 0);
+});
+
+test('durable deadline context protects internal updates during resume prework', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.executionDeadlineCaps = new Map();
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let mutations = 0;
+  instance.now = () => now;
+  instance.store = {
+    async withExecutionLease(_scope, _id, _kind, task) {
+      now = 2_000;
+      return task();
+    },
+    async mutate() {
+      mutations += 1;
+      throw new Error('unexpected_mutation');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.resume('slow-resume', { deadlineCapAt: 1_000 }),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(mutations, 0);
+});
+
 test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
