@@ -9,6 +9,7 @@ import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCh
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
+import { AutonomousSelfImprovement } from './self-improvement.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -147,6 +148,9 @@ try {
         includedProjectIds: cloudAction ? cloudLane.projectIds : null,
         excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds
       });
+      const autonomousSelfImprovement = cloudAction && cloudLane.id === 'self'
+        ? new AutonomousSelfImprovement({ store: activeStore, workflowEngine: activeWorkflows, operatorRevision: loadedRevision })
+        : null;
       const view = (record) => record ? {
         issueNumber: record.issueNumber,
         workflowId: record.workflowId,
@@ -181,11 +185,17 @@ try {
       } else if (action === 'cloud-recover') {
         console.log(JSON.stringify(await queue.recoverAdmissionIntents(), null, 2));
       } else if (action === 'cloud-peek') {
-        console.log(String(await queue.hasWork()));
+        const queueWork = await queue.hasWork();
+        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
+        console.log(String(queueWork || autonomousWork));
       } else if (action === 'cloud-once') {
         const result = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
-          return queue.tick();
+          const queueResult = await queue.tick();
+          if (autonomousSelfImprovement && (!queueResult || ['awaiting_start_approval', 'awaiting_workflow_approval'].includes(queueResult.status))) {
+            await autonomousSelfImprovement.tick();
+          }
+          return queueResult;
         });
         console.log(JSON.stringify(view(result), null, 2));
       } else if (action === 'watch') {
