@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -372,6 +372,37 @@ test('security rejects control characters in governed paths and keeps state priv
   if (process.platform !== 'win32') {
     assert.equal((await stat(file)).mode & 0o777, 0o600);
   }
+});
+
+test('JsonStore commits a capped save through a deadline-bounded rename process', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-deadline-state-'));
+  const file = join(directory, 'state.json');
+  const calls = [];
+  const store = new JsonStore(file, {
+    now: () => 1_000,
+    processRunner: async (binary, args, options) => {
+      calls.push({ binary, args, options });
+      await rename(args.at(-2), args.at(-1));
+      return { ok: true, exitCode: 0, timedOut: false, stdout: '', stderr: '', durationMs: 1 };
+    }
+  });
+  await store.save({ ok: true }, { deadlineAt: 2_000 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].binary, process.execPath);
+  assert.equal(calls[0].options.timeoutMs, 1_000);
+  assert.equal(calls[0].options.killGraceMs, 0);
+});
+
+test('JsonStore rejects a capped save when the rename process reaches the deadline', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-deadline-state-timeout-'));
+  const file = join(directory, 'state.json');
+  const store = new JsonStore(file, {
+    now: () => 1_000,
+    processRunner: async () => ({ ok: false, exitCode: null, timedOut: true, stdout: '', stderr: '', durationMs: 1_000 })
+  });
+  await assert.rejects(() => store.save({ ok: true }, { deadlineAt: 2_000 }), /workflow_deadline_cap_exceeded/);
+  assert.equal(existsSync(file), false);
 });
 
 test('state transitions deny bypass and persisted state is valid JSON', async () => {
