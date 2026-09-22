@@ -1150,7 +1150,8 @@ export class GitHubStateStore extends JsonStore {
     return claimTag;
   }
 
-  async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities, lineageEnvelope) {
+  async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities, lineageEnvelope, { beforeCommit = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     const desired = {
       generation,
       stateSha: assertSha(stateSha),
@@ -1175,6 +1176,7 @@ export class GitHubStateStore extends JsonStore {
     await this.validateLineageAnchor(lineageEnvelope, { baseWitnessSha });
     desired.baseWitnessSha = baseWitnessSha;
 
+    if (beforeCommit) await beforeCommit();
     let postError = null;
     try {
       await this.request(`/statuses/${registration.authorityAnchorSha}`, {
@@ -1517,7 +1519,8 @@ export class GitHubStateStore extends JsonStore {
     return assertSha(commit?.sha, 'cloud_state_commit_invalid');
   }
 
-  async writeSnapshot(state, snapshot) {
+  async writeSnapshot(state, snapshot, { beforeCommit = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     validateCloudState(state, { maxBytes: this.maxBytes, allowedProjectIds: this.allowedProjectIds });
     const expectedStateSha = snapshot?.refSha ?? null;
     const expectedCheckpointSha = snapshot?.checkpointSha ?? null;
@@ -1661,7 +1664,8 @@ export class GitHubStateStore extends JsonStore {
         commitSha,
         parentSha,
         preClaimAuthorities,
-        envelope
+        envelope,
+        { beforeCommit }
       );
     } catch (error) {
       authorityError = error;
@@ -1708,7 +1712,8 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_direct_save_forbidden');
   }
 
-  async mutateInternal(mutator, { requireLease }) {
+  async mutateInternal(mutator, { requireLease, beforeCommit = null }) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     const snapshot = await this.readSnapshot({ repair: true });
     const data = snapshot.state;
     if (requireLease) {
@@ -1725,12 +1730,12 @@ export class GitHubStateStore extends JsonStore {
     }
     const output = await mutator(data);
     sanitizeRemoteOnlyEvidence(data);
-    await this.writeSnapshot(data, snapshot);
+    await this.writeSnapshot(data, snapshot, { beforeCommit });
     return output;
   }
 
-  async mutate(mutator) {
-    return this.mutateInternal(mutator, { requireLease: true });
+  async mutate(mutator, { beforeCommit = null } = {}) {
+    return this.mutateInternal(mutator, { requireLease: true, beforeCommit });
   }
 
   async ownerIdentity() {
