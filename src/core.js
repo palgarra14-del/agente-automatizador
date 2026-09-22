@@ -1937,10 +1937,16 @@ export class WorkflowEngine {
   async get(id) { return (await this.store.load()).workflows?.[id]; }
   async list() { return Object.values((await this.store.load()).workflows ?? {}); }
 
-  async cancel(id, { reason = 'workflow_cancelled' } = {}) {
+  async cancel(id, {
+    reason = 'workflow_cancelled',
+    deadlineCapAt = null,
+    beforeLeaseClaimCommit = null,
+    beforeCommit = null
+  } = {}) {
     if (typeof reason !== 'string' || !/^[a-z][a-z0-9_.:-]{2,120}$/.test(reason)) throw new Error('workflow cancellation reason is invalid');
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) throw new Error('workflow_deadline_cap_invalid');
     return this.store.withExecutionLease('workflows', id, 'workflow', async (lease) => {
-      const current = await this.get(id);
+      const current = await this.get(id, { deadlineCapAt });
       if (!current) throw new Error('Workflow not found');
       if ([WorkflowStepStatus.COMPLETED, WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(current.status)) return current;
 
@@ -1973,8 +1979,8 @@ export class WorkflowEngine {
         saved.pausedAt = null;
         saved.result = { error: reason, stepId: step?.id ?? null, ...(historicalPristine ? { historicalRecovery: true } : {}) };
         if (!historicalPristine) validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
-      });
-    });
+      }, { beforeCommit, deadlineAt: deadlineCapAt });
+    }, { beforeClaimCommit: beforeLeaseClaimCommit, deadlineAt: deadlineCapAt });
   }
 
   async update(id, mutator, { beforeCommit = null, deadlineAt = null } = {}) {
@@ -3199,13 +3205,28 @@ export class WorkflowEngine {
   }
 
   async approve(id, stepId, options = {}) {
-    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.approveUnlocked(id, stepId, options));
+    const deadlineCapAt = options.deadlineCapAt ?? null;
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) throw new Error('workflow_deadline_cap_invalid');
+    return this.store.withExecutionLease(
+      'workflows',
+      id,
+      'workflow',
+      async () => this.approveUnlocked(id, stepId, options),
+      {
+        beforeClaimCommit: typeof options.beforeLeaseClaimCommit === 'function' ? options.beforeLeaseClaimCommit : null,
+        deadlineAt: deadlineCapAt
+      }
+    );
   }
 
-  async approveUnlocked(id, stepId, { externalApprovalFingerprint = null } = {}) {
+  async approveUnlocked(id, stepId, {
+    externalApprovalFingerprint = null,
+    deadlineCapAt = null,
+    beforeCommit = null
+  } = {}) {
     if (externalApprovalFingerprint !== null && !/^[a-f0-9]{64}$/i.test(externalApprovalFingerprint)) throw new Error('external approval fingerprint is invalid');
     const approvedAt = this.now();
-    const current = await this.get(id);
+    const current = await this.get(id, { deadlineCapAt });
     validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
     const project = this.projects.get(current.projectId);
     const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
@@ -3250,7 +3271,7 @@ export class WorkflowEngine {
           plan.status = WorkflowStepStatus.BLOCKED;
           plan.pausedAt = null;
           plan.result = { error: step.error, stepId: step.id };
-        });
+        }, { beforeCommit, deadlineAt: deadlineCapAt });
       }
       return this.update(id, (plan) => {
         const step = plan.steps.find((candidate) => candidate.id === stepId);
@@ -3271,7 +3292,7 @@ export class WorkflowEngine {
         };
         plan.status = WorkflowStepStatus.PENDING;
         plan.result = null;
-      });
+      }, { beforeCommit, deadlineAt: deadlineCapAt });
     }
 
     return this.update(id, (plan) => {
@@ -3357,7 +3378,7 @@ export class WorkflowEngine {
         ...checkpointBinding
       };
       plan.status = WorkflowStepStatus.PENDING;
-    });
+    }, { beforeCommit, deadlineAt: deadlineCapAt });
   }
 
   async resume(id, options = {}) {

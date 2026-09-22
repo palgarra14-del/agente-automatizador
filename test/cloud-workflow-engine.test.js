@@ -432,6 +432,75 @@ test('durable publication threads the active deadline into commit and push conte
   );
 });
 
+test('nested durable approve uses the effective earlier deadline for its lease claim', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let observed = null;
+  instance.now = () => now;
+  instance.store = {
+    async withExecutionLease(collection, id, kind, _operation, options) {
+      observed = { collection, id, kind, options };
+      now = 2_000;
+      await options.beforeClaimCommit();
+      throw new Error('unexpected_approval_after_deadline');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.withExecutionDeadlineCap(
+      'approve-deadline',
+      1_000,
+      () => instance.approve('approve-deadline', 'checkpoint', { deadlineCapAt: 5_000 })
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(observed.collection, 'workflows');
+  assert.equal(observed.id, 'approve-deadline');
+  assert.equal(observed.kind, 'workflow');
+  assert.equal(observed.options.deadlineAt, 1_000);
+  assert.equal(typeof observed.options.beforeClaimCommit, 'function');
+});
+
+test('nested durable cancel uses the effective earlier deadline for its lease claim', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  let now = 0;
+  let observed = null;
+  instance.now = () => now;
+  instance.store = {
+    async withExecutionLease(collection, id, kind, _operation, options) {
+      observed = { collection, id, kind, options };
+      now = 2_000;
+      await options.beforeClaimCommit();
+      throw new Error('unexpected_cancel_after_deadline');
+    }
+  };
+
+  await assert.rejects(
+    () => instance.withExecutionDeadlineCap(
+      'cancel-deadline',
+      1_000,
+      () => instance.cancel('cancel-deadline', { reason: 'issue_queue_blocked', deadlineCapAt: 5_000 })
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(observed.collection, 'workflows');
+  assert.equal(observed.id, 'cancel-deadline');
+  assert.equal(observed.kind, 'workflow');
+  assert.equal(observed.options.deadlineAt, 1_000);
+  assert.equal(typeof observed.options.beforeClaimCommit, 'function');
+});
+
+test('base approve and cancel thread deadline options through lease and persistence boundaries', () => {
+  const core = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
+  assert.match(core, /async approve\(id, stepId, options = \{\}\)[\s\S]*beforeClaimCommit:[\s\S]*deadlineAt: deadlineCapAt/);
+  assert.match(core, /async cancel\(id,[\s\S]*beforeLeaseClaimCommit[\s\S]*beforeClaimCommit: beforeLeaseClaimCommit[\s\S]*deadlineAt: deadlineCapAt/);
+  assert.match(core, /approveUnlocked\(id, stepId,[\s\S]*beforeCommit[\s\S]*deadlineAt: deadlineCapAt/);
+});
+
 test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
