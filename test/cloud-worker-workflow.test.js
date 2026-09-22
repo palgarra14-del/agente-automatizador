@@ -121,17 +121,19 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('cloud worker gates heavy runtime behind a read-only lane preflight', () => {
-  const preflightStart = workflow.indexOf('- name: Check lane for governed work');
-  const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime');
-  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick');
-  assert.ok(preflightStart > 0);
+test('cloud worker repairs authorized partial state before recovery and read-only preflight', () => {
+  const cloudOnceStart = workflow.indexOf('  cloud-once:');
+  const repairStart = workflow.indexOf('- name: Repair authorized partial cloud state', cloudOnceStart);
+  const preflightStart = workflow.indexOf('- name: Check lane for governed work', cloudOnceStart);
+  const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
+  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick', cloudOnceStart);
+  assert.ok(repairStart > cloudOnceStart);
+  assert.ok(preflightStart > repairStart);
   assert.ok(runtimeStart > preflightStart);
   assert.ok(tickStart > runtimeStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
   const admitStart = workflow.indexOf('  admit:');
   const recoverJobStart = workflow.indexOf('  recover:');
-  const cloudOnceStart = workflow.indexOf('  cloud-once:');
   assert.ok(admitStart > 0 && recoverJobStart > admitStart && cloudOnceStart > recoverJobStart);
   const admit = workflow.slice(admitStart, recoverJobStart);
   const recovery = workflow.slice(recoverJobStart, cloudOnceStart);
@@ -141,8 +143,12 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
   assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|statuses:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
-  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
+  const repair = workflow.slice(repairStart, preflightStart);
+  assert.match(repair, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(repair, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(repair, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.doesNotMatch(preflight, /cloud-admit|cloud-recover/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
@@ -153,12 +159,12 @@ test('cloud worker gates heavy runtime behind a read-only lane preflight', () =>
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 4);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 4);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
