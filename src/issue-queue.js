@@ -457,6 +457,20 @@ export function validateIssueQueueRecord(record, { issue, requestFingerprint, is
     if (record.status !== 'rejected' && !/^[a-f0-9]{64}$/.test(record.projectFingerprint ?? '')) throw new Error('issue queue record project fingerprint is invalid');
     if (projectFingerprint && record.projectFingerprint !== projectFingerprint) throw new Error('issue queue record project fingerprint no longer matches active project');
   }
+  if (record.routingProjectId !== null && record.routingProjectId !== undefined) {
+    if (record.request !== null ||
+        record.status !== 'rejected' ||
+        record.reason !== 'malformed_request' ||
+        typeof record.routingProjectId !== 'string' ||
+        !/^[a-z0-9-]{1,80}$/.test(record.routingProjectId) ||
+        record.requestFingerprint !== null ||
+        !/^[a-f0-9]{64}$/.test(record.issueBodyFingerprint ?? '') ||
+        record.projectFingerprint !== null ||
+        !/^[a-f0-9]{64}$/.test(record.controlPlaneFingerprint ?? '') ||
+        !record.terminalNotification) {
+      throw new Error('issue queue malformed-request record is invalid');
+    }
+  }
   if (record.workflowId !== null && (typeof record.workflowId !== 'string' || !record.workflowId.trim())) throw new Error('issue queue record workflowId is invalid');
   if (record.workflowId !== null && !/^[a-f0-9]{64}$/.test(record.workflowBindingFingerprint ?? '')) throw new Error('issue queue record workflow binding fingerprint is invalid');
   if (record.startApprovalFingerprint !== null && record.startApprovalFingerprint !== undefined && !/^[a-f0-9]{64}$/.test(record.startApprovalFingerprint)) throw new Error('issue queue start approval fingerprint is invalid');
@@ -952,7 +966,127 @@ export class SupervisedIssueQueue {
   }
 
   ownsRecord(record) {
-    return this.ownsProject(record?.request?.projectId ?? null);
+    return this.ownsProject(record?.request?.projectId ?? record?.routingProjectId ?? null);
+  }
+
+  correctableMalformedTombstone(record, issue, parsed) {
+    return Boolean(
+      record &&
+      record.status === 'rejected' &&
+      record.reason === 'malformed_request' &&
+      record.request === null &&
+      record.routingProjectId === 'self' &&
+      record.workflowId === null &&
+      record.issueNumber === issue?.number &&
+      record.issueId === issue?.id &&
+      record.author === issue?.user?.login &&
+      typeof record.issueBodyFingerprint === 'string' &&
+      record.issueBodyFingerprint !== parsed?.issueBodyFingerprint
+    );
+  }
+
+  drainTickBudgetMs() {
+    const ids = this.includedProjectIds ? [...this.includedProjectIds] : [...this.projects.keys()];
+    let max = 0;
+    for (const id of ids) {
+      const minutes = this.projects.get(id)?.budgets?.maxRuntimeMinutes;
+      if (!Number.isFinite(minutes) || minutes <= 0) continue;
+      max = Math.max(max, Math.ceil(minutes * 60_000));
+    }
+    return max;
+  }
+
+  workflowExecutionOptions(executionGuard, options = {}) {
+    if (executionGuard === null || executionGuard === undefined) return { ...options };
+    if (!executionGuard || typeof executionGuard !== 'object' || Array.isArray(executionGuard) ||
+        !Number.isFinite(executionGuard.deadlineAtMs) ||
+        !Number.isInteger(executionGuard.exitMarginMs) || executionGuard.exitMarginMs < 0) {
+      throw new Error('issue_queue_drain_execution_guard_invalid');
+    }
+    const deadlineCapAt = executionGuard.deadlineAtMs - executionGuard.exitMarginMs;
+    if (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0) {
+      throw new Error('issue_queue_drain_execution_guard_invalid');
+    }
+    return { ...options, deadlineCapAt };
+  }
+
+  drainExecutionDeadline(issue, guard) {
+    if (guard === null || guard === undefined) return null;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard) ||
+        !Number.isFinite(guard.deadlineAtMs) ||
+        !Number.isInteger(guard.requiredRuntimeMs) || guard.requiredRuntimeMs < 0 ||
+        !Number.isInteger(guard.exitMarginMs) || guard.exitMarginMs < 0 ||
+        typeof guard.clock !== 'function') {
+      throw new Error('issue_queue_drain_execution_guard_invalid');
+    }
+    const now = guard.clock();
+    if (!Number.isFinite(now)) throw new Error('issue_queue_drain_clock_invalid');
+    const remainingMs = guard.deadlineAtMs - now;
+    if (remainingMs >= guard.requiredRuntimeMs + guard.exitMarginMs) return null;
+    return {
+      status: 'drain_deadline',
+      issueNumber: Number.isInteger(issue?.number) ? issue.number : null,
+      remainingMs: Math.max(0, Math.floor(remainingMs)),
+      requiredRuntimeMs: guard.requiredRuntimeMs,
+      exitMarginMs: guard.exitMarginMs,
+      updatedAt: this.now()
+    };
+  }
+
+  ownsMalformedAdmission() {
+    return this.includedProjectIds !== null && this.includedProjectIds.has('self');
+  }
+
+  malformedAdmissionIntent(issue) {
+    if (!this.ownsMalformedAdmission() ||
+        !Number.isInteger(issue?.number) || !issue?.id ||
+        typeof issue?.body !== 'string' ||
+        typeof issue?.user?.login !== 'string' || !this.authorized(issue.user.login)) {
+      throw new Error('malformed_admission_intent_identity_invalid');
+    }
+    return {
+      projectId: 'self',
+      issueNumber: issue.number,
+      fingerprint: fingerprint({
+        version: 1,
+        kind: 'malformed_request',
+        repository: this.channel.repository,
+        issueNumber: issue.number,
+        issueId: String(issue.id),
+        author: issue.user.login,
+        issueBodyFingerprint: textFingerprint(issue.body)
+      })
+    };
+  }
+
+  async admitMalformedEventIssue(eventIssue) {
+    if (!this.ownsMalformedAdmission()) return { admitted: false, reason: 'event_request_invalid' };
+    let current;
+    let retryableIssueRead = false;
+    try { current = await this.channel.issue(eventIssue.number); }
+    catch { current = eventIssue; retryableIssueRead = true; }
+    if (!retryableIssueRead && (!current || current.number !== eventIssue.number || current.id !== eventIssue.id ||
+        current.state !== 'open' || current.pull_request || current.user?.login !== eventIssue.user?.login ||
+        current.body !== eventIssue.body)) {
+      return { admitted: false, reason: 'event_issue_stale' };
+    }
+    try {
+      parseIssueRequestBody(current.body);
+      return { admitted: false, reason: 'event_issue_stale' };
+    } catch {
+      // Expected: only the self lane durably owns malformed authorized requests.
+    }
+    const intent = this.malformedAdmissionIntent(current);
+    const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
+    const created = await this.channel.createAdmissionIntent(intent, targetSha);
+    return {
+      admitted: created.created,
+      idempotent: !created.created,
+      issueNumber: current.number,
+      status: 'intent',
+      malformed: true,
+      ...(retryableIssueRead ? { retryable: true } : {})
+    };
   }
 
   admissionIntent(issue, parsed) {
@@ -1005,8 +1139,7 @@ export class SupervisedIssueQueue {
       staleRetired += 1;
     }
 
-    const createRecoveredIntent = async (issue, parsed) => {
-      const intent = this.admissionIntent(issue, parsed);
+    const createRecoveredIntent = async (intent) => {
       try {
         return await this.channel.createAdmissionIntent(intent, targetSha);
       } catch (error) {
@@ -1029,13 +1162,33 @@ export class SupervisedIssueQueue {
       }
       let parsed;
       try { parsed = parseIssueRequestBody(issue.body); }
-      catch { skipped += 1; return; }
+      catch {
+        if (!this.ownsMalformedAdmission()) {
+          skipped += 1;
+          return;
+        }
+        const key = this.requestKey(issue);
+        if (state.requests?.[key]) {
+          existing += 1;
+          return;
+        }
+        if (scanned >= max) {
+          deferred += 1;
+          return;
+        }
+        scanned += 1;
+        const result = await createRecoveredIntent(this.malformedAdmissionIntent(issue));
+        if (result.created) created += 1;
+        else existing += 1;
+        return;
+      }
       if (!this.ownsProject(parsed.request.projectId) || !this.projects.has(parsed.request.projectId)) {
         skipped += 1;
         return;
       }
       const key = this.requestKey(issue);
-      if (state.requests?.[key]) {
+      const existingRecord = state.requests?.[key] ?? null;
+      if (existingRecord && !this.correctableMalformedTombstone(existingRecord, issue, parsed)) {
         existing += 1;
         return;
       }
@@ -1044,7 +1197,7 @@ export class SupervisedIssueQueue {
         return;
       }
       scanned += 1;
-      const result = await createRecoveredIntent(issue, parsed);
+      const result = await createRecoveredIntent(this.admissionIntent(issue, parsed));
       if (result.created) created += 1;
       else existing += 1;
     };
@@ -1110,8 +1263,57 @@ export class SupervisedIssueQueue {
       let parsed;
       try { parsed = parseIssueRequestBody(issue.body); }
       catch {
+        if (!this.ownsMalformedAdmission() || intent.projectId !== 'self') {
+          await this.channel.deleteAdmissionIntent(intent.ref);
+          continue;
+        }
+        const expectedMalformed = this.malformedAdmissionIntent(issue);
+        if (expectedMalformed.fingerprint !== intent.fingerprint) {
+          await this.channel.deleteAdmissionIntent(intent.ref);
+          continue;
+        }
+        const key = this.requestKey(issue);
+        const existing = await this.getRecord(key);
+        if (existing) {
+          await this.channel.deleteAdmissionIntent(intent.ref);
+          continue;
+        }
+        const now = this.now();
+        const record = {
+          version: 1,
+          issueNumber: issue.number,
+          issueId: issue.id,
+          author: issue.user.login,
+          routingProjectId: 'self',
+          requestFingerprint: null,
+          issueBodyFingerprint: textFingerprint(issue.body),
+          projectFingerprint: null,
+          controlPlaneFingerprint: this.controlPlaneFingerprint(),
+          request: null,
+          workflowId: null,
+          workflowBindingFingerprint: null,
+          status: 'rejected',
+          reason: 'malformed_request',
+          createdAt: now,
+          updatedAt: now,
+          pendingApproval: null,
+          startApprovalFingerprint: null,
+          startApprovalCommentId: null,
+          startApprovedBy: null,
+          activeApproval: null,
+          initializationLease: null,
+          lastProcessedCommentId: 0,
+          terminalNotification: {
+            body: 'Agent request rejected: the agent-request marker is present, but the request body is malformed or does not match the required v1 schema. No workflow, model call, project write, pull request, merge, or deployment was authorized. Edit the issue with a valid request to try again.',
+            attempts: 0,
+            commentId: null,
+            sentAt: null
+          }
+        };
+        validateIssueQueueRecord(record, { issue });
+        await this.saveRecord(key, record);
         await this.channel.deleteAdmissionIntent(intent.ref);
-        continue;
+        return record;
       }
       if (!this.ownsProject(parsed.request.projectId) || parsed.request.projectId !== intent.projectId) {
         await this.channel.deleteAdmissionIntent(intent.ref);
@@ -1125,7 +1327,7 @@ export class SupervisedIssueQueue {
 
       const key = this.requestKey(issue);
       const existing = await this.getRecord(key);
-      if (existing) {
+      if (existing && !this.correctableMalformedTombstone(existing, issue, parsed)) {
         await this.channel.deleteAdmissionIntent(intent.ref);
         continue;
       }
@@ -1431,7 +1633,7 @@ export class SupervisedIssueQueue {
 
     let parsed;
     try { parsed = parseIssueRequestBody(eventIssue.body); }
-    catch { return { admitted: false, reason: 'event_request_invalid' }; }
+    catch { return this.admitMalformedEventIssue(eventIssue); }
     if (!this.ownsProject(parsed.request.projectId)) return { admitted: false, reason: 'event_wrong_lane' };
 
     const project = this.projects.get(parsed.request.projectId) ?? null;
@@ -1714,7 +1916,7 @@ export class SupervisedIssueQueue {
     return next;
   }
 
-  async processExisting(issue, parsed, record) {
+  async processExisting(issue, parsed, record, { executionGuard = null } = {}) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
     const currentRequest = await this.revalidateCurrentRequest(issue, record);
@@ -1834,7 +2036,7 @@ export class SupervisedIssueQueue {
       }
       if (!decision) {
         if (!instructionPresent) {
-          const workflow = await this.workflowEngine.get(record.workflowId);
+          const workflow = await this.workflowEngine.get(record.workflowId, this.workflowExecutionOptions(executionGuard));
           if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
             const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
             return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
@@ -1891,7 +2093,7 @@ export class SupervisedIssueQueue {
         return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${decision.actor}\`. No further execution will occur.`);
       }
       if (record.pendingApproval.kind === 'start') {
-        const workflow = await this.workflowEngine.get(record.workflowId);
+        const workflow = await this.workflowEngine.get(record.workflowId, this.workflowExecutionOptions(executionGuard));
         if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
           const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null };
           return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
@@ -1935,11 +2137,16 @@ export class SupervisedIssueQueue {
         });
         const activeStart = await this.revalidateActiveApproval(issue, key, record);
         if (!activeStart.ok) return activeStart.record;
-        const result = await this.workflowEngine.run(record.workflowId, { refreshPristineDeadline: true });
+        const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+        if (drainDeadline) return drainDeadline;
+        const result = await this.workflowEngine.run(
+          record.workflowId,
+          this.workflowExecutionOptions(executionGuard, { refreshPristineDeadline: true })
+        );
         return this.settleWorkflow(issue, key, record, result);
       }
       if (record.pendingApproval.kind === 'workflow-step') {
-        const workflow = await this.workflowEngine.get(record.workflowId);
+        const workflow = await this.workflowEngine.get(record.workflowId, this.workflowExecutionOptions(executionGuard));
         if (!workflow || workflow.id !== record.workflowId || workflowBindingFingerprint(workflow) !== record.workflowBindingFingerprint) {
           const next = { ...record, status: 'blocked', reason: 'workflow_binding_mismatch', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
           return this.finalizeTerminal(issue, key, next, 'Agent workflow binding no longer matches the accepted request. Manual inspection is required.');
@@ -1986,7 +2193,12 @@ export class SupervisedIssueQueue {
               });
               const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
               if (!recoveredApproval.ok) return recoveredApproval.record;
-              const result = await this.workflowEngine.run(record.workflowId);
+              const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+              if (drainDeadline) return drainDeadline;
+              const result = await this.workflowEngine.run(
+                record.workflowId,
+                this.workflowExecutionOptions(executionGuard)
+              );
               return this.settleWorkflow(issue, key, record, result);
             }
             if (appliedState) {
@@ -2035,7 +2247,12 @@ export class SupervisedIssueQueue {
         });
         const activeWorkflowApproval = await this.revalidateActiveApproval(issue, key, record);
         if (!activeWorkflowApproval.ok) return activeWorkflowApproval.record;
-        const result = await this.workflowEngine.run(record.workflowId);
+        const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+        if (drainDeadline) return drainDeadline;
+        const result = await this.workflowEngine.run(
+          record.workflowId,
+          this.workflowExecutionOptions(executionGuard)
+        );
         return this.settleWorkflow(issue, key, record, result);
       }
     }
@@ -2045,7 +2262,7 @@ export class SupervisedIssueQueue {
       if (!active.ok) return active.record;
     }
 
-    const workflow = await this.workflowEngine.get(record.workflowId);
+    const workflow = await this.workflowEngine.get(record.workflowId, this.workflowExecutionOptions(executionGuard));
     if (!workflow) {
       const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
       return this.finalizeTerminal(issue, key, next, 'Agent workflow state is missing. Manual inspection is required; no continuation was attempted.');
@@ -2098,29 +2315,52 @@ export class SupervisedIssueQueue {
         const recoveredStart = await this.revalidateActiveApproval(issue, key, record);
         if (!recoveredStart.ok) return recoveredStart.record;
       }
-      const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
+      const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+      if (drainDeadline) return drainDeadline;
+      const result = await this.workflowEngine.run(
+        workflow.id,
+        this.workflowExecutionOptions(
+          executionGuard,
+          this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {}
+        )
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.RUNNING) {
-      const result = await this.workflowEngine.resume(workflow.id);
+      const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+      if (drainDeadline) return drainDeadline;
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        this.workflowExecutionOptions(executionGuard)
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.BLOCKED &&
         workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
-      const result = await this.workflowEngine.resume(workflow.id);
+      const drainDeadline = this.drainExecutionDeadline(issue, executionGuard);
+      if (drainDeadline) return drainDeadline;
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        this.workflowExecutionOptions(executionGuard)
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     return this.settleWorkflow(issue, key, record, workflow);
   }
 
-  async processIssue(issue) {
+  async processIssue(issue, { recordSnapshot = undefined, executionGuard = null } = {}) {
+    if (recordSnapshot !== undefined &&
+        recordSnapshot !== null &&
+        (!recordSnapshot || typeof recordSnapshot !== 'object' || Array.isArray(recordSnapshot))) {
+      throw new Error('issue_queue_process_record_snapshot_invalid');
+    }
     if (!Number.isInteger(issue?.number) || !issue.id || issue.state !== 'open' || issue.pull_request) return null;
     if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) return null;
     let parsed;
     try { parsed = parseIssueRequestBody(issue.body); }
     catch (error) {
       const key = this.requestKey(issue);
-      const existing = await this.getRecord(key);
+      const existing = recordSnapshot !== undefined ? recordSnapshot : await this.getRecord(key);
       if (existing && !['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) {
         return this.blockRequestRevalidation(issue, key, existing, 'request_body_invalid');
       }
@@ -2138,8 +2378,83 @@ export class SupervisedIssueQueue {
       return null;
     }
     const key = this.requestKey(issue);
-    const existing = await this.getRecord(key);
-    return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
+    const existing = recordSnapshot !== undefined ? recordSnapshot : await this.getRecord(key);
+    return existing ? this.processExisting(issue, parsed, existing, { executionGuard }) : this.initializeIssue(issue, parsed);
+  }
+
+  drainStateFingerprint(state) {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) return fingerprint(state);
+    const durable = { ...state };
+    delete durable.cloudExecutionLease;
+    delete durable.issueQueueWatcherLease;
+    return fingerprint(durable);
+  }
+
+  async drain({ maxTicks = 12, maxRuntimeMs = 30 * 60 * 1000, exitMarginMs = 60_000, clock = () => Date.now() } = {}) {
+    if (!Number.isInteger(maxTicks) || maxTicks < 1 || maxTicks > 50) {
+      throw new Error('issue_queue_drain_max_ticks_invalid');
+    }
+    if (!Number.isInteger(maxRuntimeMs) || maxRuntimeMs < 60_000 || maxRuntimeMs > 30 * 60 * 1000 ||
+        !Number.isInteger(exitMarginMs) || exitMarginMs < 1_000 || exitMarginMs > 5 * 60 * 1000) {
+      throw new Error('issue_queue_drain_runtime_invalid');
+    }
+    if (typeof clock !== 'function') throw new Error('issue_queue_drain_clock_invalid');
+
+    const startedAt = clock();
+    if (!Number.isFinite(startedAt)) throw new Error('issue_queue_drain_clock_invalid');
+    const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+    const humanWait = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
+    const externalWait = new Set(['operator_update_pending', 'operator_revision_check_failed']);
+    const tickBudgetMs = this.drainTickBudgetMs();
+    let ticks = 0;
+    let last = null;
+
+    while (ticks < maxTicks) {
+      const now = clock();
+      if (!Number.isFinite(now)) throw new Error('issue_queue_drain_clock_invalid');
+      const remainingMs = maxRuntimeMs - (now - startedAt);
+      if (remainingMs <= 0 || (tickBudgetMs > 0 && remainingMs < tickBudgetMs + exitMarginMs)) {
+        return { status: 'deadline', ticks, last };
+      }
+
+      await this.ingestAdmissionIntents();
+      if (!await this.hasWork()) {
+        return { status: ticks === 0 ? 'idle' : 'drained', ticks, last };
+      }
+
+      const beforeState = await this.store.load();
+      const beforeTickNow = clock();
+      if (!Number.isFinite(beforeTickNow)) throw new Error('issue_queue_drain_clock_invalid');
+      const beforeTickRemainingMs = maxRuntimeMs - (beforeTickNow - startedAt);
+      if (beforeTickRemainingMs <= 0 ||
+          (tickBudgetMs > 0 && beforeTickRemainingMs < tickBudgetMs + exitMarginMs)) {
+        return { status: 'deadline', ticks, last };
+      }
+
+      const before = this.drainStateFingerprint(beforeState);
+      last = await this.tick({
+        stateSnapshot: beforeState,
+        executionGuard: {
+          deadlineAtMs: startedAt + maxRuntimeMs,
+          requiredRuntimeMs: tickBudgetMs,
+          exitMarginMs,
+          clock
+        }
+      });
+      if (last?.status === 'drain_deadline') return { status: 'deadline', ticks, last };
+      ticks += 1;
+      const after = this.drainStateFingerprint(await this.store.load());
+      const resultStatus = last?.status ?? null;
+
+      if (humanWait.has(resultStatus) || last?.pendingApproval) {
+        return { status: 'awaiting_human', ticks, last };
+      }
+      if (terminal.has(resultStatus)) return { status: 'terminal', ticks, last };
+      if (externalWait.has(resultStatus)) return { status: 'external_wait', ticks, last };
+      if (after === before) return { status: 'no_progress', ticks, last };
+    }
+
+    return { status: 'max_ticks', ticks, last };
   }
 
   async hasWork() {
@@ -2175,9 +2490,12 @@ export class SupervisedIssueQueue {
     return false;
   }
 
-  async tick() {
+  async tick({ stateSnapshot = null, executionGuard = null } = {}) {
+    if (stateSnapshot !== null && (!stateSnapshot || typeof stateSnapshot !== 'object' || Array.isArray(stateSnapshot))) {
+      throw new Error('issue_queue_tick_state_snapshot_invalid');
+    }
     let notificationError = null;
-    const state = await this.store.load();
+    const state = stateSnapshot ?? await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     for (const [key, record] of Object.entries(state.requests ?? {})) {
       if (!key.startsWith(keyPrefix) ||
@@ -2213,7 +2531,7 @@ export class SupervisedIssueQueue {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
         return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
       }
-      const activeResult = await this.processIssue(issue);
+      const activeResult = await this.processIssue(issue, { recordSnapshot: record, executionGuard });
       if (activeResult) return activeResult;
     }
     if (this.includedProjectIds !== null) {
@@ -2245,7 +2563,7 @@ export class SupervisedIssueQueue {
           };
         }
       }
-      const result = await this.processIssue(issue);
+      const result = await this.processIssue(issue, { executionGuard });
       if (result) return result;
     }
     if (notificationError) throw notificationError;
