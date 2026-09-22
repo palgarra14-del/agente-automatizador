@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { SupervisedIssueQueue } from '../src/issue-queue.js';
 import { configFrom } from '../src/core.js';
@@ -123,7 +124,7 @@ function eventFor(target, { eventName = 'issues', actor = 'palgarra14-del', repo
   return { action: eventName === 'issue_comment' ? 'created' : 'opened', repository: { name: repositoryOverride.name, owner: { login: repositoryOverride.owner } },
     sender: { login: actor }, issue: clone(target), ...(eventName === 'issue_comment' ? { comment: { body: commentBody, user: { login: actor } } } : {}) };
 }
-function admissionFixture(currentIssue = issue(20)) {
+function admissionFixture(currentIssue = issue(20), { includedProjectIds = ['callflow'], projects = new Map([['callflow', governedProject()]]) } = {}) {
   const state = { requests: {} }; let writes = 0, leases = 0;
   const intents = new Map();
   const store = {
@@ -154,8 +155,8 @@ function admissionFixture(currentIssue = issue(20)) {
     },
     async deleteAdmissionIntent(ref) { return intents.delete(ref); }
   };
-  const queue = new SupervisedIssueQueue({ store, projects: new Map([['callflow', governedProject()]]), workflowEngine: {}, channel,
-    allowedActors: ['palgarra14-del'], operatorRevision: revision, operatorBranch: 'main', includedProjectIds: ['callflow'] });
+  const queue = new SupervisedIssueQueue({ store, projects, workflowEngine: {}, channel,
+    allowedActors: ['palgarra14-del'], operatorRevision: revision, operatorBranch: 'main', includedProjectIds });
   return { queue, state, channel, intents, writes: () => writes, leases: () => leases };
 }
 test('event admission is lease-free, retryable and idempotent until governed ingestion', async () => {
@@ -170,6 +171,103 @@ test('event admission is lease-free, retryable and idempotent until governed ing
   const result = await retry.queue.admitEvent('issues', eventFor(issue(21)));
   assert.equal(result.retryable, true); assert.equal(retry.intents.size, 1); assert.deepEqual(retry.state.requests, {});
 });
+test('authorized malformed requests are durably rejected only by the self lane', async () => {
+  const malformed = issue(42, { body: '<!-- agent-request:v1 -->\n{"version":1,"projectId":"callflow"' });
+
+  const foreignLane = admissionFixture(malformed);
+  const foreignResult = await foreignLane.queue.admitEvent('issues', eventFor(malformed));
+  assert.equal(foreignResult.admitted, false);
+  assert.equal(foreignResult.reason, 'event_request_invalid');
+  assert.equal(foreignLane.intents.size, 0);
+  assert.deepEqual(foreignLane.state.requests, {});
+
+  const selfLane = admissionFixture(malformed, { includedProjectIds: ['self'] });
+  const eventResult = await selfLane.queue.admitEvent('issues', eventFor(malformed));
+  assert.equal(eventResult.admitted, true);
+  assert.equal(eventResult.malformed, true);
+  assert.equal(selfLane.intents.size, 1);
+  assert.equal(selfLane.writes(), 0);
+  assert.equal(selfLane.leases(), 0);
+
+  const rejected = await selfLane.queue.ingestAdmissionIntents();
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(rejected.reason, 'malformed_request');
+  assert.equal(rejected.request, null);
+  assert.equal(rejected.routingProjectId, 'self');
+  assert.equal(rejected.workflowId, null);
+  assert.equal(rejected.terminalNotification.sentAt, null);
+  assert.equal(selfLane.intents.size, 0);
+  assert.equal(selfLane.state.requests[key(42)].status, 'rejected');
+  assert.equal(await selfLane.queue.hasWork(), true);
+
+  selfLane.channel.comments = async () => [];
+  selfLane.channel.comment = async (_number, body) => {
+    assert.match(body, /request body is malformed/);
+    assert.match(body, /No workflow, model call, project write/);
+    return { id: 4200 };
+  };
+  const notified = await selfLane.queue.tick();
+  assert.equal(notified.status, 'rejected');
+  assert.equal(notified.terminalNotification.commentId, 4200);
+  assert.ok(notified.terminalNotification.sentAt);
+  assert.equal(await selfLane.queue.hasWork(), false);
+});
+
+test('a corrected valid self request supersedes only its malformed terminal tombstone', async () => {
+  const malformed = issue(44, { body: '<!-- agent-request:v1 -->\n{"version":1' });
+  const selfProject = configFrom({
+    id: 'self',
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' }
+  });
+  const f = admissionFixture(malformed, {
+    includedProjectIds: ['self'],
+    projects: new Map([['self', selfProject]])
+  });
+
+  await f.queue.admitEvent('issues', eventFor(malformed));
+  const tombstone = await f.queue.ingestAdmissionIntents();
+  assert.equal(tombstone.status, 'rejected');
+  assert.equal(tombstone.reason, 'malformed_request');
+
+  const corrected = issue(44, { projectId: 'self', body: requestBody('self') });
+  f.channel.issue = async () => clone(corrected);
+  f.channel.openIssues = async () => [clone(corrected)];
+
+  const eventResult = await f.queue.admitEvent('issues', eventFor(corrected));
+  assert.equal(eventResult.admitted, true);
+  const admitted = await f.queue.ingestAdmissionIntents();
+  assert.equal(admitted.status, 'admitted');
+  assert.equal(admitted.request.projectId, 'self');
+  assert.equal(admitted.reason, null);
+  assert.equal(admitted.workflowId, null);
+  assert.equal(f.state.requests[key(44)].status, 'admitted');
+
+  const recovered = await f.queue.recoverAdmissionIntents();
+  assert.equal(recovered.created, 0);
+  assert.equal(recovered.existing, 1);
+});
+
+test('scheduled recovery rediscovers an authorized malformed request for the self lane', async () => {
+  const malformed = issue(43, { body: '<!-- agent-request:v1 -->\n{"version":1' });
+  const selfLane = admissionFixture(malformed, { includedProjectIds: ['self'] });
+  selfLane.channel.openIssues = async () => [clone(malformed)];
+  selfLane.channel.listAdmissionIntents = async (projectIds) =>
+    [...selfLane.intents.values()].filter((intent) => projectIds.includes(intent.projectId));
+
+  const recovered = await selfLane.queue.recoverAdmissionIntents();
+  assert.equal(recovered.created, 1);
+  assert.equal(recovered.scanned, 1);
+  assert.deepEqual(selfLane.state.requests, {});
+  assert.equal(selfLane.intents.size, 1);
+  assert.equal([...selfLane.intents.values()][0].projectId, 'self');
+  assert.equal(await selfLane.queue.hasWork(), true);
+});
+
 test('ingestion rejects an intent tag whose target sha is not the trusted operator revision', async () => {
   const target = issue(37), f = admissionFixture(target);
   await f.queue.admitEvent('issues', eventFor(target));
@@ -440,6 +538,299 @@ test('comment admission trims exact /agent but rejects non-admission wakeups', a
     assert.equal((await f.queue.admitEvent('issue_comment', eventFor(target, { eventName: 'issue_comment', commentBody: body }))).reason, 'event_comment_invalid');
     assert.equal(f.intents.size, 0); assert.equal(f.writes(), 0);
   }
+});
+
+test('cloud drain advances repeatedly then stops when the lane becomes idle', async () => {
+  const f = admissionFixture(issue(30));
+  let ticks = 0;
+  f.queue.ingestAdmissionIntents = async () => null;
+  f.queue.hasWork = async () => ticks < 3;
+  f.queue.tick = async () => {
+    ticks += 1;
+    f.state.drainProgress = ticks;
+    return { status: 'running', issueNumber: 30 };
+  };
+
+  const result = await f.queue.drain({ maxTicks: 6, maxRuntimeMs: 30 * 60 * 1000, clock: () => 0 });
+  assert.equal(result.status, 'drained');
+  assert.equal(result.ticks, 3);
+  assert.equal(ticks, 3);
+});
+
+test('cloud drain stops on no progress, human wait, terminal state, max ticks and deadline', async () => {
+  const noProgress = admissionFixture(issue(31));
+  noProgress.queue.ingestAdmissionIntents = async () => null;
+  noProgress.queue.hasWork = async () => true;
+  noProgress.queue.tick = async () => ({ status: 'running', issueNumber: 31 });
+  const noProgressResult = await noProgress.queue.drain({ maxTicks: 4, maxRuntimeMs: 30 * 60 * 1000, clock: () => 0 });
+  assert.equal(noProgressResult.status, 'no_progress');
+  assert.equal(noProgressResult.ticks, 1);
+
+  const human = admissionFixture(issue(32));
+  human.queue.ingestAdmissionIntents = async () => null;
+  human.queue.hasWork = async () => true;
+  human.queue.tick = async () => {
+    human.state.humanWait = true;
+    return { status: 'awaiting_start_approval', issueNumber: 32, pendingApproval: { kind: 'start' } };
+  };
+  const humanResult = await human.queue.drain({ clock: () => 0 });
+  assert.equal(humanResult.status, 'awaiting_human');
+  assert.equal(humanResult.ticks, 1);
+
+  const terminal = admissionFixture(issue(33));
+  terminal.queue.ingestAdmissionIntents = async () => null;
+  terminal.queue.hasWork = async () => true;
+  terminal.queue.tick = async () => {
+    terminal.state.cancelled = true;
+    return { status: 'rejected', issueNumber: 33 };
+  };
+  const terminalResult = await terminal.queue.drain({ clock: () => 0 });
+  assert.equal(terminalResult.status, 'terminal');
+  assert.equal(terminalResult.ticks, 1);
+
+  const bounded = admissionFixture(issue(34));
+  let boundedTicks = 0;
+  bounded.queue.ingestAdmissionIntents = async () => null;
+  bounded.queue.hasWork = async () => true;
+  bounded.queue.tick = async () => {
+    boundedTicks += 1;
+    bounded.state.progress = boundedTicks;
+    return { status: 'running', issueNumber: 34 };
+  };
+  const boundedResult = await bounded.queue.drain({ maxTicks: 2, maxRuntimeMs: 30 * 60 * 1000, clock: () => 0 });
+  assert.equal(boundedResult.status, 'max_ticks');
+  assert.equal(boundedResult.ticks, 2);
+
+  const deadlineProject = governedProject();
+  deadlineProject.budgets.maxRuntimeMinutes = 20;
+  const deadline = admissionFixture(issue(35), { projects: new Map([['callflow', deadlineProject]]) });
+  let now = 0;
+  deadline.queue.ingestAdmissionIntents = async () => null;
+  deadline.queue.hasWork = async () => true;
+  deadline.queue.tick = async () => {
+    deadline.state.progress = 1;
+    now = 10 * 60 * 1000;
+    return { status: 'running', issueNumber: 35 };
+  };
+  const deadlineResult = await deadline.queue.drain({
+    maxTicks: 4,
+    maxRuntimeMs: 30 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => now
+  });
+  assert.equal(deadlineResult.status, 'deadline');
+  assert.equal(deadlineResult.ticks, 1);
+
+  let unsafeTickCalls = 0;
+  const insufficient = admissionFixture(issue(36), { projects: new Map([['callflow', deadlineProject]]) });
+  insufficient.queue.ingestAdmissionIntents = async () => null;
+  insufficient.queue.hasWork = async () => true;
+  insufficient.queue.tick = async () => { unsafeTickCalls += 1; return { status: 'running' }; };
+  const insufficientResult = await insufficient.queue.drain({
+    maxRuntimeMs: 20 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => 0
+  });
+  assert.equal(insufficientResult.status, 'deadline');
+  assert.equal(insufficientResult.ticks, 0);
+  assert.equal(unsafeTickCalls, 0);
+
+  let preflightNow = 0;
+  let lateTickCalls = 0;
+  const late = admissionFixture(issue(45), { projects: new Map([['callflow', deadlineProject]]) });
+  late.queue.ingestAdmissionIntents = async () => { preflightNow = 10 * 60 * 1000; };
+  late.queue.hasWork = async () => true;
+  late.queue.tick = async () => { lateTickCalls += 1; return { status: 'running' }; };
+  const lateResult = await late.queue.drain({
+    maxRuntimeMs: 30 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => preflightNow
+  });
+  assert.equal(lateResult.status, 'deadline');
+  assert.equal(lateResult.ticks, 0);
+  assert.equal(lateTickCalls, 0);
+
+  let loadNow = 0;
+  let postLoadTickCalls = 0;
+  const slowLoad = admissionFixture(issue(47), { projects: new Map([['callflow', deadlineProject]]) });
+  slowLoad.queue.ingestAdmissionIntents = async () => null;
+  slowLoad.queue.hasWork = async () => true;
+  const originalLoad = slowLoad.queue.store.load.bind(slowLoad.queue.store);
+  let loadCalls = 0;
+  slowLoad.queue.store.load = async () => {
+    const snapshot = await originalLoad();
+    loadCalls += 1;
+    if (loadCalls === 1) loadNow = 10 * 60 * 1000;
+    return snapshot;
+  };
+  slowLoad.queue.tick = async () => {
+    postLoadTickCalls += 1;
+    return { status: 'running', issueNumber: 47 };
+  };
+  const slowLoadResult = await slowLoad.queue.drain({
+    maxRuntimeMs: 30 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => loadNow
+  });
+  assert.equal(slowLoadResult.status, 'deadline');
+  assert.equal(slowLoadResult.ticks, 0);
+  assert.equal(postLoadTickCalls, 0);
+});
+
+test('drain tick reuses the checked state snapshot without a second pre-work state load', async () => {
+  const f = admissionFixture(issue(48));
+  const snapshot = clone(f.state);
+  let unexpectedLoads = 0;
+  f.queue.store.load = async () => {
+    unexpectedLoads += 1;
+    throw new Error('unexpected_store_load');
+  };
+
+  const result = await f.queue.tick({ stateSnapshot: snapshot });
+  assert.equal(result, null);
+  assert.equal(unexpectedLoads, 0);
+  await assert.rejects(() => f.queue.tick({ stateSnapshot: [] }), /issue_queue_tick_state_snapshot_invalid/);
+});
+
+test('cloud drain rechecks its absolute budget at the real execution boundary', async () => {
+  const target = issue(50);
+  const project = governedProject();
+  project.budgets.maxRuntimeMinutes = 20;
+  const f = admissionFixture(target, { projects: new Map([['callflow', project]]) });
+  let now = 0;
+  let realExecutions = 0;
+  f.queue.ingestAdmissionIntents = async () => null;
+  f.queue.hasWork = async () => true;
+  f.queue.tick = async ({ executionGuard } = {}) => {
+    now = 10 * 60 * 1000;
+    const blocked = f.queue.drainExecutionDeadline(target, executionGuard);
+    if (blocked) return blocked;
+    realExecutions += 1;
+    return { status: 'running', issueNumber: 50 };
+  };
+
+  const result = await f.queue.drain({
+    maxRuntimeMs: 30 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => now
+  });
+  assert.equal(result.status, 'deadline');
+  assert.equal(result.ticks, 0);
+  assert.equal(result.last.status, 'drain_deadline');
+  assert.equal(realExecutions, 0);
+
+  const guard = {
+    deadlineAtMs: 30 * 60 * 1000,
+    requiredRuntimeMs: 20 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => now
+  };
+  now = 9 * 60 * 1000;
+  assert.equal(f.queue.drainExecutionDeadline(target, guard), null);
+  now += 1;
+  assert.equal(f.queue.drainExecutionDeadline(target, guard).status, 'drain_deadline');
+});
+
+test('drain active-request path reuses the checked record snapshot without reloading state', async () => {
+  const target = issue(49);
+  const record = {
+    status: 'admitted',
+    request: { projectId: 'callflow' },
+    issueNumber: target.number,
+    issueId: target.id,
+    author: target.user.login
+  };
+
+  const tickFixture = admissionFixture(target);
+  const snapshot = clone(tickFixture.state);
+  snapshot.requests[key(49)] = clone(record);
+  let seenRecord = null;
+  tickFixture.queue.processIssue = async (_issue, { recordSnapshot } = {}) => {
+    seenRecord = recordSnapshot;
+    return { status: 'running', issueNumber: 49 };
+  };
+  const result = await tickFixture.queue.tick({ stateSnapshot: snapshot });
+  assert.equal(result.status, 'running');
+  assert.deepEqual(seenRecord, record);
+
+  const processFixture = admissionFixture(target);
+  let unexpectedLoads = 0;
+  processFixture.queue.store.load = async () => {
+    unexpectedLoads += 1;
+    throw new Error('unexpected_store_load');
+  };
+  processFixture.queue.processExisting = async (_issue, _parsed, existing) => {
+    assert.deepEqual(existing, record);
+    return { status: 'running', issueNumber: 49 };
+  };
+  const processed = await processFixture.queue.processIssue(target, { recordSnapshot: record });
+  assert.equal(processed.status, 'running');
+  assert.equal(unexpectedLoads, 0);
+  await assert.rejects(
+    () => processFixture.queue.processIssue(target, { recordSnapshot: [] }),
+    /issue_queue_process_record_snapshot_invalid/
+  );
+});
+
+test('cloud drain workflow options propagate only an absolute execution cap', () => {
+  const f = admissionFixture(issue(51));
+  const guard = {
+    deadlineAtMs: 30 * 60 * 1000,
+    requiredRuntimeMs: 20 * 60 * 1000,
+    exitMarginMs: 60_000,
+    clock: () => 0
+  };
+
+  assert.deepEqual(
+    f.queue.workflowExecutionOptions(guard, { refreshPristineDeadline: true }),
+    { refreshPristineDeadline: true, deadlineCapAt: 29 * 60 * 1000 }
+  );
+  assert.deepEqual(
+    f.queue.workflowExecutionOptions(guard),
+    { deadlineCapAt: 29 * 60 * 1000 }
+  );
+  assert.deepEqual(
+    f.queue.workflowExecutionOptions(null, { refreshPristineDeadline: true }),
+    { refreshPristineDeadline: true }
+  );
+  assert.throws(
+    () => f.queue.workflowExecutionOptions({ ...guard, deadlineAtMs: 30_000, exitMarginMs: 60_000 }),
+    /issue_queue_drain_execution_guard_invalid/
+  );
+});
+
+test('cloud drain propagates its deadline cap to every durable workflow read in processExisting', () => {
+  const source = readFileSync(new URL('../src/issue-queue.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  async processExisting(');
+  const end = source.indexOf('\n  async processIssue(', start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.equal((body.match(/workflowEngine\.get\(record\.workflowId\)/g) ?? []).length, 0);
+  assert.equal(
+    (body.match(/workflowEngine\.get\(record\.workflowId, this\.workflowExecutionOptions\(executionGuard\)\)/g) ?? []).length,
+    4
+  );
+});
+
+test('cloud drain processes a pending terminal notification once and stops', async () => {
+  const f = admissionFixture(issue(46));
+  f.state.requests[key(46)] = {
+    status: 'completed',
+    request: { projectId: 'callflow' },
+    terminalNotification: { sentAt: null }
+  };
+  let ticks = 0;
+  f.queue.ingestAdmissionIntents = async () => null;
+  f.queue.hasWork = async () => ticks === 0;
+  f.queue.tick = async () => {
+    ticks += 1;
+    f.state.requests[key(46)].terminalNotification.sentAt = '2026-09-21T00:00:00.000Z';
+    return { status: 'completed', issueNumber: 46, terminalNotification: f.state.requests[key(46)].terminalNotification };
+  };
+  const result = await f.queue.drain({ clock: () => 0 });
+  assert.equal(result.status, 'terminal');
+  assert.equal(result.ticks, 1);
+  assert.equal(ticks, 1);
 });
 
 test('admitted work claims a lease and trusted-main drift restores it before creation', async () => {
