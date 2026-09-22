@@ -241,7 +241,7 @@ test('website workflow persists normalized input fingerprint and rejects busines
 });
 
 test('workflow profiles create validated deterministic plans', () => {
-  for (const profile of ['website-build', 'app-improvement', 'data-analysis']) {
+  for (const profile of ['website-build', 'app-improvement', 'autonomous-maintenance', 'data-analysis']) {
     const configured = project();
     const plan = createWorkflowPlan({
       profile,
