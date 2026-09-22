@@ -158,6 +158,16 @@ test('bounded src/test sensitivity can be auto-approved only from exact governed
     paths: ['package.json'],
     reason: 'sensitive_change:package.json'
   })), false);
+  const mismatched = sensitiveImplementation({
+    paths: ['src/recovery.js'],
+    reason: 'sensitive_change:src/recovery.js'
+  });
+  mismatched.evidence.changeSet.paths = ['src/other.js'];
+  assert.equal(autonomousSensitiveImplementationAllowed(mismatched), false);
+  assert.equal(autonomousSensitiveImplementationAllowed(sensitiveImplementation({
+    paths: ['src/../config/projects.json'],
+    reason: 'sensitive_change:src/../config/projects.json'
+  })), false);
 });
 
 test('autopilot may approve an exact bounded src implementation but never auth/security content', async () => {
@@ -205,6 +215,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
 
   const blockedStore = fakeStore({ autopilotSelfImprovement: initial });
   let blockedApprovals = 0;
+  let cancellations = 0;
   const blockedEngine = {
     async get() {
       return {
@@ -220,7 +231,20 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
       };
     },
     async approve() { blockedApprovals += 1; throw new Error('must not approve auth/security changes'); },
-    async run() { throw new Error('must not run while human approval is required'); }
+    async run() { throw new Error('must not run while human approval is required'); },
+    async cancel(id, options) {
+      cancellations += 1;
+      assert.equal(id, 'workflow-sensitive');
+      assert.equal(options.reason, 'autonomous_maintenance_human_gate_required');
+      return {
+        id,
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'blocked',
+        result: { error: options.reason },
+        steps: []
+      };
+    }
   };
   const blockedAutopilot = new AutonomousSelfImprovement({
     store: blockedStore,
@@ -229,9 +253,11 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
     now: () => Date.parse('2026-09-23T00:10:00Z')
   });
   const blocked = await blockedAutopilot.tick();
-  assert.equal(blocked.status, 'human_gate_required');
-  assert.equal(blocked.stepId, 'implementation');
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.humanGateStepId, 'implementation');
   assert.equal(blockedApprovals, 0);
+  assert.equal(cancellations, 1);
+  assert.equal(blockedStore.state.autopilotSelfImprovement.activeWorkflowId, null);
 });
 
 test('published autopilot work cannot spawn again until authoritative main advances', async () => {
