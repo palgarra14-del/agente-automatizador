@@ -1397,13 +1397,13 @@ test('active epoch rejects malformed intermediate envelope', async () => {
   assert.ok(third);
 });
 
-test('active epoch rejects truncated history blobs', async () => {
+test('active epoch lineage validation does not depend on GraphQL history blobs', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const first = await publishMarker(store, 'one');
   await publishMarker(store, 'two');
   fake.markHistoryTruncated(first);
-  await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /history_blob_invalid/);
+  assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'two');
 });
 
 test('v2 child cannot rewrite inherited lineage anchor', async () => {
