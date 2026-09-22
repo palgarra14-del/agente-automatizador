@@ -122,7 +122,10 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
   }
 
   async resume(id, options = {}) {
-    return this.withExecutionDeadlineCap(id, options.deadlineCapAt ?? null, () => super.resume(id, options));
+    return this.withExecutionDeadlineCap(id, options.deadlineCapAt ?? null, () => super.resume(id, {
+      ...options,
+      beforeLeaseClaimCommit: () => this.assertExecutionDeadline(id)
+    }));
   }
 
   async runUnlocked(id, options = {}) {
