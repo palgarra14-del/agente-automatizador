@@ -855,16 +855,23 @@ export class JsonStore {
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     let committed = false;
+    let operationError = null;
     try {
       await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
       if (beforeCommit) await beforeCommit();
       await rename(temporary, this.file);
       committed = true;
-    } finally {
-      if (!committed) {
-        try { await unlink(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    } catch (error) {
+      operationError = error;
+    }
+    if (!committed) {
+      try {
+        await unlink(temporary);
+      } catch (error) {
+        if (error.code !== 'ENOENT' && operationError === null) operationError = error;
       }
     }
+    if (operationError) throw operationError;
   }
 
   async ownerIdentity(pid) {
