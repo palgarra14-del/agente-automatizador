@@ -1454,7 +1454,23 @@ export class SupervisedIssueQueue {
 
     const intent = this.admissionIntent(current, currentParsed);
     const targetSha = this.operatorRevision ?? await this.channel.branchHead(this.operatorBranch);
-    const created = await this.channel.createAdmissionIntent(intent, targetSha);
+    let created;
+    try {
+      created = await this.channel.createAdmissionIntent(intent, targetSha);
+    } catch (error) {
+      if (error.message !== 'admission_intent_existing_conflict' ||
+          typeof this.channel.admissionIntentRef !== 'function' ||
+          typeof this.channel.admissionIntentTarget !== 'function' ||
+          typeof this.channel.deleteAdmissionIntent !== 'function') throw error;
+      const ref = this.channel.admissionIntentRef(intent);
+      const existingTarget = await this.channel.admissionIntentTarget(ref);
+      if (existingTarget === targetSha) {
+        created = { created: false, ref };
+      } else {
+        if (existingTarget !== null) await this.channel.deleteAdmissionIntent(ref);
+        created = await this.channel.createAdmissionIntent(intent, targetSha);
+      }
+    }
     return {
       admitted: created.created,
       idempotent: !created.created,
