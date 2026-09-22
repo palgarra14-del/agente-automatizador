@@ -386,22 +386,30 @@ export async function collectReadOnlyRepositoryContext({
   );
   if (manifest.timedOut || manifest.exitCode !== 0) throw new Error('repository_context_manifest_failed');
   if (manifest.stdoutTruncated) throw new Error('repository_context_manifest_too_large');
-  const candidatePaths = [...new Set(String(manifest.stdout ?? '').split(/\r?\n/).filter(Boolean).map((raw) => normalizeRepositoryPath(raw, 'repository context path')))].sort();
-  if (!candidatePaths.length) throw new Error('repository_context_empty');
-  if (candidatePaths.length > maxFiles) throw new Error(`repository_context_file_limit_exceeded:${candidatePaths.length}>${maxFiles}`);
+  const manifestPaths = [...new Set(String(manifest.stdout ?? '').split(/\r?\n/).filter(Boolean).map((raw) => normalizeRepositoryPath(raw, 'repository context path')))].sort();
+  if (!manifestPaths.length) throw new Error('repository_context_empty');
 
   const policyForbidden = project.changePolicy?.forbiddenPaths ?? [];
+  const forbiddenContextPath = (path) =>
+    immutableForbiddenPathPattern.test(path) ||
+    packageManagerControlPathPattern.test(path) ||
+    pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths) ||
+    pathMatchesAnyRoot(path, policyForbidden);
+  for (const path of manifestPaths) {
+    if (!pathMatchesAnyRoot(path, normalizedScope.allowedPaths)) throw new Error(`repository_context_scope_violation:${path}`);
+  }
+  const firstForbiddenPath = manifestPaths.find((path) => forbiddenContextPath(path));
+  const candidatePaths = manifestPaths.filter((path) => !forbiddenContextPath(path));
+  if (!candidatePaths.length) {
+    if (firstForbiddenPath) throw new Error(`repository_context_forbidden_path:${firstForbiddenPath}`);
+    throw new Error('repository_context_empty');
+  }
+  if (candidatePaths.length > maxFiles) throw new Error(`repository_context_file_limit_exceeded:${candidatePaths.length}>${maxFiles}`);
+
   const files = [];
   let totalBytes = 0;
   let sourceTotalBytes = 0;
   for (const path of candidatePaths) {
-    if (!pathMatchesAnyRoot(path, normalizedScope.allowedPaths)) throw new Error(`repository_context_scope_violation:${path}`);
-    if (
-      immutableForbiddenPathPattern.test(path) ||
-      packageManagerControlPathPattern.test(path) ||
-      pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths) ||
-      pathMatchesAnyRoot(path, policyForbidden)
-    ) throw new Error(`repository_context_forbidden_path:${path}`);
     const target = resolve(root, path);
     if (!isWithin(root, target)) throw new Error(`repository_context_path_escape:${path}`);
     let source;
