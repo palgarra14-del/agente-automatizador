@@ -123,7 +123,14 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
   }
 
   async get(id, options = {}) {
-    const cap = this.assertExecutionDeadline(id, options.deadlineCapAt ?? null);
+    if (options.deadlineCapAt !== null && options.deadlineCapAt !== undefined) {
+      return this.withExecutionDeadlineCap(
+        id,
+        options.deadlineCapAt,
+        () => this.get(id)
+      );
+    }
+    const cap = this.assertExecutionDeadline(id);
     const plan = await super.get(id);
     this.assertExecutionDeadline(id, cap);
     if (!plan || this.suppressDurability > 0 || this.preparingDurableCheckpoints.has(id) || !releaseCheckpointCandidate(plan)) return plan;
