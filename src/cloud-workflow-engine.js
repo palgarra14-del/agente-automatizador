@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { WorkflowEngine, WorkflowStepStatus, maskSecrets, validateWorkflowPlan } from './core.js';
 
 const DURABLE_CHECKPOINT_VERSION = 1;
-const governedProfiles = new Set(['app-improvement', 'website-build']);
+const governedProfiles = new Set(['app-improvement', 'autonomous-maintenance', 'website-build']);
 
 function exactSha(value) {
   return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value);
