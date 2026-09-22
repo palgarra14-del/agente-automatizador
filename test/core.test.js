@@ -359,6 +359,46 @@ test('read-only repository context excerpts large files while fingerprinting the
   }
 });
 
+test('read-only repository context excludes forbidden files before limits and never exposes their bytes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-filtered-context-'));
+  try {
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src', 'allowed.js'), 'export const allowedMarker = "visible";\n');
+    await writeFile(join(root, 'src', 'capabilities.js'), 'export const forbiddenMarker = "must-never-be-visible";\n');
+    assert.equal((await runProcess('git', ['init', '--initial-branch=main'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+    assert.equal((await runProcess('git', ['add', 'src'], { cwd: root, timeoutMs: 5_000 })).ok, true);
+
+    const configured = { changePolicy: { forbiddenPaths: [] } };
+    const context = await collectReadOnlyRepositoryContext({
+      workspace: root,
+      project: configured,
+      scope: { allowedPaths: ['src'], forbiddenPaths: ['src/capabilities.js'] },
+      limits: {
+        maxFiles: 1,
+        maxFileBytes: 4 * 1024,
+        maxSourceFileBytes: 8 * 1024,
+        maxTotalBytes: 4 * 1024,
+        maxSourceTotalBytes: 8 * 1024
+      }
+    });
+
+    assert.deepEqual(context.files.map((file) => file.path), ['src/allowed.js']);
+    assert.match(context.files[0].content, /allowedMarker/);
+    assert.doesNotMatch(JSON.stringify(context), /must-never-be-visible/);
+
+    await assert.rejects(
+      collectReadOnlyRepositoryContext({
+        workspace: root,
+        project: configured,
+        scope: { allowedPaths: ['src/capabilities.js'], forbiddenPaths: ['src/capabilities.js'] }
+      }),
+      /repository_context_forbidden_path:src\/capabilities\.js/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('security rejects control characters in governed paths and keeps state private', async () => {
   const configured = project();
   const decision = evaluateChangePolicy(configured, { paths: ['safe\n.env'], changedFiles: 1, diffLines: 1 });
