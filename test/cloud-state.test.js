@@ -690,6 +690,56 @@ function installAuthority(fake, store, registration, generation, stateSha, paren
   );
 }
 
+test('cloud-state mutating request is aborted at the active workflow deadline', async () => {
+  let writes = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:1',
+    now: () => Date.now(),
+    fetchImpl: async (_url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') writes += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(response(201, { ref: 'refs/tags/test', object: { sha: 'a'.repeat(40) } })), 250);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('aborted_by_deadline'));
+        }, { once: true });
+      });
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      Date.now() + 25,
+      () => store.request('/git/refs', { method: 'POST', body: { ref: 'refs/tags/test', sha: 'a'.repeat(40) } })
+    ),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(writes, 1);
+});
+
+test('cloud-state mutation refuses an already-expired remote write', async () => {
+  let writes = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:2',
+    now: () => 10_000,
+    fetchImpl: async (_url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') writes += 1;
+      return response(500, {});
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      9_999,
+      () => store.request('/git/refs', { method: 'POST', body: { ref: 'refs/tags/test', sha: 'a'.repeat(40) } })
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.equal(writes, 0);
+});
+
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.doesNotThrow(() => validateCloudState(

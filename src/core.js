@@ -834,12 +834,14 @@ export async function loadProjects(file, registry = defaultToolSkillRegistry) {
 }
 
 export class JsonStore {
-  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10 } = {}) {
+  constructor(file, { lockTimeoutMs = 5_000, lockPollMs = 10, processRunner = runProcess, now = () => Date.now() } = {}) {
     this.file = file;
     this.lockFile = `${file}.lock`;
     this.recoveryLockFile = `${file}.lock.recovery`;
     this.lockTimeoutMs = lockTimeoutMs;
     this.lockPollMs = lockPollMs;
+    this.processRunner = processRunner;
+    this.now = now;
   }
 
   async load() {
@@ -850,11 +852,49 @@ export class JsonStore {
     }
   }
 
-  async save(data) {
+  async save(data, { beforeCommit = null, deadlineAt = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
+    if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('state_deadline_invalid');
     await mkdir(dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
-    await rename(temporary, this.file);
+    const serialized = JSON.stringify(data, null, 2);
+    let committed = false;
+    let operationError = null;
+    try {
+      await writeFile(temporary, serialized, { mode: 0o600 });
+      if (beforeCommit) await beforeCommit();
+      if (deadlineAt === null) {
+        await rename(temporary, this.file);
+      } else {
+        const remainingMs = Math.floor(deadlineAt - this.now());
+        if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
+        const script = "const fs=require('node:fs');fs.renameSync(process.argv[1],process.argv[2]);";
+        const result = await this.processRunner(process.execPath, ['-e', script, temporary, this.file], {
+          cwd: dirname(this.file),
+          timeoutMs: remainingMs,
+          killGraceMs: 0,
+          outputLimit: 1_000
+        });
+        if (result.timedOut) {
+          let observed = null;
+          try { observed = await readFile(this.file, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          if (observed !== serialized) throw new Error('workflow_deadline_cap_exceeded');
+        } else if (!result.ok) {
+          throw new Error('state_commit_failed');
+        }
+      }
+      committed = true;
+    } catch (error) {
+      operationError = error;
+    }
+    if (!committed) {
+      try {
+        await unlink(temporary);
+      } catch (error) {
+        if (error.code !== 'ENOENT' && operationError === null) operationError = error;
+      }
+    }
+    if (operationError) throw operationError;
   }
 
   async ownerIdentity(pid) {
@@ -939,14 +979,16 @@ export class JsonStore {
     }
   }
 
-  async mutate(mutator) {
+  async mutate(mutator, { beforeCommit = null, deadlineAt = null } = {}) {
+    if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('state_before_commit_invalid');
+    if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('state_deadline_invalid');
     await this.acquireLock();
     let output;
     let operationError = null;
     try {
       const data = await this.load();
       output = await mutator(data);
-      await this.save(data);
+      await this.save(data, { beforeCommit, deadlineAt });
     } catch (error) {
       operationError = error;
     }
@@ -958,7 +1000,7 @@ export class JsonStore {
     return output;
   }
 
-  async claimExecutionLease(collection, id, kind) {
+  async claimExecutionLease(collection, id, kind, { beforeCommit = null, deadlineAt = null } = {}) {
     if (!['runs', 'workflows'].includes(collection) || !['run', 'workflow'].includes(kind)) throw new Error('execution_lease_scope_invalid');
     return this.mutate(async (data) => {
       const entity = data[collection]?.[id];
@@ -981,7 +1023,7 @@ export class JsonStore {
       };
       entity.executionLease = lease;
       return lease;
-    });
+    }, { beforeCommit, deadlineAt });
   }
 
   async releaseExecutionLease(collection, id, leaseId) {
@@ -995,8 +1037,8 @@ export class JsonStore {
     });
   }
 
-  async withExecutionLease(collection, id, kind, operation) {
-    const lease = await this.claimExecutionLease(collection, id, kind);
+  async withExecutionLease(collection, id, kind, operation, { beforeClaimCommit = null, deadlineAt = null } = {}) {
+    const lease = await this.claimExecutionLease(collection, id, kind, { beforeCommit: beforeClaimCommit, deadlineAt });
     let output;
     let operationError = null;
     try { output = await operation(lease); }
@@ -1935,12 +1977,12 @@ export class WorkflowEngine {
     });
   }
 
-  async update(id, mutator) {
+  async update(id, mutator, { beforeCommit = null, deadlineAt = null } = {}) {
     return this.store.mutate((data) => {
       const plan = data.workflows?.[id];
       if (!plan) throw new Error('Workflow not found');
       mutator(plan); plan.updatedAt = new Date().toISOString(); return plan;
-    });
+    }, { beforeCommit, deadlineAt });
   }
 
   readySteps(plan) {
@@ -3319,6 +3361,12 @@ export class WorkflowEngine {
   }
 
   async resume(id, options = {}) {
+    const leaseOptions = {
+      deadlineAt: options.deadlineCapAt ?? null,
+      beforeClaimCommit: typeof options.beforeLeaseClaimCommit === 'function'
+        ? options.beforeLeaseClaimCommit
+        : null
+    };
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
@@ -3427,7 +3475,7 @@ export class WorkflowEngine {
         }
       }
       return this.runUnlocked(id, options);
-    });
+    }, leaseOptions);
   }
 
   remainingMs(plan) { return plan.deadlineAt - this.now(); }
@@ -4898,19 +4946,29 @@ function managedGitCommitEnvironment(identity) {
 }
 
 export class LocalGitAdapter {
-  constructor({ processRunner = runProcess, environment = process.env } = {}) {
+  constructor({ processRunner = runProcess, environment = process.env, now = () => Date.now() } = {}) {
     this.processRunner = processRunner;
     this.environment = environment;
+    this.now = now;
   }
 
-  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {}, network = false } = {}) {
+  gitTimeoutMs(project, deadlineAt = null) {
+    if (deadlineAt === null || deadlineAt === undefined) return project.budgets.commandTimeoutMs;
+    if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('git_deadline_invalid');
+    const remaining = Math.floor(deadlineAt - this.now());
+    if (remaining <= 0) throw new Error('workflow_deadline_cap_exceeded');
+    return Math.min(project.budgets.commandTimeoutMs, remaining);
+  }
+
+  async git(args, project, { allowExitCodes = [0], outputLimit, captureOutputDigest = false, env = {}, network = false, deadlineAt = null } = {}) {
     const networkEnvironment = network ? githubGitNetworkEnvironment(this.environment, { preferAgentToken: project.id !== 'self' }) : {};
     const result = await this.processRunner('git', args, {
       cwd: project.workspace,
-      timeoutMs: project.budgets.commandTimeoutMs,
+      timeoutMs: this.gitTimeoutMs(project, deadlineAt),
       outputLimit,
       captureOutputDigest,
-      env: { ...networkEnvironment, ...env }
+      env: { ...networkEnvironment, ...env },
+      killGraceMs: deadlineAt === null || deadlineAt === undefined ? 1_000 : 0
     });
     if (!allowExitCodes.includes(result.exitCode) || result.timedOut) throw new Error(`Git ${args[0]} failed: ${clip(result.stderr || result.stdout)}`);
     return result;
@@ -5138,7 +5196,7 @@ export class LocalGitAdapter {
 
   async hasDiff(project) { return (await this.changedPaths(project)).length > 0; }
 
-  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote, identity } = {}) {
+  async commit(project, branch, message, { expectedChangeSetFingerprint, expectedHead, expectedRemote, identity, deadlineAt = null } = {}) {
     const commitEnvironment = managedGitCommitEnvironment(identity);
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
@@ -5149,7 +5207,7 @@ export class LocalGitAdapter {
     const unsafe = paths.find((path) => protectedFilePattern.test(path) || immutableForbiddenPathPattern.test(path));
     if (unsafe) throw new Error(`Worker changed a protected path: ${unsafe}`);
     const preStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
-    await this.git(['add', '--all'], project);
+    await this.git(['add', '--all'], project, { deadlineAt });
     const postStageWorkingTreeFingerprint = await this.workingTreeChangeFingerprint(project, paths);
     if (postStageWorkingTreeFingerprint !== preStageWorkingTreeFingerprint) throw new Error('changeset_changed_while_staging');
     const unstaged = await this.git(['diff', '--quiet'], project, { allowExitCodes: [0, 1] });
@@ -5169,15 +5227,15 @@ export class LocalGitAdapter {
     if (postStageUntracked.length) throw new Error('changeset_changed_while_staging');
     const description = String(message).replace(/[\r\n]+/g, ' ').replace(/[^\w .,:;!?()/-]/g, '').slice(0, 68).trim() || 'safe engineering change';
     const safeMessage = `agent: ${description}`;
-    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: commitEnvironment });
+    await this.git(['commit', '--no-verify', '--message', safeMessage], project, { env: commitEnvironment, deadlineAt });
     return { message: safeMessage, finalHead: await this.head(project), committedPaths: paths, committedChangeSetFingerprint: expectedChangeSetFingerprint ?? reviewedFingerprint };
   }
 
-  async push(project, branch, { expectedHead, expectedRemote } = {}) {
+  async push(project, branch, { expectedHead, expectedRemote, deadlineAt = null } = {}) {
     await this.assertRepositoryState(project, { branch, head: expectedHead, remote: expectedRemote });
     await this.assertWorkingBranch(project, branch);
     assertAllowedWorkingBranch(project, branch);
-    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project, { network: true });
+    await this.git(['push', '--no-verify', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], project, { network: true, deadlineAt });
     return { branch, finalHead: await this.head(project) };
   }
 }
@@ -5626,12 +5684,17 @@ export class WorkflowPublicationBridge {
       expectedChangeSetFingerprint: context.changeSetFingerprint,
       expectedHead: context.baseHead,
       expectedRemote: context.remote,
-      identity
+      identity,
+      deadlineAt: context.deadlineAt ?? null
     });
   }
 
   async push(project, context) {
-    return this.localGit.push(project, context.branch, { expectedHead: context.commitHead, expectedRemote: context.remote });
+    return this.localGit.push(project, context.branch, {
+      expectedHead: context.commitHead,
+      expectedRemote: context.remote,
+      deadlineAt: context.deadlineAt ?? null
+    });
   }
 
   async verifyRemoteBranch(project, branch, expectedHead) {

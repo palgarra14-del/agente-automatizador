@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { WorkflowEngine, WorkflowStepStatus, maskSecrets, validateWorkflowPlan } from './core.js';
@@ -59,10 +60,83 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     super(options);
     this.preparingDurableCheckpoints = new Set();
     this.suppressDurability = 0;
+    this.executionDeadlineContext = new AsyncLocalStorage();
+  }
+
+  executionDeadlineCap(id, explicit = null) {
+    if (explicit !== null && (!Number.isFinite(explicit) || explicit <= 0)) {
+      throw new Error('workflow_deadline_cap_invalid');
+    }
+    const active = this.executionDeadlineContext?.getStore()?.get(id) ?? null;
+    if (explicit === null) return active;
+    return active === null ? explicit : Math.min(active, explicit);
+  }
+
+  assertExecutionDeadline(id, explicit = null) {
+    const cap = this.executionDeadlineCap(id, explicit);
+    if (cap !== null && this.now() >= cap) throw new Error('workflow_deadline_cap_exceeded');
+    return cap;
+  }
+
+  async withExecutionDeadlineCap(id, explicit, task) {
+    const cap = this.executionDeadlineCap(id, explicit ?? null);
+    if (cap === null) return task();
+    this.assertExecutionDeadline(id, cap);
+    this.executionDeadlineContext ??= new AsyncLocalStorage();
+    const parent = this.executionDeadlineContext.getStore();
+    const scoped = new Map(parent ?? []);
+    scoped.set(id, cap);
+    return this.executionDeadlineContext.run(scoped, task);
+  }
+
+  async update(id, mutator) {
+    this.assertExecutionDeadline(id);
+    const deadlineAt = this.executionDeadlineCap(id);
+    return super.update(id, (saved) => {
+      this.assertExecutionDeadline(id);
+      mutator(saved);
+      this.assertExecutionDeadline(id);
+    }, {
+      beforeCommit: () => this.assertExecutionDeadline(id),
+      deadlineAt
+    });
+  }
+
+  async run(id, options = {}) {
+    if (options.dryRun || options.deadlineCapAt === null || options.deadlineCapAt === undefined) {
+      return super.run(id, options);
+    }
+    return this.withExecutionDeadlineCap(id, options.deadlineCapAt, async () => {
+      this.assertExecutionDeadline(id);
+      return this.store.withExecutionLease(
+        'workflows',
+        id,
+        'workflow',
+        async () => super.runUnlocked(id, options),
+        {
+          beforeClaimCommit: () => this.assertExecutionDeadline(id),
+          deadlineAt: this.executionDeadlineCap(id, options.deadlineCapAt)
+        }
+      );
+    });
+  }
+
+  async resume(id, options = {}) {
+    return this.withExecutionDeadlineCap(id, options.deadlineCapAt ?? null, () => super.resume(id, {
+      ...options,
+      deadlineCapAt: this.executionDeadlineCap(id, options.deadlineCapAt ?? null),
+      beforeLeaseClaimCommit: () => this.assertExecutionDeadline(id)
+    }));
   }
 
   async runUnlocked(id, options = {}) {
-    if (!options.dryRun) return super.runUnlocked(id, options);
+    if (!options.dryRun) {
+      return this.withExecutionDeadlineCap(
+        id,
+        options.deadlineCapAt ?? null,
+        () => super.runUnlocked(id, options)
+      );
+    }
     this.suppressDurability += 1;
     try {
       const plan = await super.runUnlocked(id, options);
@@ -76,13 +150,22 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     }
   }
 
-  async get(id) {
+  async get(id, options = {}) {
+    if (options.deadlineCapAt !== null && options.deadlineCapAt !== undefined) {
+      return this.withExecutionDeadlineCap(
+        id,
+        options.deadlineCapAt,
+        () => this.get(id)
+      );
+    }
+    const cap = this.assertExecutionDeadline(id);
     const plan = await super.get(id);
+    this.assertExecutionDeadline(id, cap);
     if (!plan || this.suppressDurability > 0 || this.preparingDurableCheckpoints.has(id) || !releaseCheckpointCandidate(plan)) return plan;
     validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
     this.preparingDurableCheckpoints.add(id);
     try {
-      return await this.ensureDurableReleaseCheckpoint(id);
+      return await this.ensureDurableReleaseCheckpoint(id, { deadlineCapAt: cap });
     } finally {
       this.preparingDurableCheckpoints.delete(id);
     }
@@ -220,8 +303,11 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     };
   }
 
-  async ensureDurableReleaseCheckpoint(id) {
+  async ensureDurableReleaseCheckpoint(id, { deadlineCapAt = null } = {}) {
+    const guard = () => this.assertExecutionDeadline(id, deadlineCapAt);
+    guard();
     let plan = await super.get(id);
+    guard();
     const candidate = releaseCheckpointCandidate(plan);
     if (!candidate) return plan;
     const project = this.projects.get(plan.projectId);
@@ -235,7 +321,9 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
 
     let base;
     try {
+      guard();
       base = await this.publicationBridge.inspectBase(project);
+      guard();
     } catch (error) {
       return this.blockDurability(id, 'durable_checkpoint_base_observation_failed', error.message);
     }
@@ -246,7 +334,9 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
 
     let remote;
     try {
+      guard();
       remote = await this.remoteWorkingBranch(project, plan.workspace.workingBranch);
+      guard();
     } catch (error) {
       return this.blockDurability(id, 'durable_checkpoint_remote_observation_failed', error.message);
     }
@@ -255,25 +345,33 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     let push;
     if (remote) {
       try {
+        guard();
         const recovered = await this.recoverRemoteCheckpoint(id, project, plan, candidate, remote);
+        guard();
         if (!recovered.ok) return recovered.plan;
         ({ commit, push } = recovered);
       } catch (error) {
         return this.blockDurability(id, 'durable_checkpoint_remote_recovery_failed', error.message);
       }
     } else {
+      guard();
       const governed = await this.guardImplementationChangeSet(id, project, candidate.release.id, 'before-durable-checkpoint');
+      guard();
       if (!governed.ok) return governed.plan;
       const workspaceProject = await this.workspaceProject(id, project);
+      guard();
       try {
+        guard();
         commit = await this.publicationBridge.commit(workspaceProject, {
           workflowId: plan.id,
           goal: `durable checkpoint ${plan.goal}`,
           branch: plan.workspace.workingBranch,
           baseHead: plan.workspace.baseHead,
           remote: plan.workspace.remote,
-          changeSetFingerprint: candidate.changeSetFingerprint
+          changeSetFingerprint: candidate.changeSetFingerprint,
+          deadlineAt: this.executionDeadlineCap(id, deadlineCapAt)
         });
+        guard();
         const expectedPaths = exactPaths(candidate.implementation.evidence?.changeSet?.paths);
         if (!exactSha(commit?.finalHead) ||
             commit.committedChangeSetFingerprint !== candidate.changeSetFingerprint ||
@@ -281,17 +379,23 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
           throw new Error('durable_checkpoint_commit_mismatch');
         }
         try {
+          guard();
           push = await this.publicationBridge.push(workspaceProject, {
             branch: plan.workspace.workingBranch,
             commitHead: commit.finalHead,
-            remote: plan.workspace.remote
+            remote: plan.workspace.remote,
+            deadlineAt: this.executionDeadlineCap(id, deadlineCapAt)
           });
         } catch (error) {
+          guard();
           const uncertain = await this.remoteWorkingBranch(project, plan.workspace.workingBranch);
+          guard();
           if (!uncertain || uncertain.head !== commit.finalHead) throw error;
           push = { branch: plan.workspace.workingBranch, finalHead: commit.finalHead, recoveredAfterUncertainPush: true };
         }
+        guard();
         const verified = await this.publicationBridge.verifyRemoteBranch(project, plan.workspace.workingBranch, commit.finalHead);
+        guard();
         if (!verified.ok || push.finalHead !== commit.finalHead) throw new Error('durable_checkpoint_push_mismatch');
         push = { ...push, remoteBranchHead: verified.head };
       } catch (error) {
@@ -299,6 +403,7 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
       }
     }
 
+    guard();
     const checkpoint = {
       version: DURABLE_CHECKPOINT_VERSION,
       changeSetFingerprint: candidate.changeSetFingerprint,
