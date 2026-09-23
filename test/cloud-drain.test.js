@@ -95,6 +95,29 @@ test('parked human approvals do not stall independent autonomous maintenance', a
   assert.equal(queue.calls.hasWork, 0);
 });
 
+test('operator safety gates remain fail closed even when autonomous maintenance is available', async () => {
+  const queue = scriptedQueue([{ status: 'operator_revision_check_failed', issueNumber: 11 }]);
+  let autonomousCalls = 0;
+  const autonomousSelfImprovement = {
+    async tick() {
+      autonomousCalls += 1;
+      return { status: 'running' };
+    },
+    async hasWork() {
+      return true;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'human_gate');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(autonomousCalls, 0);
+  assert.equal(queue.calls.tick, 1);
+});
+
 test('cloud drain obeys its hard iteration budget even when work remains', async () => {
   const queue = scriptedQueue([
     { status: 'running', issueNumber: 1 },
