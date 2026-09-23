@@ -1,6 +1,15 @@
 name: Agent Cloud Worker
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/agent-cloud.yml'
+      - 'src/**'
+      - 'config/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
   issues:
     types: [opened, edited, reopened]
   issue_comment:
@@ -26,6 +35,7 @@ jobs:
   route:
     name: route cloud lanes
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (
