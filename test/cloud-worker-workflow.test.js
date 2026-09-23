@@ -121,6 +121,16 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
+test('scheduled recovery has the minimum commit-status authority required by Cloud State repair', () => {
+  const recoverStart = workflow.indexOf('  recover:');
+  const cloudOnceStart = workflow.indexOf('  cloud-once:');
+  assert.ok(recoverStart > 0 && cloudOnceStart > recoverStart);
+  const recovery = workflow.slice(recoverStart, cloudOnceStart);
+  assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
+  assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|checks:\s*write/);
+  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
+});
+
 test('cloud worker repairs authorized partial state before recovery and read-only preflight', () => {
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   const repairStart = workflow.indexOf('- name: Repair authorized partial cloud state', cloudOnceStart);
@@ -140,8 +150,8 @@ test('cloud worker repairs authorized partial state before recovery and read-onl
   assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
   assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && github\.event_name == 'schedule'/);
-  assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read/);
-  assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|statuses:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read[\s\S]*statuses: write/);
+  assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
