@@ -16,11 +16,18 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+lane:\n\s+description: Trusted cloud lane for bounded continuation\n\s+required: false\n\s+type: string/);
   assert.match(workflow, /cron: '17 \*\/6 \* \* \*'/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
-  assert.doesNotMatch(workflow, /^\s*push:/m);
+  assert.match(workflow, /push:\n\s+branches: \[main\][\s\S]*paths:[\s\S]*'\.github\/workflows\/agent-cloud\.yml'[\s\S]*'src\/\*\*'[\s\S]*'config\/\*\*'[\s\S]*'scripts\/\*\*'/);
+  assert.match(workflow, /github\.event_name == 'push'/);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
   assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
   assert.match(workflow, /\.trim\(\)[\s\S]*body\.startsWith\("\/agent "\)/);
+});
+
+test('trusted main updates wake the cloud worker without requiring a manual dispatch', () => {
+  assert.match(workflow, /push:\n\s+branches: \[main\]/);
+  assert.match(workflow, /github\.event_name == 'push'/);
+  assert.doesNotMatch(workflow, /push:\n\s+branches: \[(?!main\])/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
