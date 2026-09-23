@@ -289,8 +289,6 @@ export class WindowsDesktopBridge {
       '-NoLogo',
       '-NoProfile',
       '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
       '-EncodedCommand',
       encoded
     ], {
