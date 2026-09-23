@@ -2238,6 +2238,9 @@ export class SupervisedIssueQueue {
         notificationError ??= error;
       }
     }
+    let parkedResult = null;
+    let parkedScans = 0;
+    const maxParkedScans = 20;
     for (const [key, record] of Object.entries(state.requests ?? {})) {
       if (!key.startsWith(keyPrefix) ||
           !this.ownsRecord(record) ||
@@ -2260,11 +2263,18 @@ export class SupervisedIssueQueue {
         return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
       }
       const activeResult = await this.processIssue(issue);
-      if (activeResult) return activeResult;
+      if (!activeResult) continue;
+      if (['awaiting_start_approval', 'awaiting_workflow_approval', 'execution_deferred'].includes(activeResult.status)) {
+        parkedResult ??= activeResult;
+        parkedScans += 1;
+        if (parkedScans >= maxParkedScans) break;
+        continue;
+      }
+      return activeResult;
     }
     if (this.includedProjectIds !== null) {
       if (notificationError) throw notificationError;
-      return null;
+      return parkedResult;
     }
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
@@ -2295,7 +2305,7 @@ export class SupervisedIssueQueue {
       if (result) return result;
     }
     if (notificationError) throw notificationError;
-    return null;
+    return parkedResult;
   }
 }
 
