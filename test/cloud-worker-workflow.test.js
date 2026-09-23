@@ -14,7 +14,7 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /cron: '\*\/15 \* \* \* \*'/);
+  assert.match(workflow, /cron: '17 \*\/3 \* \* \*'/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
@@ -31,7 +31,7 @@ test('cloud worker routes events through trusted main before constructing the la
   const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
   assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
-  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit, recover\][\s\S]*needs\.admit\.result[\s\S]*needs\.recover\.result/);
+  assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit\][\s\S]*needs\.admit\.result/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
@@ -121,60 +121,71 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('scheduled recovery has the minimum commit-status authority required by Cloud State repair', () => {
-  const recoverStart = workflow.indexOf('  recover:');
+test('scheduled recovery stays inside the lane worker and remains model-free', () => {
+  assert.doesNotMatch(workflow, /^  recover:/m);
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
-  assert.ok(recoverStart > 0 && cloudOnceStart > recoverStart);
-  const recovery = workflow.slice(recoverStart, cloudOnceStart);
-  assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
-  assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|checks:\s*write/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
+  const recoveryStart = workflow.indexOf('- name: Recover missing admissions from open requests', cloudOnceStart);
+  const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudOnceStart);
+  assert.ok(cloudOnceStart > 0 && recoveryStart > cloudOnceStart && controlStart > recoveryStart);
+  const recovery = workflow.slice(recoveryStart, controlStart);
+  assert.match(recovery, /if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/);
+  assert.match(recovery, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|npm ci|docker|runtime sync/);
+  const cloudJobHeader = workflow.slice(cloudOnceStart, recoveryStart);
+  assert.match(cloudJobHeader, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
 });
 
-test('cloud worker runs lightweight control before executable-work preflight', () => {
+test('cloud worker runs repair and recovery before lightweight control and executable preflight', () => {
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   const repairStart = workflow.indexOf('- name: Repair authorized partial cloud state', cloudOnceStart);
+  const recoveryStart = workflow.indexOf('- name: Recover missing admissions from open requests', cloudOnceStart);
   const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudOnceStart);
   const preflightStart = workflow.indexOf('- name: Check lane for executable work', cloudOnceStart);
+  const installStart = workflow.indexOf('- name: Install frozen dependencies for executable work', cloudOnceStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
   const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick', cloudOnceStart);
   assert.ok(repairStart > cloudOnceStart);
-  assert.ok(controlStart > repairStart);
+  assert.ok(recoveryStart > repairStart);
+  assert.ok(controlStart > recoveryStart);
   assert.ok(preflightStart > controlStart);
-  assert.ok(runtimeStart > preflightStart);
+  assert.ok(installStart > preflightStart);
+  assert.ok(runtimeStart > installStart);
   assert.ok(tickStart > runtimeStart);
-  const control = workflow.slice(controlStart, preflightStart);
-  const preflight = workflow.slice(preflightStart, runtimeStart);
-  const admitStart = workflow.indexOf('  admit:');
-  const recoverJobStart = workflow.indexOf('  recover:');
-  assert.ok(admitStart > 0 && recoverJobStart > admitStart && cloudOnceStart > recoverJobStart);
-  const admit = workflow.slice(admitStart, recoverJobStart);
-  const recovery = workflow.slice(recoverJobStart, cloudOnceStart);
-  assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
-  assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
-  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\)/);
-  assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read[\s\S]*statuses: write/);
-  assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
-  assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
-  assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
-  const repair = workflow.slice(repairStart, controlStart);
+  const admitStart = workflow.indexOf('  admit:');
+  assert.ok(admitStart > 0 && cloudOnceStart > admitStart);
+  const admit = workflow.slice(admitStart, cloudOnceStart);
+  assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
+  assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}|npm ci/);
+  assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit\]/);
+
+  const repair = workflow.slice(repairStart, recoveryStart);
+  const recovery = workflow.slice(recoveryStart, controlStart);
+  const control = workflow.slice(controlStart, preflightStart);
+  const preflight = workflow.slice(preflightStart, installStart);
+  const install = workflow.slice(installStart, runtimeStart);
+
   assert.match(repair, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(repair, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(repair, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.doesNotMatch(repair, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY|npm ci/);
+
+  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY|npm ci/);
 
   assert.match(control, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(control, /inbox cloud-control-once --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(control, /CODEX_API_KEY|AGENT_GITHUB_TOKEN:|OPENAI_API_KEY|docker|runtime sync/);
+  assert.doesNotMatch(control, /CODEX_API_KEY|AGENT_GITHUB_TOKEN:|OPENAI_API_KEY|docker|runtime sync|npm ci/);
 
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(preflight, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ secrets\.AGENT_GITHUB_TOKEN != '' && 'true' \|\| 'false' \}\}/);
   assert.match(preflight, /inbox cloud-execution-peek --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(preflight, /website-pilot[\s\S]*cross_repo_credential_missing/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
-  assert.doesNotMatch(preflight, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
+  assert.doesNotMatch(preflight, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY|npm ci/m);
 
+  assert.match(install, /if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(install, /run: npm ci --ignore-scripts/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
@@ -193,13 +204,13 @@ test('cloud-once emits queue and autonomous results separately for auditability'
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 7);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
   assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 7);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
