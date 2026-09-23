@@ -33,6 +33,11 @@ function positiveInteger(value, label, { min = 1, max = 2_147_483_647 } = {}) {
   return value;
 }
 
+function boundedInteger(value, label, { min = -32_768, max = 65_535 } = {}) {
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`desktop_${label}_invalid`);
+  return value;
+}
+
 function exactKeys(value, expected, label) {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
@@ -81,8 +86,8 @@ function normalizeRequestShape(request) {
       exactKeys(request, ['action', 'x', 'y'], 'request');
       return {
         action,
-        x: positiveInteger(request.x, 'x', { min: 0, max: 65_535 }),
-        y: positiveInteger(request.y, 'y', { min: 0, max: 65_535 })
+        x: boundedInteger(request.x, 'x'),
+        y: boundedInteger(request.y, 'y')
       };
     case 'input.keys':
       exactKeys(request, ['action', 'keys', 'processId'], 'request');
