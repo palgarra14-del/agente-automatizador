@@ -398,12 +398,20 @@ function compactDryRun(dryRun) {
   };
 }
 
-function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {}) {
+function githubMention(login) {
+  return typeof login === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    ? `@${login}`
+    : null;
+}
+
+function startApprovalMessage(workflow, dryRun, token, { recovered = false, notifyLogin = null } = {}) {
   const summary = compactDryRun(dryRun);
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? 'Agent dry-run approval instruction recovered. No Codex call, project write, Git write, PR creation, or deployment was performed.'
       : 'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+    mention ? `${mention} — manual action required.` : null,
     '',
     `Workflow: \`${workflow.id}\``,
     `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
@@ -415,14 +423,16 @@ function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {
     '',
     'To reject this request, post exactly:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
-function workflowApprovalMessage(workflow, step, token, { recovered = false } = {}) {
+function workflowApprovalMessage(workflow, step, token, { recovered = false, notifyLogin = null } = {}) {
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? `Agent workflow approval instruction recovered for step \`${step.id}\` (skill \`${step.skill}\`).`
       : `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
+    mention ? `${mention} — manual action required.` : null,
     `Current workflow status: \`${workflow.status}\`.`,
     '',
     'Evidence bound to this approval fingerprint:',
@@ -433,7 +443,7 @@ function workflowApprovalMessage(workflow, step, token, { recovered = false } = 
     '',
     'Reject with:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
 const requestStatuses = new Set(['admitted', 'initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
@@ -1595,7 +1605,7 @@ export class SupervisedIssueQueue {
       lastProcessedCommentId: 0
     };
     await this.saveRecord(key, initialized);
-    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token, { notifyLogin: issue.user?.login ?? null }));
     return initialized;
   }
 
@@ -1695,7 +1705,7 @@ export class SupervisedIssueQueue {
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
     let approvalMessage = null;
     if (!already) {
-      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token, { notifyLogin: record.author }); }
       catch (error) {
         return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
       }
@@ -1898,7 +1908,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
             }
-            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true, notifyLogin: record.author });
           } else {
             const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
             if (!stepNeedsHumanApproval(targetStep)) {
@@ -1917,7 +1927,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
             }
-            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true, notifyLogin: record.author }); }
             catch (error) {
               return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
             }
@@ -2124,7 +2134,7 @@ export class SupervisedIssueQueue {
             updatedAt: this.now()
           };
           await this.saveRecord(key, next);
-          if (!already) await this.post(issue.number, `Agent start authorization is missing or stale. Approve the current dry-run with exactly:\n\`${approvalInstruction(expectedStart)}\``);
+          if (!already) await this.post(issue.number, [`Agent start authorization is missing or stale.`, `${githubMention(record.author) ?? 'Authorized operator'} — manual action required.`, 'Approve the current dry-run with exactly:', `\`${approvalInstruction(expectedStart)}\``].join('\n'));
           return next;
         }
         record = await this.saveRecord(key, {
