@@ -23,7 +23,8 @@ test('desktop request schema is strict and fingerprints normalized requests', ()
   assert.deepEqual(normalizeDesktopRequest({ action: 'system.info' }), { action: 'system.info' });
   assert.throws(() => normalizeDesktopRequest({ action: 'system.info', surprise: true }), /desktop_request_fields_invalid/);
   assert.throws(() => normalizeDesktopRequest({ action: 'url.open', url: 'file:///etc/passwd' }), /desktop_url_scheme_not_allowed/);
-  assert.throws(() => normalizeDesktopRequest({ action: 'input.click', x: -1, y: 10 }), /desktop_x_invalid/);
+  assert.deepEqual(normalizeDesktopRequest({ action: 'input.click', x: -1920, y: 10 }), { action: 'input.click', x: -1920, y: 10 });
+  assert.throws(() => normalizeDesktopRequest({ action: 'input.click', x: -32769, y: 10 }), /desktop_x_invalid/);
   assert.throws(() => normalizeDesktopRequest({ action: 'unknown' }), /desktop_action_not_supported/);
   assert.throws(() => normalizeDesktopRequest({ action: 'app.launch', executable: 'notepad.exe\ncalc.exe' }), /desktop_executable_invalid/);
   assert.throws(() => normalizeDesktopRequest({ action: 'app.launch', executable: 'notepad.exe\rcalc.exe' }), /desktop_executable_invalid/);
