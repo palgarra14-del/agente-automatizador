@@ -85,52 +85,17 @@ jobs:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm }
-      - run: npm ci --ignore-scripts
+        with: { node-version: 24 }
       - name: Persist create-only event intent
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: for _ in {1..30}; do node src/cli.js inbox cloud-admit --lane "$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1
 
-  recover:
-    name: recover cloud admissions (${{ matrix.lane }})
-    needs: route
-    if: needs.route.outputs.active == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    permissions:
-      contents: write
-      issues: read
-      statuses: write
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: ${{ fromJSON(needs.route.outputs.lanes) }}
-    concurrency:
-      group: agent-${{ matrix.lane }}-cloud
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-        with: { ref: main, persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm }
-      - run: npm ci --ignore-scripts
-      - name: Repair authorized partial cloud state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
-      - name: Recover missing admissions from open requests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
-
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
-    needs: [route, admit, recover]
-    if: always() && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped') && (needs.recover.result == 'success' || needs.recover.result == 'skipped')
+    needs: [route, admit]
+    if: always() && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -151,16 +116,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-
-      - name: Install frozen dependencies
-        run: npm ci --ignore-scripts
 
       - name: Repair authorized partial cloud state
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
+
+      - name: Recover missing admissions from open requests
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
 
       - name: Run lightweight cloud control tick
         env:
@@ -189,6 +157,17 @@ jobs:
           fi
           echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
           echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"
+
+      - name: Restore npm cache for executable work
+        if: steps.preflight.outputs.has_work == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frozen dependencies for executable work
+        if: steps.preflight.outputs.has_work == 'true'
+        run: npm ci --ignore-scripts
 
       - name: Prepare exact cloud runtime
         if: steps.preflight.outputs.has_work == 'true'
