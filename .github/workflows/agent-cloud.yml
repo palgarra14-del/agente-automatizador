@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm }
+        with: { node-version: 24 }
       - name: Persist create-only event intent
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -116,7 +116,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
 
       - name: Repair authorized partial cloud state
         env:
@@ -158,6 +157,13 @@ jobs:
           fi
           echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
           echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"
+
+      - name: Restore npm cache for executable work
+        if: steps.preflight.outputs.has_work == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
 
       - name: Install frozen dependencies for executable work
         if: steps.preflight.outputs.has_work == 'true'
