@@ -398,12 +398,20 @@ function compactDryRun(dryRun) {
   };
 }
 
-function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {}) {
+function githubMention(login) {
+  return typeof login === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    ? `@${login}`
+    : null;
+}
+
+function startApprovalMessage(workflow, dryRun, token, { recovered = false, notifyLogin = null } = {}) {
   const summary = compactDryRun(dryRun);
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? 'Agent dry-run approval instruction recovered. No Codex call, project write, Git write, PR creation, or deployment was performed.'
       : 'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+    mention ? `${mention} — manual action required.` : null,
     '',
     `Workflow: \`${workflow.id}\``,
     `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
@@ -415,14 +423,16 @@ function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {
     '',
     'To reject this request, post exactly:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
-function workflowApprovalMessage(workflow, step, token, { recovered = false } = {}) {
+function workflowApprovalMessage(workflow, step, token, { recovered = false, notifyLogin = null } = {}) {
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? `Agent workflow approval instruction recovered for step \`${step.id}\` (skill \`${step.skill}\`).`
       : `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
+    mention ? `${mention} — manual action required.` : null,
     `Current workflow status: \`${workflow.status}\`.`,
     '',
     'Evidence bound to this approval fingerprint:',
@@ -433,7 +443,7 @@ function workflowApprovalMessage(workflow, step, token, { recovered = false } = 
     '',
     'Reject with:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
 const requestStatuses = new Set(['admitted', 'initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
@@ -1595,7 +1605,7 @@ export class SupervisedIssueQueue {
       lastProcessedCommentId: 0
     };
     await this.saveRecord(key, initialized);
-    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token, { notifyLogin: issue.user?.login ?? null }));
     return initialized;
   }
 
@@ -1695,7 +1705,7 @@ export class SupervisedIssueQueue {
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
     let approvalMessage = null;
     if (!already) {
-      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token, { notifyLogin: record.author }); }
       catch (error) {
         return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
       }
@@ -1898,7 +1908,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
             }
-            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true, notifyLogin: record.author });
           } else {
             const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
             if (!stepNeedsHumanApproval(targetStep)) {
@@ -1917,7 +1927,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
             }
-            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true, notifyLogin: record.author }); }
             catch (error) {
               return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
             }
@@ -2124,7 +2134,7 @@ export class SupervisedIssueQueue {
             updatedAt: this.now()
           };
           await this.saveRecord(key, next);
-          if (!already) await this.post(issue.number, `Agent start authorization is missing or stale. Approve the current dry-run with exactly:\n\`${approvalInstruction(expectedStart)}\``);
+          if (!already) await this.post(issue.number, [`Agent start authorization is missing or stale.`, `${githubMention(record.author) ?? 'Authorized operator'} — manual action required.`, 'Approve the current dry-run with exactly:', `\`${approvalInstruction(expectedStart)}\``].join('\n'));
           return next;
         }
         record = await this.saveRecord(key, {
@@ -2238,10 +2248,22 @@ export class SupervisedIssueQueue {
         notificationError ??= error;
       }
     }
-    for (const [key, record] of Object.entries(state.requests ?? {})) {
-      if (!key.startsWith(keyPrefix) ||
-          !this.ownsRecord(record) ||
-          ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
+    let parkedResult = null;
+    const maxParkedScans = 20;
+    const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
+    const activeEntries = Object.entries(state.requests ?? {})
+      .filter(([key, record]) =>
+        key.startsWith(keyPrefix) &&
+        this.ownsRecord(record) &&
+        !['completed', 'failed', 'blocked', 'rejected'].includes(record.status)
+      );
+    const activeKeys = new Set(activeEntries.map(([key]) => key));
+    const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
+    const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
+    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
+      ? []
+      : allParkedEntries.slice(0, maxParkedScans);
+    for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
           issue.state !== 'open' ||
@@ -2260,15 +2282,22 @@ export class SupervisedIssueQueue {
         return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
       }
       const activeResult = await this.processIssue(issue);
-      if (activeResult) return activeResult;
+      if (!activeResult) continue;
+      if (['awaiting_start_approval', 'awaiting_workflow_approval', 'execution_deferred'].includes(activeResult.status)) {
+        parkedResult ??= activeResult;
+        continue;
+      }
+      return activeResult;
     }
     if (this.includedProjectIds !== null) {
       if (notificationError) throw notificationError;
-      return null;
+      return parkedResult;
     }
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
     for (const issue of issues) {
+      const issueKey = this.requestKey(issue);
+      if (activeKeys.has(issueKey)) continue;
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
       let routingRequest = null;
       try { routingRequest = parseIssueRequestBody(issue.body).request; }
@@ -2276,7 +2305,7 @@ export class SupervisedIssueQueue {
         if (this.includedProjectIds !== null) continue;
       }
       if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
-      const existing = await this.getRecord(this.requestKey(issue));
+      const existing = await this.getRecord(issueKey);
       if (existing && !this.ownsRecord(existing)) continue;
       if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
       if (!existing && this.operatorRevision) {
@@ -2295,7 +2324,7 @@ export class SupervisedIssueQueue {
       if (result) return result;
     }
     if (notificationError) throw notificationError;
-    return null;
+    return parkedResult;
   }
 }
 

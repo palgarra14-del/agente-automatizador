@@ -19,9 +19,28 @@ ${JSON.stringify({
   scope: { allowedPaths: ['src'] }
 })}`;
 
-test('scheduled and manual recovery route every trusted configured lane', () => {
+test('scheduled, manual and trusted main wakeups route every configured lane', () => {
+  assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), ['self', 'website-pilot', 'callflow']);
   assert.deepEqual(routeCloudLanes({ eventName: 'schedule', config }), ['self', 'website-pilot', 'callflow']);
   assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'callflow']);
+});
+
+test('workflow dispatch continuation may target exactly one configured lane', () => {
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'callflow',
+    config
+  }), ['callflow']);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: '../escape',
+    config
+  }), /requested_lane_invalid/);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'unknown',
+    config
+  }), /requested_lane_invalid/);
 });
 
 test('issue events route a valid request to exactly its configured owning lane', () => {

@@ -9,6 +9,7 @@ test('autonomous regression directory is discovered and root-of-trust files stay
     'src/core.js',
     'src/cloud-state.js',
     'src/cloud-workflow-engine.js',
+    'src/cloud-drain.js',
     'src/cli.js',
     'src/issue-queue.js',
     'src/capabilities.js',

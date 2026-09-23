@@ -412,6 +412,31 @@ test('new issue requests initialize normally when operator checkout matches main
   assert.equal(Object.keys((await store.load()).requests ?? {}).length, 1);
 });
 
+test('manual approval comments mention the authorized issue author for mobile notification', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+  assert.equal(record.status, 'awaiting_start_approval');
+  assert.match(channel.posted.at(-1).body, /@palgarra14-del — manual action required\./);
+  assert.match(channel.posted.at(-1).body, new RegExp(record.pendingApproval.fingerprint));
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { ok: true };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, {
+    id: 250,
+    login: 'palgarra14-del',
+    body: `/agent approve ${record.pendingApproval.fingerprint}`
+  });
+  record = await queue.tick();
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  assert.match(channel.posted.at(-1).body, /@palgarra14-del — manual action required\./);
+  assert.match(channel.posted.at(-1).body, new RegExp(record.pendingApproval.fingerprint));
+});
+
 test('existing active issue request continues without remote revision gating', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'a'.repeat(40);
@@ -482,6 +507,171 @@ test('control-only queue persists approvals but defers repository execution', as
   });
   await executionQueue.tick();
   assert.equal(workflowEngine.runCalls.some((options) => options.dryRun !== true), true);
+});
+
+test('cloud queue parks approval-gated requests and advances independent runnable work', async () => {
+  const records = {
+    'palgarra14-del/agente-automatizador#1': {
+      issueNumber: 1, issueId: 1001, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_workflow_approval'
+    },
+    'palgarra14-del/agente-automatizador#2': {
+      issueNumber: 2, issueId: 1002, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'running'
+    }
+  };
+  const store = { load: async () => ({ requests: records }) };
+  const issues = new Map([
+    [1, { number: 1, id: 1001, state: 'open', body: requestBody(), user: { login: 'palgarra14-del' } }],
+    [2, { number: 2, id: 1002, state: 'open', body: requestBody(), user: { login: 'palgarra14-del' } }]
+  ]);
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => clone(issues.get(number))
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return issue.number === 1
+      ? { status: 'awaiting_workflow_approval', issueNumber: 1 }
+      : { status: 'running', issueNumber: 2 };
+  };
+
+  const result = await queue.tick();
+  assert.deepEqual(seen, [1, 2]);
+  assert.equal(result.status, 'running');
+  assert.equal(result.issueNumber, 2);
+});
+
+test('cloud queue returns a parked approval gate only after checking other active requests', async () => {
+  const records = Object.fromEntries([1, 2].map((number) => [
+    `palgarra14-del/agente-automatizador#${number}`,
+    {
+      issueNumber: number, issueId: 2000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    }
+  ]));
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 2000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  const result = await queue.tick();
+  assert.deepEqual(seen, [1, 2]);
+  assert.equal(result.status, 'awaiting_start_approval');
+  assert.equal(result.issueNumber, 1);
+});
+
+test('runnable cloud work is not starved behind more parked approvals than the scan cap', async () => {
+  const records = {};
+  for (let number = 1; number <= 25; number += 1) {
+    records[`palgarra14-del/agente-automatizador#${number}`] = {
+      issueNumber: number, issueId: 4000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    };
+  }
+  records['palgarra14-del/agente-automatizador#26'] = {
+    issueNumber: 26, issueId: 4026, author: 'palgarra14-del',
+    request: { projectId: 'callflow' }, status: 'running'
+  };
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 4000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return issue.number === 26
+      ? { status: 'running', issueNumber: 26 }
+      : { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  const result = await queue.tick();
+  assert.deepEqual(seen, [26]);
+  assert.equal(result.status, 'running');
+  assert.equal(result.issueNumber, 26);
+});
+
+test('cloud queue bounds approval-gated scans so a large parked backlog cannot monopolize a tick', async () => {
+  const records = {};
+  for (let number = 1; number <= 25; number += 1) {
+    records[`palgarra14-del/agente-automatizador#${number}`] = {
+      issueNumber: number, issueId: 3000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    };
+  }
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 3000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  let scans = 0;
+  queue.processIssue = async (issue) => {
+    scans += 1;
+    return { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  const result = await queue.tick();
+  assert.equal(scans, 20);
+  assert.equal(result.issueNumber, 1);
+  assert.equal(result.status, 'awaiting_start_approval');
 });
 
 test('execution work detection ignores approvals and rejects invalid execution mode', async () => {

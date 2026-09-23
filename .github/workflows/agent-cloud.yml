@@ -1,11 +1,25 @@
 name: Agent Cloud Worker
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/agent-cloud.yml'
+      - 'src/**'
+      - 'config/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
   issues:
     types: [opened, edited, reopened]
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:
+      lane:
+        description: Trusted cloud lane for bounded continuation
+        required: false
+        type: string
   schedule:
     - cron: '17 */6 * * *'
 
@@ -21,6 +35,7 @@ jobs:
   route:
     name: route cloud lanes
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (
@@ -33,7 +48,7 @@ jobs:
       )
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 5
     outputs:
       active: ${{ steps.wakeup.outputs.active }}
@@ -63,6 +78,7 @@ jobs:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
           AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
+          AGENT_CLOUD_REQUESTED_LANE: ${{ inputs.lane }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
           node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
@@ -79,7 +95,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: ${{ fromJSON(needs.route.outputs.lanes) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -108,7 +124,7 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -138,7 +154,7 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 35
     steps:
       - name: Checkout trusted main
@@ -197,7 +213,8 @@ jobs:
           node src/cli.js runtime sync
           docker run --rm --entrypoint git agent-node22-pnpm11:local --version
 
-      - name: Run one governed cloud queue tick
+      - name: Drain governed cloud work continuously
+        id: drain
         if: steps.preflight.outputs.has_work == 'true'
         shell: bash
         env:
@@ -205,4 +222,43 @@ jobs:
           AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
+        run: |
+          RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
+          node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          cat "$RESULT_FILE"
+          CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
+          echo "continue=$CONTINUE" >> "$GITHUB_OUTPUT"
+
+      - name: Continue same lane while governed work remains
+        if: steps.drain.outputs.continue == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: |
+          node --input-type=module <<'NODE'
+          const lane = process.env.AGENT_CLOUD_LANE ?? '';
+          const repository = process.env.GITHUB_REPOSITORY ?? '';
+          const token = process.env.GITHUB_TOKEN ?? '';
+          if (!/^[a-z0-9-]{1,80}$/.test(lane)) throw new Error('cloud_continuation_lane_invalid');
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('cloud_continuation_repository_invalid');
+          if (!token) throw new Error('cloud_continuation_token_missing');
+          const response = await fetch(
+            `https://api.github.com/repos/${repository}/actions/workflows/agent-cloud.yml/dispatches`,
+            {
+              method: 'POST',
+              headers: {
+                Accept: 'application/vnd.github+json',
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'agente-automatizador-cloud-continuation',
+                'X-GitHub-Api-Version': '2022-11-28'
+              },
+              body: JSON.stringify({ ref: 'main', inputs: { lane } })
+            }
+          );
+          if (response.status !== 204) {
+            throw new Error(`cloud_continuation_dispatch_failed:${response.status}`);
+          }
+          NODE
