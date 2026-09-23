@@ -914,6 +914,7 @@ export class SupervisedIssueQueue {
     operatorBranch = 'main',
     includedProjectIds = null,
     excludedProjectIds = [],
+    executionEnabled = true,
     now = () => new Date().toISOString()
   } = {}) {
     if (!store || !projects || !workflowEngine || !channel) throw new Error('SupervisedIssueQueue requires store, projects, workflowEngine, and channel');
@@ -940,8 +941,10 @@ export class SupervisedIssueQueue {
     if (this.includedProjectIds && [...this.includedProjectIds].some((id) => this.excludedProjectIds.has(id))) {
       throw new Error('SupervisedIssueQueue project routing overlaps include/exclude sets');
     }
+    if (typeof executionEnabled !== 'boolean') throw new Error('SupervisedIssueQueue executionEnabled must be boolean');
     this.operatorRevision = operatorRevision?.toLowerCase() ?? null;
     this.operatorBranch = operatorBranch;
+    this.executionEnabled = executionEnabled;
     this.now = now;
   }
 
@@ -953,6 +956,27 @@ export class SupervisedIssueQueue {
 
   ownsRecord(record) {
     return this.ownsProject(record?.request?.projectId ?? null);
+  }
+
+  executionDeferred(record) {
+    return {
+      issueNumber: record?.issueNumber ?? null,
+      workflowId: record?.workflowId ?? null,
+      status: 'execution_deferred',
+      reason: 'execution_disabled',
+      queueStatus: record?.status ?? null,
+      updatedAt: this.now()
+    };
+  }
+
+  async hasExecutionWork() {
+    const state = await this.store.load();
+    const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
+    return Object.entries(state.requests ?? {}).some(([key, record]) =>
+      key.startsWith(keyPrefix) &&
+      this.ownsRecord(record) &&
+      record?.status === 'running'
+    );
   }
 
   admissionIntent(issue, parsed) {
@@ -1951,6 +1975,7 @@ export class SupervisedIssueQueue {
         });
         const activeStart = await this.revalidateActiveApproval(issue, key, record);
         if (!activeStart.ok) return activeStart.record;
+        if (!this.executionEnabled) return this.executionDeferred(record);
         const result = await this.workflowEngine.run(record.workflowId, { refreshPristineDeadline: true });
         return this.settleWorkflow(issue, key, record, result);
       }
@@ -2002,6 +2027,7 @@ export class SupervisedIssueQueue {
               });
               const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
               if (!recoveredApproval.ok) return recoveredApproval.record;
+              if (!this.executionEnabled) return this.executionDeferred(record);
               const result = await this.workflowEngine.run(record.workflowId);
               return this.settleWorkflow(issue, key, record, result);
             }
@@ -2051,6 +2077,7 @@ export class SupervisedIssueQueue {
         });
         const activeWorkflowApproval = await this.revalidateActiveApproval(issue, key, record);
         if (!activeWorkflowApproval.ok) return activeWorkflowApproval.record;
+        if (!this.executionEnabled) return this.executionDeferred(record);
         const result = await this.workflowEngine.run(record.workflowId);
         return this.settleWorkflow(issue, key, record, result);
       }
@@ -2114,15 +2141,18 @@ export class SupervisedIssueQueue {
         const recoveredStart = await this.revalidateActiveApproval(issue, key, record);
         if (!recoveredStart.ok) return recoveredStart.record;
       }
+      if (!this.executionEnabled) return this.executionDeferred(record);
       const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.RUNNING) {
+      if (!this.executionEnabled) return this.executionDeferred(record);
       const result = await this.workflowEngine.resume(workflow.id);
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.BLOCKED &&
         workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
+      if (!this.executionEnabled) return this.executionDeferred(record);
       const result = await this.workflowEngine.resume(workflow.id);
       return this.settleWorkflow(issue, key, record, result);
     }

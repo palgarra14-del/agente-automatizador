@@ -131,16 +131,19 @@ test('scheduled recovery has the minimum commit-status authority required by Clo
   assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
 });
 
-test('cloud worker repairs authorized partial state before recovery and read-only preflight', () => {
+test('cloud worker runs lightweight control before executable-work preflight', () => {
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   const repairStart = workflow.indexOf('- name: Repair authorized partial cloud state', cloudOnceStart);
-  const preflightStart = workflow.indexOf('- name: Check lane for governed work', cloudOnceStart);
+  const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudOnceStart);
+  const preflightStart = workflow.indexOf('- name: Check lane for executable work', cloudOnceStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
   const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick', cloudOnceStart);
   assert.ok(repairStart > cloudOnceStart);
-  assert.ok(preflightStart > repairStart);
+  assert.ok(controlStart > repairStart);
+  assert.ok(preflightStart > controlStart);
   assert.ok(runtimeStart > preflightStart);
   assert.ok(tickStart > runtimeStart);
+  const control = workflow.slice(controlStart, preflightStart);
   const preflight = workflow.slice(preflightStart, runtimeStart);
   const admitStart = workflow.indexOf('  admit:');
   const recoverJobStart = workflow.indexOf('  recover:');
@@ -155,17 +158,29 @@ test('cloud worker repairs authorized partial state before recovery and read-onl
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
-  const repair = workflow.slice(repairStart, preflightStart);
+
+  const repair = workflow.slice(repairStart, controlStart);
   assert.match(repair, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(repair, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
   assert.doesNotMatch(repair, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+
+  assert.match(control, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(control, /inbox cloud-control-once --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(control, /CODEX_API_KEY|AGENT_GITHUB_TOKEN:|OPENAI_API_KEY|docker|runtime sync/);
+
   assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.doesNotMatch(preflight, /cloud-admit|cloud-recover/); assert.match(preflight, /inbox cloud-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(preflight, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ secrets\.AGENT_GITHUB_TOKEN != '' && 'true' \|\| 'false' \}\}/);
+  assert.match(preflight, /inbox cloud-execution-peek --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(preflight, /website-pilot[\s\S]*cross_repo_credential_missing/);
   assert.match(preflight, /has_work=\$HAS_WORK/);
-  assert.doesNotMatch(preflight, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.doesNotMatch(preflight, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
+
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
-  assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /ingestAdmissionIntents\(\)[\s\S]*queue\.tick\(\)/);
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /cloud-control-once/);
+  assert.match(cli, /cloud-execution-peek/);
+  assert.match(cli, /executionEnabled: action !== 'cloud-control-once'/);
 });
 
 test('cloud-once emits queue and autonomous results separately for auditability', () => {
@@ -178,12 +193,13 @@ test('cloud-once emits queue and autonomous results separately for auditability'
 });
 
 test('model and cross-repo credentials exist only at the governed queue step', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 7);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
+  assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 7);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
