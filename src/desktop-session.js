@@ -34,7 +34,8 @@ async function ensureDirectory(path) {
     info = await lstat(path);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    await mkdir(path, { mode: 0o700 });
+    try { await mkdir(path, { mode: 0o700 }); }
+    catch (mkdirError) { if (mkdirError.code !== 'EEXIST') throw mkdirError; }
     info = await lstat(path);
   }
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('desktop_session_store_directory_invalid');
