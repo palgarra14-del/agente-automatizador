@@ -1,9 +1,13 @@
 const DEFAULT_MAX_ITERATIONS = 8;
 const DEFAULT_MAX_DURATION_MS = 20 * 60 * 1000;
 
-const HUMAN_GATE_STATUSES = new Set([
+const PARKED_APPROVAL_STATUSES = new Set([
   'awaiting_start_approval',
-  'awaiting_workflow_approval',
+  'awaiting_workflow_approval'
+]);
+
+const HUMAN_GATE_STATUSES = new Set([
+  ...PARKED_APPROVAL_STATUSES,
   'execution_deferred',
   'operator_update_pending',
   'operator_revision_check_failed'
@@ -18,9 +22,7 @@ function integerInRange(value, fallback, label, min, max) {
 }
 
 function shouldRunAutonomous(queueResult) {
-  return !queueResult ||
-    queueResult.status === 'awaiting_start_approval' ||
-    queueResult.status === 'awaiting_workflow_approval';
+  return !queueResult || PARKED_APPROVAL_STATUSES.has(queueResult.status);
 }
 
 export async function runCloudDrain({
@@ -75,12 +77,13 @@ export async function runCloudDrain({
     });
 
     const humanGate = Boolean(queueResult && HUMAN_GATE_STATUSES.has(queueResult.status));
+    const parkedApprovalGate = Boolean(queueResult && PARKED_APPROVAL_STATUSES.has(queueResult.status));
     const autonomousHasWork = autonomousSelfImprovement
       ? await autonomousSelfImprovement.hasWork()
       : false;
 
     if (humanGate) {
-      if (!autonomousHasWork) {
+      if (!parkedApprovalGate || !autonomousHasWork) {
         stopReason = 'human_gate';
         break;
       }
