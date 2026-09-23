@@ -12,6 +12,7 @@ import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousSelfImprovement } from './self-improvement.js';
 import { WindowsDesktopBridge } from './desktop-bridge.js';
 import { CodexDesktopPlanner } from './desktop-planner.js';
+import { DesktopTaskSessionEngine, FileDesktopSessionStore } from './desktop-session.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -115,7 +116,35 @@ try {
         ...planned,
         actionPlan: planned.decision.status === 'act' ? desktop.plan(planned.decision.action) : null
       }, null, 2));
-    } else throw new Error('Usage: agent desktop <status|next --goal "..."|plan --request request.json|execute --request request.json [--approve fingerprint]>');
+    } else if (action === 'session') {
+      const sessionAction = args[2] ?? 'status';
+      const planner = new CodexDesktopPlanner();
+      const engine = new DesktopTaskSessionEngine({
+        store: new FileDesktopSessionStore(),
+        bridge: desktop,
+        planner
+      });
+      if (sessionAction === 'start') {
+        const goal = take('--goal');
+        if (!goal) throw new Error('desktop session start requires --goal "..."');
+        const rawMaxActions = take('--max-actions');
+        const maxActions = rawMaxActions === undefined ? 30 : Number(rawMaxActions);
+        const started = await engine.start(goal, { maxActions });
+        console.log(JSON.stringify(await engine.step(started.id), null, 2));
+      } else if (sessionAction === 'step') {
+        const sessionId = args[3];
+        if (!sessionId) throw new Error('desktop session step requires <session-id>');
+        console.log(JSON.stringify(await engine.step(sessionId, {
+          approvedFingerprint: take('--approve') ?? null
+        }), null, 2));
+      } else if (sessionAction === 'status') {
+        const sessionId = args[3];
+        if (!sessionId) throw new Error('desktop session status requires <session-id>');
+        console.log(JSON.stringify(await engine.get(sessionId), null, 2));
+      } else {
+        throw new Error('Usage: agent desktop session <start --goal "..." [--max-actions N]|step <session-id> [--approve fingerprint]|status <session-id>>');
+      }
+    } else throw new Error('Usage: agent desktop <status|next --goal "..."|session <start --goal "..." [--max-actions N]|step <session-id> [--approve fingerprint]|status <session-id>>|plan --request request.json|execute --request request.json [--approve fingerprint]>');
   } else if (command === 'runtime') {
     const action = args[1] ?? 'status';
     const registeredProjects = [...projects.values()];
