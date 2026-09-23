@@ -75,7 +75,7 @@
       "budgets": {
         "maxIterations": 3,
         "maxTasks": 10,
-        "maxRuntimeMinutes": 10,
+        "maxRuntimeMinutes": 15,
         "maxModelCalls": 6,
         "maxWorkerAttempts": 2,
         "commandTimeoutMs": 30000,
