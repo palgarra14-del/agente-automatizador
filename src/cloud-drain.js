@@ -74,15 +74,26 @@ export async function runCloudDrain({
       autonomousResult
     });
 
-    if (queueResult && HUMAN_GATE_STATUSES.has(queueResult.status)) {
-      stopReason = 'human_gate';
-      break;
-    }
-
-    const queueHasWork = await queue.hasWork();
+    const humanGate = Boolean(queueResult && HUMAN_GATE_STATUSES.has(queueResult.status));
     const autonomousHasWork = autonomousSelfImprovement
       ? await autonomousSelfImprovement.hasWork()
       : false;
+
+    if (humanGate) {
+      if (!autonomousHasWork) {
+        stopReason = 'human_gate';
+        break;
+      }
+      const afterIteration = now();
+      if (!Number.isFinite(afterIteration)) throw new Error('cloud_drain_clock_invalid');
+      if (afterIteration - startedAt >= durationLimitMs) {
+        stopReason = 'duration_limit';
+        break;
+      }
+      continue;
+    }
+
+    const queueHasWork = await queue.hasWork();
 
     if (!queueHasWork && !autonomousHasWork) {
       stopReason = 'idle';
