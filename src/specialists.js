@@ -4,7 +4,7 @@ import { defaultToolSkillRegistry } from './capabilities.js';
 const idPattern = /^[a-z][a-z0-9.-]*$/;
 const modes = new Set(['read-only', 'workspace-write', 'verification', 'publication', 'human', 'reserved']);
 const modeSkillRisks = new Map([
-  ['read-only', new Set(['workspace-read'])],
+  ['read-only', new Set(['workspace-read', 'network-read'])],
   ['workspace-write', new Set(['workspace-write'])],
   ['verification', new Set(['workspace-execution', 'network-workspace-execution'])],
   ['publication', new Set(['external-write'])],
@@ -109,6 +109,7 @@ export const defaultSpecialists = Object.freeze([
   { id: 'dependency-manager', mode: 'verification', skills: ['project.dependencies.refresh'], authority: 'network-workspace-execution', executor: 'ProjectCommandRunner', description: 'Runs one approved frozen dependency refresh without lifecycle scripts, then proves the governed diff is unchanged.' },
   { id: 'release-manager', mode: 'publication', skills: ['release.publish-reviewed-workflow'], authority: 'external-write', executor: 'WorkflowPublicationBridge', description: 'Publishes a verified change for human review without merge or production deployment.' },
   { id: 'human-supervisor', mode: 'human', skills: ['human.approval'], authority: 'human-approval', executor: 'WorkflowApproval', description: 'Provides explicit human checkpoints.' },
+  { id: 'visual-reviewer', mode: 'read-only', skills: ['visual.review'], authority: 'network-read', executor: 'BrowserQaCoordinator', description: 'Runs bounded deterministic browser QA against the exact published preview.' },
   { id: 'researcher', mode: 'reserved', skills: ['research.web'], authority: 'unavailable', executor: null, description: 'Reserved for future reviewed web research.' },
   { id: 'business-analyst', mode: 'reserved', skills: ['business.analyze'], authority: 'unavailable', executor: null, description: 'Reserved for future business analysis.' },
   { id: 'requirements-engineer', mode: 'read-only', skills: ['website.plan'], authority: 'workspace-read', executor: 'CodexReadOnlySkillExecutor', description: 'Turns a validated business brief and repository context into a factual structured website plan without writes or web research.' },
