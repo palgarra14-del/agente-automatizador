@@ -39,6 +39,8 @@ test('desktop action risk keeps observation separate from host interaction', () 
   assert.equal(desktopActionRequiresApproval('system.info'), false);
   assert.equal(desktopActionRisk('window.list'), 'host-read');
   assert.equal(desktopActionRequiresApproval('window.list'), false);
+  assert.equal(desktopActionRisk('screen.capture'), 'host-read');
+  assert.equal(desktopActionRequiresApproval('screen.capture'), false);
   assert.equal(desktopActionRisk('input.keys'), 'interactive-host-write');
   assert.equal(desktopActionRequiresApproval('input.keys'), true);
 });
@@ -52,6 +54,15 @@ test('PowerShell rendering carries untrusted values only inside an encoded JSON 
   const encoded = encodePowerShellCommand(script);
   assert.match(encoded, /^[A-Za-z0-9+/=]+$/);
   assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), script);
+});
+
+test('screen capture is bounded read-only observation and uses a compressed payload', () => {
+  const script = renderDesktopPowerShell({ action: 'screen.capture' });
+  assert.match(script, /CopyFromScreen/);
+  assert.match(script, /image\/jpeg/);
+  assert.match(script, /750000/);
+  assert.match(script, /1280/);
+  assert.equal(desktopActionRequiresApproval('screen.capture'), false);
 });
 
 test('read-only desktop observation executes without approval and strips secret environment variables', async () => {
