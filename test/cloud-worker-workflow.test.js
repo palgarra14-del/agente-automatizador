@@ -137,7 +137,7 @@ test('cloud worker runs lightweight control before executable-work preflight', (
   const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudOnceStart);
   const preflightStart = workflow.indexOf('- name: Check lane for executable work', cloudOnceStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
-  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick', cloudOnceStart);
+  const tickStart = workflow.indexOf('- name: Drain governed cloud work continuously', cloudOnceStart);
   assert.ok(repairStart > cloudOnceStart);
   assert.ok(controlStart > repairStart);
   assert.ok(preflightStart > controlStart);
@@ -176,7 +176,7 @@ test('cloud worker runs lightweight control before executable-work preflight', (
   assert.doesNotMatch(preflight, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
 
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
-  assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(workflow, /- name: Drain governed cloud work continuously\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   assert.match(cli, /cloud-control-once/);
   assert.match(cli, /cloud-execution-peek/);
@@ -192,6 +192,15 @@ test('cloud-once emits queue and autonomous results separately for auditability'
   assert.match(cli, /autonomous: result\.autonomousResult/);
 });
 
+test('production cloud execution uses the bounded drain while retaining cloud-once for diagnostics', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /action === 'cloud-drain'/);
+  assert.match(cli, /runCloudDrain\(\{[\s\S]*queue,[\s\S]*autonomousSelfImprovement/);
+  assert.match(cli, /stopReason: result\.stopReason/);
+  assert.match(cli, /iterations: result\.iterations\.map/);
+  assert.match(cli, /action === 'cloud-once'/);
+});
+
 test('model and cross-repo credentials exist only at the governed queue step', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 7);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
@@ -204,7 +213,7 @@ test('model and cross-repo credentials exist only at the governed queue step', (
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
-  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
 });
 
 test('cloud worker has no merge or production deployment command surface', () => {
