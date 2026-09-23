@@ -2249,19 +2249,21 @@ export class SupervisedIssueQueue {
       }
     }
     let parkedResult = null;
-    let parkedScans = 0;
     const maxParkedScans = 20;
+    const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
     const activeEntries = Object.entries(state.requests ?? {})
       .filter(([key, record]) =>
         key.startsWith(keyPrefix) &&
         this.ownsRecord(record) &&
         !['completed', 'failed', 'blocked', 'rejected'].includes(record.status)
-      )
-      .sort((left, right) => {
-        const parked = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
-        return Number(parked.has(left[1].status)) - Number(parked.has(right[1].status));
-      });
-    for (const [key, record] of activeEntries) {
+      );
+    const activeKeys = new Set(activeEntries.map(([key]) => key));
+    const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
+    const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
+    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
+      ? []
+      : allParkedEntries.slice(0, maxParkedScans);
+    for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
           issue.state !== 'open' ||
@@ -2283,8 +2285,6 @@ export class SupervisedIssueQueue {
       if (!activeResult) continue;
       if (['awaiting_start_approval', 'awaiting_workflow_approval', 'execution_deferred'].includes(activeResult.status)) {
         parkedResult ??= activeResult;
-        parkedScans += 1;
-        if (parkedScans >= maxParkedScans) break;
         continue;
       }
       return activeResult;
@@ -2296,6 +2296,8 @@ export class SupervisedIssueQueue {
     const issues = await this.channel.openIssues();
     let remoteOperatorRevision = null;
     for (const issue of issues) {
+      const issueKey = this.requestKey(issue);
+      if (activeKeys.has(issueKey)) continue;
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
       let routingRequest = null;
       try { routingRequest = parseIssueRequestBody(issue.body).request; }
@@ -2303,7 +2305,7 @@ export class SupervisedIssueQueue {
         if (this.includedProjectIds !== null) continue;
       }
       if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
-      const existing = await this.getRecord(this.requestKey(issue));
+      const existing = await this.getRecord(issueKey);
       if (existing && !this.ownsRecord(existing)) continue;
       if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
       if (!existing && this.operatorRevision) {
