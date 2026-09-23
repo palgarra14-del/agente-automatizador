@@ -61,6 +61,17 @@ function normalizeScreenCapture(screen) {
   };
 }
 
+function normalizeHistory(history = []) {
+  if (!Array.isArray(history) || history.length > 20) throw new Error('desktop_planner_history_invalid');
+  return history.map((entry, index) => {
+    exactKeys(entry, ['action', 'outcome'], `history_item_${index}`);
+    return {
+      action: boundedText(entry.action, 'history_action', 120),
+      outcome: boundedText(entry.outcome, 'history_outcome', 1_000)
+    };
+  });
+}
+
 function normalizeWindows(windows) {
   exactKeys(windows, ['action', 'items'], 'windows');
   if (windows.action !== 'window.list' || !Array.isArray(windows.items) || windows.items.length > maxWindows) {
@@ -108,8 +119,9 @@ export function normalizeDesktopPlannerDecision(value) {
   throw new Error('desktop_planner_status_invalid');
 }
 
-export function buildDesktopPlannerPrompt({ goal, screen, windows }) {
+export function buildDesktopPlannerPrompt({ goal, screen, windows, history = [] }) {
   const safeGoal = boundedText(goal, 'goal', maxGoalLength);
+  const safeHistory = normalizeHistory(history);
   const screenMetadata = { ...screen };
   return [
     'You are the perception and decision component of a governed Windows desktop agent.',
@@ -132,7 +144,8 @@ export function buildDesktopPlannerPrompt({ goal, screen, windows }) {
     '',
     `User goal: ${safeGoal}`,
     `Screen metadata: ${JSON.stringify(screenMetadata)}`,
-    `Visible windows: ${JSON.stringify(windows)}`
+    `Visible windows: ${JSON.stringify(windows)}`,
+    `Prior action history: ${JSON.stringify(safeHistory)}`
   ].join('\n');
 }
 
@@ -160,11 +173,12 @@ export class CodexDesktopPlanner {
     Object.assign(this, { CodexClient, environment, codexHomeFactory, home: resolve(home), platform, nativeRuntimePath });
   }
 
-  async plan({ goal, screen, windows }, { timeoutMs = 45_000 } = {}) {
+  async plan({ goal, screen, windows, history = [] }, { timeoutMs = 45_000 } = {}) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) throw new Error('desktop_planner_timeout_invalid');
     const normalizedGoal = boundedText(goal, 'goal', maxGoalLength);
     const normalizedScreen = normalizeScreenCapture(screen);
     const normalizedWindows = normalizeWindows(windows);
+    const normalizedHistory = normalizeHistory(history);
     const security = codexWorkerSecurityConfig({
       writeAccess: false,
       pathValue: this.environment.PATH ?? '',
@@ -187,7 +201,8 @@ export class CodexDesktopPlanner {
       await writeFile(resolve(workspace.path, 'observation.json'), JSON.stringify({
         goal: normalizedGoal,
         screen: normalizedScreen.metadata,
-        windows: normalizedWindows
+        windows: normalizedWindows,
+        history: normalizedHistory
       }, null, 2), { mode: 0o600, flag: 'wx' });
 
       isolatedHome = await this.codexHomeFactory(this.environment);
@@ -200,7 +215,8 @@ export class CodexDesktopPlanner {
       const turn = await thread.run(buildDesktopPlannerPrompt({
         goal: normalizedGoal,
         screen: normalizedScreen.metadata,
-        windows: normalizedWindows
+        windows: normalizedWindows,
+        history: normalizedHistory
       }), { signal: controller.signal });
       const raw = String(turn.finalResponse ?? '').trim();
       const outputBytes = Buffer.byteLength(raw);
