@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const projects = JSON.parse(readFileSync(new URL('../../config/projects.json', import.meta.url), 'utf8'));
+
+test('self-maintenance has enough bounded runtime to finish on the local runner', () => {
+  const self = projects.projects.find((project) => project.id === 'self');
+  assert.ok(self);
+  assert.equal(self.budgets.maxRuntimeMinutes, 15);
+  assert.ok(self.budgets.maxRuntimeMinutes < 20);
+});
