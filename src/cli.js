@@ -208,6 +208,8 @@ try {
         console.log(JSON.stringify({
           version: result.version,
           stopReason: result.stopReason,
+          remainingWork: result.remainingWork,
+          continuationRecommended: result.continuationRecommended,
           elapsedMs: result.elapsedMs,
           limits: result.limits,
           iterations: result.iterations.map((iteration) => ({
