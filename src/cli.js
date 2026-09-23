@@ -192,12 +192,16 @@ try {
         const result = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
           const queueResult = await queue.tick();
+          let autonomousResult = null;
           if (autonomousSelfImprovement && (!queueResult || ['awaiting_start_approval', 'awaiting_workflow_approval'].includes(queueResult.status))) {
-            await autonomousSelfImprovement.tick();
+            autonomousResult = await autonomousSelfImprovement.tick();
           }
-          return queueResult;
+          return { queueResult, autonomousResult };
         });
-        console.log(JSON.stringify(view(result), null, 2));
+        console.log(JSON.stringify({
+          queue: view(result.queueResult),
+          autonomous: result.autonomousResult
+        }, null, 2));
       } else if (action === 'watch') {
         const controller = new AbortController();
         const stop = () => controller.abort();
