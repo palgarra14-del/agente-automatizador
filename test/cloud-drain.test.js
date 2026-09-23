@@ -68,6 +68,33 @@ test('cloud drain stops immediately at a human queue gate instead of spinning', 
   assert.equal(queue.calls.hasWork, 0);
 });
 
+test('parked human approvals do not stall independent autonomous maintenance', async () => {
+  const queue = scriptedQueue([
+    { status: 'awaiting_workflow_approval', issueNumber: 9 },
+    { status: 'awaiting_workflow_approval', issueNumber: 9 }
+  ]);
+  let autonomousCalls = 0;
+  const autonomousSelfImprovement = {
+    async tick() {
+      autonomousCalls += 1;
+      return { status: autonomousCalls < 2 ? 'running' : 'completed' };
+    },
+    async hasWork() {
+      return autonomousCalls < 2;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'human_gate');
+  assert.equal(result.iterations.length, 2);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(autonomousCalls, 2);
+  assert.equal(queue.calls.tick, 2);
+  assert.equal(queue.calls.hasWork, 0);
+});
+
 test('cloud drain obeys its hard iteration budget even when work remains', async () => {
   const queue = scriptedQueue([
     { status: 'running', issueNumber: 1 },
