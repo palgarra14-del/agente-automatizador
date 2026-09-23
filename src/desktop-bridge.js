@@ -310,12 +310,13 @@ export class WindowsDesktopBridge {
     };
   }
 
-  async execute(request, { approvedFingerprint = null, timeoutMs = 20_000, maxOutputBytes = 256 * 1024 } = {}) {
+  async execute(request, { approvedFingerprint = null, timeoutMs = 20_000, maxOutputBytes = null } = {}) {
     const plan = this.plan(request);
+    const outputLimit = maxOutputBytes ?? (plan.action === 'screen.capture' ? 2 * 1024 * 1024 : 256 * 1024);
     if (!plan.supported) throw new Error('windows_desktop_bridge_unavailable');
     if (plan.requiresApproval && approvedFingerprint !== plan.fingerprint) throw new Error('desktop_action_approval_required');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) throw new Error('desktop_timeout_invalid');
-    if (!Number.isInteger(maxOutputBytes) || maxOutputBytes < 1_024 || maxOutputBytes > 2 * 1024 * 1024) throw new Error('desktop_output_limit_invalid');
+    if (!Number.isInteger(outputLimit) || outputLimit < 1_024 || outputLimit > 2 * 1024 * 1024) throw new Error('desktop_output_limit_invalid');
 
     const script = renderDesktopPowerShell(plan.request);
     const encoded = encodePowerShellCommand(script);
@@ -329,7 +330,7 @@ export class WindowsDesktopBridge {
       cwd: this.home,
       env: bridgeEnvironment({ platform: this.platform, environment: this.environment, home: this.home }),
       timeoutMs,
-      maxOutputBytes
+      maxOutputBytes: outputLimit
     });
 
     if (result.exitCode !== 0) {
