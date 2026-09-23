@@ -28,8 +28,14 @@ function trustedRouting(config) {
   return { lanes: [...laneIds], projectToLane };
 }
 
-export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', config } = {}) {
+export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', requestedLane = '', config } = {}) {
   const { lanes, projectToLane } = trustedRouting(config);
+  if (eventName === 'workflow_dispatch' && requestedLane) {
+    if (!VALID_LANE_ID.test(requestedLane) || !lanes.includes(requestedLane)) {
+      throw new Error('cloud_lane_route_requested_lane_invalid');
+    }
+    return [requestedLane];
+  }
   if (eventName === 'schedule' || eventName === 'workflow_dispatch') return lanes;
   if (!['issues', 'issue_comment'].includes(eventName)) return lanes;
   if (eventName === 'issues' && eventAction !== 'opened') return lanes;
@@ -59,6 +65,7 @@ function main() {
     eventName: process.env.AGENT_CLOUD_EVENT_NAME ?? '',
     eventAction: process.env.AGENT_CLOUD_EVENT_ACTION ?? '',
     issueBody: process.env.AGENT_CLOUD_ISSUE_BODY ?? '',
+    requestedLane: process.env.AGENT_CLOUD_REQUESTED_LANE ?? '',
     config
   });
   process.stdout.write(JSON.stringify(lanes));
