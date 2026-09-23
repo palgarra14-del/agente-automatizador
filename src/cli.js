@@ -10,6 +10,7 @@ import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousSelfImprovement } from './self-improvement.js';
+import { WindowsDesktopBridge } from './desktop-bridge.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -31,6 +32,18 @@ const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
 const workflows = new WorkflowEngine({ store, projects });
+
+async function loadDesktopRequest() {
+  const requestPath = take('--request');
+  if (!requestPath) throw new Error('desktop plan/execute requires --request <desktop-request.json>');
+  try {
+    const content = await readBoundedRegularFile(resolve(requestPath), { maxBytes: 32 * 1024, label: 'Desktop request' });
+    return JSON.parse(content.toString('utf8'));
+  } catch (error) {
+    if (/^Desktop request (?:must|exceeds|changed)/.test(error.message)) throw error;
+    throw new Error(`Invalid desktop request JSON: ${error.message}`, { cause: error });
+  }
+}
 
 async function loadWorkflowInput(profile) {
   const briefPath = take('--brief');
@@ -75,6 +88,18 @@ try {
     const project = projects.get(take('--project'));
     if (!project) throw new Error('Unknown --project');
     console.log(formatDoctor(await doctor(project)));
+  } else if (command === 'desktop') {
+    const action = args[1] ?? 'status';
+    const desktop = new WindowsDesktopBridge();
+    if (action === 'status') {
+      console.log(JSON.stringify(await desktop.status(), null, 2));
+    } else if (action === 'plan') {
+      console.log(JSON.stringify(desktop.plan(await loadDesktopRequest()), null, 2));
+    } else if (action === 'execute') {
+      console.log(JSON.stringify(await desktop.execute(await loadDesktopRequest(), {
+        approvedFingerprint: take('--approve') ?? null
+      }), null, 2));
+    } else throw new Error('Usage: agent desktop <status|plan --request request.json|execute --request request.json [--approve fingerprint]>');
   } else if (command === 'runtime') {
     const action = args[1] ?? 'status';
     const registeredProjects = [...projects.values()];
