@@ -4434,7 +4434,7 @@ async function assertWorkerProjectControlSurface(workspace) {
   }
 }
 
-async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
+export async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
   const isolatedHome = await mkdtemp(resolve(tmpdir(), 'agent-codex-home-'));
   await chmod(isolatedHome, 0o700);
   const sourceHome = resolve(sourceEnvironment.CODEX_HOME ?? resolve(sourceEnvironment.HOME ?? homedir(), '.codex'));
