@@ -154,9 +154,10 @@ export class CodexDesktopPlanner {
     environment = process.env,
     codexHomeFactory = prepareIsolatedCodexHome,
     home = homedir(),
-    platform = process.platform
+    platform = process.platform,
+    nativeRuntimePath = undefined
   } = {}) {
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, home: resolve(home), platform });
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, home: resolve(home), platform, nativeRuntimePath });
   }
 
   async plan({ goal, screen, windows }, { timeoutMs = 45_000 } = {}) {
@@ -167,7 +168,8 @@ export class CodexDesktopPlanner {
     const security = codexWorkerSecurityConfig({
       writeAccess: false,
       pathValue: this.environment.PATH ?? '',
-      platform: this.platform
+      platform: this.platform,
+      nativeRuntimePath: this.nativeRuntimePath
     });
     if (!security.supported) throw new Error(security.error);
 
