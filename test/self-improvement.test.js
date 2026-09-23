@@ -460,6 +460,101 @@ test('billing failures back off instead of creating a costly retry loop', async 
   const autopilot = new AutonomousSelfImprovement({ store, workflowEngine: engine, operatorRevision: REV_A, now: () => now });
   const result = await autopilot.tick();
   assert.equal(result.status, 'blocked');
-  assert.ok(Date.parse(store.state.autopilotSelfImprovement.suspendedUntil) >= now + 6 * 60 * 60 * 1000);
+  assert.equal(Date.parse(store.state.autopilotSelfImprovement.suspendedUntil), now + 6 * 60 * 60 * 1000);
   assert.equal(await autopilot.hasWork(), false);
+});
+
+test('repeated billing failures back off exponentially and cap at 24 hours', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const makeStore = (priorFailures) => fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-billing',
+      activeBaseRevision: REV_A,
+      sequence: priorFailures.length + 1,
+      starts: ['2026-09-23T11:50:00.000Z'],
+      history: priorFailures.map((completedAt, index) => ({
+        workflowId: `workflow-prior-${index + 1}`,
+        status: 'blocked',
+        error: 'model_billing_unavailable',
+        changedPaths: [],
+        pullRequestNumber: null,
+        pullRequestUrl: null,
+        finalHead: null,
+        baseRevision: REV_A,
+        completedAt
+      })),
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const engine = {
+    async get() {
+      return {
+        id: 'workflow-billing',
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'blocked',
+        result: { error: 'model_billing_unavailable' },
+        steps: []
+      };
+    }
+  };
+
+  for (const [priorFailures, expectedHours] of [
+    [[], 6],
+    [['2026-09-23T01:00:00.000Z'], 12],
+    [['2026-09-23T01:00:00.000Z', '2026-09-23T07:00:00.000Z'], 24],
+    [['2026-09-22T01:00:00.000Z', '2026-09-22T07:00:00.000Z', '2026-09-22T19:00:00.000Z'], 24]
+  ]) {
+    const store = makeStore(priorFailures);
+    const autopilot = new AutonomousSelfImprovement({ store, workflowEngine: engine, operatorRevision: REV_A, now: () => now });
+    assert.equal((await autopilot.tick()).status, 'blocked');
+    assert.equal(Date.parse(store.state.autopilotSelfImprovement.suspendedUntil), now + expectedHours * 60 * 60 * 1000);
+  }
+});
+
+test('a non-billing terminal result clears an expired billing suspension', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-normal-failure',
+      activeBaseRevision: REV_A,
+      sequence: 2,
+      starts: ['2026-09-23T11:50:00.000Z'],
+      history: [{
+        workflowId: 'workflow-billing',
+        status: 'blocked',
+        error: 'model_billing_unavailable',
+        changedPaths: [],
+        pullRequestNumber: null,
+        pullRequestUrl: null,
+        finalHead: null,
+        baseRevision: REV_A,
+        completedAt: '2026-09-23T01:00:00.000Z'
+      }],
+      suspendedUntil: '2026-09-23T07:00:00.000Z',
+      updatedAt: null
+    }
+  });
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: {
+      async get() {
+        return {
+          id: 'workflow-normal-failure',
+          profile: 'autonomous-maintenance',
+          projectId: 'self',
+          status: 'failed',
+          result: { error: 'read_only_repository_context_failed' },
+          steps: []
+        };
+      }
+    },
+    operatorRevision: REV_A,
+    now: () => now
+  });
+  assert.equal((await autopilot.tick()).status, 'failed');
+  assert.equal(store.state.autopilotSelfImprovement.suspendedUntil, null);
 });
