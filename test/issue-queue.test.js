@@ -412,6 +412,31 @@ test('new issue requests initialize normally when operator checkout matches main
   assert.equal(Object.keys((await store.load()).requests ?? {}).length, 1);
 });
 
+test('manual approval comments mention the authorized issue author for mobile notification', async () => {
+  const { queue, channel, workflowEngine, issue } = await queueFixture();
+  let record = await queue.tick();
+  assert.equal(record.status, 'awaiting_start_approval');
+  assert.match(channel.posted.at(-1).body, /@palgarra14-del — manual action required\./);
+  assert.match(channel.posted.at(-1).body, new RegExp(record.pendingApproval.fingerprint));
+
+  const awaitingPlan = workflowPlan();
+  awaitingPlan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+  awaitingPlan.steps[0].status = WorkflowStepStatus.COMPLETED;
+  awaitingPlan.steps[0].evidence = { ok: true };
+  awaitingPlan.steps[1].status = WorkflowStepStatus.AWAITING_APPROVAL;
+  workflowEngine.realRunResult = awaitingPlan;
+
+  channel.addUserComment(issue.number, {
+    id: 250,
+    login: 'palgarra14-del',
+    body: `/agent approve ${record.pendingApproval.fingerprint}`
+  });
+  record = await queue.tick();
+  assert.equal(record.status, 'awaiting_workflow_approval');
+  assert.match(channel.posted.at(-1).body, /@palgarra14-del — manual action required\./);
+  assert.match(channel.posted.at(-1).body, new RegExp(record.pendingApproval.fingerprint));
+});
+
 test('existing active issue request continues without remote revision gating', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'a'.repeat(40);
