@@ -24,6 +24,12 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /\.trim\(\)[\s\S]*body\.startsWith\("\/agent "\)/);
 });
 
+test('temporary quota-outage mode pins every cloud job to the private local runner', () => {
+  const localRunner = 'runs-on: [self-hosted, Linux, X64, agent-local]';
+  assert.equal(workflow.split(localRunner).length - 1, 4);
+  assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
+});
+
 test('trusted main updates wake the cloud worker without requiring a manual dispatch', () => {
   assert.match(workflow, /push:\n\s+branches: \[main\]/);
   assert.match(workflow, /github\.event_name == 'push'/);

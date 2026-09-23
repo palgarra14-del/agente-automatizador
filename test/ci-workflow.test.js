@@ -5,6 +5,11 @@ import test from 'node:test';
 const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const deepIf = "if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false";
 
+test('temporary quota-outage mode pins CI to the private local runner', () => {
+  assert.match(workflow, /runs-on: \[self-hosted, Linux, X64, agent-local\]/);
+  assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
+});
+
 test('CI runs fast verification on draft updates and re-triggers when a PR becomes ready', () => {
   assert.match(workflow, /pull_request:\n\s+types: \[opened, synchronize, reopened, ready_for_review\]/);
   assert.match(workflow, /- run: npm ci\n\s+- run: npm test\n\s+- run: npm run typecheck\n\s+- run: npm run lint\n\s+- run: npm run build/);

@@ -48,7 +48,7 @@ jobs:
       )
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 5
     outputs:
       active: ${{ steps.wakeup.outputs.active }}
@@ -95,7 +95,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: ${{ fromJSON(needs.route.outputs.lanes) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -124,7 +124,7 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -154,7 +154,7 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 35
     steps:
       - name: Checkout trusted main
