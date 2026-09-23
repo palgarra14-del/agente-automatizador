@@ -209,14 +209,6 @@ export class DesktopTaskSessionEngine {
       throw new Error('desktop_session_approval_without_pending_action');
     }
 
-    if (session.actionCount >= session.maxActions) {
-      session.status = 'blocked';
-      session.result = { reason: 'desktop_session_action_budget_exhausted' };
-      session.updatedAt = this.now();
-      await this.store.save(session);
-      return sessionView(session);
-    }
-
     let windows;
     let screen;
     let planned;
@@ -250,6 +242,17 @@ export class DesktopTaskSessionEngine {
       session.result = {
         reason: planned.decision.reason,
         request: planned.decision.request,
+        observation: planned.observation ?? null
+      };
+      session.updatedAt = this.now();
+      await this.store.save(session);
+      return sessionView(session);
+    }
+
+    if (session.actionCount >= session.maxActions) {
+      session.status = 'blocked';
+      session.result = {
+        reason: 'desktop_session_action_budget_exhausted',
         observation: planned.observation ?? null
       };
       session.updatedAt = this.now();
