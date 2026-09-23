@@ -416,22 +416,22 @@
       },
       "skills": {
         "allow": [
-          "code.diagnose",
-          "code.implement",
-          "code.inspect",
-          "code.review",
-          "human.approval",
-          "project.dependencies.refresh",
+          "workspace.prepare",
           "project.verify",
-          "release.observe-ci",
-          "release.observe-preview",
-          "release.publish-pr",
-          "release.publish-reviewed-workflow",
+          "project.dependencies.refresh",
+          "human.approval",
           "repository.observe",
           "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "release.observe-preview",
+          "code.inspect",
+          "code.diagnose",
+          "code.review",
           "visual.review",
           "website.plan",
-          "workspace.prepare"
+          "release.publish-reviewed-workflow"
         ],
         "deny": []
       }
