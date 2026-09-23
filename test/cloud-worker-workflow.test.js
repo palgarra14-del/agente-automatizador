@@ -168,6 +168,15 @@ test('cloud worker repairs authorized partial state before recovery and read-onl
   assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /ingestAdmissionIntents\(\)[\s\S]*queue\.tick\(\)/);
 });
 
+test('cloud-once emits queue and autonomous results separately for auditability', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /let autonomousResult = null/);
+  assert.match(cli, /autonomousResult = await autonomousSelfImprovement\.tick\(\)/);
+  assert.match(cli, /return \{ queueResult, autonomousResult \}/);
+  assert.match(cli, /queue: view\(result\.queueResult\)/);
+  assert.match(cli, /autonomous: result\.autonomousResult/);
+});
+
 test('model and cross-repo credentials exist only at the governed queue step', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
