@@ -19,7 +19,8 @@ ${JSON.stringify({
   scope: { allowedPaths: ['src'] }
 })}`;
 
-test('scheduled and manual recovery route every trusted configured lane', () => {
+test('scheduled, manual and trusted main wakeups route every configured lane', () => {
+  assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), ['self', 'website-pilot', 'callflow']);
   assert.deepEqual(routeCloudLanes({ eventName: 'schedule', config }), ['self', 'website-pilot', 'callflow']);
   assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'callflow']);
 });
