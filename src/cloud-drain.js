@@ -97,11 +97,31 @@ export async function runCloudDrain({
     }
   }
 
+  let remainingWork;
+  if (stopReason === 'idle') {
+    remainingWork = false;
+  } else if (stopReason === 'human_gate') {
+    remainingWork = true;
+  } else {
+    const queueHasWork = await queue.hasWork();
+    const autonomousHasWork = autonomousSelfImprovement
+      ? await autonomousSelfImprovement.hasWork()
+      : false;
+    remainingWork = queueHasWork || autonomousHasWork;
+  }
+
+  const finishedAt = now();
+  if (!Number.isFinite(finishedAt)) throw new Error('cloud_drain_clock_invalid');
+
   return {
     version: 1,
     iterations,
     stopReason,
-    elapsedMs: Math.max(0, now() - startedAt),
+    remainingWork,
+    continuationRecommended:
+      remainingWork &&
+      (stopReason === 'iteration_limit' || stopReason === 'duration_limit'),
+    elapsedMs: Math.max(0, finishedAt - startedAt),
     limits: {
       maxIterations: iterationLimit,
       maxDurationMs: durationLimitMs
