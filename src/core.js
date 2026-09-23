@@ -7,9 +7,14 @@ import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { URL, URLSearchParams } from 'node:url';
 import { TextDecoder } from 'node:util';
-import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
+
+let defaultCodexClientPromise = null;
+async function loadDefaultCodexClient() {
+  defaultCodexClientPromise ??= import('@openai/codex-sdk').then((module) => module.Codex);
+  return defaultCodexClientPromise;
+}
 
 export const RunStatus = Object.freeze({
   CREATED: 'created',
@@ -4522,7 +4527,7 @@ export function codexTurnFailureDiagnostics(items = []) {
 }
 
 export class CodexSdkWorker extends CodingWorker {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
+  constructor({ CodexClient = null, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
     super();
     Object.assign(this, { CodexClient, environment, codexHomeFactory, platform });
   }
@@ -4540,7 +4545,8 @@ export class CodexSdkWorker extends CodingWorker {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
+      const CodexClient = this.CodexClient ?? await loadDefaultCodexClient();
+      const client = new CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
@@ -4821,7 +4827,7 @@ function deterministicDiagnosisResult(request) {
 }
 
 export class CodexReadOnlySkillExecutor {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform, contextProcessRunner = runProcess } = {}) {
+  constructor({ CodexClient = null, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform, contextProcessRunner = runProcess } = {}) {
     Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform, contextProcessRunner });
   }
 
@@ -4952,7 +4958,8 @@ export class CodexReadOnlySkillExecutor {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
+      const CodexClient = this.CodexClient ?? await loadDefaultCodexClient();
+      const client = new CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
       const thread = client.startThread({
         workingDirectory: workspace,
         approvalPolicy: 'never',
