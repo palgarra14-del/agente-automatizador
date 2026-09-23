@@ -162,19 +162,33 @@ jobs:
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
 
-      - name: Check lane for governed work
+      - name: Run lightweight cloud control tick
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: node src/cli.js inbox cloud-control-once --lane "$AGENT_CLOUD_LANE"
+
+      - name: Check lane for executable work
         id: preflight
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
+          CROSS_REPO_CREDENTIAL_CONFIGURED: ${{ secrets.AGENT_GITHUB_TOKEN != '' && 'true' || 'false' }}
         run: |
-          HAS_WORK="$(node src/cli.js inbox cloud-peek --lane "$AGENT_CLOUD_LANE")"
+          HAS_WORK="$(node src/cli.js inbox cloud-execution-peek --lane "$AGENT_CLOUD_LANE")"
           if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
-            echo "invalid cloud preflight result" >&2
+            echo "invalid cloud execution preflight result" >&2
             exit 1
           fi
+          SKIP_REASON=""
+          if [[ "$AGENT_CLOUD_LANE" == "website-pilot" && "$HAS_WORK" == "true" && "$CROSS_REPO_CREDENTIAL_CONFIGURED" != "true" ]]; then
+            HAS_WORK="false"
+            SKIP_REASON="cross_repo_credential_missing"
+            echo "::notice::website-pilot execution deferred because AGENT_GITHUB_TOKEN is not configured"
+          fi
           echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
+          echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"
 
       - name: Prepare exact cloud runtime
         if: steps.preflight.outputs.has_work == 'true'
