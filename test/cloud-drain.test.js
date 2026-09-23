@@ -37,6 +37,8 @@ test('cloud drain keeps advancing governed queue work until the lane is idle', a
 
   assert.equal(result.stopReason, 'idle');
   assert.equal(result.iterations.length, 3);
+  assert.equal(result.remainingWork, false);
+  assert.equal(result.continuationRecommended, false);
   assert.deepEqual(result.iterations.map((item) => item.queueResult?.status ?? null), ['running', 'completed', null]);
   assert.deepEqual(result.iterations.map((item) => item.admitted), [true, false, false]);
   assert.equal(queue.calls.tick, 3);
@@ -60,6 +62,8 @@ test('cloud drain stops immediately at a human queue gate instead of spinning', 
 
   assert.equal(result.stopReason, 'human_gate');
   assert.equal(result.iterations.length, 1);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
   assert.equal(autonomousCalls, 1);
   assert.equal(queue.calls.hasWork, 0);
 });
@@ -77,6 +81,8 @@ test('cloud drain obeys its hard iteration budget even when work remains', async
 
   assert.equal(result.stopReason, 'iteration_limit');
   assert.equal(result.iterations.length, 2);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, true);
   assert.equal(queue.calls.tick, 2);
 });
 
@@ -94,5 +100,7 @@ test('cloud drain stops before starting another iteration after the duration gua
 
   assert.equal(result.stopReason, 'duration_limit');
   assert.equal(result.iterations.length, 1);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, true);
   assert.equal(queue.calls.tick, 1);
 });
