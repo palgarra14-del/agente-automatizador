@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 const WORKFLOW_FILE = 'agent-cloud.yml';
 const DEFAULT_MAX_AGE_MS = 20 * 60 * 1000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$/;
+const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 
 function boundedJsonText(text, label) {
   if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
