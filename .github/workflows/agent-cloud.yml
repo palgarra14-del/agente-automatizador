@@ -96,7 +96,7 @@ jobs:
   recover:
     name: recover cloud admissions (${{ matrix.lane }})
     needs: route
-    if: needs.route.outputs.active == 'true' && github.event_name == 'schedule'
+    if: needs.route.outputs.active == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: write
       issues: read

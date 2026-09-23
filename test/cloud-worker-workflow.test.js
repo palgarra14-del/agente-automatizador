@@ -149,7 +149,7 @@ test('cloud worker repairs authorized partial state before recovery and read-onl
   const recovery = workflow.slice(recoverJobStart, cloudOnceStart);
   assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
-  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && github\.event_name == 'schedule'/);
+  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\)/);
   assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read[\s\S]*statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
