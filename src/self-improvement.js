@@ -4,7 +4,8 @@ const PROFILE = 'autonomous-maintenance';
 const STATE_KEY = 'autopilotSelfImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
 const COOLDOWN_MS = 30 * 60 * 1000;
-const BILLING_BACKOFF_MS = 6 * 60 * 60 * 1000;
+const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
+const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const MAX_STARTS_PER_24H = 4;
 const HISTORY_LIMIT = 20;
 
@@ -91,6 +92,22 @@ export function autonomousSensitiveImplementationAllowed(step) {
     pathAllowedForAutopilot(path)
   )) return false;
   return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
+}
+
+function billingUnavailableError(error) {
+  return /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(error ?? ''));
+}
+
+function nextBillingBackoffMs(state) {
+  let consecutivePriorFailures = 0;
+  for (let index = state.history.length - 1; index >= 0; index -= 1) {
+    if (!billingUnavailableError(state.history[index]?.error)) break;
+    consecutivePriorFailures += 1;
+  }
+  return Math.min(
+    BILLING_BACKOFF_BASE_MS * (2 ** Math.min(consecutivePriorFailures, 2)),
+    BILLING_BACKOFF_MAX_MS
+  );
 }
 
 function resultSummary(plan) {
@@ -183,7 +200,7 @@ export class AutonomousSelfImprovement {
 
   async settle(plan, { baseRevision }) {
     const summary = resultSummary(plan);
-    const billingUnavailable = /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(summary.error ?? ''));
+    const billingUnavailable = billingUnavailableError(summary.error);
     return this.writeState((state) => ({
       ...state,
       activeWorkflowId: null,
@@ -194,8 +211,8 @@ export class AutonomousSelfImprovement {
         completedAt: new Date(this.now()).toISOString()
       }].slice(-HISTORY_LIMIT),
       suspendedUntil: billingUnavailable
-        ? new Date(this.now() + BILLING_BACKOFF_MS).toISOString()
-        : state.suspendedUntil
+        ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
+        : null
     }));
   }
 
@@ -263,7 +280,7 @@ export class AutonomousSelfImprovement {
           ...current,
           activeWorkflowId: null,
           activeBaseRevision: null,
-          suspendedUntil: new Date(this.now() + BILLING_BACKOFF_MS).toISOString()
+          suspendedUntil: new Date(this.now() + BILLING_BACKOFF_MAX_MS).toISOString()
         }));
         return { status: 'workflow_binding_invalid', workflowId };
       }
