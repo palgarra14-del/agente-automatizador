@@ -71,7 +71,7 @@ function normalizeRequestShape(request) {
       const keys = Object.keys(request).sort();
       if (!['action,executable', 'action,args,executable'].includes(keys.join(','))) throw new Error('desktop_request_fields_invalid');
       const executable = boundedText(request.executable, 'executable', { max: 1_024 });
-      if (executable.includes('\\r') || executable.includes('\\n')) throw new Error('desktop_executable_invalid');
+      if (executable.includes(String.fromCharCode(13)) || executable.includes(String.fromCharCode(10))) throw new Error('desktop_executable_invalid');
       return { action, executable, args: normalizeArgs(request.args) };
     }
     case 'window.focus':
