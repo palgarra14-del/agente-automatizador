@@ -25,6 +25,8 @@ test('desktop request schema is strict and fingerprints normalized requests', ()
   assert.throws(() => normalizeDesktopRequest({ action: 'url.open', url: 'file:///etc/passwd' }), /desktop_url_scheme_not_allowed/);
   assert.throws(() => normalizeDesktopRequest({ action: 'input.click', x: -1, y: 10 }), /desktop_x_invalid/);
   assert.throws(() => normalizeDesktopRequest({ action: 'unknown' }), /desktop_action_not_supported/);
+  assert.throws(() => normalizeDesktopRequest({ action: 'app.launch', executable: 'notepad.exe\ncalc.exe' }), /desktop_executable_invalid/);
+  assert.throws(() => normalizeDesktopRequest({ action: 'app.launch', executable: 'notepad.exe\rcalc.exe' }), /desktop_executable_invalid/);
 
   const left = desktopRequestFingerprint({ action: 'app.launch', executable: 'notepad.exe', args: ['a.txt'] });
   const right = desktopRequestFingerprint({ executable: 'notepad.exe', args: ['a.txt'], action: 'app.launch' });
