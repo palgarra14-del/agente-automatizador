@@ -437,6 +437,69 @@ test('existing active issue request continues without remote revision gating', a
   assert.equal(workflowEngine.createCalls.length, 1);
 });
 
+test('control-only queue persists approvals but defers repository execution', async () => {
+  const { store, channel, workflowEngine, projects, issue } = await queueFixture();
+  const controlQueue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors: ['palgarra14-del'],
+    executionEnabled: false,
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+
+  const initialized = await controlQueue.tick();
+  assert.equal(initialized.status, 'awaiting_start_approval');
+  assert.equal(await controlQueue.hasExecutionWork(), false);
+  assert.equal(workflowEngine.runCalls.length, 1);
+  assert.equal(workflowEngine.runCalls[0].dryRun, true);
+
+  channel.addUserComment(issue.number, {
+    id: 200,
+    login: 'palgarra14-del',
+    body: `/agent approve ${initialized.pendingApproval.fingerprint}`
+  });
+  const deferred = await controlQueue.tick();
+  assert.equal(deferred.status, 'execution_deferred');
+  assert.equal(deferred.reason, 'execution_disabled');
+  assert.equal(deferred.queueStatus, 'running');
+  assert.equal(workflowEngine.runCalls.every((options) => options.dryRun === true), true);
+  assert.equal(await controlQueue.hasExecutionWork(), true);
+
+  const persisted = Object.values((await store.load()).requests ?? {})[0];
+  assert.equal(persisted.status, 'running');
+  assert.equal(persisted.activeApproval.kind, 'start');
+
+  const executionQueue = new SupervisedIssueQueue({
+    store,
+    projects,
+    workflowEngine,
+    channel,
+    allowedActors: ['palgarra14-del'],
+    executionEnabled: true,
+    now: () => '2026-09-12T00:00:00.000Z'
+  });
+  await executionQueue.tick();
+  assert.equal(workflowEngine.runCalls.some((options) => options.dryRun !== true), true);
+});
+
+test('execution work detection ignores approvals and rejects invalid execution mode', async () => {
+  const fixture = await queueFixture();
+  assert.throws(() => new SupervisedIssueQueue({
+    store: fixture.store,
+    projects: fixture.projects,
+    workflowEngine: fixture.workflowEngine,
+    channel: fixture.channel,
+    allowedActors: ['palgarra14-del'],
+    executionEnabled: 'no'
+  }), /executionEnabled must be boolean/);
+
+  const initialized = await fixture.queue.tick();
+  assert.equal(initialized.status, 'awaiting_start_approval');
+  assert.equal(await fixture.queue.hasExecutionWork(), false);
+});
+
 test('GitHubIssueChannel reads and validates the configured branch head', async () => {
   const calls = [];
   const valid = new GitHubIssueChannel({
