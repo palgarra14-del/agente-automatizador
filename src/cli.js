@@ -10,6 +10,7 @@ import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousSelfImprovement } from './self-improvement.js';
+import { WindowsDesktopBridge } from './desktop-bridge.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -31,6 +32,18 @@ const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
 const workflows = new WorkflowEngine({ store, projects });
+
+async function loadDesktopRequest() {
+  const requestPath = take('--request');
+  if (!requestPath) throw new Error('desktop plan/execute requires --request <desktop-request.json>');
+  try {
+    const content = await readBoundedRegularFile(resolve(requestPath), { maxBytes: 32 * 1024, label: 'Desktop request' });
+    return JSON.parse(content.toString('utf8'));
+  } catch (error) {
+    if (/^Desktop request (?:must|exceeds|changed)/.test(error.message)) throw error;
+    throw new Error(`Invalid desktop request JSON: ${error.message}`, { cause: error });
+  }
+}
 
 async function loadWorkflowInput(profile) {
   const briefPath = take('--brief');
@@ -75,6 +88,18 @@ try {
     const project = projects.get(take('--project'));
     if (!project) throw new Error('Unknown --project');
     console.log(formatDoctor(await doctor(project)));
+  } else if (command === 'desktop') {
+    const action = args[1] ?? 'status';
+    const desktop = new WindowsDesktopBridge();
+    if (action === 'status') {
+      console.log(JSON.stringify(await desktop.status(), null, 2));
+    } else if (action === 'plan') {
+      console.log(JSON.stringify(desktop.plan(await loadDesktopRequest()), null, 2));
+    } else if (action === 'execute') {
+      console.log(JSON.stringify(await desktop.execute(await loadDesktopRequest(), {
+        approvedFingerprint: take('--approve') ?? null
+      }), null, 2));
+    } else throw new Error('Usage: agent desktop <status|plan --request request.json|execute --request request.json [--approve fingerprint]>');
   } else if (command === 'runtime') {
     const action = args[1] ?? 'status';
     const registeredProjects = [...projects.values()];
@@ -310,7 +335,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent desktop <status|plan --request request.json|execute --request request.json [--approve fingerprint]> | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
