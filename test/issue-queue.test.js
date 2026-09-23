@@ -565,6 +565,51 @@ test('cloud queue returns a parked approval gate only after checking other activ
   assert.equal(result.issueNumber, 1);
 });
 
+test('runnable cloud work is not starved behind more parked approvals than the scan cap', async () => {
+  const records = {};
+  for (let number = 1; number <= 25; number += 1) {
+    records[`palgarra14-del/agente-automatizador#${number}`] = {
+      issueNumber: number, issueId: 4000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    };
+  }
+  records['palgarra14-del/agente-automatizador#26'] = {
+    issueNumber: 26, issueId: 4026, author: 'palgarra14-del',
+    request: { projectId: 'callflow' }, status: 'running'
+  };
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 4000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return issue.number === 26
+      ? { status: 'running', issueNumber: 26 }
+      : { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  const result = await queue.tick();
+  assert.deepEqual(seen, [26]);
+  assert.equal(result.status, 'running');
+  assert.equal(result.issueNumber, 26);
+});
+
 test('cloud queue bounds approval-gated scans so a large parked backlog cannot monopolize a tick', async () => {
   const records = {};
   for (let number = 1; number <= 25; number += 1) {
