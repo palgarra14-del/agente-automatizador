@@ -3618,6 +3618,19 @@ export class WorkflowEngine {
         return this.runUnlocked(id, options);
       }
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+      if (interruptedStep?.skill === 'visual.review') {
+        await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === interruptedStep.id);
+          if (Number.isFinite(saved.pausedAt)) saved.deadlineAt += Math.max(0, this.now() - saved.pausedAt);
+          saved.pausedAt = null;
+          step.status = WorkflowStepStatus.READY;
+          step.error = null;
+          step.evidence = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        });
+        return this.runUnlocked(id, options);
+      }
       if (interruptedStep?.skill === 'release.publish-reviewed-workflow') {
         plan = await this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === interruptedStep.id);
