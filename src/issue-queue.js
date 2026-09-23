@@ -2241,10 +2241,17 @@ export class SupervisedIssueQueue {
     let parkedResult = null;
     let parkedScans = 0;
     const maxParkedScans = 20;
-    for (const [key, record] of Object.entries(state.requests ?? {})) {
-      if (!key.startsWith(keyPrefix) ||
-          !this.ownsRecord(record) ||
-          ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
+    const activeEntries = Object.entries(state.requests ?? {})
+      .filter(([key, record]) =>
+        key.startsWith(keyPrefix) &&
+        this.ownsRecord(record) &&
+        !['completed', 'failed', 'blocked', 'rejected'].includes(record.status)
+      )
+      .sort((left, right) => {
+        const parked = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
+        return Number(parked.has(left[1].status)) - Number(parked.has(right[1].status));
+      });
+    for (const [key, record] of activeEntries) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
           issue.state !== 'open' ||
