@@ -15,19 +15,29 @@ test('cloud control can load core without a static Codex SDK dependency', () => 
 test('cloud workflow installs dependencies only after executable work is proven', () => {
   assert.equal((workflow.match(/npm ci --ignore-scripts/g) ?? []).length, 1);
   const admitStart = workflow.indexOf('  admit:');
-  const recoverStart = workflow.indexOf('  recover:');
   const cloudStart = workflow.indexOf('  cloud-once:');
-  assert.ok(admitStart >= 0 && recoverStart > admitStart && cloudStart > recoverStart);
-  assert.doesNotMatch(workflow.slice(admitStart, recoverStart), /npm ci --ignore-scripts/);
-  assert.doesNotMatch(workflow.slice(recoverStart, cloudStart), /npm ci --ignore-scripts/);
+  assert.ok(admitStart >= 0 && cloudStart > admitStart);
+  assert.doesNotMatch(workflow.slice(admitStart, cloudStart), /npm ci --ignore-scripts/);
 
+  const recoveryStart = workflow.indexOf('- name: Recover missing admissions from open requests', cloudStart);
   const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudStart);
   const preflightStart = workflow.indexOf('- name: Check lane for executable work', cloudStart);
+  const cacheStart = workflow.indexOf('- name: Restore npm cache for executable work', cloudStart);
   const installStart = workflow.indexOf('- name: Install frozen dependencies for executable work', cloudStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudStart);
-  assert.ok(controlStart > cloudStart && preflightStart > controlStart && installStart > preflightStart && runtimeStart > installStart);
-  const preInstall = workflow.slice(cloudStart, installStart);
-  assert.doesNotMatch(preInstall, /npm ci --ignore-scripts/);
+  assert.ok(
+    recoveryStart > cloudStart &&
+    controlStart > recoveryStart &&
+    preflightStart > controlStart &&
+    cacheStart > preflightStart &&
+    installStart > cacheStart &&
+    runtimeStart > installStart
+  );
+  const preCache = workflow.slice(cloudStart, cacheStart);
+  assert.doesNotMatch(preCache, /npm ci --ignore-scripts|cache: npm/);
+  const cacheBlock = workflow.slice(cacheStart, installStart);
+  assert.match(cacheBlock, /if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(cacheBlock, /cache: npm/);
   const installBlock = workflow.slice(installStart, runtimeStart);
   assert.match(installBlock, /if: steps\.preflight\.outputs\.has_work == 'true'/);
   assert.match(installBlock, /run: npm ci --ignore-scripts/);
