@@ -65,6 +65,25 @@ test('screen capture is bounded read-only observation and uses a compressed payl
   assert.equal(desktopActionRequiresApproval('screen.capture'), false);
 });
 
+test('screen capture receives a larger bounded command output budget by default', async () => {
+  const calls = [];
+  const bridge = new WindowsDesktopBridge({
+    platform: 'linux',
+    environment: wslEnvironment,
+    home: '/home/tester',
+    commandRunner: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ action: 'screen.capture', mimeType: 'image/jpeg', width: 1, height: 1, originalWidth: 1, originalHeight: 1, originX: 0, originY: 0, sha256: '0'.repeat(64), imageBase64: 'AA==' }),
+        stderr: ''
+      };
+    }
+  });
+  await bridge.execute({ action: 'screen.capture' });
+  assert.equal(calls[0].options.maxOutputBytes, 2 * 1024 * 1024);
+});
+
 test('read-only desktop observation executes without approval and strips secret environment variables', async () => {
   const calls = [];
   const bridge = new WindowsDesktopBridge({
