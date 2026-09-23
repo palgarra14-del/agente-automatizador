@@ -10,6 +10,8 @@ import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
+import { BrowserQaCoordinator, createBrowserQaRequest, validateBrowserQaEvidence } from './browser-qa.js';
+import { ChromeBrowserQaRunner } from './browser-qa-runner.js';
 
 export const RunStatus = Object.freeze({
   CREATED: 'created',
@@ -1402,8 +1404,8 @@ function normalizeWorkflowInput(profile, input) {
 
 const workflowProfiles = Object.freeze({
   'website-build': {
-    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }],
-    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder'], ['visual-verification', 'checkpoint']]
+    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }, { id: 'browserQaPassed', steps: ['browser-verification'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }],
+    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder'], ['browser-verification', 'placeholder'], ['visual-verification', 'checkpoint']]
   },
   'app-improvement': {
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
@@ -1462,6 +1464,7 @@ const workflowStepSkills = Object.freeze({
     'dependency-refresh': 'project.dependencies.refresh',
     review: 'code.review',
     quality: 'project.verify',
+    'browser-verification': 'visual.review',
     'visual-verification': 'human.approval',
     'release-readiness': 'human.approval',
     publication: 'release.publish-reviewed-workflow'
@@ -1507,6 +1510,7 @@ const workflowStepSpecialists = Object.freeze({
     'dependency-refresh': 'dependency-manager',
     review: 'change-critic',
     quality: 'verifier',
+    'browser-verification': 'visual-reviewer',
     'visual-verification': 'human-supervisor',
     'release-readiness': 'human-supervisor',
     publication: 'release-manager'
@@ -1751,6 +1755,40 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch || (plan.profile === 'website-build' && (typeof preview.url !== 'string' || !preview.url)))) throw new Error('Completed publication READY preview is not bound to the published commit');
       if (preview.state === 'NOT_REQUIRED' && (previewRequired || project.deployment?.provider === 'vercel')) throw new Error('Completed publication cannot omit configured preview evidence');
     }
+    if (step.skill === 'visual.review') {
+      const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      const publication = plan.steps.find((candidate) => candidate.id === 'publication');
+      const preview = publication?.evidence?.preview;
+      const commit = publication?.evidence?.commit;
+      if (
+        plan.profile !== 'website-build' ||
+        requirements?.status !== WorkflowStepStatus.COMPLETED ||
+        implementation?.status !== WorkflowStepStatus.COMPLETED ||
+        review?.status !== WorkflowStepStatus.COMPLETED ||
+        reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' ||
+        publication?.status !== WorkflowStepStatus.COMPLETED ||
+        preview?.state !== 'READY' ||
+        preview?.ok !== true ||
+        preview?.environment !== 'preview' ||
+        typeof preview?.url !== 'string' ||
+        !preview.url ||
+        !commit?.finalHead ||
+        preview.commitSha !== commit.finalHead
+      ) throw new Error('Completed Browser QA prerequisites are invalid');
+      const expectedRequest = createBrowserQaRequest({
+        workflowId: plan.id,
+        websiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        publishedCommitSha: commit.finalHead,
+        previewUrl: preview.url,
+        websiteBlueprint: requirements.evidence.websiteBlueprint
+      });
+      if (JSON.stringify(step.evidence.browserQaRequest) !== JSON.stringify(expectedRequest)) throw new Error('Completed Browser QA request is not bound to the published preview');
+      validateBrowserQaEvidence(expectedRequest, step.evidence.browserQaEvidence);
+      if (step.evidence.browserQaEvidence.status !== 'pass') throw new Error('Completed Browser QA requires pass evidence');
+    }
     return;
   }
   if (step.type === 'checkpoint') {
@@ -1956,10 +1994,10 @@ function historicalFingerprintMismatch(error) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, browserQaCoordinator = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
     const resolvedPublicationBridge = publicationBridge ?? new WorkflowPublicationBridge({ localGit });
-    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, commandRunner, now });
+    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, browserQaCoordinator, commandRunner, now });
   }
 
   async create(input) {
@@ -2414,6 +2452,126 @@ export class WorkflowEngine {
       } else {
         step.status = WorkflowStepStatus.READY;
         step.error = execution.timedOut ? 'skill_executor_timeout_retry_available' : 'skill_executor_failed_retry_available';
+        saved.status = WorkflowStepStatus.PENDING;
+      }
+    });
+  }
+
+  browserQa() {
+    if (!this.browserQaCoordinator) {
+      this.browserQaCoordinator = new BrowserQaCoordinator({ runner: new ChromeBrowserQaRunner() });
+    }
+    return this.browserQaCoordinator;
+  }
+
+  async executeBrowserQaWorkflowStep(id, next) {
+    let plan = await this.get(id);
+    const requirements = plan.steps.find((step) => step.id === 'requirements');
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    const review = plan.steps.find((step) => step.id === 'review');
+    const publication = plan.steps.find((step) => step.id === 'publication');
+    const preview = publication?.evidence?.preview;
+    const commit = publication?.evidence?.commit;
+    if (
+      plan.profile !== 'website-build' ||
+      requirements?.status !== WorkflowStepStatus.COMPLETED ||
+      implementation?.status !== WorkflowStepStatus.COMPLETED ||
+      review?.status !== WorkflowStepStatus.COMPLETED ||
+      reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' ||
+      publication?.status !== WorkflowStepStatus.COMPLETED ||
+      preview?.state !== 'READY' ||
+      preview?.ok !== true ||
+      preview?.environment !== 'preview' ||
+      typeof preview?.url !== 'string' ||
+      !preview.url ||
+      !commit?.finalHead ||
+      preview.commitSha !== commit.finalHead
+    ) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'browser_qa_prerequisites_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    let request;
+    try {
+      request = createBrowserQaRequest({
+        workflowId: plan.id,
+        websiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        publishedCommitSha: commit.finalHead,
+        previewUrl: preview.url,
+        websiteBlueprint: requirements.evidence.websiteBlueprint
+      });
+    } catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'browser_qa_request_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      step.evidence = { type: 'executor-start', ...workflowEvidenceContext(saved, step), browserQaRequest: safeJson(request) };
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    let result;
+    try {
+      result = await this.browserQa().verify(request);
+    } catch (error) {
+      result = { evidence: { status: 'unavailable', unavailableReason: clip(error.message, 160), deterministicDefects: [], observations: [] } };
+    }
+    const evidence = result?.evidence ?? null;
+    let evidenceValid = false;
+    try {
+      if (evidence) evidenceValid = validateBrowserQaEvidence(request, evidence) === true;
+    } catch {
+      evidenceValid = false;
+    }
+    const outputBytes = Buffer.byteLength(JSON.stringify(evidence ?? {}));
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += outputBytes;
+      const status = evidenceValid ? evidence.status : 'unavailable';
+      step.evidence = {
+        type: 'executor',
+        ok: evidenceValid && status === 'pass',
+        completedAt: evidenceValid && status === 'pass' ? new Date().toISOString() : null,
+        ...workflowEvidenceContext(saved, step),
+        browserQaRequest: safeJson(request),
+        browserQaEvidence: evidenceValid ? safeJson(evidence) : null,
+        error: evidenceValid ? null : 'browser_qa_evidence_invalid'
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (status === 'pass' && evidenceValid) {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        saved.status = WorkflowStepStatus.PENDING;
+      } else if (status === 'defects' && evidenceValid) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'browser_qa_defects';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id, defects: safeJson(evidence.deterministicDefects) };
+      } else if (step.attempts >= saved.budgets.maxAttempts) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = evidenceValid ? 'browser_qa_unavailable' : 'browser_qa_evidence_invalid';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else {
+        step.status = WorkflowStepStatus.READY;
+        step.error = 'browser_qa_unavailable_retry_available';
         saved.status = WorkflowStepStatus.PENDING;
       }
     });
@@ -3746,6 +3904,11 @@ export class WorkflowEngine {
       }
       if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && governedImplementationProfiles.has(plan.profile)) {
         plan = await this.executePublicationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'visual.review' && plan.profile === 'website-build') {
+        plan = await this.executeBrowserQaWorkflowStep(id, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
