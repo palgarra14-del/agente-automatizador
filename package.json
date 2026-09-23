@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "node --test",
-    "typecheck": "node --check src/capabilities.js && node --check src/specialists.js && node --check src/core.js && node --check src/cloud-workflow-engine.js && node --check src/browser-qa.js && node --check src/browser-qa-runner.js && node --check src/cli.js && node --check src/issue-queue.js && node --check src/service.js && node --check src/wsl-wakeup.js && node --check src/runtime.js && node --check src/desktop-bridge.js && node --check scripts/bootstrap-operator.js && node --check scripts/browser-qa-chrome-smoke.js && node --check scripts/browser-qa-adversarial-smoke.js",
+    "typecheck": "node --check src/capabilities.js && node --check src/specialists.js && node --check src/core.js && node --check src/cloud-workflow-engine.js && node --check src/browser-qa.js && node --check src/browser-qa-runner.js && node --check src/cli.js && node --check src/issue-queue.js && node --check src/service.js && node --check src/wsl-wakeup.js && node --check src/runtime.js && node --check src/desktop-bridge.js && node --check src/desktop-planner.js && node --check scripts/bootstrap-operator.js && node --check scripts/browser-qa-chrome-smoke.js && node --check scripts/browser-qa-adversarial-smoke.js",
     "lint": "eslint . --max-warnings 0",
     "build": "node scripts/build.js"
   },
