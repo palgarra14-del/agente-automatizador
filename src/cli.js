@@ -11,6 +11,7 @@ import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousSelfImprovement } from './self-improvement.js';
 import { WindowsDesktopBridge } from './desktop-bridge.js';
+import { CodexDesktopPlanner } from './desktop-planner.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -99,7 +100,22 @@ try {
       console.log(JSON.stringify(await desktop.execute(await loadDesktopRequest(), {
         approvedFingerprint: take('--approve') ?? null
       }), null, 2));
-    } else throw new Error('Usage: agent desktop <status|plan --request request.json|execute --request request.json [--approve fingerprint]>');
+    } else if (action === 'next') {
+      const goal = take('--goal');
+      if (!goal) throw new Error('desktop next requires --goal "..."');
+      const windows = await desktop.execute({ action: 'window.list' });
+      const screen = await desktop.execute({ action: 'screen.capture' });
+      const planner = new CodexDesktopPlanner();
+      const planned = await planner.plan({
+        goal,
+        windows: windows.evidence,
+        screen: screen.evidence
+      });
+      console.log(JSON.stringify({
+        ...planned,
+        actionPlan: planned.decision.status === 'act' ? desktop.plan(planned.decision.action) : null
+      }, null, 2));
+    } else throw new Error('Usage: agent desktop <status|next --goal "..."|plan --request request.json|execute --request request.json [--approve fingerprint]>');
   } else if (command === 'runtime') {
     const action = args[1] ?? 'status';
     const registeredProjects = [...projects.values()];
