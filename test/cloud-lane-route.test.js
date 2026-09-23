@@ -24,6 +24,24 @@ test('scheduled and manual recovery route every trusted configured lane', () => 
   assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'callflow']);
 });
 
+test('workflow dispatch continuation may target exactly one configured lane', () => {
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'callflow',
+    config
+  }), ['callflow']);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: '../escape',
+    config
+  }), /requested_lane_invalid/);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'unknown',
+    config
+  }), /requested_lane_invalid/);
+});
+
 test('issue events route a valid request to exactly its configured owning lane', () => {
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('self'), config }), ['self']);
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('website-pilot'), config }), ['website-pilot']);
