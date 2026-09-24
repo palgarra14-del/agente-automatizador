@@ -2343,6 +2343,8 @@ export class WorkflowEngine {
         ...workflowEvidenceContext(saved, step),
         result: executionOk && !integrityChanged && !websitePlanContextError ? execution.result : null,
         codexThreadId: execution.codexThreadId ?? null,
+        authMode: execution.authMode ?? (execution.executionMode === 'deterministic' ? 'deterministic' : null),
+        paidApiUsed: Boolean(execution.paidApiUsed),
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
         protectedIgnoredBeforeFingerprint: before.protectedIgnored.fingerprint,
@@ -2619,6 +2621,8 @@ export class WorkflowEngine {
           status: worker.status,
           summary: clip(worker.summary, 1_000),
           codexThreadId: worker.codexThreadId ?? null,
+          authMode: worker.authMode ?? null,
+          paidApiUsed: Boolean(worker.paidApiUsed),
           timedOut: Boolean(worker.timedOut),
           output: clip(worker.output, 1_000)
         },
@@ -4507,13 +4511,21 @@ async function runCostAwareCodexTurn({
       { authentication }
     ));
     const thread = client.startThread(threadOptions);
-    const turn = await thread.run(prompt, { signal });
-    return {
-      thread,
-      turn,
-      authMode: authentication,
-      paidApiUsed: authentication === 'api'
-    };
+    try {
+      const turn = await thread.run(prompt, { signal });
+      return {
+        thread,
+        turn,
+        authMode: authentication,
+        paidApiUsed: authentication === 'api'
+      };
+    } catch (error) {
+      if (error && typeof error === 'object') {
+        error.codexAuthMode = authentication;
+        error.paidApiUsed = authentication === 'api';
+      }
+      throw error;
+    }
   };
 
   if (!sessionAvailable) {
@@ -4626,6 +4638,8 @@ export class CodexSdkWorker extends CodingWorker {
         status: 'failed',
         summary: 'Codex SDK did not complete the coding task',
         timedOut,
+        authMode: error?.codexAuthMode ?? null,
+        paidApiUsed: Boolean(error?.paidApiUsed),
         output,
         outputBytes: Buffer.byteLength(String(error.message ?? ''))
       };
@@ -5053,6 +5067,8 @@ export class CodexReadOnlySkillExecutor {
         status: 'failed',
         ok: false,
         timedOut,
+        authMode: error?.codexAuthMode ?? null,
+        paidApiUsed: Boolean(error?.paidApiUsed),
         outputBytes,
         error: clip(error.message, 1_000)
       };
