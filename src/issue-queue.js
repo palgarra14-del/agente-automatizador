@@ -609,7 +609,11 @@ export class GitHubIssueChannel {
   }
 
   async request(path, options = {}) {
-    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    const timeoutController = new globalThis.AbortController();
+    const timeout = setTimeout(() => {
+      timeoutController.abort(new Error('github_issue_queue_request_timeout'));
+    }, this.requestTimeoutMs);
+    const timeoutSignal = timeoutController.signal;
     const signal = options.signal
       ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
       : timeoutSignal;
@@ -626,6 +630,8 @@ export class GitHubIssueChannel {
     } catch (error) {
       if (timeoutSignal.aborted) throw new Error('github_issue_queue_request_timeout', { cause: error });
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
