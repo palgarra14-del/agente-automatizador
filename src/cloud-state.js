@@ -6,6 +6,8 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
+const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
+const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 120_000;
 const STATUS_PAGE_SIZE = 100;
 const LANE_INIT_STATUS_MAX_PAGES = 32;
 const EPOCH_STATUS_MAX_PAGES = 8;
@@ -135,6 +137,23 @@ export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES, allowe
   return state;
 }
 
+async function githubReadRateLimitDelayMs(response, fallbackDelayMs) {
+  if (![403, 429].includes(response?.status)) return null;
+  const header = (name) => response?.headers?.get?.(name) ?? null;
+  const retryAfter = header('retry-after');
+  if (/^\d+$/.test(String(retryAfter ?? ''))) {
+    return Math.min(GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS, Math.max(1_000, Number(retryAfter) * 1_000));
+  }
+  const remaining = header('x-ratelimit-remaining');
+  let body = '';
+  try {
+    const readable = typeof response?.clone === 'function' ? response.clone() : response;
+    if (typeof readable?.text === 'function') body = await readable.text();
+  } catch {}
+  const rateLimited = response.status === 429 || remaining === '0' || /secondary rate limit|rate limit exceeded|abuse detection/i.test(body);
+  return rateLimited ? fallbackDelayMs : null;
+}
+
 function responseError(status) {
   if ([409, 422].includes(status)) return new Error('cloud_state_conflict');
   return new Error(`cloud_state_github_request_failed:${status}`);
@@ -155,7 +174,8 @@ export class GitHubStateStore extends JsonStore {
     ownerId = process.env.GITHUB_RUN_ID
       ? `github:${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`
       : `cloud:${randomUUID()}`,
-    now = () => Date.now()
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   } = {}) {
     super('.agent/cloud-state-unused.json');
     if (!repository?.owner || !repository?.name) throw new Error('cloud_state_repository_required');
@@ -168,6 +188,7 @@ export class GitHubStateStore extends JsonStore {
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
     if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
     if (!Number.isInteger(leaseTtlMs) || leaseTtlMs < 60_000 || leaseTtlMs > 60 * 60 * 1000) throw new Error('cloud_state_lease_ttl_invalid');
+    if (typeof sleep !== 'function') throw new Error('cloud_state_sleep_invalid');
     this.repository = repository;
     this.token = token;
     this.fetchImpl = fetchImpl;
@@ -182,6 +203,7 @@ export class GitHubStateStore extends JsonStore {
     this.leaseTtlMs = leaseTtlMs;
     this.ownerId = ownerId;
     this.now = now;
+    this.sleep = sleep;
     this.activeGlobalLeaseId = null;
     this.mutationDeadlineContext = new AsyncLocalStorage();
     this.validatedLineageHeads = new Set();
@@ -219,24 +241,36 @@ export class GitHubStateStore extends JsonStore {
       if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
       timeoutMs = Math.min(timeoutMs, remainingMs);
     }
-    let response;
-    try {
-      response = await this.fetchImpl(this.apiPath(suffix), {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: globalThis.AbortSignal.timeout(timeoutMs)
-      });
-    } catch (error) {
-      throw new Error('cloud_state_github_request_failed', { cause: error });
+    const retryDelays = method === 'GET' ? GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS : [];
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchImpl(this.apiPath(suffix), {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: globalThis.AbortSignal.timeout(timeoutMs)
+        });
+      } catch (error) {
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+      if (allow404 && response.status === 404) return null;
+      if (response.ok) return response.status === 204 ? null : response.json();
+
+      const fallbackDelayMs = retryDelays[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs);
+        if (delayMs !== null) {
+          await this.sleep(delayMs);
+          continue;
+        }
+      }
+      throw responseError(response.status);
     }
-    if (allow404 && response.status === 404) return null;
-    if (!response.ok) throw responseError(response.status);
-    return response.status === 204 ? null : response.json();
   }
 
 
