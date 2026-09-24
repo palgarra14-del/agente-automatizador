@@ -72,6 +72,25 @@ function pathAllowedForAutopilot(path) {
   return allowed && !forbidden;
 }
 
+function pristineWorkflowForDeadlineRefresh(plan) {
+  return Boolean(
+    plan &&
+    plan.status === 'pending' &&
+    plan.workspace === null &&
+    plan.outputBytes === 0 &&
+    (plan.modelUsage?.calls ?? 0) === 0 &&
+    Array.isArray(plan.steps) &&
+    plan.steps.length > 0 &&
+    plan.steps.every((step, index) =>
+      step.status === (index === 0 ? 'ready' : 'pending') &&
+      step.attempts === 0 &&
+      step.evidence === null &&
+      step.error === null
+    ) &&
+    ['pending', 'not_required'].includes(plan.bootstrap?.status)
+  );
+}
+
 export function autonomousSensitiveImplementationAllowed(step) {
   if (!step ||
       step.id !== 'implementation' ||
@@ -337,7 +356,9 @@ export class AutonomousSelfImprovement {
         continue;
       }
 
-      plan = await this.workflowEngine.run(workflowId);
+      plan = await this.workflowEngine.run(workflowId, {
+        refreshPristineDeadline: pristineWorkflowForDeadlineRefresh(plan)
+      });
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
         return { ...resultSummary(plan), status: plan.status };
