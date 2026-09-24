@@ -85,6 +85,7 @@ function fakeGitHub() {
   const failures = [];
   const contentRefs = [];
   const statusesBySha = new Map();
+  const workflowRuns = new Map();
   const truncatedBlobs = new Set();
   let precreateNextClaim = false;
   let loseNextClaimResponse = false;
@@ -279,6 +280,11 @@ function fakeGitHub() {
       }
       const value = refs.get(ref);
       return value ? response(200, { object: { sha: value } }) : response(404, { message: 'not found' });
+    }
+    const workflowRunGet = /^\/actions\/runs\/(\d+)$/.exec(path);
+    if (method === 'GET' && workflowRunGet) {
+      const value = workflowRuns.get(workflowRunGet[1]);
+      return value ? response(200, cloneState(value)) : response(404, { message: 'not found' });
     }
     if (method === 'GET' && path.startsWith('/git/commits/')) {
       const value = commits.get(path.slice('/git/commits/'.length));
@@ -533,6 +539,9 @@ function fakeGitHub() {
     moveMainBeforeNextMainRead(commitSha) {
       assert.ok(commits.has(commitSha));
       moveMainBeforeNextMainRead = commitSha;
+    },
+    setWorkflowRun(runId, { status = 'in_progress', conclusion = null } = {}) {
+      workflowRuns.set(String(runId), { id: Number(runId), status, conclusion });
     },
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
@@ -1630,9 +1639,10 @@ test('state content is always read by exact commit SHA', async () => {
   assert.ok(fake.contentRefs().includes(sha));
 });
 
-test('global lease excludes concurrent runners and recovers after expiry', async () => {
+test('global lease excludes active concurrent runners and recovers after expiry', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
+  fake.setWorkflowRun(1, { status: 'in_progress' });
   const first = storeFor(fake, { ownerId: 'github:1:1', now: () => now, leaseTtlMs: 60_000 });
   const second = storeFor(fake, { ownerId: 'github:2:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = await first.claimGlobalLease();
@@ -1642,17 +1652,44 @@ test('global lease excludes concurrent runners and recovers after expiry', async
   assert.notEqual(recovered.leaseId, lease.leaseId);
 });
 
-test('execution leases use cloud owner identity and become recoverable only after ttl by another owner', async () => {
+test('completed GitHub run lease is reclaimable immediately before ttl', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  fake.setWorkflowRun(77, { status: 'in_progress' });
+  const first = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const second = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = await first.claimGlobalLease();
+
+  fake.setWorkflowRun(77, { status: 'completed', conclusion: 'cancelled' });
+  const recovered = await second.claimGlobalLease();
+
+  assert.notEqual(recovered.leaseId, lease.leaseId);
+  assert.equal(recovered.ownerId, 'github:88:1');
+});
+
+test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
   const owner = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
   const observer = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = { leaseId: 'lease-1', pid: 123, ownerIdentity: 'github:77:3', createdAt: new Date(now).toISOString() };
+
   assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
   assert.equal(await observer.lockOwnerIsAbandoned(lease), false);
+
   now += 61_000;
   assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
   assert.equal(await observer.lockOwnerIsAbandoned(lease), true);
+});
+
+test('active GitHub run lease remains protected before ttl', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  fake.setWorkflowRun(77, { status: 'in_progress' });
+  const observer = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = { leaseId: 'lease-1', ownerIdentity: 'github:77:3', createdAt: new Date(now).toISOString() };
+
+  assert.equal(await observer.lockOwnerIsAbandoned(lease), false);
 });
 
 test('remote envelope integrity mismatch fails closed with matching epoch authority', async () => {
