@@ -1488,6 +1488,9 @@ test('both writing and read-only Codex surfaces share the session-first cost rou
   assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
   assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(error\?\.message\)\) throw error;/);
   assert.match(source, /paidApiUsed: authentication === 'api'/);
+  assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
+  assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);
+  assert.match(source, /authMode: error\?\.codexAuthMode \?\? null,[\s\S]*paidApiUsed: Boolean\(error\?\.paidApiUsed\)/);
 });
 
 test('GitHub adapter derives a process-local commit identity from the authenticated user', async () => {
