@@ -116,7 +116,13 @@ test('autopilot creates one bounded autonomous workflow and records a reviewed P
     }
   };
   const now = Date.parse('2026-09-23T00:00:00Z');
-  const autopilot = new AutonomousSelfImprovement({ store, workflowEngine: engine, operatorRevision: REV_A, now: () => now });
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: engine,
+    operatorRevision: REV_A,
+    workflowTimeoutMs: 18 * 60_000,
+    now: () => now
+  });
 
   assert.equal(await autopilot.hasWork(), true);
   const result = await autopilot.tick();
@@ -124,6 +130,7 @@ test('autopilot creates one bounded autonomous workflow and records a reviewed P
   assert.equal(calls.create.length, 1);
   assert.equal(calls.create[0].profile, 'autonomous-maintenance');
   assert.equal(calls.create[0].projectId, 'self');
+  assert.deepEqual(calls.create[0].budgets, { timeoutMs: 18 * 60_000 });
   assert.equal(calls.create[0].goal, AUTONOMOUS_MAINTENANCE_GOAL);
   assert.deepEqual(calls.create[0].scope.allowedPaths, [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths]);
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('.github'));
@@ -618,4 +625,15 @@ test('a non-billing terminal result clears an expired billing suspension', async
   });
   assert.equal((await autopilot.tick()).status, 'failed');
   assert.equal(store.state.autopilotSelfImprovement.suspendedUntil, null);
+});
+
+test('autonomous workflow timeout rejects invalid values instead of falling back silently', () => {
+  for (const workflowTimeoutMs of [0, 999, 1.5, NaN]) {
+    assert.throws(() => new AutonomousSelfImprovement({
+      store: fakeStore(),
+      workflowEngine: {},
+      operatorRevision: REV_A,
+      workflowTimeoutMs
+    }), /autonomous_self_improvement_timeout_invalid/);
+  }
 });
