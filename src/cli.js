@@ -151,7 +151,12 @@ try {
         executionEnabled: action !== 'cloud-control-once'
       });
       const autonomousSelfImprovement = cloudAction && cloudLane.id === 'self'
-        ? new AutonomousSelfImprovement({ store: activeStore, workflowEngine: activeWorkflows, operatorRevision: loadedRevision })
+        ? new AutonomousSelfImprovement({
+          store: activeStore,
+          workflowEngine: activeWorkflows,
+          operatorRevision: loadedRevision,
+          workflowTimeoutMs: projects.get('self').budgets.maxRuntimeMinutes * 60_000
+        })
         : null;
       const view = (record) => record ? {
         issueNumber: record.issueNumber,

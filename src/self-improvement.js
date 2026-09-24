@@ -128,14 +128,18 @@ function resultSummary(plan) {
 }
 
 export class AutonomousSelfImprovement {
-  constructor({ store, workflowEngine, operatorRevision, now = () => Date.now() } = {}) {
+  constructor({ store, workflowEngine, operatorRevision, workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
     if (!store || !workflowEngine) throw new Error('autonomous_self_improvement_dependencies_required');
     if (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision)) {
       throw new Error('autonomous_self_improvement_revision_invalid');
     }
+    if (!Number.isInteger(workflowTimeoutMs) || workflowTimeoutMs < 1_000) {
+      throw new Error('autonomous_self_improvement_timeout_invalid');
+    }
     this.store = store;
     this.workflowEngine = workflowEngine;
     this.operatorRevision = operatorRevision.toLowerCase();
+    this.workflowTimeoutMs = workflowTimeoutMs;
     this.now = now;
   }
 
@@ -242,6 +246,7 @@ export class AutonomousSelfImprovement {
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
       projectId: 'self',
+      budgets: { timeoutMs: this.workflowTimeoutMs },
       goal: recentProposalPaths.length
         ? `${AUTONOMOUS_MAINTENANCE_GOAL} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
         : AUTONOMOUS_MAINTENANCE_GOAL,
