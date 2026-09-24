@@ -227,7 +227,12 @@ jobs:
           node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
           cat "$RESULT_FILE"
           CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
+          AUTONOMOUS_FAILED="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.stopReason === "autonomous_failure" ? "true" : "false");' "$RESULT_FILE")"
           echo "continue=$CONTINUE" >> "$GITHUB_OUTPUT"
+          if [[ "$AUTONOMOUS_FAILED" == "true" ]]; then
+            echo "::error::autonomous self-maintenance failed; inspect the drain result"
+            exit 1
+          fi
 
       - name: Continue same lane while governed work remains
         if: steps.drain.outputs.continue == 'true'
