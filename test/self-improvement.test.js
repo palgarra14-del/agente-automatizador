@@ -339,18 +339,15 @@ test('completed autonomous PRs do not halt the loop and their files are excluded
 
 test('autopilot enforces cooldown and a hard daily start budget', async () => {
   const now = Date.parse('2026-09-23T12:00:00Z');
-  const recentStarts = [
-    '2026-09-23T02:00:00.000Z',
-    '2026-09-23T04:00:00.000Z',
-    '2026-09-23T06:00:00.000Z',
-    '2026-09-23T08:00:00.000Z'
-  ];
+  const recentStarts = Array.from({ length: 24 }, (_, index) =>
+    new Date(now - (24 - index) * 60 * 60 * 1000 + 1_000).toISOString()
+  );
   const budgetStore = fakeStore({
     autopilotSelfImprovement: {
       version: 1,
       activeWorkflowId: null,
       activeBaseRevision: null,
-      sequence: 4,
+      sequence: 24,
       starts: recentStarts,
       history: [],
       suspendedUntil: null,
