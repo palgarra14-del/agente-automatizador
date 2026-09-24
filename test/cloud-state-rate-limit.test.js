@@ -15,12 +15,13 @@ function response(status, payload = null, { headers = {}, body = null } = {}) {
   };
 }
 
-function store(fetchImpl, sleep) {
+function store(fetchImpl, sleep, { now = () => Date.now() } = {}) {
   return new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
     token: 'test-token-not-a-real-secret',
     fetchImpl,
-    sleep
+    sleep,
+    now
   });
 }
 test('cloud-state retries a GET when GitHub reports a secondary rate limit', async () => {
@@ -35,6 +36,27 @@ test('cloud-state retries a GET when GitHub reports a secondary rate limit', asy
   assert.equal(await subject.refSha('tags/test'), SHA);
   assert.equal(calls, 2);
   assert.deepEqual(waits, [60_000]);
+});
+
+test('cloud-state honors the primary rate-limit reset timestamp when the window is exhausted', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return response(403, null, {
+        headers: {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1005'
+        }
+      });
+    }
+    return response(200, { object: { sha: SHA } });
+  }, async (ms) => waits.push(ms), { now: () => 1_000_000 });
+
+  assert.equal(await subject.refSha('tags/test'), SHA);
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [6_000]);
 });
 
 test('cloud-state does not retry a permission 403 that is not rate limited', async () => {
