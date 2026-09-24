@@ -7,7 +7,7 @@ const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
-const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 120_000;
+const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
 const LANE_INIT_STATUS_MAX_PAGES = 32;
 const EPOCH_STATUS_MAX_PAGES = 8;
@@ -137,7 +137,7 @@ export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES, allowe
   return state;
 }
 
-async function githubReadRateLimitDelayMs(response, fallbackDelayMs) {
+async function githubReadRateLimitDelayMs(response, fallbackDelayMs, nowMs) {
   if (![403, 429].includes(response?.status)) return null;
   const header = (name) => response?.headers?.get?.(name) ?? null;
   const retryAfter = header('retry-after');
@@ -145,6 +145,11 @@ async function githubReadRateLimitDelayMs(response, fallbackDelayMs) {
     return Math.min(GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS, Math.max(1_000, Number(retryAfter) * 1_000));
   }
   const remaining = header('x-ratelimit-remaining');
+  const reset = header('x-ratelimit-reset');
+  if (remaining === '0' && /^\d+$/.test(String(reset ?? '')) && Number.isFinite(nowMs)) {
+    const resetDelayMs = (Number(reset) * 1_000) - nowMs + 1_000;
+    if (resetDelayMs > 0) return Math.min(GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS, resetDelayMs);
+  }
   let body = '';
   try {
     const readable = typeof response?.clone === 'function' ? response.clone() : response;
@@ -265,7 +270,7 @@ export class GitHubStateStore extends JsonStore {
 
       const fallbackDelayMs = retryDelays[attempt];
       if (fallbackDelayMs !== undefined) {
-        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs);
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
           await this.sleep(delayMs);
           continue;
