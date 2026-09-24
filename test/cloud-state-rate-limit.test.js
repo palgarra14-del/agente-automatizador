@@ -64,3 +64,36 @@ test('cloud-state never retries mutating requests after a rate-limit response', 
   assert.equal(calls, 1);
   assert.deepEqual(waits, []);
 });
+
+test('cloud-state exact GraphQL status reads retry rate limits without retrying mutations', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async (url) => {
+    calls += 1;
+    assert.equal(url, 'https://api.github.com/graphql');
+    if (calls === 1) return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
+    return response(200, {
+      data: {
+        repository: {
+          object: {
+            status: {
+              context: {
+                context: 'agent-cloud-state-v2/test',
+                state: 'SUCCESS',
+                description: 'r=' + SHA,
+                targetUrl: null
+              }
+            }
+          }
+        }
+      }
+    });
+  }, async (ms) => waits.push(ms));
+
+  const status = await subject.readStatusContext(SHA, 'agent-cloud-state-v2/test');
+
+  assert.equal(status.state, 'success');
+  assert.equal(status.description, 'r=' + SHA);
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [60_000]);
+});
