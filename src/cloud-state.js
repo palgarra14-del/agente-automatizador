@@ -9,7 +9,6 @@ const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
 const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
-const LANE_INIT_STATUS_MAX_PAGES = 32;
 const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
@@ -313,6 +312,80 @@ export class GitHubStateStore extends JsonStore {
     return comparison.status;
   }
 
+  async readStatusContext(commitSha, contextName) {
+    const oid = assertSha(commitSha);
+    if (typeof contextName !== 'string' || contextName.length < 1 || contextName.length > 200) {
+      throw new Error('cloud_state_status_context_invalid');
+    }
+    const query = `query CloudStateContext($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
+      repository(owner: $owner, name: $name) {
+        object(oid: $oid) {
+          ... on Commit {
+            status {
+              context(name: $context) {
+                context
+                state
+                description
+                targetUrl
+              }
+            }
+          }
+        }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      oid,
+      context: contextName
+    };
+
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchImpl('https://api.github.com/graphql', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query, variables }),
+          signal: globalThis.AbortSignal.timeout(30_000)
+        });
+      } catch (error) {
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+
+      if (response.ok) {
+        const payload = await response.json();
+        if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+          throw new Error('cloud_state_graphql_invalid');
+        }
+        const object = payload?.data?.repository?.object;
+        if (!object || !('status' in object)) throw new Error('cloud_state_graphql_invalid');
+        const status = object.status?.context ?? null;
+        if (!status) return null;
+        return {
+          context: status.context,
+          state: String(status.state ?? '').toLowerCase(),
+          description: status.description ?? null,
+          target_url: status.targetUrl ?? null
+        };
+      }
+
+      const fallbackDelayMs = GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs);
+        if (delayMs !== null) {
+          await this.sleep(delayMs);
+          continue;
+        }
+      }
+      throw responseError(response.status);
+    }
+  }
+
   validateEnvelope(envelope) {
     if (![1, 2].includes(envelope?.version) ||
         envelope.repository !== `${this.repository.owner}/${this.repository.name}` ||
@@ -429,25 +502,17 @@ export class GitHubStateStore extends JsonStore {
 
   async readLaneInitMarker() {
     await this.verifyLedgerRoot();
-    const wanted = this.laneInitContextName.toLowerCase();
-    for (let page = 1; page <= LANE_INIT_STATUS_MAX_PAGES; page += 1) {
-      const statuses = await this.request(`/commits/${LEDGER_ROOT_SHA}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
-      if (!Array.isArray(statuses)) throw new Error('cloud_state_lane_init_invalid');
-      for (const status of statuses) {
-        const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
-        if (context !== wanted) continue;
-        if (String(status.state ?? '').toLowerCase() !== 'success' ||
-            (status.target_url !== null && status.target_url !== undefined) ||
-            typeof status.description !== 'string') {
-          throw new Error('cloud_state_lane_init_invalid');
-        }
-        const match = /^r=([a-f0-9]{40})$/i.exec(status.description);
-        if (!match) throw new Error('cloud_state_lane_init_invalid');
-        return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
-      }
-      if (statuses.length < STATUS_PAGE_SIZE) return null;
+    const status = await this.readStatusContext(LEDGER_ROOT_SHA, this.laneInitContextName);
+    if (!status) return null;
+    if (status.context.toLowerCase() !== this.laneInitContextName.toLowerCase() ||
+        status.state !== 'success' ||
+        (status.target_url !== null && status.target_url !== undefined) ||
+        typeof status.description !== 'string') {
+      throw new Error('cloud_state_lane_init_invalid');
     }
-    throw new Error('cloud_state_lane_init_status_limit');
+    const match = /^r=([a-f0-9]{40})$/i.exec(status.description);
+    if (!match) throw new Error('cloud_state_lane_init_invalid');
+    return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
   }
 
   async ensureLaneInitMarker(laneRootSha) {

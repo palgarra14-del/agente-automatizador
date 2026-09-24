@@ -768,13 +768,20 @@ test('lane initialization marker is looked up by exact context and binds determi
   assert.equal(initStatuses[0].description, store.laneInitDescription(root.sha));
 });
 
-test('lane initialization REST lookup is explicitly bounded and fails closed when exhausted', async () => {
+test('lane initialization exact-context lookup ignores unrelated status volume', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
+  const expectedRoot = 'f'.repeat(40);
+  fake.forceStatus(LEDGER_ROOT_SHA, store.laneInitContextName, store.laneInitDescription(expectedRoot));
   for (let index = 0; index < 3200; index += 1) {
     fake.forceStatus(LEDGER_ROOT_SHA, `other-lane-init/${index}`, 'unrelated');
   }
-  await assert.rejects(() => store.readLaneInitMarker(), /lane_init_status_limit/);
+  fake.resetRequestCount();
+
+  const marker = await store.readLaneInitMarker();
+
+  assert.equal(marker.laneRootSha, expectedRoot);
+  assert.equal(fake.requestCount(), 2);
 });
 
 test('initialized lane without first pointer fails closed instead of looking empty', async () => {
