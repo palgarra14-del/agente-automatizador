@@ -637,3 +637,109 @@ test('autonomous workflow timeout rejects invalid values instead of falling back
     }), /autonomous_self_improvement_timeout_invalid/);
   }
 });
+
+test('resumed pristine autonomous workflow refreshes its execution deadline at first real run', async () => {
+  const now = Date.parse('2026-09-24T10:00:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-pristine-resume',
+      activeBaseRevision: REV_A,
+      sequence: 1,
+      starts: ['2026-09-24T09:00:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  let plan = {
+    id: 'workflow-pristine-resume',
+    profile: 'autonomous-maintenance',
+    projectId: 'self',
+    status: 'pending',
+    result: null,
+    deadlineAt: now - 1,
+    workspace: null,
+    outputBytes: 0,
+    modelUsage: { calls: 0 },
+    bootstrap: { status: 'pending' },
+    steps: [
+      { id: 'inspect-project', status: 'ready', attempts: 0, evidence: null, error: null },
+      { id: 'diagnose', status: 'pending', attempts: 0, evidence: null, error: null },
+      { id: 'implementation', status: 'pending', attempts: 0, evidence: null, error: null }
+    ]
+  };
+  const runOptions = [];
+  const engine = {
+    async get() { return clone(plan); },
+    async run(id, options) {
+      runOptions.push(clone(options));
+      assert.equal(id, plan.id);
+      plan = { ...plan, status: 'failed', result: { error: 'fixture_stop' } };
+      return clone(plan);
+    }
+  };
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: engine,
+    operatorRevision: REV_A,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(runOptions, [{ refreshPristineDeadline: true }]);
+  assert.equal(store.state.autopilotSelfImprovement.activeWorkflowId, null);
+});
+
+test('partially started autonomous workflow can never refresh its deadline', async () => {
+  const now = Date.parse('2026-09-24T10:00:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-started-resume',
+      activeBaseRevision: REV_A,
+      sequence: 1,
+      starts: ['2026-09-24T09:00:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  let plan = {
+    id: 'workflow-started-resume',
+    profile: 'autonomous-maintenance',
+    projectId: 'self',
+    status: 'pending',
+    result: null,
+    deadlineAt: now - 1,
+    workspace: '/tmp/already-started',
+    outputBytes: 0,
+    modelUsage: { calls: 0 },
+    bootstrap: { status: 'pending' },
+    steps: [
+      { id: 'inspect-project', status: 'ready', attempts: 0, evidence: null, error: null }
+    ]
+  };
+  const runOptions = [];
+  const engine = {
+    async get() { return clone(plan); },
+    async run(id, options) {
+      runOptions.push(clone(options));
+      plan = { ...plan, status: 'failed', result: { error: 'workflow_budget_deadline_exceeded' } };
+      return clone(plan);
+    }
+  };
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: engine,
+    operatorRevision: REV_A,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(runOptions, [{ refreshPristineDeadline: false }]);
+});
