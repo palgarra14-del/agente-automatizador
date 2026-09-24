@@ -21,7 +21,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '17 * * * *'
 
 permissions:
   actions: write
@@ -208,7 +208,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ''
+          OPENAI_API_KEY: ''
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: |
           RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
