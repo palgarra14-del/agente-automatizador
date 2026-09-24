@@ -14,7 +14,7 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);
   assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+lane:\n\s+description: Trusted cloud lane for bounded continuation\n\s+required: false\n\s+type: string/);
-  assert.match(workflow, /cron: '17 \*\/6 \* \* \*'/);
+  assert.match(workflow, /cron: '17 \* \* \* \*'/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.match(workflow, /push:\n\s+branches: \[main\][\s\S]*paths:[\s\S]*'\.github\/workflows\/agent-cloud\.yml'[\s\S]*'src\/\*\*'[\s\S]*'config\/\*\*'[\s\S]*'scripts\/\*\*'/);
   assert.match(workflow, /github\.event_name == 'push'/);
@@ -212,17 +212,19 @@ test('production cloud execution uses the bounded drain while retaining cloud-on
   assert.match(cli, /action === 'cloud-once'/);
 });
 
-test('model and cross-repo credentials exist only at the governed queue step', () => {
+test('autonomous cloud work is session-only and cannot spend a paid OpenAI API key', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
-  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
+  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
+  assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
+  assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
   assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
-  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
+  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY|secrets\.OPENAI_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
   assert.match(workflow, /node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE" > "\$RESULT_FILE"/);
 });
@@ -257,4 +259,10 @@ test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
   assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
+});
+
+test('scheduled self-maintenance wakes hourly while active work still chains immediately', () => {
+  assert.match(workflow, /cron: '17 \* \* \* \*'/);
+  assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
+  assert.match(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
 });
