@@ -183,9 +183,13 @@ test('cloud worker reuses one process for repair, control and executable-work pr
 
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   assert.match(cli, /action === 'cloud-prepare'/);
-  assert.match(cli, /readSnapshot\(\{ repair: true \}\)/);
-  assert.match(cli, /withGlobalLease/);
-  assert.match(cli, /hasExecutionWork/);
+  const prepareCliStart = cli.indexOf("} else if (action === 'cloud-prepare') {");
+  const repairCliStart = cli.indexOf("} else if (action === 'cloud-repair') {", prepareCliStart);
+  assert.ok(prepareCliStart > 0 && repairCliStart > prepareCliStart);
+  const prepareCli = cli.slice(prepareCliStart, repairCliStart);
+  assert.doesNotMatch(prepareCli, /readSnapshot\(\{ repair: true \}\)/);
+  assert.match(prepareCli, /withGlobalLease/);
+  assert.match(prepareCli, /hasExecutionWork/);
   assert.match(cli, /executionEnabled: !\['cloud-control-once', 'cloud-prepare'\]\.includes\(action\)/);
 });
 

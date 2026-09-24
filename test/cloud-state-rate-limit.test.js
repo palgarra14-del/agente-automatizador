@@ -119,3 +119,42 @@ test('cloud-state exact GraphQL status reads retry rate limits without retrying 
   assert.equal(calls, 2);
   assert.deepEqual(waits, [60_000]);
 });
+
+test('exact GraphQL status reads honor the primary rate-limit reset timestamp', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async (url) => {
+    calls += 1;
+    assert.equal(url, 'https://api.github.com/graphql');
+    if (calls === 1) {
+      return response(403, null, {
+        headers: {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': '1005'
+        }
+      });
+    }
+    return response(200, {
+      data: {
+        repository: {
+          object: {
+            status: {
+              context: {
+                context: 'agent-cloud-state-v2/test',
+                state: 'SUCCESS',
+                description: 'r=' + SHA,
+                targetUrl: null
+              }
+            }
+          }
+        }
+      }
+    });
+  }, async (ms) => waits.push(ms), { now: () => 1_000_000 });
+
+  const status = await subject.readStatusContext(SHA, 'agent-cloud-state-v2/test');
+
+  assert.equal(status.state, 'success');
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [6_000]);
+});
