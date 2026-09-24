@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1382,13 +1382,7 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
 });
 
-test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
-  let clientOptions;
-  class FakeCodex {
-    constructor(options) { clientOptions = options; }
-    startThread() { return { id: 'thread-auth', run: async () => ({ finalResponse: 'done' }) }; }
-  }
-
+test('Codex routing prefers the logged-in session and uses paid API only as a bounded fallback', async () => {
   const codexKey = 'codex_cloud_worker_test_key_1234567890';
   const openAiKey = 'sk-cloud-worker-fallback-key-1234567890';
   assert.equal(codexApiKeyFromEnvironment({ CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }), codexKey);
@@ -1397,44 +1391,108 @@ test('Codex API credentials use the SDK apiKey boundary and never enter the gene
   assert.throws(() => codexApiKeyFromEnvironment({ CODEX_API_KEY: 'too short' }), /codex_api_key_invalid/);
   assert.throws(() => codexApiKeyFromEnvironment({ OPENAI_API_KEY: 'sk-valid-length-but has-space-1234' }), /codex_api_key_invalid/);
 
-  const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
-  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  Object.assign(process.env, {
-    AGENT_GITHUB_TOKEN: 'ghp_agent_worker_test_secret_1234567890',
-    GITHUB_TOKEN: 'ghp_worker_test_secret_1234567890',
-    VERCEL_TOKEN: 'vcp_worker_test_secret_1234567890',
-    OPENAI_API_KEY: openAiKey,
-    CODEX_API_KEY: codexKey
+  const isolatedHome = async (_sourceEnvironment, authAvailable = true) => ({
+    path: '/isolated/codex-home',
+    authAvailable,
+    cleanup: async () => {}
   });
-  try {
-    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
-      { objective: 'fixture' },
-      { workspace: process.cwd(), timeoutMs: 100 }
-    );
-    assert.equal(clientOptions.apiKey, codexKey);
-    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
-    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
-    assert.equal(clientOptions.env.AGENT_GITHUB_TOKEN, undefined);
-    assert.equal(clientOptions.env.GITHUB_TOKEN, undefined);
-    assert.equal(clientOptions.env.VERCEL_TOKEN, undefined);
-    assert.ok(clientOptions.configOverrides.includes('shell_environment_policy.inherit="none"'));
-    assert.equal(clientOptions.configOverrides.some((entry) => entry.includes('API_KEY')), false);
 
-    delete process.env.CODEX_API_KEY;
-    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
-      { objective: 'fallback fixture' },
-      { workspace: process.cwd(), timeoutMs: 100 }
-    );
-    assert.equal(clientOptions.apiKey, openAiKey);
-    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
-    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
-  } finally {
-    for (const name of names) {
-      if (previous[name] === undefined) delete process.env[name];
-      else process.env[name] = previous[name];
+  const sessionOnlyOptions = [];
+  class SessionCodex {
+    constructor(options) { sessionOnlyOptions.push(options); }
+    startThread() {
+      return { id: 'thread-session', run: async () => ({ finalResponse: 'done from session' }) };
     }
   }
+  const sessionResult = await new CodexSdkWorker({
+    CodexClient: SessionCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(sessionResult.status, 'completed');
+  assert.equal(sessionResult.authMode, 'session');
+  assert.equal(sessionResult.paidApiUsed, false);
+  assert.equal(sessionOnlyOptions.length, 1);
+  assert.equal(Object.hasOwn(sessionOnlyOptions[0], 'apiKey'), false);
+  assert.equal(sessionOnlyOptions[0].env.CODEX_API_KEY, undefined);
+  assert.equal(sessionOnlyOptions[0].env.OPENAI_API_KEY, undefined);
+
+  const fallbackOptions = [];
+  class QuotaThenApiCodex {
+    constructor(options) { this.options = options; fallbackOptions.push(options); }
+    startThread() {
+      const paid = Object.hasOwn(this.options, 'apiKey');
+      return {
+        id: paid ? 'thread-api' : 'thread-session',
+        run: async () => {
+          if (!paid) throw new Error('You have hit your usage limit for Codex. Try again later.');
+          return { finalResponse: 'done from paid fallback', usage: { input_tokens: 1, output_tokens: 1 } };
+        }
+      };
+    }
+  }
+  const fallbackResult = await new CodexSdkWorker({
+    CodexClient: QuotaThenApiCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(fallbackResult.status, 'completed');
+  assert.equal(fallbackResult.authMode, 'api');
+  assert.equal(fallbackResult.paidApiUsed, true);
+  assert.equal(fallbackOptions.length, 2);
+  assert.equal(Object.hasOwn(fallbackOptions[0], 'apiKey'), false);
+  assert.equal(fallbackOptions[1].apiKey, codexKey);
+  assert.equal(fallbackOptions[1].env.CODEX_API_KEY, undefined);
+  assert.equal(fallbackOptions[1].env.OPENAI_API_KEY, undefined);
+
+  const noSessionOptions = [];
+  class ApiOnlyCodex {
+    constructor(options) { this.options = options; noSessionOptions.push(options); }
+    startThread() { return { id: 'thread-api-only', run: async () => ({ finalResponse: 'api only' }) }; }
+  }
+  const noSessionResult = await new CodexSdkWorker({
+    CodexClient: ApiOnlyCodex,
+    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey }),
+    codexHomeFactory: (env) => isolatedHome(env, false),
+    platform: 'linux'
+  }).execute({ objective: 'no session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(noSessionResult.status, 'completed');
+  assert.equal(noSessionResult.authMode, 'api');
+  assert.equal(noSessionResult.paidApiUsed, true);
+  assert.equal(noSessionOptions.length, 1);
+  assert.equal(noSessionOptions[0].apiKey, openAiKey);
+
+  const transientOptions = [];
+  class TransientCodex {
+    constructor(options) { transientOptions.push(options); }
+    startThread() {
+      return { id: 'thread-transient', run: async () => { throw new Error('stream disconnected before completion'); } };
+    }
+  }
+  const transientResult = await new CodexSdkWorker({
+    CodexClient: TransientCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'transient fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(transientResult.status, 'failed');
+  assert.equal(transientOptions.length, 1);
+  assert.equal(Object.hasOwn(transientOptions[0], 'apiKey'), false);
+  assert.match(transientResult.output, /stream disconnected/);
 });
+
+test('both writing and read-only Codex surfaces share the session-first cost router', () => {
+  const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
+  assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
+  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(error\?\.message\)\) throw error;/);
+  assert.match(source, /paidApiUsed: authentication === 'api'/);
+  assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
+  assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);
+  assert.match(source, /authMode: error\?\.codexAuthMode \?\? null,[\s\S]*paidApiUsed: Boolean\(error\?\.paidApiUsed\)/);
+});
+
 test('GitHub adapter derives a process-local commit identity from the authenticated user', async () => {
   const adapter = new GitHubAdapter({
     token: 'ghp_adapterToken',
