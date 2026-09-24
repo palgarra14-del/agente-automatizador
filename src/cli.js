@@ -119,7 +119,7 @@ try {
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
-      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair';
+      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-prepare' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair';
       const requestedLaneId = take('--lane') ?? 'self';
       const cloudLane = cloudAction
         ? queueConfig.cloudLanes.find((lane) => lane.id === requestedLaneId)
@@ -148,7 +148,7 @@ try {
         operatorBranch: 'main',
         includedProjectIds: cloudAction ? cloudLane.projectIds : null,
         excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds,
-        executionEnabled: action !== 'cloud-control-once'
+        executionEnabled: !['cloud-control-once', 'cloud-prepare'].includes(action)
       });
       const autonomousSelfImprovement = cloudAction && cloudLane.id === 'self'
         ? new AutonomousSelfImprovement({
@@ -186,6 +186,20 @@ try {
           throw new Error(`Invalid GitHub event payload: ${error.message}`, { cause: error });
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
+      } else if (action === 'cloud-prepare') {
+        const snapshot = await activeStore.readSnapshot({ repair: true });
+        const queueResult = await activeStore.withGlobalLease(async () => {
+          await queue.ingestAdmissionIntents();
+          return queue.tick();
+        });
+        const queueWork = await queue.hasExecutionWork();
+        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
+        console.log(JSON.stringify({
+          generation: snapshot.generation,
+          authorityGeneration: snapshot.authorityGeneration,
+          queue: view(queueResult),
+          hasExecutionWork: Boolean(queueWork || autonomousWork)
+        }, null, 2));
       } else if (action === 'cloud-repair') {
         const snapshot = await activeStore.readSnapshot({ repair: true });
         console.log(JSON.stringify({ generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration }, null, 2));
@@ -335,7 +349,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-drain|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-prepare|cloud-drain|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
