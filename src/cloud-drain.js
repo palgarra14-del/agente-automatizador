@@ -76,6 +76,11 @@ export async function runCloudDrain({
       autonomousResult
     });
 
+    if (autonomousResult?.status === 'failed') {
+      stopReason = 'autonomous_failure';
+      break;
+    }
+
     const humanGate = Boolean(queueResult && HUMAN_GATE_STATUSES.has(queueResult.status));
     const parkedApprovalGate = Boolean(queueResult && PARKED_APPROVAL_STATUSES.has(queueResult.status));
     const autonomousHasWork = autonomousSelfImprovement
@@ -114,7 +119,7 @@ export async function runCloudDrain({
   let remainingWork;
   if (stopReason === 'idle') {
     remainingWork = false;
-  } else if (stopReason === 'human_gate') {
+  } else if (stopReason === 'human_gate' || stopReason === 'autonomous_failure') {
     remainingWork = true;
   } else {
     const queueHasWork = await queue.hasWork();

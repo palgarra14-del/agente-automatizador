@@ -154,3 +154,29 @@ test('cloud drain stops before starting another iteration after the duration gua
   assert.equal(result.continuationRecommended, true);
   assert.equal(queue.calls.tick, 1);
 });
+
+test('cloud drain never converts a failed autonomous iteration into idle success', async () => {
+  const queue = scriptedQueue([null]);
+  const autonomousSelfImprovement = {
+    async tick() {
+      return {
+        status: 'failed',
+        error: 'workflow_budget_deadline_exceeded',
+        workflowId: 'workflow-deadline'
+      };
+    },
+    async hasWork() {
+      return false;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'autonomous_failure');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].autonomousResult.status, 'failed');
+  assert.equal(result.iterations[0].autonomousResult.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(queue.calls.hasWork, 0);
+});
