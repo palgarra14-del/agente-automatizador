@@ -376,7 +376,7 @@ export class GitHubStateStore extends JsonStore {
 
       const fallbackDelayMs = GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
       if (fallbackDelayMs !== undefined) {
-        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs);
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
           await this.sleep(delayMs);
           continue;
