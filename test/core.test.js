@@ -1485,7 +1485,7 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
 
 test('both writing and read-only Codex surfaces share the session-first cost router', () => {
   const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
-  assert.equal((source.match(/runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
+  assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
   assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(error\?\.message\)\) throw error;/);
   assert.match(source, /paidApiUsed: authentication === 'api'/);
 });
