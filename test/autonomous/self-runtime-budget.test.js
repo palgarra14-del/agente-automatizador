@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const projects = JSON.parse(readFileSync(new URL('../../config/projects.json', import.meta.url), 'utf8'));
+const cli = readFileSync(new URL('../../src/cli.js', import.meta.url), 'utf8');
 
 test('self-maintenance has enough bounded runtime to finish on the local runner', () => {
   const self = projects.projects.find((project) => project.id === 'self');
