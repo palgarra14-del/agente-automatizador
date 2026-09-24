@@ -189,12 +189,25 @@ export class AutonomousSelfImprovement {
     return true;
   }
 
+  revisionAdvanceBypassesDailyCap(state, starts = this.recentStarts(state)) {
+    if (starts.length < MAX_STARTS_PER_24H) return false;
+    const latest = state.history.at(-1);
+    const lastStartAt = Date.parse(starts.at(-1) ?? '');
+    const completedAt = Date.parse(latest?.completedAt ?? '');
+    return Number.isFinite(lastStartAt) &&
+      Number.isFinite(completedAt) &&
+      completedAt >= lastStartAt &&
+      typeof latest?.baseRevision === 'string' &&
+      /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
+      latest.baseRevision.toLowerCase() !== this.operatorRevision;
+  }
+
   async hasWork() {
     const state = await this.readState();
     if (state.activeWorkflowId) return true;
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return false;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H) return false;
+    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
     if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
@@ -222,7 +235,7 @@ export class AutonomousSelfImprovement {
     if (state.activeWorkflowId) return state.activeWorkflowId;
     if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return null;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H) return null;
+    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);

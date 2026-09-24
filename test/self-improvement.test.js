@@ -431,6 +431,67 @@ test('completed failed cycle can retry immediately after authoritative main adva
   assert.equal(creates, 1);
 });
 
+test('daily start cap permits exactly one fresh-main retry after the prior revision exhausted the budget', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const starts = [
+    '2026-09-23T02:00:00.000Z',
+    '2026-09-23T04:00:00.000Z',
+    '2026-09-23T06:00:00.000Z',
+    '2026-09-23T08:00:00.000Z'
+  ];
+  const state = {
+    version: 1,
+    activeWorkflowId: null,
+    activeBaseRevision: null,
+    sequence: 4,
+    starts,
+    history: [{
+      workflowId: 'workflow-old',
+      status: 'failed',
+      error: 'workflow_budget_deadline_exceeded',
+      changedPaths: [],
+      pullRequestNumber: null,
+      pullRequestUrl: null,
+      finalHead: null,
+      baseRevision: REV_A,
+      completedAt: '2026-09-23T08:10:00.000Z'
+    }],
+    suspendedUntil: null,
+    updatedAt: null
+  };
+
+  let creates = 0;
+  const store = fakeStore({ autopilotSelfImprovement: state });
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: {
+      async create() {
+        creates += 1;
+        return { id: 'workflow-fresh-main' };
+      },
+      async get() {
+        return {
+          id: 'workflow-fresh-main',
+          profile: 'autonomous-maintenance',
+          projectId: 'self',
+          status: 'failed',
+          result: { error: 'fixture_stop' },
+          steps: []
+        };
+      }
+    },
+    operatorRevision: REV_B,
+    now: () => now
+  });
+
+  assert.equal(await autopilot.hasWork(), true);
+  assert.equal((await autopilot.tick()).status, 'failed');
+  assert.equal(creates, 1);
+  assert.equal(store.state.autopilotSelfImprovement.starts.length, 5);
+  assert.equal(store.state.autopilotSelfImprovement.history.at(-1).baseRevision, REV_B);
+  assert.equal(await autopilot.hasWork(), false);
+});
+
 test('billing failures back off instead of creating a costly retry loop', async () => {
   const store = fakeStore({
     autopilotSelfImprovement: {
