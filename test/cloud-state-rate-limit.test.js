@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { GitHubStateStore } from '../src/cloud-state.js';
+
+const SHA = 'a'.repeat(40);
+
+function response(status, payload = null, { headers = {}, body = null } = {}) {
+  const normalized = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), String(value)]));
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (name) => normalized.get(name.toLowerCase()) ?? null },
+    clone() { return { text: async () => body ?? JSON.stringify(payload) }; },
+    async json() { return payload; }
+  };
+}
+
+function store(fetchImpl, sleep) {
+  return new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    fetchImpl,
+    sleep
+  });
+}
+test('cloud-state retries a GET when GitHub reports a secondary rate limit', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    calls += 1;
+    if (calls === 1) return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
+    return response(200, { object: { sha: SHA } });
+  }, async (ms) => waits.push(ms));
+
+  assert.equal(await subject.refSha('tags/test'), SHA);
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [60_000]);
+});
+
+test('cloud-state does not retry a permission 403 that is not rate limited', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    calls += 1;
+    return response(403, null, { body: 'Resource not accessible by integration' });
+  }, async (ms) => waits.push(ms));
+
+  await assert.rejects(() => subject.refSha('tags/test'), /cloud_state_github_request_failed:403/);
+  assert.equal(calls, 1);
+  assert.deepEqual(waits, []);
+});
+test('cloud-state never retries mutating requests after a rate-limit response', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    calls += 1;
+    return response(429, null, { headers: { 'retry-after': '1' } });
+  }, async (ms) => waits.push(ms));
+
+  await assert.rejects(
+    () => subject.request('/git/refs', { method: 'POST', body: { ref: 'refs/tags/test', sha: SHA } }),
+    /cloud_state_github_request_failed:429/
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(waits, []);
+});
