@@ -187,18 +187,16 @@ try {
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
       } else if (action === 'cloud-prepare') {
-        const snapshot = await activeStore.readSnapshot({ repair: true });
-        const queueResult = await activeStore.withGlobalLease(async () => {
+        const prepared = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
-          return queue.tick();
+          const queueResult = await queue.tick();
+          const queueWork = await queue.hasExecutionWork();
+          const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
+          return { queueResult, hasExecutionWork: Boolean(queueWork || autonomousWork) };
         });
-        const queueWork = await queue.hasExecutionWork();
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
         console.log(JSON.stringify({
-          generation: snapshot.generation,
-          authorityGeneration: snapshot.authorityGeneration,
-          queue: view(queueResult),
-          hasExecutionWork: Boolean(queueWork || autonomousWork)
+          queue: view(prepared.queueResult),
+          hasExecutionWork: prepared.hasExecutionWork
         }, null, 2));
       } else if (action === 'cloud-repair') {
         const snapshot = await activeStore.readSnapshot({ repair: true });
