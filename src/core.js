@@ -4439,12 +4439,14 @@ async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
   await chmod(isolatedHome, 0o700);
   const sourceHome = resolve(sourceEnvironment.CODEX_HOME ?? resolve(sourceEnvironment.HOME ?? homedir(), '.codex'));
   const sourceAuth = resolve(sourceHome, 'auth.json');
+  let authAvailable = false;
   try {
     const info = await lstat(sourceAuth);
     if (info.isSymbolicLink() || !info.isFile()) throw new Error('codex_auth_source_must_be_regular_file');
     const targetAuth = resolve(isolatedHome, 'auth.json');
     await copyFile(sourceAuth, targetAuth);
     await chmod(targetAuth, 0o600);
+    authAvailable = true;
   } catch (error) {
     if (error.code !== 'ENOENT') {
       await rm(isolatedHome, { recursive: true, force: true });
@@ -4453,6 +4455,7 @@ async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
   }
   return {
     path: isolatedHome,
+    authAvailable,
     cleanup: async () => rm(isolatedHome, { recursive: true, force: true })
   };
 }
@@ -4467,13 +4470,63 @@ function isolatedWorkerEnvironment(sourceEnvironment, isolatedHome) {
   return environment;
 }
 
-export function codexClientOptions(sourceEnvironment, isolatedHome, configOverrides) {
-  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+export function codexClientOptions(sourceEnvironment, isolatedHome, configOverrides, { authentication = 'session' } = {}) {
+  if (!['session', 'api'].includes(authentication)) throw new Error('codex_authentication_mode_invalid');
+  const apiKey = authentication === 'api' ? codexApiKeyFromEnvironment(sourceEnvironment) : null;
+  if (authentication === 'api' && !apiKey) throw new Error('codex_api_key_unavailable');
   return {
     ...(apiKey ? { apiKey } : {}),
     env: isolatedWorkerEnvironment(sourceEnvironment, isolatedHome),
     configOverrides
   };
+}
+
+export function codexPaidFallbackEligible(message) {
+  const text = String(message ?? '');
+  if (!text) return false;
+  if (nonRetryableModelFailureCode(text)) return true;
+  return /(?:\b429\b|rate[ _-]?limit|usage[ _-]?limit|too many requests|login required|not logged in|sign[ -]?in required|session expired|authentication required|authorization required|quota exceeded|plan limit)/i.test(text);
+}
+
+async function runCostAwareCodexTurn({
+  CodexClient,
+  sourceEnvironment,
+  isolatedHome,
+  configOverrides,
+  threadOptions,
+  prompt,
+  signal
+}) {
+  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const sessionAvailable = isolatedHome?.authAvailable !== false;
+  const run = async (authentication) => {
+    const client = new CodexClient(codexClientOptions(
+      sourceEnvironment,
+      isolatedHome.path,
+      configOverrides,
+      { authentication }
+    ));
+    const thread = client.startThread(threadOptions);
+    const turn = await thread.run(prompt, { signal });
+    return {
+      thread,
+      turn,
+      authMode: authentication,
+      paidApiUsed: authentication === 'api'
+    };
+  };
+
+  if (!sessionAvailable) {
+    if (!apiKey) return run('session');
+    return run('api');
+  }
+
+  try {
+    return await run('session');
+  } catch (error) {
+    if (signal?.aborted || !apiKey || !codexPaidFallbackEligible(error?.message)) throw error;
+    return run('api');
+  }
 }
 
 function diagnosticCommandExecutable(command) {
@@ -4540,13 +4593,20 @@ export class CodexSdkWorker extends CodingWorker {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
-      const thread = client.startThread({
-        workingDirectory: workspace,
-        approvalPolicy: 'never',
-        webSearchMode: 'disabled'
+      const execution = await runCostAwareCodexTurn({
+        CodexClient: this.CodexClient,
+        sourceEnvironment,
+        isolatedHome,
+        configOverrides: security.configOverrides,
+        threadOptions: {
+          workingDirectory: workspace,
+          approvalPolicy: 'never',
+          webSearchMode: 'disabled'
+        },
+        prompt: buildWorkerPrompt(task),
+        signal: controller.signal
       });
-      const turn = await thread.run(buildWorkerPrompt(task), { signal: controller.signal });
+      const { thread, turn, authMode, paidApiUsed } = execution;
       const output = clip(turn.finalResponse);
       const diagnostics = codexTurnFailureDiagnostics(turn.items);
       return {
@@ -4554,13 +4614,21 @@ export class CodexSdkWorker extends CodingWorker {
         summary: 'Codex SDK completed the coding task',
         codexThreadId: thread.id,
         usage: turn.usage === undefined ? null : safeJson(turn.usage),
+        authMode,
+        paidApiUsed,
         diagnostics,
         output,
         outputBytes: Buffer.byteLength(String(turn.finalResponse ?? ''))
       };
     } catch (error) {
       const output = clip(error.message);
-      return { status: 'failed', summary: 'Codex SDK did not complete the coding task', timedOut, output, outputBytes: Buffer.byteLength(String(error.message ?? '')) };
+      return {
+        status: 'failed',
+        summary: 'Codex SDK did not complete the coding task',
+        timedOut,
+        output,
+        outputBytes: Buffer.byteLength(String(error.message ?? ''))
+      };
     } finally {
       clearTimeout(timer);
       await isolatedHome?.cleanup();
@@ -4952,13 +5020,20 @@ export class CodexReadOnlySkillExecutor {
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const client = new this.CodexClient(codexClientOptions(sourceEnvironment, isolatedHome.path, security.configOverrides));
-      const thread = client.startThread({
-        workingDirectory: workspace,
-        approvalPolicy: 'never',
-        webSearchMode: 'disabled'
+      const execution = await runCostAwareCodexTurn({
+        CodexClient: this.CodexClient,
+        sourceEnvironment,
+        isolatedHome,
+        configOverrides: security.configOverrides,
+        threadOptions: {
+          workingDirectory: workspace,
+          approvalPolicy: 'never',
+          webSearchMode: 'disabled'
+        },
+        prompt: buildReadOnlySkillPrompt(request),
+        signal: controller.signal
       });
-      const turn = await thread.run(buildReadOnlySkillPrompt(request), { signal: controller.signal });
+      const { thread, turn, authMode, paidApiUsed } = execution;
       const raw = String(turn.finalResponse ?? '').trim();
       outputBytes = Buffer.byteLength(raw);
       if (outputBytes > this.maxOutputBytes) throw new Error('skill_output_too_large');
@@ -4968,6 +5043,8 @@ export class CodexReadOnlySkillExecutor {
         ok: true,
         codexThreadId: thread.id,
         usage: turn.usage === undefined ? null : safeJson(turn.usage),
+        authMode,
+        paidApiUsed,
         outputBytes,
         result: parsed
       };
