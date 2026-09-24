@@ -155,7 +155,8 @@ jobs:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, agent-local]
-    timeout-minutes: 35
+    # Supervisor headroom only: internal self/drain budgets remain bounded separately.
+    timeout-minutes: 60
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5

@@ -48,7 +48,7 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
-  assert.match(workflow, /timeout-minutes: 35/);
+  assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
   assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
@@ -251,4 +251,10 @@ test('autonomous self-maintenance failures cannot masquerade as a successful clo
   assert.match(drain, /AUTONOMOUS_FAILED=/);
   assert.match(drain, /::error::autonomous self-maintenance failed/);
   assert.match(drain, /exit 1/);
+});
+
+test('cloud supervisor headroom does not widen autonomous work budgets', () => {
+  const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
+  assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
+  assert.equal(self.budgets.maxRuntimeMinutes, 18);
 });
