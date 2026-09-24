@@ -212,17 +212,19 @@ test('production cloud execution uses the bounded drain while retaining cloud-on
   assert.match(cli, /action === 'cloud-once'/);
 });
 
-test('model and cross-repo credentials exist only at the governed queue step', () => {
+test('autonomous cloud work is session-only and cannot spend a paid OpenAI API key', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
-  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
+  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 0);
   assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
+  assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
+  assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
   assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
-  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
+  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY|secrets\.OPENAI_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
   assert.match(workflow, /node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE" > "\$RESULT_FILE"/);
 });
@@ -257,4 +259,10 @@ test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
   assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
+});
+
+test('scheduled self-maintenance wakes hourly while active work still chains immediately', () => {
+  assert.match(workflow, /cron: '17 \* \* \* \*'/);
+  assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
+  assert.match(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
 });
