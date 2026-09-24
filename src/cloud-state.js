@@ -149,7 +149,9 @@ async function githubReadRateLimitDelayMs(response, fallbackDelayMs) {
   try {
     const readable = typeof response?.clone === 'function' ? response.clone() : response;
     if (typeof readable?.text === 'function') body = await readable.text();
-  } catch {}
+  } catch {
+    body = '';
+  }
   const rateLimited = response.status === 429 || remaining === '0' || /secondary rate limit|rate limit exceeded|abuse detection/i.test(body);
   return rateLimited ? fallbackDelayMs : null;
 }
