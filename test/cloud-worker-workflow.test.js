@@ -244,3 +244,14 @@ test('cloud continuation dispatch is lane-scoped and only follows an explicit dr
 test('cloud worker has no merge or production deployment command surface', () => {
   assert.doesNotMatch(workflow, /\bgh\s+pr\s+merge\b|merge_pull_request|vercel\s+--prod|production[_ -]?deploy/i);
 });
+
+test('autonomous self-maintenance failures cannot masquerade as a successful cloud drain', () => {
+  const drainStart = workflow.indexOf('- name: Drain governed cloud work continuously');
+  const continuationStart = workflow.indexOf('- name: Continue same lane while governed work remains');
+  assert.ok(drainStart > 0 && continuationStart > drainStart);
+  const drain = workflow.slice(drainStart, continuationStart);
+  assert.match(drain, /result\.stopReason === "autonomous_failure"/);
+  assert.match(drain, /AUTONOMOUS_FAILED=/);
+  assert.match(drain, /::error::autonomous self-maintenance failed/);
+  assert.match(drain, /exit 1/);
+});
