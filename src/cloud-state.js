@@ -1786,8 +1786,18 @@ export class GitHubStateStore extends JsonStore {
   async lockOwnerIsAbandoned(metadata) {
     const createdAt = Date.parse(metadata?.createdAt ?? '');
     if (!Number.isFinite(createdAt)) return false;
-    if (metadata?.ownerIdentity === this.ownerId) return false;
-    return this.now() - createdAt >= this.leaseTtlMs;
+    const ownerIdentity = metadata?.ownerIdentity ?? metadata?.ownerId ?? null;
+    if (ownerIdentity === this.ownerId) return false;
+    if (this.now() - createdAt >= this.leaseTtlMs) return true;
+
+    const githubOwner = /^github:(\d+):(\d+)$/.exec(String(ownerIdentity ?? ''));
+    if (!githubOwner) return false;
+    try {
+      const run = await this.request(`/actions/runs/${githubOwner[1]}`);
+      return run?.status === 'completed';
+    } catch {
+      return false;
+    }
   }
 
   async claimGlobalLease() {
@@ -1797,11 +1807,15 @@ export class GitHubStateStore extends JsonStore {
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(this.now() + this.leaseTtlMs).toISOString()
     };
-    await this.mutateInternal((data) => {
+    await this.mutateInternal(async (data) => {
       const existing = data.cloudExecutionLease;
       const existingExpiry = Date.parse(existing?.expiresAt ?? '');
       if (existing && Number.isFinite(existingExpiry) && existingExpiry > this.now()) {
-        throw new Error('cloud_global_lease_busy');
+        const abandoned = await this.lockOwnerIsAbandoned({
+          ownerIdentity: existing.ownerId,
+          createdAt: existing.createdAt
+        });
+        if (!abandoned) throw new Error('cloud_global_lease_busy');
       }
       data.cloudExecutionLease = lease;
       return lease;
