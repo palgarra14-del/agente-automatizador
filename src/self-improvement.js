@@ -6,7 +6,7 @@ const TERMINAL = new Set(['completed', 'failed', 'blocked']);
 const COOLDOWN_MS = 30 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const MAX_STARTS_PER_24H = 4;
+const MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
@@ -225,10 +225,19 @@ export class AutonomousSelfImprovement {
       latest.baseRevision.toLowerCase() !== this.operatorRevision;
   }
 
+  revisionAdvanceBypassesSuspension(state) {
+    const latest = state.history.at(-1);
+    return typeof latest?.baseRevision === 'string' &&
+      /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
+      latest.baseRevision.toLowerCase() !== this.operatorRevision;
+  }
+
   async hasWork() {
     const state = await this.readState();
     if (state.activeWorkflowId) return true;
-    if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return false;
+    if (state.suspendedUntil &&
+        Date.parse(state.suspendedUntil) > this.now() &&
+        !this.revisionAdvanceBypassesSuspension(state)) return false;
     const starts = this.recentStarts(state);
     if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
     if (this.cooldownApplies(state, starts)) return false;
@@ -256,7 +265,9 @@ export class AutonomousSelfImprovement {
   async createWorkflow() {
     const state = await this.readState();
     if (state.activeWorkflowId) return state.activeWorkflowId;
-    if (state.suspendedUntil && Date.parse(state.suspendedUntil) > this.now()) return null;
+    if (state.suspendedUntil &&
+        Date.parse(state.suspendedUntil) > this.now() &&
+        !this.revisionAdvanceBypassesSuspension(state)) return null;
     const starts = this.recentStarts(state);
     if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
     if (this.cooldownApplies(state, starts)) return null;
