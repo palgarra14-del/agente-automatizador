@@ -1825,11 +1825,32 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async releaseGlobalLease(leaseId) {
-    const released = await this.mutateInternal((data) => {
+    const clearLease = () => this.mutateInternal((data) => {
       if (data.cloudExecutionLease?.leaseId !== leaseId || data.cloudExecutionLease?.ownerId !== this.ownerId) return false;
       data.cloudExecutionLease = null;
       return true;
     }, { requireLease: false });
+    let released;
+    try {
+      released = await clearLease();
+    } catch (error) {
+      let snapshot;
+      try {
+        snapshot = await this.readSnapshot({ repair: true });
+      } catch {
+        throw error;
+      }
+      const current = snapshot.state.cloudExecutionLease;
+      if (!current) {
+        if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+        return true;
+      }
+      if (current.leaseId !== leaseId || current.ownerId !== this.ownerId) {
+        if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+        return false;
+      }
+      throw error;
+    }
     if (released && this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
     return released;
   }

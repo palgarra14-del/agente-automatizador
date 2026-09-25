@@ -1667,6 +1667,59 @@ test('completed GitHub run lease is reclaimable immediately before ttl', async (
   assert.equal(recovered.ownerId, 'github:88:1');
 });
 
+test('global lease release reconciles partial publication without duplicating completed work', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const first = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  let executions = 0;
+
+  const result = await first.withGlobalLease(async () => {
+    executions += 1;
+    await first.mutate((state) => {
+      state.releaseRecoveryMarker = 'completed-once';
+    });
+    fake.failNextTagWrite(stateTag, 500);
+    return 'completed';
+  });
+
+  assert.equal(result, 'completed');
+  const afterRelease = await first.load();
+  assert.equal(afterRelease.releaseRecoveryMarker, 'completed-once');
+  assert.equal(afterRelease.cloudExecutionLease ?? null, null);
+
+  const second = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  await second.withGlobalLease(async () => {
+    const state = await second.load();
+    if (state.releaseRecoveryMarker !== 'completed-once') executions += 1;
+  });
+  assert.equal(executions, 1);
+});
+
+test('global lease release still fails closed when authoritative state retains the same lease', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const lease = await store.claimGlobalLease();
+  const mutateInternal = store.mutateInternal.bind(store);
+  let injectReleaseFailure = true;
+  store.mutateInternal = async (...args) => {
+    if (injectReleaseFailure) {
+      injectReleaseFailure = false;
+      throw new Error('injected_release_write_failure');
+    }
+    return mutateInternal(...args);
+  };
+
+  await assert.rejects(
+    () => store.releaseGlobalLease(lease.leaseId),
+    /injected_release_write_failure/
+  );
+
+  const state = await store.load();
+  assert.equal(state.cloudExecutionLease?.leaseId, lease.leaseId);
+  assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
+});
+
 test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
