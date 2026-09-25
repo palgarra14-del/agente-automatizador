@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
@@ -4309,7 +4309,16 @@ export function nonRetryableModelFailureCode(message) {
     text.includes('invalid api key') ||
     text.includes('authentication failed') ||
     text.includes('authentication error') ||
-    text.includes('unauthorized api key')
+    text.includes('unauthorized api key') ||
+    text.includes('access token could not be refreshed') ||
+    text.includes('refresh token was already used') ||
+    text.includes('please log out and sign in again') ||
+    text.includes('session expired') ||
+    text.includes('login required') ||
+    text.includes('not logged in') ||
+    text.includes('sign in required') ||
+    text.includes('authentication required') ||
+    text.includes('authorization required')
   ) return 'model_authentication_unavailable';
   return null;
 }
@@ -4438,28 +4447,106 @@ async function assertWorkerProjectControlSurface(workspace) {
   }
 }
 
+const CODEX_AUTH_MAX_BYTES = 64 * 1024;
+
+async function readCodexAuthSnapshot(file, { allowMissing = false } = {}) {
+  let info;
+  try { info = await lstat(file); }
+  catch (error) {
+    if (allowMissing && error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isFile()) throw new Error('codex_auth_source_must_be_regular_file');
+  if (info.size <= 0 || info.size > CODEX_AUTH_MAX_BYTES) throw new Error('codex_auth_source_size_invalid');
+  const content = await readFile(file);
+  try {
+    const parsed = JSON.parse(content.toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid');
+  } catch {
+    throw new Error('codex_auth_source_invalid_json');
+  }
+  return { content, fingerprint: createHash('sha256').update(content).digest('hex') };
+}
+
+async function writeCodexAuthAtomically(file, content) {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  let committed = false;
+  let operationError = null;
+  try {
+    await writeFile(temporary, content, { flag: 'wx', mode: 0o600 });
+    await rename(temporary, file);
+    await chmod(file, 0o600);
+    committed = true;
+  } catch (error) {
+    operationError = error;
+  }
+  if (!committed) {
+    try { await unlink(temporary); }
+    catch (error) { if (error.code !== 'ENOENT' && operationError === null) operationError = error; }
+  }
+  if (operationError) throw operationError;
+}
+
+async function withCodexAuthSyncLock(sourceAuth, operation) {
+  const lock = new JsonStore(`${sourceAuth}.agent-auth-sync`, { lockTimeoutMs: 5_000, lockPollMs: 20 });
+  await lock.acquireLock();
+  let output;
+  let operationError = null;
+  try { output = await operation(); }
+  catch (error) { operationError = error; }
+  let unlockError = null;
+  try { await unlink(lock.lockFile); }
+  catch (error) { if (error.code !== 'ENOENT') unlockError = error; }
+  if (operationError) throw operationError;
+  if (unlockError) throw unlockError;
+  return output;
+}
 async function prepareIsolatedCodexHome(sourceEnvironment = {}) {
   const isolatedHome = await mkdtemp(resolve(tmpdir(), 'agent-codex-home-'));
   await chmod(isolatedHome, 0o700);
   const sourceHome = resolve(sourceEnvironment.CODEX_HOME ?? resolve(sourceEnvironment.HOME ?? homedir(), '.codex'));
   const sourceAuth = resolve(sourceHome, 'auth.json');
-  let authAvailable = false;
+  const targetAuth = resolve(isolatedHome, 'auth.json');
+  let sourceSnapshot;
   try {
-    const info = await lstat(sourceAuth);
-    if (info.isSymbolicLink() || !info.isFile()) throw new Error('codex_auth_source_must_be_regular_file');
-    const targetAuth = resolve(isolatedHome, 'auth.json');
-    await copyFile(sourceAuth, targetAuth);
-    await chmod(targetAuth, 0o600);
-    authAvailable = true;
+    sourceSnapshot = await readCodexAuthSnapshot(sourceAuth, { allowMissing: true });
+    if (sourceSnapshot) await writeCodexAuthAtomically(targetAuth, sourceSnapshot.content);
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      await rm(isolatedHome, { recursive: true, force: true });
-      throw error;
-    }
+    await rm(isolatedHome, { recursive: true, force: true });
+    throw error;
   }
+  const authAvailable = Boolean(sourceSnapshot);
+  let authFingerprint = sourceSnapshot?.fingerprint ?? null;
+
+  const syncAuth = async () => {
+    if (!authAvailable) return false;
+    const isolatedSnapshot = await readCodexAuthSnapshot(targetAuth, { allowMissing: true });
+    if (!isolatedSnapshot || isolatedSnapshot.fingerprint === authFingerprint) return false;
+    return withCodexAuthSyncLock(sourceAuth, async () => {
+      const current = await readCodexAuthSnapshot(sourceAuth, { allowMissing: true });
+      if (!current || current.fingerprint !== authFingerprint) return false;
+      await writeCodexAuthAtomically(sourceAuth, isolatedSnapshot.content);
+      authFingerprint = isolatedSnapshot.fingerprint;
+      return true;
+    });
+  };
+
+  const refreshAuthFromSource = async () => {
+    if (!authAvailable) return false;
+    return withCodexAuthSyncLock(sourceAuth, async () => {
+      const current = await readCodexAuthSnapshot(sourceAuth, { allowMissing: true });
+      if (!current || current.fingerprint === authFingerprint) return false;
+      await writeCodexAuthAtomically(targetAuth, current.content);
+      authFingerprint = current.fingerprint;
+      return true;
+    });
+  };
+
   return {
     path: isolatedHome,
     authAvailable,
+    syncAuth,
+    refreshAuthFromSource,
     cleanup: async () => rm(isolatedHome, { recursive: true, force: true })
   };
 }
@@ -4503,6 +4590,7 @@ async function runCostAwareCodexTurn({
 }) {
   const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
   const sessionAvailable = isolatedHome?.authAvailable !== false;
+
   const run = async (authentication) => {
     const client = new CodexClient(codexClientOptions(
       sourceEnvironment,
@@ -4511,21 +4599,39 @@ async function runCostAwareCodexTurn({
       { authentication }
     ));
     const thread = client.startThread(threadOptions);
+    let turn = null;
+    let runError = null;
     try {
-      const turn = await thread.run(prompt, { signal });
-      return {
-        thread,
-        turn,
-        authMode: authentication,
-        paidApiUsed: authentication === 'api'
-      };
+      turn = await thread.run(prompt, { signal });
     } catch (error) {
-      if (error && typeof error === 'object') {
-        error.codexAuthMode = authentication;
-        error.paidApiUsed = authentication === 'api';
-      }
-      throw error;
+      runError = error;
     }
+    let syncError = null;
+    if (authentication === 'session' && typeof isolatedHome?.syncAuth === 'function') {
+      try { await isolatedHome.syncAuth(); }
+      catch (error) { syncError = error; }
+    }
+    if (runError) {
+      if (runError && typeof runError === 'object') {
+        runError.codexAuthMode = authentication;
+        runError.paidApiUsed = authentication === 'api';
+        if (syncError) runError.codexAuthSyncError = String(syncError.message ?? syncError);
+      }
+      throw runError;
+    }
+    if (syncError) {
+      if (syncError && typeof syncError === 'object') {
+        syncError.codexAuthMode = authentication;
+        syncError.paidApiUsed = authentication === 'api';
+      }
+      throw syncError;
+    }
+    return {
+      thread,
+      turn,
+      authMode: authentication,
+      paidApiUsed: authentication === 'api'
+    };
   };
 
   if (!sessionAvailable) {
@@ -4533,12 +4639,30 @@ async function runCostAwareCodexTurn({
     return run('api');
   }
 
+  let sessionError;
   try {
     return await run('session');
   } catch (error) {
-    if (signal?.aborted || !apiKey || !codexPaidFallbackEligible(error?.message)) throw error;
-    return run('api');
+    sessionError = error;
   }
+  const refreshCollision = /access token could not be refreshed|refresh token was already used/i.test(String(sessionError?.message ?? ''));
+  if (!signal?.aborted && refreshCollision && typeof isolatedHome?.refreshAuthFromSource === 'function') {
+    try {
+      const refreshed = await isolatedHome.refreshAuthFromSource();
+      if (refreshed) {
+        try {
+          return await run('session');
+        } catch (error) {
+          sessionError = error;
+        }
+      }
+    } catch (error) {
+      sessionError = error;
+    }
+  }
+
+  if (signal?.aborted || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  return run('api');
 }
 
 function diagnosticCommandExecutable(command) {

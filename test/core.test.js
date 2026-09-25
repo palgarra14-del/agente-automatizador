@@ -974,6 +974,12 @@ test('model billing/auth failures are fail-fast while transient transport failur
   assert.equal(nonRetryableModelFailureCode('billing_hard_limit_reached'), 'model_billing_unavailable');
   assert.equal(nonRetryableModelFailureCode('Incorrect API key provided'), 'model_authentication_unavailable');
   assert.equal(nonRetryableModelFailureCode('invalid_api_key'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode(
+    'Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+  ), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('session expired'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('login required'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('not logged in'), 'model_authentication_unavailable');
   assert.equal(nonRetryableModelFailureCode('rate limit exceeded, retry later'), null);
   assert.equal(nonRetryableModelFailureCode('stream disconnected before completion'), null);
   assert.equal(nonRetryableModelFailureCode(null), null);
@@ -1486,7 +1492,8 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
 test('both writing and read-only Codex surfaces share the session-first cost router', () => {
   const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
   assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
-  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(error\?\.message\)\) throw error;/);
+  assert.match(source, /refreshAuthFromSource/);
+  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
   assert.match(source, /paidApiUsed: authentication === 'api'/);
   assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
   assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);
