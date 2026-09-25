@@ -238,30 +238,56 @@ export class GitHubStateStore extends JsonStore {
     return `https://api.github.com/repos/${encodeURIComponent(this.repository.owner)}/${encodeURIComponent(this.repository.name)}${suffix}`;
   }
 
-  async request(suffix, { method = 'GET', body, allow404 = false } = {}) {
-    const deadlineAt = method === 'GET' ? null : this.mutationDeadlineContext?.getStore() ?? null;
-    let timeoutMs = 30_000;
+  activeRequestDeadline() {
+    return this.mutationDeadlineContext?.getStore() ?? null;
+  }
+
+  requestTimeoutMs(deadlineAt = this.activeRequestDeadline()) {
+    if (deadlineAt === null) return 30_000;
+    if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+    const remainingMs = Math.floor(deadlineAt - this.now());
+    if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
+    return Math.min(30_000, remainingMs);
+  }
+
+  async fetchWithDeadline(url, options = {}, deadlineAt = this.activeRequestDeadline()) {
+    const timeoutController = new globalThis.AbortController();
+    const timeout = setTimeout(() => {
+      timeoutController.abort(new Error('cloud_state_github_request_timeout'));
+    }, this.requestTimeoutMs(deadlineAt));
+    try {
+      return await this.fetchImpl(url, { ...options, signal: timeoutController.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async sleepWithinDeadline(delayMs, deadlineAt = this.activeRequestDeadline()) {
     if (deadlineAt !== null) {
       if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
       const remainingMs = Math.floor(deadlineAt - this.now());
-      if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
-      timeoutMs = Math.min(timeoutMs, remainingMs);
+      if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
     }
+    await this.sleep(delayMs);
+  }
+
+  async request(suffix, { method = 'GET', body, allow404 = false } = {}) {
+    const deadlineAt = this.activeRequestDeadline();
     const retryDelays = method === 'GET' ? GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS : [];
     for (let attempt = 0; ; attempt += 1) {
       let response;
       try {
-        response = await this.fetchImpl(this.apiPath(suffix), {
+        response = await this.fetchWithDeadline(this.apiPath(suffix), {
           method,
           headers: {
             Authorization: `Bearer ${this.token}`,
             Accept: 'application/vnd.github+json',
             'Content-Type': 'application/json'
           },
-          body: body === undefined ? undefined : JSON.stringify(body),
-          signal: globalThis.AbortSignal.timeout(timeoutMs)
-        });
+          body: body === undefined ? undefined : JSON.stringify(body)
+        }, deadlineAt);
       } catch (error) {
+        if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
         throw new Error('cloud_state_github_request_failed', { cause: error });
       }
       if (allow404 && response.status === 404) return null;
@@ -271,7 +297,7 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
-          await this.sleep(delayMs);
+          await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
         }
       }
@@ -343,15 +369,14 @@ export class GitHubStateStore extends JsonStore {
     for (let attempt = 0; ; attempt += 1) {
       let response;
       try {
-        response = await this.fetchImpl('https://api.github.com/graphql', {
+        response = await this.fetchWithDeadline('https://api.github.com/graphql', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.token}`,
             Accept: 'application/vnd.github+json',
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ query, variables }),
-          signal: globalThis.AbortSignal.timeout(30_000)
+          body: JSON.stringify({ query, variables })
         });
       } catch (error) {
         throw new Error('cloud_state_github_request_failed', { cause: error });
@@ -378,7 +403,7 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
-          await this.sleep(delayMs);
+          await this.sleepWithinDeadline(delayMs);
           continue;
         }
       }
