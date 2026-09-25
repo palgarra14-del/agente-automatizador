@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { WorkflowEngine, WorkflowStepStatus, maskSecrets, validateWorkflowPlan } from './core.js';
+import { basename, dirname, resolve } from 'node:path';
+import { WorkflowEngine, WorkflowStepStatus, assertAllowedWorkingBranch, maskSecrets, remoteMatchesProject, validateWorkflowPlan } from './core.js';
 
 const DURABLE_CHECKPOINT_VERSION = 1;
 const governedProfiles = new Set(['app-improvement', 'autonomous-maintenance', 'website-build']);
@@ -16,6 +16,22 @@ function reviewPassed(step) {
 
 function exactPaths(value) {
   return [...new Set((value ?? []).map((path) => String(path)))].sort();
+}
+
+function portableManagedWorkspaceEvidence(plan, project) {
+  const workspace = plan?.workspace;
+  if (!workspace || workspace.managed !== true || project?.workspaceStrategy !== 'managed') return false;
+  const source = resolve(workspace.path);
+  if (basename(source) !== plan.id || basename(dirname(source)) !== project.id) return false;
+  if (workspace.projectId !== project.id ||
+      workspace.repository?.owner !== project.repository?.owner ||
+      workspace.repository?.name !== project.repository?.name ||
+      !Number.isFinite(Date.parse(workspace.initializedAt))) return false;
+  if (workspace.workingBranch !== undefined) {
+    if (!exactSha(workspace.baseHead) || !remoteMatchesProject(workspace.remote, project)) return false;
+    try { assertAllowedWorkingBranch(project, workspace.workingBranch); } catch { return false; }
+  } else if (workspace.baseHead !== undefined || workspace.remote !== undefined) return false;
+  return true;
 }
 
 export function releaseCheckpointCandidate(plan) {
@@ -168,6 +184,28 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     }
   }
 
+  async rebindPortableManagedWorkspace(id, plan) {
+    if (!plan?.workspace) return plan;
+    const project = this.projects.get(plan.projectId);
+    if (!project || project.workspaceStrategy !== 'managed' || plan.workspace.managed !== true) return plan;
+    const expected = this.workspaceManager.describe(project, plan.id);
+    const source = resolve(plan.workspace.path);
+    const target = resolve(expected.workspace);
+    if (source === target) return plan;
+    if (existsSync(source)) throw new Error('cloud_workspace_rebind_source_still_exists');
+    if (!portableManagedWorkspaceEvidence(plan, project)) throw new Error('cloud_workspace_rebind_evidence_invalid');
+    await this.update(id, (saved) => {
+      if (saved.workspace?.path !== plan.workspace.path ||
+          saved.workspace?.projectId !== plan.workspace.projectId ||
+          saved.workspace?.repository?.owner !== plan.workspace.repository?.owner ||
+          saved.workspace?.repository?.name !== plan.workspace.repository?.name) {
+        throw new Error('cloud_workspace_rebind_state_changed');
+      }
+      saved.workspace.path = target;
+    });
+    return super.get(id);
+  }
+
   async get(id, options = {}) {
     if (options.deadlineCapAt !== null && options.deadlineCapAt !== undefined) {
       return this.withExecutionDeadlineCap(
@@ -177,7 +215,9 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
       );
     }
     const cap = this.assertExecutionDeadline(id);
-    const plan = await super.get(id);
+    let plan = await super.get(id);
+    this.assertExecutionDeadline(id, cap);
+    if (plan) plan = await this.rebindPortableManagedWorkspace(id, plan);
     this.assertExecutionDeadline(id, cap);
     if (!plan || this.suppressDurability > 0 || this.preparingDurableCheckpoints.has(id) || !releaseCheckpointCandidate(plan)) return plan;
     validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
