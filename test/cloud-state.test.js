@@ -1695,6 +1695,26 @@ test('global lease release reconciles partial publication without duplicating co
   assert.equal(executions, 1);
 });
 
+test('global lease release still fails closed when authoritative state retains the same lease', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  let executions = 0;
+
+  await assert.rejects(
+    () => store.withGlobalLease(async () => {
+      executions += 1;
+      fake.failNextMainRead(500);
+      return 'completed';
+    }),
+    /cloud_global_lease_release_failed/
+  );
+
+  assert.equal(executions, 1);
+  const state = await store.load();
+  assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
+});
+
 test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
