@@ -313,8 +313,9 @@ export class AutonomousSelfImprovement {
     }
 
     const baseRevision = state.activeBaseRevision ?? this.operatorRevision;
+    const tickDeadlineAt = this.now() + this.workflowTimeoutMs;
     for (let transition = 0; transition < 4; transition += 1) {
-      let plan = await this.workflowEngine.get(workflowId);
+      let plan = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
       if (!plan) {
         await this.writeState((current) => ({
           ...current,
@@ -350,7 +351,8 @@ export class AutonomousSelfImprovement {
         if (!releaseReady && !boundedSensitiveImplementation) {
           if (typeof this.workflowEngine.cancel === 'function') {
             const cancelled = await this.workflowEngine.cancel(workflowId, {
-              reason: 'autonomous_maintenance_human_gate_required'
+              reason: 'autonomous_maintenance_human_gate_required',
+              deadlineCapAt: tickDeadlineAt
             });
             await this.settle(cancelled, { baseRevision });
             return { ...resultSummary(cancelled), status: cancelled.status, humanGateStepId: step.id };
@@ -358,7 +360,8 @@ export class AutonomousSelfImprovement {
           return { status: 'human_gate_required', workflowId, stepId: step.id };
         }
         plan = await this.workflowEngine.approve(workflowId, step.id, {
-          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id)
+          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id),
+          deadlineCapAt: tickDeadlineAt
         });
         if (TERMINAL.has(plan.status)) {
           await this.settle(plan, { baseRevision });
@@ -368,7 +371,8 @@ export class AutonomousSelfImprovement {
       }
 
       plan = await this.workflowEngine.run(workflowId, {
-        refreshPristineDeadline: pristineWorkflowForDeadlineRefresh(plan)
+        refreshPristineDeadline: pristineWorkflowForDeadlineRefresh(plan),
+        deadlineCapAt: tickDeadlineAt
       });
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
@@ -378,7 +382,7 @@ export class AutonomousSelfImprovement {
       return { ...resultSummary(plan), status: plan.status };
     }
 
-    const current = await this.workflowEngine.get(workflowId);
+    const current = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
     return { ...resultSummary(current), status: current?.status ?? 'transition_budget_exhausted' };
   }
 }

@@ -750,6 +750,83 @@ test('cloud-state mutation refuses an already-expired remote write', async () =>
   assert.equal(writes, 0);
 });
 
+test('cloud-state read request is aborted at the active workflow deadline', async () => {
+  let reads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:read',
+    now: () => Date.now(),
+    fetchImpl: async (_url, options = {}) => {
+      reads += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(response(200, { object: { sha: 'a'.repeat(40) } })), 250);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('read_aborted_by_deadline'));
+        }, { once: true });
+      });
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      Date.now() + 25,
+      () => store.request('/git/ref/tags/test')
+    ),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(reads, 1);
+});
+
+test('cloud-state rate-limit retry cannot sleep past the active workflow deadline', async () => {
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:retry',
+    now: () => 10_000,
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => response(429, {})
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      10_050,
+      () => store.request('/git/ref/tags/test')
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.deepEqual(sleeps, []);
+});
+
+test('cloud-state GraphQL status read is bounded by the active workflow deadline', async () => {
+  let graphqlReads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:graphql',
+    now: () => Date.now(),
+    fetchImpl: async (url, options = {}) => {
+      assert.equal(url, 'https://api.github.com/graphql');
+      graphqlReads += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(response(200, { data: { repository: { object: { status: null } } } })), 250);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('graphql_aborted_by_deadline'));
+        }, { once: true });
+      });
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      Date.now() + 25,
+      () => store.readStatusContext('a'.repeat(40), 'agent-cloud-state-v2/test')
+    ),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(graphqlReads, 1);
+});
+
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.doesNotThrow(() => validateCloudState(
