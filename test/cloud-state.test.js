@@ -1699,19 +1699,24 @@ test('global lease release still fails closed when authoritative state retains t
   const now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
   const store = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
-  let executions = 0;
+  const lease = await store.claimGlobalLease();
+  const mutateInternal = store.mutateInternal.bind(store);
+  let injectReleaseFailure = true;
+  store.mutateInternal = async (...args) => {
+    if (injectReleaseFailure) {
+      injectReleaseFailure = false;
+      throw new Error('injected_release_write_failure');
+    }
+    return mutateInternal(...args);
+  };
 
   await assert.rejects(
-    () => store.withGlobalLease(async () => {
-      executions += 1;
-      fake.failNextMainRead(500);
-      return 'completed';
-    }),
-    /cloud_global_lease_release_failed/
+    () => store.releaseGlobalLease(lease.leaseId),
+    /injected_release_write_failure/
   );
 
-  assert.equal(executions, 1);
   const state = await store.load();
+  assert.equal(state.cloudExecutionLease?.leaseId, lease.leaseId);
   assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
 });
 
