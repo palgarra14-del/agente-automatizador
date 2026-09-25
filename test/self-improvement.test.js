@@ -143,6 +143,7 @@ test('autopilot creates one bounded autonomous workflow and records a reviewed P
   assert.equal(calls.approve.length, 1);
   assert.equal(calls.approve[0].stepId, 'release-readiness');
   assert.match(calls.approve[0].options.externalApprovalFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(calls.approve[0].options.deadlineCapAt, now + 18 * 60_000);
 
   const persisted = store.state.autopilotSelfImprovement;
   assert.equal(persisted.activeWorkflowId, null);
@@ -231,6 +232,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
   assert.equal(approvals.length, 1);
   assert.equal(approvals[0].stepId, 'implementation');
   assert.match(approvals[0].options.externalApprovalFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(approvals[0].options.deadlineCapAt, Date.parse('2026-09-23T00:15:00Z'));
 
   const blockedStore = fakeStore({ autopilotSelfImprovement: initial });
   let blockedApprovals = 0;
@@ -255,6 +257,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
       cancellations += 1;
       assert.equal(id, 'workflow-sensitive');
       assert.equal(options.reason, 'autonomous_maintenance_human_gate_required');
+      assert.equal(options.deadlineCapAt, Date.parse('2026-09-23T00:15:00Z'));
       return {
         id,
         profile: 'autonomous-maintenance',
@@ -686,7 +689,10 @@ test('resumed pristine autonomous workflow refreshes its execution deadline at f
   const result = await autopilot.tick();
 
   assert.equal(result.status, 'failed');
-  assert.deepEqual(runOptions, [{ refreshPristineDeadline: true }]);
+  assert.deepEqual(runOptions, [{
+    refreshPristineDeadline: true,
+    deadlineCapAt: now + 300_000
+  }]);
   assert.equal(store.state.autopilotSelfImprovement.activeWorkflowId, null);
 });
 
@@ -738,5 +744,8 @@ test('partially started autonomous workflow can never refresh its deadline', asy
   const result = await autopilot.tick();
 
   assert.equal(result.status, 'failed');
-  assert.deepEqual(runOptions, [{ refreshPristineDeadline: false }]);
+  assert.deepEqual(runOptions, [{
+    refreshPristineDeadline: false,
+    deadlineCapAt: now + 300_000
+  }]);
 });
