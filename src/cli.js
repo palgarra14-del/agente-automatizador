@@ -187,17 +187,21 @@ try {
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
       } else if (action === 'cloud-prepare') {
-        const prepared = await activeStore.withGlobalLease(async () => {
-          await queue.ingestAdmissionIntents();
-          const queueResult = await queue.tick();
-          const queueWork = await queue.hasExecutionWork();
-          const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-          return { queueResult, hasExecutionWork: Boolean(queueWork || autonomousWork) };
-        });
-        console.log(JSON.stringify({
-          queue: view(prepared.queueResult),
-          hasExecutionWork: prepared.hasExecutionWork
-        }, null, 2));
+        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
+        if (autonomousWork) {
+          console.log(JSON.stringify({ queue: null, hasExecutionWork: true }, null, 2));
+        } else {
+          const prepared = await activeStore.withGlobalLease(async () => {
+            await queue.ingestAdmissionIntents();
+            const queueResult = await queue.tick();
+            const queueWork = await queue.hasExecutionWork();
+            return { queueResult, hasExecutionWork: Boolean(queueWork) };
+          });
+          console.log(JSON.stringify({
+            queue: view(prepared.queueResult),
+            hasExecutionWork: prepared.hasExecutionWork
+          }, null, 2));
+        }
       } else if (action === 'cloud-repair') {
         const snapshot = await activeStore.readSnapshot({ repair: true });
         console.log(JSON.stringify({ generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration }, null, 2));
