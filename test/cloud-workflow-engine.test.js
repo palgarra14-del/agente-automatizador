@@ -509,3 +509,95 @@ test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
   assert.match(cli, /const workflows = new WorkflowEngine\(\{ store, projects \}\);/);
   assert.match(pkg.scripts.typecheck, /node --check src\/cloud-workflow-engine\.js/);
 });
+
+test('cloud workflow rebinds stale managed workspace evidence to the current managed root', async () => {
+  const id = 'workflow-portable';
+  const staleRoot = resolve(join(tmpdir(), 'old-agent-root'));
+  const currentRoot = resolve(join(tmpdir(), 'current-agent-root'));
+  const project = {
+    id: 'self',
+    workspaceStrategy: 'managed',
+    managedWorkspaceRoot: currentRoot,
+    repository: { owner: 'owner', name: 'repo' },
+    protectedBranches: ['main'],
+    workingBranchPattern: 'agent/{runId}'
+  };
+  const state = {
+    workflows: {
+      [id]: {
+        id,
+        projectId: 'self',
+        profile: 'data-analysis',
+        workspace: {
+          path: resolve(staleRoot, 'self', id),
+          managed: true,
+          projectId: 'self',
+          repository: { owner: 'owner', name: 'repo' },
+          initializedAt: '2026-09-25T00:00:00.000Z'
+        },
+        steps: []
+      }
+    }
+  };
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.projects = new Map([['self', project]]);
+  instance.workspaceManager = {
+    describe() { return { workspace: resolve(currentRoot, 'self', id), managed: true }; }
+  };
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  instance.store = {
+    async load() { return state; },
+    async mutate(mutator) { return mutator(state); }
+  };
+
+  const rebound = await instance.get(id);
+  assert.equal(rebound.workspace.path, resolve(currentRoot, 'self', id));
+  assert.equal(rebound.workspace.projectId, 'self');
+  assert.deepEqual(rebound.workspace.repository, { owner: 'owner', name: 'repo' });
+});
+
+test('cloud workflow refuses to rebind arbitrary external workspace evidence', async () => {
+  const id = 'workflow-portable';
+  const currentRoot = resolve(join(tmpdir(), 'current-agent-root-reject'));
+  const project = {
+    id: 'self',
+    workspaceStrategy: 'managed',
+    managedWorkspaceRoot: currentRoot,
+    repository: { owner: 'owner', name: 'repo' },
+    protectedBranches: ['main'],
+    workingBranchPattern: 'agent/{runId}'
+  };
+  const state = {
+    workflows: {
+      [id]: {
+        id,
+        projectId: 'self',
+        profile: 'data-analysis',
+        workspace: {
+          path: resolve(tmpdir(), 'untrusted-parent', id),
+          managed: true,
+          projectId: 'self',
+          repository: { owner: 'owner', name: 'repo' },
+          initializedAt: '2026-09-25T00:00:00.000Z'
+        },
+        steps: []
+      }
+    }
+  };
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.projects = new Map([['self', project]]);
+  instance.workspaceManager = {
+    describe() { return { workspace: resolve(currentRoot, 'self', id), managed: true }; }
+  };
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  instance.store = {
+    async load() { return state; },
+    async mutate(mutator) { return mutator(state); }
+  };
+
+  await assert.rejects(() => instance.get(id), /cloud_workspace_rebind_evidence_invalid/);
+});
