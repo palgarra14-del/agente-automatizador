@@ -5554,7 +5554,11 @@ export class GitHubAdapter {
   }
 
   async request(path, options = {}) {
-    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    const timeoutController = new globalThis.AbortController();
+    const timeout = setTimeout(() => {
+      timeoutController.abort(new Error('github_api_request_timeout'));
+    }, this.requestTimeoutMs);
+    const timeoutSignal = timeoutController.signal;
     const signal = options.signal
       ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
       : timeoutSignal;
@@ -5571,6 +5575,8 @@ export class GitHubAdapter {
     } catch (error) {
       if (timeoutSignal.aborted) throw new Error('github_api_request_timeout', { cause: error });
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -5881,7 +5887,11 @@ export class VercelDeploymentProvider {
       }
     }
     const query = new URLSearchParams({ projectId: project.deployment.projectId, limit: '20', teamId: project.deployment.teamId });
-    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
+    const timeoutController = new globalThis.AbortController();
+    const timeout = setTimeout(() => {
+      timeoutController.abort(new Error('vercel_api_request_timeout'));
+    }, this.requestTimeoutMs);
+    const timeoutSignal = timeoutController.signal;
     let response;
     try {
       response = await this.fetch(`https://api.vercel.com/v13/deployments?${query}`, {
@@ -5892,6 +5902,8 @@ export class VercelDeploymentProvider {
     } catch (error) {
       if (timeoutSignal.aborted) throw new Error('vercel_api_request_timeout', { cause: error });
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
     const data = await response.json();
     const deployment = (data.deployments ?? []).find((item) => {
