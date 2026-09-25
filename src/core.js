@@ -2026,6 +2026,51 @@ export class WorkflowEngine {
     }, { beforeCommit, deadlineAt });
   }
 
+  expiredPausedWorkflow(plan) {
+    return Boolean(
+      plan &&
+      [WorkflowStepStatus.AWAITING_APPROVAL, WorkflowStepStatus.BLOCKED].includes(plan.status) &&
+      Number.isFinite(plan.pausedAt) &&
+      Number.isFinite(plan.deadlineAt) &&
+      plan.pausedAt > plan.deadlineAt
+    );
+  }
+
+  async recoverExpiredPausedWorkflow(id, observed, { beforeCommit = null, deadlineAt = null } = {}) {
+    if (!this.expiredPausedWorkflow(observed)) return null;
+    return this.update(id, (saved) => {
+      if (!this.expiredPausedWorkflow(saved) ||
+          saved.pausedAt !== observed.pausedAt ||
+          saved.deadlineAt !== observed.deadlineAt ||
+          saved.status !== observed.status) {
+        throw new Error('workflow_expired_pause_recovery_state_changed');
+      }
+      const step = saved.steps.find((candidate) => candidate.status === WorkflowStepStatus.AWAITING_APPROVAL) ??
+        saved.steps.find((candidate) => candidate.status === WorkflowStepStatus.BLOCKED);
+      if (!step) throw new Error('workflow_expired_pause_recovery_step_missing');
+      const expiredPausedAt = saved.pausedAt;
+      const expiredDeadlineAt = saved.deadlineAt;
+      step.status = WorkflowStepStatus.FAILED;
+      step.error = 'workflow_budget_deadline_exceeded';
+      step.evidence = {
+        ...(step.evidence ?? {}),
+        budgetRecovery: {
+          type: 'expired-pause',
+          pausedAt: expiredPausedAt,
+          deadlineAt: expiredDeadlineAt
+        }
+      };
+      saved.pausedAt = null;
+      saved.status = WorkflowStepStatus.FAILED;
+      saved.result = {
+        error: 'workflow_budget_deadline_exceeded',
+        stepId: step.id,
+        historicalPauseRecovery: true
+      };
+      validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
+    }, { beforeCommit, deadlineAt });
+  }
+
   readySteps(plan) {
     const completed = new Set(plan.steps.filter((step) => step.status === WorkflowStepStatus.COMPLETED).map((step) => step.id));
     return plan.steps.filter((step) => (step.status === WorkflowStepStatus.READY || step.status === WorkflowStepStatus.PENDING) && step.dependsOn.every((id) => completed.has(id)));
@@ -3266,6 +3311,8 @@ export class WorkflowEngine {
     if (externalApprovalFingerprint !== null && !/^[a-f0-9]{64}$/i.test(externalApprovalFingerprint)) throw new Error('external approval fingerprint is invalid');
     const approvedAt = this.now();
     const current = await this.get(id, { deadlineCapAt });
+    const expiredPause = await this.recoverExpiredPausedWorkflow(id, current, { beforeCommit, deadlineAt: deadlineCapAt });
+    if (expiredPause) return expiredPause;
     validateWorkflowPlan(current, this.projects, this.registry, this.specialistRegistry);
     const project = this.projects.get(current.projectId);
     const approvalCapability = this.registry.resolve(project, 'human.approval', { surface: 'workflow' });
@@ -3428,6 +3475,9 @@ export class WorkflowEngine {
         : null
     };
     return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
+      const current = await this.get(id);
+      const expiredPause = await this.recoverExpiredPausedWorkflow(id, current, { deadlineAt: options.deadlineCapAt ?? null });
+      if (expiredPause) return expiredPause;
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
         validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
@@ -3663,6 +3713,10 @@ export class WorkflowEngine {
     }
     let plan = await this.get(id);
     if (!plan) throw new Error('Workflow not found');
+    if (!dryRun) {
+      const expiredPause = await this.recoverExpiredPausedWorkflow(id, plan, { deadlineAt: deadlineCapAt });
+      if (expiredPause) return expiredPause;
+    }
     const project = this.projects.get(plan.projectId);
     validateWorkflowPlan(plan, this.projects, this.registry, this.specialistRegistry);
     if (dryRun) return {

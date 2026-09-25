@@ -1263,6 +1263,97 @@ test('human checkpoint wait time pauses the workflow execution deadline', async 
   assert.ok(approved.deadlineAt > clock);
 });
 
+test('expired historical workflow pauses fail closed across approve, run, and resume', async () => {
+  for (const action of ['approve', 'run', 'resume']) {
+    let commandCalls = 0;
+    const instance = await engine({
+      runner: async (_project, name) => {
+        commandCalls += 1;
+        return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+      }
+    });
+    const created = await instance.create({
+      profile: 'app-improvement',
+      projectId: 'workflow-project',
+      goal: `Recover expired pause via ${action}`,
+      budgets: { timeoutMs: 1_000 }
+    });
+    await instance.update(created.id, (plan) => {
+      completeStep(plan, 'inspect-project');
+      const diagnosis = completeStep(plan, 'diagnose');
+      diagnosis.evidence.result = {
+        diagnosis: {
+          summary: 'fixture diagnosis',
+          cause: 'fixture cause',
+          relevantPaths: ['src/core.js'],
+          recommendedChange: 'fixture bounded change',
+          risks: []
+        }
+      };
+      const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+      checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+      checkpoint.error = null;
+      plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+      plan.pausedAt = plan.deadlineAt + 1;
+    });
+
+    let recovered;
+    if (action === 'approve') recovered = await instance.approve(created.id, 'plan-change');
+    else if (action === 'run') recovered = await instance.run(created.id);
+    else recovered = await instance.resume(created.id);
+
+    const checkpoint = recovered.steps.find((step) => step.id === 'plan-change');
+    assert.equal(recovered.status, WorkflowStepStatus.FAILED, action);
+    assert.equal(recovered.pausedAt, null, action);
+    assert.equal(recovered.result.error, 'workflow_budget_deadline_exceeded', action);
+    assert.equal(recovered.result.stepId, 'plan-change', action);
+    assert.equal(recovered.result.historicalPauseRecovery, true, action);
+    assert.equal(checkpoint.status, WorkflowStepStatus.FAILED, action);
+    assert.equal(checkpoint.error, 'workflow_budget_deadline_exceeded', action);
+    assert.equal(checkpoint.evidence.budgetRecovery.type, 'expired-pause', action);
+    assert.equal(checkpoint.evidence.budgetRecovery.pausedAt, created.deadlineAt + 1, action);
+    assert.equal(checkpoint.evidence.budgetRecovery.deadlineAt, created.deadlineAt, action);
+    assert.equal(commandCalls, 0, action);
+    assert.equal(validateWorkflowPlan(recovered, instance.projects).ok, true, action);
+  }
+});
+
+test('expired-pause recovery does not accept other malformed pause timestamps', async () => {
+  const instance = await engine();
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Reject unrelated malformed pause',
+    budgets: { timeoutMs: 1_000 }
+  });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    const diagnosis = completeStep(plan, 'diagnose');
+    diagnosis.evidence.result = {
+      diagnosis: {
+        summary: 'fixture diagnosis',
+        cause: 'fixture cause',
+        relevantPaths: ['src/core.js'],
+        recommendedChange: 'fixture bounded change',
+        risks: []
+      }
+    };
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    checkpoint.error = null;
+    plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.pausedAt = plan.deadlineAt - plan.budgets.timeoutMs - 1;
+  });
+
+  await assert.rejects(
+    instance.approve(created.id, 'plan-change'),
+    /Workflow pausedAt must be null or a valid active-budget pause timestamp/
+  );
+  const unchanged = await instance.get(created.id);
+  assert.equal(unchanged.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(unchanged.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
 test('managed workspace clone receives only the workflow remaining time', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-clone-deadline-'));
   const leadfinder = managedProject('leadfinder', root, { commands: { test: 'pnpm test' }, budgets: { commandTimeoutMs: 120_000 } });
