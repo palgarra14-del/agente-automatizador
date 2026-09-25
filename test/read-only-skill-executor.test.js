@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { link, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext } from '../src/core.js';
@@ -73,6 +73,109 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.match(invocation.prompt, /exactly one JSON object/);
   assert.match(invocation.prompt, /relevantPaths/);
   assert.match(invocation.prompt, /If repository access is blocked/);
+});
+
+test('isolated Codex session persists rotated auth back to the canonical home', async () => {
+  const sourceHome = await mkdtemp(join(tmpdir(), 'agent-codex-source-'));
+  const sourceAuth = join(sourceHome, 'auth.json');
+  const initialAuth = JSON.stringify({ tokens: { access_token: 'old-access', refresh_token: 'old-refresh' } });
+  const rotatedAuth = JSON.stringify({ tokens: { access_token: 'new-access', refresh_token: 'new-refresh' } });
+  try {
+    await writeFile(sourceAuth, initialAuth, { mode: 0o600 });
+    class RotatingCodex {
+      constructor(options) { this.options = options; }
+      startThread() {
+        const options = this.options;
+        return {
+          id: 'rotating-auth-thread',
+          run: async () => {
+            await writeFile(join(options.env.CODEX_HOME, 'auth.json'), rotatedAuth, { mode: 0o600 });
+            return {
+              finalResponse: JSON.stringify({
+                inspectionEvidence: {
+                  summary: 'Inspected bounded repository context.',
+                  relevantPaths: ['src/core.js'],
+                  findings: ['Auth rotation fixture completed.']
+                }
+              }),
+              usage: {}
+            };
+          }
+        };
+      }
+    }
+    const executor = new CodexReadOnlySkillExecutor({
+      CodexClient: RotatingCodex,
+      environment: () => ({ PATH: '/safe/bin', CODEX_HOME: sourceHome }),
+      platform: 'linux'
+    });
+    const result = await executor.execute({
+      skill: 'code.inspect',
+      goal: 'Inspect auth rotation',
+      contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+      context: {}
+    }, { workspace: process.cwd(), timeoutMs: 500 });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(sourceAuth, 'utf8'), rotatedAuth);
+  } finally {
+    await rm(sourceHome, { recursive: true, force: true });
+  }
+});
+
+test('refresh-token collision reloads a newer canonical auth once before failing', async () => {
+  const sourceHome = await mkdtemp(join(tmpdir(), 'agent-codex-collision-'));
+  const sourceAuth = join(sourceHome, 'auth.json');
+  const initialAuth = JSON.stringify({ tokens: { access_token: 'old-access', refresh_token: 'old-refresh' } });
+  const newerAuth = JSON.stringify({ tokens: { access_token: 'fresh-access', refresh_token: 'fresh-refresh' } });
+  let calls = 0;
+  try {
+    await writeFile(sourceAuth, initialAuth, { mode: 0o600 });
+    class CollisionCodex {
+      constructor(options) { this.options = options; }
+      startThread() {
+        const options = this.options;
+        return {
+          id: `collision-thread-${calls + 1}`,
+          run: async () => {
+            calls += 1;
+            if (calls === 1) {
+              await writeFile(sourceAuth, newerAuth, { mode: 0o600 });
+              throw new Error('Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.');
+            }
+            assert.equal(await readFile(join(options.env.CODEX_HOME, 'auth.json'), 'utf8'), newerAuth);
+            return {
+              finalResponse: JSON.stringify({
+                inspectionEvidence: {
+                  summary: 'Retried with the newer canonical session.',
+                  relevantPaths: ['src/core.js'],
+                  findings: ['Refresh collision recovered once.']
+                }
+              }),
+              usage: {}
+            };
+          }
+        };
+      }
+    }
+    const executor = new CodexReadOnlySkillExecutor({
+      CodexClient: CollisionCodex,
+      environment: () => ({ PATH: '/safe/bin', CODEX_HOME: sourceHome }),
+      platform: 'linux'
+    });
+    const result = await executor.execute({
+      skill: 'code.inspect',
+      goal: 'Recover auth collision',
+      contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+      context: {}
+    }, { workspace: process.cwd(), timeoutMs: 500 });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls, 2);
+    assert.equal(await readFile(sourceAuth, 'utf8'), newerAuth);
+  } finally {
+    await rm(sourceHome, { recursive: true, force: true });
+  }
 });
 
 test('orchestrator repository context is bounded, masked, scope-bound, and rejects aliased files', async () => {
