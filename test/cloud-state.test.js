@@ -1667,6 +1667,34 @@ test('completed GitHub run lease is reclaimable immediately before ttl', async (
   assert.equal(recovered.ownerId, 'github:88:1');
 });
 
+test('global lease release reconciles partial publication without duplicating completed work', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const first = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  let executions = 0;
+
+  const result = await first.withGlobalLease(async () => {
+    executions += 1;
+    await first.mutate((state) => {
+      state.releaseRecoveryMarker = 'completed-once';
+    });
+    fake.failNextTagWrite(stateTag, 500);
+    return 'completed';
+  });
+
+  assert.equal(result, 'completed');
+  const afterRelease = await first.load();
+  assert.equal(afterRelease.releaseRecoveryMarker, 'completed-once');
+  assert.equal(afterRelease.cloudExecutionLease ?? null, null);
+
+  const second = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  await second.withGlobalLease(async () => {
+    const state = await second.load();
+    if (state.releaseRecoveryMarker !== 'completed-once') executions += 1;
+  });
+  assert.equal(executions, 1);
+});
+
 test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
