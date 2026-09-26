@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync } from 'node:fs';
+import { mkdir, rename } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
-import { WorkflowEngine, WorkflowStepStatus, assertAllowedWorkingBranch, maskSecrets, remoteMatchesProject, validateWorkflowPlan } from './core.js';
+import { WorkflowEngine, WorkflowStepStatus, assertAllowedWorkingBranch, assertSafePathChain, maskSecrets, remoteMatchesProject, validateWorkflowPlan } from './core.js';
 
 const DURABLE_CHECKPOINT_VERSION = 1;
 const governedProfiles = new Set(['app-improvement', 'autonomous-maintenance', 'website-build']);
@@ -192,8 +193,38 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     const source = resolve(plan.workspace.path);
     const target = resolve(expected.workspace);
     if (source === target) return plan;
-    if (existsSync(source)) throw new Error('cloud_workspace_rebind_source_still_exists');
     if (!portableManagedWorkspaceEvidence(plan, project)) throw new Error('cloud_workspace_rebind_evidence_invalid');
+
+    if (existsSync(source)) {
+      if (!plan.workspace.workingBranch || !exactSha(plan.workspace.baseHead) || !plan.workspace.remote) {
+        throw new Error('cloud_workspace_rebind_source_evidence_incomplete');
+      }
+      if (existsSync(target)) throw new Error('cloud_workspace_rebind_target_already_exists');
+      await assertSafePathChain(source);
+      await assertSafePathChain(expected.projectDirectory ?? dirname(target));
+      const sourceProject = { ...project, workspace: source };
+      let inspection;
+      try {
+        inspection = await this.localGit.inspect(sourceProject);
+      } catch (error) {
+        throw new Error('cloud_workspace_rebind_source_invalid', { cause: error });
+      }
+      if (inspection.currentBranch !== plan.workspace.workingBranch ||
+          inspection.initialHead !== plan.workspace.baseHead ||
+          inspection.remote !== plan.workspace.remote ||
+          inspection.status.trim() !== '') {
+        throw new Error('cloud_workspace_rebind_source_changed');
+      }
+      await mkdir(expected.projectDirectory ?? dirname(target), { recursive: true });
+      await assertSafePathChain(expected.projectDirectory ?? dirname(target));
+      try {
+        await rename(source, target);
+      } catch (error) {
+        throw new Error('cloud_workspace_rebind_move_failed', { cause: error });
+      }
+      await assertSafePathChain(target);
+    }
+
     await this.update(id, (saved) => {
       if (saved.workspace?.path !== plan.workspace.path ||
           saved.workspace?.projectId !== plan.workspace.projectId ||
