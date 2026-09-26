@@ -1529,6 +1529,19 @@ test('active epoch lineage validation paces exact REST history reads without wea
   assert.deepEqual(sleeps, [25, 25]);
 });
 
+test('production default paces lineage validation at 500 ms', () => {
+  const fake = fakeGitHub();
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    fetchImpl: fake.fetchImpl,
+    ownerId: 'github:pace-default:1',
+    laneId: 'self',
+    allowedProjectIds: ['self']
+  });
+  assert.equal(store.lineageValidationPaceMs, 500);
+});
+
 test('lineage validation pacing rejects invalid configuration', () => {
   const fake = fakeGitHub();
   assert.throws(
