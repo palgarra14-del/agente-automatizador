@@ -188,8 +188,8 @@ test('cloud worker reuses one process for repair, control and executable-work pr
   assert.ok(prepareCliStart > 0 && repairCliStart > prepareCliStart);
   const prepareCli = cli.slice(prepareCliStart, repairCliStart);
   assert.doesNotMatch(prepareCli, /readSnapshot\(\{ repair: true \}\)/);
-  assert.match(prepareCli, /const autonomousWork = autonomousSelfImprovement \? await autonomousSelfImprovement\.hasWork\(\) : false/);
-  assert.match(prepareCli, /if \(autonomousWork\)[\s\S]*queue: null, hasExecutionWork: true/);
+  assert.doesNotMatch(prepareCli, /autonomousSelfImprovement\.hasWork\(\)/);
+  assert.match(prepareCli, /if \(autonomousSelfImprovement\)[\s\S]*queue: null, hasExecutionWork: true/);
   assert.match(prepareCli, /else \{[\s\S]*withGlobalLease/);
   assert.match(prepareCli, /hasExecutionWork/);
   assert.match(cli, /executionEnabled: !\['cloud-control-once', 'cloud-prepare'\]\.includes\(action\)/);

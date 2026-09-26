@@ -187,8 +187,9 @@ try {
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
       } else if (action === 'cloud-prepare') {
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-        if (autonomousWork) {
+        if (autonomousSelfImprovement) {
+          // The self drain re-checks cooldowns, budgets and active work under the
+          // governed execution lease. Avoid a duplicate Cloud State read here.
           console.log(JSON.stringify({ queue: null, hasExecutionWork: true }, null, 2));
         } else {
           const prepared = await activeStore.withGlobalLease(async () => {
