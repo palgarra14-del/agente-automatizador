@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -556,6 +556,90 @@ test('cloud workflow rebinds stale managed workspace evidence to the current man
   assert.equal(rebound.workspace.path, resolve(currentRoot, 'self', id));
   assert.equal(rebound.workspace.projectId, 'self');
   assert.deepEqual(rebound.workspace.repository, { owner: 'owner', name: 'repo' });
+});
+
+test('cloud workflow moves an exact clean managed workspace into the current runner root', async (t) => {
+  const id = 'workflow-portable-existing-clean';
+  const staleRoot = mkdtempSync(join(tmpdir(), 'old-agent-root-existing-'));
+  const currentRoot = mkdtempSync(join(tmpdir(), 'current-agent-root-existing-'));
+  t.after(() => {
+    rmSync(staleRoot, { recursive: true, force: true });
+    rmSync(currentRoot, { recursive: true, force: true });
+  });
+  const source = resolve(staleRoot, 'self', id);
+  const target = resolve(currentRoot, 'self', id);
+  mkdirSync(source, { recursive: true });
+  const branch = 'agent/' + id;
+  const head = 'd'.repeat(40);
+  const project = {
+    id: 'self',
+    workspaceStrategy: 'managed',
+    managedWorkspaceRoot: currentRoot,
+    repository: { owner: 'owner', name: 'repo' },
+    protectedBranches: ['main'],
+    workingBranchPattern: 'agent/{runId}'
+  };
+  const state = {
+    workflows: {
+      [id]: {
+        id,
+        projectId: 'self',
+        profile: 'data-analysis',
+        workspace: { path: source, managed: true, projectId: 'self', repository: { owner: 'owner', name: 'repo' }, initializedAt: '2026-09-25T00:00:00.000Z', workingBranch: branch, baseHead: head, remote },
+        steps: []
+      }
+    }
+  };
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.projects = new Map([['self', project]]);
+  instance.workspaceManager = { describe() { return { workspace: target, projectDirectory: resolve(currentRoot, 'self'), managed: true }; } };
+  instance.localGit = {
+    async inspect(workspaceProject) {
+      assert.equal(resolve(workspaceProject.workspace), source);
+      return { repository: source, remote, currentBranch: branch, initialHead: head, status: '' };
+    }
+  };
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  instance.store = { async load() { return state; }, async mutate(mutator) { return mutator(state); } };
+
+  const rebound = await instance.get(id);
+  assert.equal(rebound.workspace.path, target);
+  assert.equal(existsSync(source), false);
+  assert.equal(existsSync(target), true);
+});
+
+test('cloud workflow refuses to move an existing portable workspace with local changes', async (t) => {
+  const id = 'workflow-portable-existing-dirty';
+  const staleRoot = mkdtempSync(join(tmpdir(), 'old-agent-root-dirty-'));
+  const currentRoot = mkdtempSync(join(tmpdir(), 'current-agent-root-dirty-'));
+  t.after(() => {
+    rmSync(staleRoot, { recursive: true, force: true });
+    rmSync(currentRoot, { recursive: true, force: true });
+  });
+  const source = resolve(staleRoot, 'self', id);
+  const target = resolve(currentRoot, 'self', id);
+  mkdirSync(source, { recursive: true });
+  const branch = 'agent/' + id;
+  const head = 'e'.repeat(40);
+  const project = {
+    id: 'self', workspaceStrategy: 'managed', managedWorkspaceRoot: currentRoot,
+    repository: { owner: 'owner', name: 'repo' }, protectedBranches: ['main'], workingBranchPattern: 'agent/{runId}'
+  };
+  const state = { workflows: { [id]: { id, projectId: 'self', profile: 'data-analysis', workspace: { path: source, managed: true, projectId: 'self', repository: { owner: 'owner', name: 'repo' }, initializedAt: '2026-09-25T00:00:00.000Z', workingBranch: branch, baseHead: head, remote }, steps: [] } } };
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.projects = new Map([['self', project]]);
+  instance.workspaceManager = { describe() { return { workspace: target, projectDirectory: resolve(currentRoot, 'self'), managed: true }; } };
+  instance.localGit = { async inspect() { return { repository: source, remote, currentBranch: branch, initialHead: head, status: ' M src/core.js' }; } };
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  instance.store = { async load() { return state; }, async mutate(mutator) { return mutator(state); } };
+
+  await assert.rejects(() => instance.get(id), /cloud_workspace_rebind_source_changed/);
+  assert.equal(existsSync(source), true);
+  assert.equal(existsSync(target), false);
 });
 
 test('cloud workflow refuses to rebind arbitrary external workspace evidence', async () => {
