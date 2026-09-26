@@ -1809,6 +1809,25 @@ test('incremental lineage validation fails closed if the new commit parent is ta
   await assert.rejects(() => warm.load(), /cloud_state_epoch_authority_mismatch|cloud_state_history_fork/);
 });
 
+test('validated lineage cache is bound to both generation and SHA', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  await publishMarker(writer, 'one');
+  await publishMarker(writer, 'two');
+  const third = await publishMarker(writer, 'three');
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:incremental:generation-bound',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  fresh.validatedLineageHeads.add(`2:${third}`);
+
+  assert.equal((await fresh.load()).marker, 'three');
+  assert.deepEqual(sleeps, [25, 25]);
+});
+
 test('2050-generation segmented history validates with lane-isolated bounded requests', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
