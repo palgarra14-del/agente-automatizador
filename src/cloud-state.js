@@ -58,6 +58,11 @@ function stateHash(state) {
   return createHash('sha256').update(JSON.stringify(canonical(state))).digest('hex');
 }
 
+function cloneSnapshot(snapshot) {
+  if (!snapshot) return null;
+  return JSON.parse(JSON.stringify(snapshot));
+}
+
 function epochForGeneration(generation) {
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
   return Math.floor((generation - 1) / EPOCH_SIZE);
@@ -231,6 +236,8 @@ export class GitHubStateStore extends JsonStore {
     this.sleep = sleep;
     this.lineageValidationPaceMs = lineageValidationPaceMs;
     this.activeGlobalLeaseId = null;
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     this.mutationDeadlineContext = new AsyncLocalStorage();
     this.validatedLineageHeads = new Set();
     this.ledgerRootVerified = false;
@@ -1811,13 +1818,45 @@ export class GitHubStateStore extends JsonStore {
     if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha &&
         finalAuthority?.generation === generation && finalAuthority.stateSha === commitSha && finalAuthority.parentSha === parentSha) {
       this.validatedLineageHeads.add(validatedLineageKey(generation, commitSha));
+      const publishedSnapshot = this.snapshotFrom(commitSha, commitSha, commitSha, envelope, finalAuthority);
+      this.lastPublishedSnapshot = cloneSnapshot(publishedSnapshot);
+      this.cacheSnapshotForActiveLease(publishedSnapshot);
       return commitSha;
     }
     throw new Error('cloud_state_partial_publication', { cause: stateRefError ?? checkpointError ?? witnessError ?? undefined });
   }
 
+  hotSnapshotForActiveLease() {
+    const snapshot = this.hotLeaseSnapshot;
+    const lease = snapshot?.state?.cloudExecutionLease;
+    if (!snapshot || !this.activeGlobalLeaseId ||
+        lease?.leaseId !== this.activeGlobalLeaseId ||
+        lease?.ownerId !== this.ownerId ||
+        Date.parse(lease?.expiresAt ?? '') <= this.now()) {
+      this.hotLeaseSnapshot = null;
+      return null;
+    }
+    return cloneSnapshot(snapshot);
+  }
+
+  cacheSnapshotForActiveLease(snapshot) {
+    const lease = snapshot?.state?.cloudExecutionLease;
+    if (!this.activeGlobalLeaseId ||
+        lease?.leaseId !== this.activeGlobalLeaseId ||
+        lease?.ownerId !== this.ownerId ||
+        Date.parse(lease?.expiresAt ?? '') <= this.now()) {
+      this.hotLeaseSnapshot = null;
+      return;
+    }
+    this.hotLeaseSnapshot = cloneSnapshot(snapshot);
+  }
+
   async load() {
-    return (await this.readSnapshot()).state;
+    const hot = this.hotSnapshotForActiveLease();
+    if (hot) return hot.state;
+    const snapshot = await this.readSnapshot();
+    this.cacheSnapshotForActiveLease(snapshot);
+    return cloneSnapshot(snapshot).state;
   }
 
   async save() {
@@ -1828,8 +1867,9 @@ export class GitHubStateStore extends JsonStore {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('cloud_state_deadline_invalid');
     const operation = async () => {
-      const snapshot = await this.readSnapshot({ repair: true });
-      const data = snapshot.state;
+      const hot = requireLease ? this.hotSnapshotForActiveLease() : null;
+      const snapshot = hot ?? await this.readSnapshot({ repair: true });
+      const data = cloneSnapshot(snapshot).state;
       if (requireLease) {
         const lease = data.cloudExecutionLease;
         const expiresAt = Date.parse(lease?.expiresAt ?? '');
@@ -1857,6 +1897,7 @@ export class GitHubStateStore extends JsonStore {
           throw error;
         }
         if (stateHash(observed.state) !== intendedStateHash) throw error;
+        this.cacheSnapshotForActiveLease(observed);
       }
       return output;
     };
@@ -1891,6 +1932,8 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async claimGlobalLease() {
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     const lease = {
       leaseId: randomUUID(),
       ownerId: this.ownerId,
@@ -1911,10 +1954,12 @@ export class GitHubStateStore extends JsonStore {
       return lease;
     }, { requireLease: false });
     this.activeGlobalLeaseId = lease.leaseId;
+    if (this.lastPublishedSnapshot) this.cacheSnapshotForActiveLease(this.lastPublishedSnapshot);
     return lease;
   }
 
   async releaseGlobalLease(leaseId) {
+    this.hotLeaseSnapshot = null;
     const clearLease = () => this.mutateInternal((data) => {
       if (data.cloudExecutionLease?.leaseId !== leaseId || data.cloudExecutionLease?.ownerId !== this.ownerId) return false;
       data.cloudExecutionLease = null;
@@ -1942,6 +1987,8 @@ export class GitHubStateStore extends JsonStore {
       throw error;
     }
     if (released && this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     return released;
   }
 

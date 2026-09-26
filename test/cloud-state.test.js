@@ -1885,6 +1885,57 @@ test('state content is always read by exact commit SHA', async () => {
   assert.ok(fake.contentRefs().includes(sha));
 });
 
+test('active global lease reuses an isolated hot snapshot and invalidates it on release', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:hot-cache:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = await store.claimGlobalLease();
+
+  fake.resetRequestCount();
+  const first = await store.load();
+  assert.equal(first.cloudExecutionLease?.leaseId, lease.leaseId);
+  assert.equal(fake.requestCount(), 0);
+
+  first.hotCacheMarker = 'local-mutation-must-not-leak';
+  const isolated = await store.load();
+  assert.equal(isolated.hotCacheMarker, undefined);
+  assert.equal(fake.requestCount(), 0);
+
+  await store.mutate((state) => {
+    state.hotCacheMarker = 'published';
+  });
+  fake.resetRequestCount();
+  const published = await store.load();
+  assert.equal(published.hotCacheMarker, 'published');
+  assert.equal(fake.requestCount(), 0);
+
+  assert.equal(await store.releaseGlobalLease(lease.leaseId), true);
+  fake.resetRequestCount();
+  const afterRelease = await store.load();
+  assert.equal(afterRelease.hotCacheMarker, 'published');
+  assert.equal(afterRelease.cloudExecutionLease ?? null, null);
+  assert.ok(fake.requestCount() > 0);
+});
+
+test('cached lease snapshot cannot hide a conflicting remote advance from the next mutation', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:hot-cache:2', now: () => now, leaseTtlMs: 60_000 });
+  await store.claimGlobalLease();
+  await store.load();
+
+  const canonical = await store.readSnapshot();
+  const foreignState = cloneState(canonical.state);
+  foreignState.foreignAdvance = true;
+  const foreignWriter = storeFor(fake, { ownerId: 'github:foreign:1', now: () => now, leaseTtlMs: 60_000 });
+  await foreignWriter.writeSnapshot(foreignState, canonical);
+
+  await assert.rejects(
+    () => store.mutate((state) => { state.localAdvance = true; }),
+    /cloud_state_conflict|cloud_state_epoch_authority_conflict/
+  );
+});
+
 test('global lease excludes active concurrent runners and recovers after expiry', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
