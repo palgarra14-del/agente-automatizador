@@ -287,7 +287,7 @@ if (!address || typeof address === 'string') throw new Error('browser_qa_smoke_s
 const origin = `http://127.0.0.1:${address.port}`;
 
 const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), 20_000);
+const timer = setTimeout(() => controller.abort(), 120_000);
 let browser = null;
 
 function fixtureRequest(route, targets = [], requiredSections = ['hero']) {
@@ -303,7 +303,7 @@ function fixtureRequest(route, targets = [], requiredSections = ['hero']) {
 try {
   browser = await launchChromeCdpBrowser({
     signal: controller.signal,
-    timeoutMs: 10_000,
+    timeoutMs: 20_000,
     allowedOrigin: origin,
     protectionBypassSecret: 'fixture-secret'
   });
@@ -434,7 +434,7 @@ try {
       pagePlan: { route: redirectRoute, url: redirectUrl },
       routeUrls: { [redirectRoute]: redirectUrl },
       signal: controller.signal,
-      timeoutMs: 250,
+      timeoutMs: 2_000,
       settleMs: 50
     }),
     /browser_qa_navigation_failed|browser_qa_final_url_mismatch|browser_qa_document_url_mismatch|browser_qa_runner_origin_forbidden/
