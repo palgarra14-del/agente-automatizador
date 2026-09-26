@@ -764,7 +764,7 @@ test('cloud-state read request is aborted at the active workflow deadline', asyn
     fetchImpl: async (_url, options = {}) => {
       reads += 1;
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => resolve(response(200, { object: { sha: 'a'.repeat(40) } })), 250);
+        const timer = setTimeout(() => resolve(response(200, { object: { sha: 'a'.repeat(40) } })), 1_000);
         options.signal?.addEventListener('abort', () => {
           clearTimeout(timer);
           reject(new Error('read_aborted_by_deadline'));
@@ -774,7 +774,7 @@ test('cloud-state read request is aborted at the active workflow deadline', asyn
   });
   await assert.rejects(
     () => store.mutationDeadlineContext.run(
-      Date.now() + 25,
+      Date.now() + 200,
       () => store.request('/git/ref/tags/test')
     ),
     /cloud_state_github_request_failed/
@@ -813,7 +813,7 @@ test('cloud-state GraphQL status read is bounded by the active workflow deadline
       assert.equal(url, 'https://api.github.com/graphql');
       graphqlReads += 1;
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => resolve(response(200, { data: { repository: { object: { status: null } } } })), 250);
+        const timer = setTimeout(() => resolve(response(200, { data: { repository: { object: { status: null } } } })), 1_000);
         options.signal?.addEventListener('abort', () => {
           clearTimeout(timer);
           reject(new Error('graphql_aborted_by_deadline'));
@@ -823,7 +823,7 @@ test('cloud-state GraphQL status read is bounded by the active workflow deadline
   });
   await assert.rejects(
     () => store.mutationDeadlineContext.run(
-      Date.now() + 25,
+      Date.now() + 200,
       () => store.readStatusContext('a'.repeat(40), 'agent-cloud-state-v2/test')
     ),
     /cloud_state_github_request_failed/
