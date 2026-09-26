@@ -599,7 +599,9 @@ function storeFor(fake, {
   laneId = 'self',
   allowedProjectIds = ['self'],
   tag = 'agent-cloud-state-v1',
-  statePath = '.agent/cloud-state.json'
+  statePath = '.agent/cloud-state.json',
+  sleep = async () => {},
+  lineageValidationPaceMs = 0
 } = {}) {
   return new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
@@ -611,7 +613,9 @@ function storeFor(fake, {
     laneId,
     allowedProjectIds,
     tag,
-    statePath
+    statePath,
+    sleep,
+    lineageValidationPaceMs
   });
 }
 
@@ -1506,6 +1510,35 @@ test('active epoch lineage validation does not depend on GraphQL history blobs',
   await publishMarker(store, 'two');
   fake.markHistoryTruncated(first);
   assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'two');
+});
+
+test('active epoch lineage validation paces exact REST history reads without weakening validation', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  await publishMarker(store, 'one');
+  await publishMarker(store, 'two');
+  await publishMarker(store, 'three');
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:2:1',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  assert.equal((await fresh.load()).marker, 'three');
+  assert.deepEqual(sleeps, [25, 25]);
+});
+
+test('lineage validation pacing rejects invalid configuration', () => {
+  const fake = fakeGitHub();
+  assert.throws(
+    () => storeFor(fake, { lineageValidationPaceMs: -1 }),
+    /cloud_state_lineage_validation_pace_invalid/
+  );
+  assert.throws(
+    () => storeFor(fake, { lineageValidationPaceMs: 1001 }),
+    /cloud_state_lineage_validation_pace_invalid/
+  );
 });
 
 test('v2 child cannot rewrite inherited lineage anchor', async () => {

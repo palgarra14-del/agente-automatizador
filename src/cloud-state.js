@@ -6,6 +6,7 @@ const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
+const DEFAULT_LINEAGE_VALIDATION_PACE_MS = 200;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
 const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
@@ -181,7 +182,8 @@ export class GitHubStateStore extends JsonStore {
       ? `github:${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`
       : `cloud:${randomUUID()}`,
     now = () => Date.now(),
-    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    lineageValidationPaceMs = DEFAULT_LINEAGE_VALIDATION_PACE_MS
   } = {}) {
     super('.agent/cloud-state-unused.json');
     if (!repository?.owner || !repository?.name) throw new Error('cloud_state_repository_required');
@@ -195,6 +197,9 @@ export class GitHubStateStore extends JsonStore {
     if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
     if (!Number.isInteger(leaseTtlMs) || leaseTtlMs < 60_000 || leaseTtlMs > 60 * 60 * 1000) throw new Error('cloud_state_lease_ttl_invalid');
     if (typeof sleep !== 'function') throw new Error('cloud_state_sleep_invalid');
+    if (!Number.isInteger(lineageValidationPaceMs) || lineageValidationPaceMs < 0 || lineageValidationPaceMs > 1_000) {
+      throw new Error('cloud_state_lineage_validation_pace_invalid');
+    }
     this.repository = repository;
     this.token = token;
     this.fetchImpl = fetchImpl;
@@ -210,6 +215,7 @@ export class GitHubStateStore extends JsonStore {
     this.ownerId = ownerId;
     this.now = now;
     this.sleep = sleep;
+    this.lineageValidationPaceMs = lineageValidationPaceMs;
     this.activeGlobalLeaseId = null;
     this.mutationDeadlineContext = new AsyncLocalStorage();
     this.validatedLineageHeads = new Set();
@@ -1385,6 +1391,9 @@ export class GitHubStateStore extends JsonStore {
       }
       expectedSha = parentSha;
       expectedGeneration -= 1;
+      if (this.lineageValidationPaceMs > 0) {
+        await this.sleepWithinDeadline(this.lineageValidationPaceMs);
+      }
     }
 
     if (!done) throw new Error('cloud_state_history_incomplete');
