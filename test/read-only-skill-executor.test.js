@@ -694,3 +694,106 @@ test('read-only skill executor fails closed on an unverified platform before con
   assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_freebsd');
   assert.equal(constructed, 0);
 });
+
+test('default read-only executor uses hard-bounded Codex CLI JSONL path', async () => {
+  const invocation = {};
+  let cleaned = false;
+  const executor = new CodexReadOnlySkillExecutor({
+    environment: () => ({ PATH: '/safe/bin' }),
+    codexHomeFactory: async () => ({
+      path: '/isolated/codex-home',
+      authAvailable: true,
+      syncAuth: async () => false,
+      cleanup: async () => { cleaned = true; }
+    }),
+    codexCliPathResolver: () => '/virtual/codex.js',
+    codexProcessRunner: async (command, args, options) => {
+      Object.assign(invocation, { command, args, options });
+      return {
+        ok: true,
+        exitCode: 0,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutBytes: 200,
+        stderrBytes: 0,
+        stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: 'cli-thread-1' }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({
+            inspectionEvidence: {
+              summary: 'Inspected the bounded target.',
+              relevantPaths: ['src/core.js'],
+              findings: ['The target is grounded.']
+            }
+          }) } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 20 } })
+        ].join('\n')
+      };
+    }
+  });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Inspect bounded target',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: { projectId: 'fixture' }
+  }, { workspace: process.cwd(), timeoutMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.codexThreadId, 'cli-thread-1');
+  assert.equal(result.authMode, 'session');
+  assert.equal(result.paidApiUsed, false);
+  assert.equal(cleaned, true);
+  assert.equal(invocation.command, process.execPath);
+  assert.equal(invocation.args[0], '/virtual/codex.js');
+  assert.ok(invocation.args.includes('--json'));
+  assert.ok(invocation.args.includes('--ignore-user-config'));
+  assert.ok(invocation.args.includes('--ignore-rules'));
+  assert.equal(invocation.args.at(-1), '-');
+  assert.equal(invocation.options.restrictEnvironment, true);
+  assert.equal(invocation.options.timeoutMs <= 500, true);
+  assert.match(invocation.options.input, /exactly one JSON object/);
+  assert.equal(invocation.options.env.CODEX_HOME, '/isolated/codex-home');
+  assert.equal(invocation.options.env.HOME, '/isolated/codex-home');
+});
+
+test('hard-bounded Codex CLI timeout is surfaced without a retry', async () => {
+  let calls = 0;
+  const executor = new CodexReadOnlySkillExecutor({
+    environment: () => ({ PATH: '/safe/bin' }),
+    codexHomeFactory: async () => ({
+      path: '/isolated/codex-home',
+      authAvailable: true,
+      syncAuth: async () => false,
+      cleanup: async () => {}
+    }),
+    codexCliPathResolver: () => '/virtual/codex.js',
+    codexProcessRunner: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        exitCode: null,
+        timedOut: true,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        stdout: '',
+        stderr: ''
+      };
+    }
+  });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Inspect bounded target',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: {}
+  }, { workspace: process.cwd(), timeoutMs: 50 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.timedOut, true);
+  assert.match(result.error, /codex_cli_timeout/);
+  assert.equal(result.authMode, 'session');
+  assert.equal(calls, 1);
+});

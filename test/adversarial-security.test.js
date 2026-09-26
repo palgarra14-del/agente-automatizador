@@ -238,3 +238,25 @@ test('runProcess escalates a timed out child instead of waiting indefinitely', a
   assert.equal(result.ok, false);
   assert.ok(result.durationMs < 2_000, `timed out child survived too long: ${result.durationMs}ms`);
 });
+
+test('runProcess writes bounded stdin and closes it for non-interactive commands', async () => {
+  const result = await runProcess(process.execPath, ['-e', 'process.stdin.setEncoding("utf8"); let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => process.stdout.write(s.toUpperCase()));'], {
+    timeoutMs: 5_000,
+    outputLimit: 1_024,
+    restrictEnvironment: true,
+    input: 'bounded stdin'
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.stdout, 'BOUNDED STDIN');
+});
+
+test('runProcess rejects oversized stdin before spawning', async () => {
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', 'process.exit(0)'], {
+      restrictEnvironment: true,
+      input: 'x'.repeat((2 * 1024 * 1024) + 1)
+    }),
+    /process_stdin_too_large/
+  );
+});
