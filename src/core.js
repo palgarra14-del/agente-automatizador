@@ -3889,7 +3889,13 @@ export class WorkflowEngine {
   }
 }
 
-export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000 } = {}) {
+export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_000, inheritEnvironment = false, restrictEnvironment = false, outputLimit = 8_000, captureOutputDigest = false, killGraceMs = 1_000, input = null } = {}) {
+  const inputBuffer = input === null || input === undefined
+    ? null
+    : Buffer.isBuffer(input)
+      ? input
+      : Buffer.from(String(input), 'utf8');
+  if (inputBuffer && inputBuffer.length > 2 * 1024 * 1024) throw new Error('process_stdin_too_large');
   return new Promise((resolveResult) => {
     let stdout = '';
     let stderr = '';
@@ -3916,6 +3922,10 @@ export async function runProcess(command, args, { cwd, env = {}, timeoutMs = 30_
     };
     const childEnvironment = inheritEnvironment ? { ...process.env, ...env } : restrictEnvironment ? { ...env } : { ...safeCommandEnvironment(), ...env };
     const child = spawn(command, args, { cwd, env: childEnvironment, shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+    if (child.stdin) {
+      child.stdin.on('error', () => {});
+      child.stdin.end(inputBuffer ?? undefined);
+    }
     const terminate = (signal) => {
       if (process.platform !== 'win32' && child.pid) {
         try { process.kill(-child.pid, signal); return; } catch { /* Child exited before group signalling. */ }
@@ -4633,6 +4643,157 @@ export function codexPaidFallbackEligible(message) {
   return /(?:\b429\b|rate[ _-]?limit|usage[ _-]?limit|too many requests|login required|not logged in|sign[ -]?in required|session expired|authentication required|authorization required|quota exceeded|plan limit)/i.test(text);
 }
 
+export function resolveCodexCliEntryPath({
+  resolvePackage = (specifier) => codexModuleRequire.resolve(specifier)
+} = {}) {
+  let packageJsonPath;
+  try { packageJsonPath = resolvePackage('@openai/codex/package.json'); }
+  catch { throw new Error('codex_cli_entry_unavailable'); }
+  const entry = resolve(dirname(packageJsonPath), 'bin', 'codex.js');
+  if (!existsSync(entry)) throw new Error('codex_cli_entry_unavailable');
+  return entry;
+}
+
+export function parseCodexCliJsonl(stdout) {
+  let threadId = null;
+  let finalResponse = '';
+  let usage = null;
+  for (const raw of String(stdout ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    let event;
+    try { event = JSON.parse(line); }
+    catch (error) { throw new Error('codex_cli_json_invalid', { cause: error }); }
+    if (event?.type === 'thread.started' && typeof event.thread_id === 'string' && event.thread_id) {
+      threadId = event.thread_id;
+    } else if (event?.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+      finalResponse = event.item.text;
+    } else if (event?.type === 'turn.completed') {
+      usage = event.usage === undefined ? null : safeJson(event.usage);
+    } else if (event?.type === 'turn.failed') {
+      throw new Error(clip(event.error?.message ?? 'codex_cli_turn_failed', 2_000));
+    } else if (event?.type === 'error') {
+      throw new Error(clip(event.message ?? event.error?.message ?? 'codex_cli_error', 2_000));
+    }
+  }
+  if (!threadId) throw new Error('codex_cli_thread_missing');
+  if (!finalResponse.trim()) throw new Error('codex_cli_final_response_missing');
+  return { threadId, finalResponse: finalResponse.trim(), usage };
+}
+
+async function runCostAwareCodexCliTurn({
+  sourceEnvironment,
+  isolatedHome,
+  configOverrides,
+  workspace,
+  prompt,
+  timeoutMs,
+  processRunner = runProcess,
+  cliEntryPath = resolveCodexCliEntryPath()
+}) {
+  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const sessionAvailable = isolatedHome?.authAvailable !== false;
+  const deadlineAt = Date.now() + timeoutMs;
+  const remainingMs = () => Math.max(0, deadlineAt - Date.now());
+
+  const run = async (authentication) => {
+    const remaining = remainingMs();
+    if (remaining <= 0) {
+      const error = new Error('codex_cli_timeout');
+      error.timedOut = true;
+      error.codexAuthMode = authentication;
+      error.paidApiUsed = authentication === 'api';
+      throw error;
+    }
+    const env = isolatedWorkerEnvironment(sourceEnvironment, isolatedHome.path);
+    if (authentication === 'api') {
+      if (!apiKey) throw new Error('codex_api_key_unavailable');
+      env.CODEX_API_KEY = apiKey;
+    }
+    const args = [
+      cliEntryPath,
+      'exec',
+      '--json',
+      '--sandbox', 'read-only',
+      '--cd', workspace,
+      '--skip-git-repo-check',
+      '--ignore-user-config',
+      '--ignore-rules',
+      ...configOverrides.flatMap((override) => ['--config', override]),
+      '-'
+    ];
+    const result = await processRunner(process.execPath, args, {
+      cwd: workspace,
+      env,
+      timeoutMs: remaining,
+      killGraceMs: 1_000,
+      restrictEnvironment: true,
+      outputLimit: 512 * 1024,
+      input: prompt
+    });
+    let syncError = null;
+    if (authentication === 'session' && typeof isolatedHome?.syncAuth === 'function') {
+      try { await isolatedHome.syncAuth(); }
+      catch (error) { syncError = error; }
+    }
+    if (result.timedOut) {
+      const error = new Error('codex_cli_timeout');
+      error.timedOut = true;
+      error.codexAuthMode = authentication;
+      error.paidApiUsed = authentication === 'api';
+      if (syncError) error.codexAuthSyncError = String(syncError.message ?? syncError);
+      throw error;
+    }
+    if (!result.ok || result.stdoutTruncated) {
+      const detail = result.stdoutTruncated
+        ? 'codex_cli_output_too_large'
+        : clip(maskSecrets(result.stderr || result.stdout || `codex_cli_exit_${result.exitCode ?? 'unknown'}`), 2_000);
+      const error = new Error(detail || 'codex_cli_failed');
+      error.codexAuthMode = authentication;
+      error.paidApiUsed = authentication === 'api';
+      if (syncError) error.codexAuthSyncError = String(syncError.message ?? syncError);
+      throw error;
+    }
+    if (syncError) {
+      syncError.codexAuthMode = authentication;
+      syncError.paidApiUsed = authentication === 'api';
+      throw syncError;
+    }
+    const parsed = parseCodexCliJsonl(result.stdout);
+    return {
+      thread: { id: parsed.threadId },
+      turn: { finalResponse: parsed.finalResponse, usage: parsed.usage, items: [] },
+      authMode: authentication,
+      paidApiUsed: authentication === 'api'
+    };
+  };
+
+  if (!sessionAvailable) {
+    if (!apiKey) return run('session');
+    return run('api');
+  }
+
+  let sessionError;
+  try { return await run('session'); }
+  catch (error) { sessionError = error; }
+
+  const refreshCollision = /access token could not be refreshed|refresh token was already used/i.test(String(sessionError?.message ?? ''));
+  if (!sessionError?.timedOut && refreshCollision && typeof isolatedHome?.refreshAuthFromSource === 'function') {
+    try {
+      const refreshed = await isolatedHome.refreshAuthFromSource();
+      if (refreshed) {
+        try { return await run('session'); }
+        catch (error) { sessionError = error; }
+      }
+    } catch (error) {
+      sessionError = error;
+    }
+  }
+
+  if (sessionError?.timedOut || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  return run('api');
+}
+
 async function runCostAwareCodexTurn({
   CodexClient,
   sourceEnvironment,
@@ -5081,8 +5242,26 @@ function deterministicDiagnosisResult(request) {
 }
 
 export class CodexReadOnlySkillExecutor {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, maxOutputBytes = 16_384, platform = process.platform, contextProcessRunner = runProcess } = {}) {
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, maxOutputBytes, platform, contextProcessRunner });
+  constructor({
+    CodexClient = Codex,
+    environment = workerEnvironment,
+    codexHomeFactory = prepareIsolatedCodexHome,
+    maxOutputBytes = 16_384,
+    platform = process.platform,
+    contextProcessRunner = runProcess,
+    codexProcessRunner = runProcess,
+    codexCliPathResolver = resolveCodexCliEntryPath
+  } = {}) {
+    Object.assign(this, {
+      CodexClient,
+      environment,
+      codexHomeFactory,
+      maxOutputBytes,
+      platform,
+      contextProcessRunner,
+      codexProcessRunner,
+      codexCliPathResolver
+    });
   }
 
   supports(skillId) { return readOnlySkillIds.has(skillId); }
@@ -5208,23 +5387,39 @@ export class CodexReadOnlySkillExecutor {
     let timedOut = false;
     let outputBytes = 0;
     let isolatedHome = null;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let timer = null;
     try {
       await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
-      const execution = await runCostAwareCodexTurn({
-        CodexClient: this.CodexClient,
-        sourceEnvironment,
-        isolatedHome,
-        configOverrides: security.configOverrides,
-        threadOptions: {
-          workingDirectory: workspace,
-          approvalPolicy: 'never',
-          webSearchMode: 'disabled'
-        },
-        prompt: buildReadOnlySkillPrompt(request),
-        signal: controller.signal
-      });
+      const prompt = buildReadOnlySkillPrompt(request);
+      let execution;
+      if (this.CodexClient === Codex) {
+        execution = await runCostAwareCodexCliTurn({
+          sourceEnvironment,
+          isolatedHome,
+          configOverrides: security.configOverrides,
+          workspace,
+          prompt,
+          timeoutMs,
+          processRunner: this.codexProcessRunner,
+          cliEntryPath: this.codexCliPathResolver()
+        });
+      } else {
+        timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+        execution = await runCostAwareCodexTurn({
+          CodexClient: this.CodexClient,
+          sourceEnvironment,
+          isolatedHome,
+          configOverrides: security.configOverrides,
+          threadOptions: {
+            workingDirectory: workspace,
+            approvalPolicy: 'never',
+            webSearchMode: 'disabled'
+          },
+          prompt,
+          signal: controller.signal
+        });
+      }
       const { thread, turn, authMode, paidApiUsed } = execution;
       const raw = String(turn.finalResponse ?? '').trim();
       outputBytes = Buffer.byteLength(raw);
@@ -5241,6 +5436,7 @@ export class CodexReadOnlySkillExecutor {
         result: parsed
       };
     } catch (error) {
+      timedOut ||= Boolean(error?.timedOut);
       return {
         status: 'failed',
         ok: false,
@@ -5251,7 +5447,7 @@ export class CodexReadOnlySkillExecutor {
         error: clip(error.message, 1_000)
       };
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       await isolatedHome?.cleanup();
     }
   }
