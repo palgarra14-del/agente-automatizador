@@ -1377,6 +1377,25 @@ export class GitHubStateStore extends JsonStore {
     if (this.validatedLineageHeads.has(authority.stateSha)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
+    const previousAuthority = authorityByGeneration.get(authority.generation - 1);
+    if (
+      authority.generation > registration.startGeneration &&
+      previousAuthority &&
+      previousAuthority.generation === authority.generation - 1 &&
+      latest.parentSha === previousAuthority.stateSha &&
+      latest.baseWitnessSha === previousAuthority.baseWitnessSha &&
+      this.validatedLineageHeads.has(previousAuthority.stateSha)
+    ) {
+      const currentCommit = await this.readCommit(authority.stateSha);
+      if (!Array.isArray(currentCommit.parents) ||
+          currentCommit.parents.length !== 1 ||
+          assertSha(currentCommit.parents[0]?.sha, 'cloud_state_parent_invalid') !== previousAuthority.stateSha) {
+        throw new Error('cloud_state_history_fork');
+      }
+      this.validatedLineageHeads.add(authority.stateSha);
+      return;
+    }
+
     let expectedSha = authority.stateSha;
     let expectedGeneration = authority.generation;
     const stepCount = authority.generation - registration.startGeneration + 1;

@@ -1783,6 +1783,32 @@ test('more than 2000 unrelated repository-root statuses cannot exhaust this lane
   assert.equal((await storeFor(legacy, { ownerId: 'github:3:1' }).load()).marker, 'g257');
 });
 
+test('validated active-epoch head makes the next write incrementally bounded', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  for (let generation = 1; generation <= 150; generation += 1) await publishMarker(writer, `g${generation}`);
+
+  const fresh = storeFor(fake, { ownerId: 'github:incremental:1' });
+  assert.equal((await fresh.load()).marker, 'g150');
+  fake.resetRequestCount();
+
+  const next = await publishMarker(fresh, 'g151');
+  assert.equal(fake.envelopeAt(next).generation, 151);
+  assert.ok(fake.requestCount() < 100, `expected incremental active-epoch write, received ${fake.requestCount()} requests`);
+});
+
+test('incremental lineage validation fails closed if the new commit parent is tampered', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  await publishMarker(writer, 'one');
+  await publishMarker(writer, 'two');
+  const warm = storeFor(fake, { ownerId: 'github:incremental:tamper' });
+  assert.equal((await warm.load()).marker, 'two');
+  const third = await publishMarker(writer, 'three');
+  fake.setCommitParents(third, [fake.mainSha]);
+  await assert.rejects(() => warm.load(), /cloud_state_epoch_authority_mismatch|cloud_state_history_fork/);
+});
+
 test('2050-generation segmented history validates with lane-isolated bounded requests', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
