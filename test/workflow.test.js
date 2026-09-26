@@ -1982,6 +1982,97 @@ test('read-only hard billing failure blocks after one model call without retryin
   assert.equal(blocked.modelUsage.entries[0].status, 'failed');
 });
 
+test('run recovers an orphaned read-only model reservation without refunding model budget', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-orphaned-readonly-'));
+  const configured = managedProject('orphaned-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls.push(request.skill);
+      if (request.skill === 'code.inspect') {
+        return {
+          ok: true,
+          status: 'completed',
+          usage: { input_tokens: 10, output_tokens: 4 },
+          outputBytes: 10,
+          result: { inspectionEvidence: { summary: 'recovered inspection', relevantPaths: ['src/core.js'], findings: ['orphan recovery verified'] } }
+        };
+      }
+      return {
+        ok: true,
+        status: 'completed',
+        usage: { input_tokens: 7, output_tokens: 3 },
+        outputBytes: 10,
+        result: { diagnosis: { summary: 'recovered diagnosis', cause: 'orphaned prior model call', relevantPaths: ['src/core.js'], recommendedChange: 'continue safely', risks: [] } }
+      };
+    }
+  };
+  let clock = Date.now();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    skillExecutor,
+    now: () => clock
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover orphaned read-only work',
+    budgets: { timeoutMs: 60_000, maxAttempts: 2 }
+  });
+  await instance.workspaceProject(created.id, configured);
+  const reservation = await instance.reserveWorkflowModelCall(created.id, 'inspect-project');
+  assert.equal(reservation.callId, 'model-call-1');
+  clock = Date.now() + 1_000;
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+    plan.deadlineAt = clock - 1;
+  });
+
+  const waiting = await instance.run(created.id, { deadlineCapAt: clock + 60_000 });
+  const inspect = waiting.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(inspect.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(inspect.attempts, 2);
+  assert.deepEqual(calls, ['code.inspect', 'code.diagnose']);
+  assert.equal(waiting.modelUsage.calls, 3);
+  assert.equal(waiting.modelUsage.unknownUsageCalls, 1);
+  assert.deepEqual(waiting.modelUsage.entries.map((entry) => [entry.skill, entry.status]), [
+    ['code.inspect', 'failed'],
+    ['code.inspect', 'completed'],
+    ['code.diagnose', 'completed']
+  ]);
+  assert.ok(waiting.deadlineAt > clock);
+});
+
 test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
   const configured = configFrom({
     id: 'readonly-transient-model',

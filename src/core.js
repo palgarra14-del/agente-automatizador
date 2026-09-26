@@ -3702,9 +3702,127 @@ export class WorkflowEngine {
     return { ok: plan.bootstrap.status === 'completed', plan };
   }
 
+  async recoverInterruptedReadOnlyStepForRun(id, { deadlineCapAt = null } = {}) {
+    const observed = await this.get(id);
+    const interruptedStep = observed?.status === WorkflowStepStatus.RUNNING
+      ? observed.steps.find((step) => step.status === WorkflowStepStatus.RUNNING)
+      : null;
+    if (!interruptedStep || !['code.inspect', 'code.diagnose', 'code.review', 'website.plan'].includes(interruptedStep.skill)) return null;
+    if (interruptedStep.evidence?.type !== 'executor-start') return null;
+
+    const project = this.projects.get(observed.projectId);
+    const expected = interruptedStep.evidence?.repositoryState;
+    if (!observed.workspace || !expected) return null;
+    const workspaceProject = projectAtWorkspace(project, observed.workspace.path);
+
+    let current = null;
+    let changeSet = null;
+    let protectedIgnored = null;
+    let repositoryControl = null;
+    let integrityError = null;
+    try {
+      repositoryControl = await this.localGit.inspectRepositoryControlState(workspaceProject);
+      current = await this.localGit.inspect(workspaceProject);
+      changeSet = await this.localGit.inspectChangeSet(workspaceProject);
+      protectedIgnored = await this.localGit.inspectProtectedIgnoredState(workspaceProject);
+    } catch (error) {
+      integrityError = error;
+    }
+
+    const repositoryChanged = integrityError ||
+      !repositoryControl ||
+      repositoryControl.fingerprint !== interruptedStep.evidence?.repositoryControlFingerprint ||
+      !current ||
+      current.currentBranch !== expected.branch ||
+      current.initialHead !== expected.head ||
+      current.remote !== expected.remote;
+    const filesChanged = Boolean(changeSet?.paths?.length) ||
+      !protectedIgnored ||
+      protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
+
+    if (repositoryChanged || filesChanged) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === interruptedStep.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'interrupted_read_only_changes_detected';
+        step.evidence = {
+          ...step.evidence,
+          type: 'interrupted-execution',
+          ok: false,
+          observedRepositoryState: current ? { branch: current.currentBranch, head: current.initialHead, remote: current.remote } : null,
+          changeSet: changeSet ? safeJson(changeSet) : null,
+          changeSetFingerprint: changeSet?.changeSetFingerprint ?? null,
+          protectedIgnoredFingerprint: protectedIgnored?.fingerprint ?? null,
+          repositoryControlFingerprint: repositoryControl?.fingerprint ?? null,
+          error: integrityError ? clip(integrityError.message, 1_000) : null
+        };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.pausedAt = null;
+        saved.result = { error: step.error, stepId: step.id };
+      }, { deadlineAt: deadlineCapAt });
+    }
+
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === interruptedStep.id);
+      if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
+        throw new Error('interrupted_read_only_recovery_state_changed');
+      }
+      const startedCalls = saved.modelUsage.entries.filter((entry) =>
+        entry.status === 'started' &&
+        entry.surface === 'workflow' &&
+        entry.stepId === step.id &&
+        entry.attempt === step.attempts
+      );
+      if (startedCalls.length > 1) throw new Error('interrupted_read_only_model_reservation_ambiguous');
+      if (startedCalls.length === 1) {
+        completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
+      }
+
+      const attemptsExhausted = step.attempts >= saved.budgets.maxAttempts;
+      const modelBudgetExhausted = startedCalls.length === 1 && saved.modelUsage.calls >= saved.modelUsage.maxCalls;
+      if (attemptsExhausted || modelBudgetExhausted) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = modelBudgetExhausted ? 'workflow_model_call_budget_exhausted' : 'skill_executor_attempt_budget_exhausted';
+        step.evidence = {
+          ...step.evidence,
+          type: 'interrupted-execution',
+          ok: false,
+          recoveredAt: new Date(this.now()).toISOString(),
+          interruptedModelCallId: startedCalls[0]?.id ?? null,
+          retryAvailable: false
+        };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.pausedAt = null;
+        saved.result = { error: step.error, stepId: step.id };
+        return;
+      }
+
+      step.status = WorkflowStepStatus.READY;
+      step.error = 'interrupted_read_only_retry_available';
+      step.evidence = {
+        ...step.evidence,
+        type: 'interrupted-execution',
+        ok: false,
+        recoveredAt: new Date(this.now()).toISOString(),
+        interruptedModelCallId: startedCalls[0]?.id ?? null,
+        retryAvailable: true
+      };
+      saved.status = WorkflowStepStatus.PENDING;
+      saved.pausedAt = null;
+      saved.result = null;
+      if (saved.deadlineAt <= this.now()) {
+        saved.deadlineAt = boundedWorkflowDeadlineAt(this.now(), saved.budgets.timeoutMs, deadlineCapAt);
+      }
+    }, { deadlineAt: deadlineCapAt });
+  }
+
   async run(id, options = {}) {
     if (options.dryRun) return this.runUnlocked(id, options);
-    return this.store.withExecutionLease('workflows', id, 'workflow', async () => this.runUnlocked(id, options));
+    return this.store.withExecutionLease('workflows', id, 'workflow', async () => {
+      const recovered = await this.recoverInterruptedReadOnlyStepForRun(id, { deadlineCapAt: options.deadlineCapAt ?? null });
+      if (recovered && [WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(recovered.status)) return recovered;
+      return this.runUnlocked(id, options);
+    });
   }
 
   async runUnlocked(id, { dryRun = false, refreshPristineDeadline = false, deadlineCapAt = null } = {}) {
