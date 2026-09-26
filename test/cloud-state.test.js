@@ -831,6 +831,84 @@ test('cloud-state GraphQL status read is bounded by the active workflow deadline
   assert.equal(graphqlReads, 1);
 });
 
+test('cloud-state GET retries bounded transient GitHub 5xx responses', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:transient:get',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      if (reads === 1) return response(502, { message: 'bad gateway' });
+      return response(200, { object: { sha: 'a'.repeat(40) } });
+    }
+  });
+  assert.equal(await store.refSha('tags/test'), 'a'.repeat(40));
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [1_000]);
+});
+
+test('cloud-state GraphQL read retries bounded transient GitHub 5xx responses', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:transient:graphql',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async (url) => {
+      assert.equal(url, 'https://api.github.com/graphql');
+      reads += 1;
+      if (reads === 1) return response(503, { message: 'service unavailable' });
+      return response(200, { data: { repository: { object: { status: null } } } });
+    }
+  });
+  assert.equal(await store.readStatusContext('a'.repeat(40), 'agent-cloud-state-v2/test'), null);
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [1_000]);
+});
+
+test('cloud-state mutation reconciles ambiguous transient 5xx only when canonical state matches intent', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const originalWriteSnapshot = store.writeSnapshot.bind(store);
+  let inject = true;
+  store.writeSnapshot = async (...args) => {
+    const result = await originalWriteSnapshot(...args);
+    if (inject) {
+      inject = false;
+      throw new Error('cloud_state_github_request_failed:502');
+    }
+    return result;
+  };
+
+  const output = await store.mutateInternal((data) => {
+    data.transientWriteMarker = 'published-once';
+    return 'completed';
+  }, { requireLease: false });
+
+  assert.equal(output, 'completed');
+  assert.equal((await store.load()).transientWriteMarker, 'published-once');
+});
+
+test('cloud-state mutation fails closed when transient 5xx did not publish intended state', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  store.writeSnapshot = async () => {
+    throw new Error('cloud_state_github_request_failed:502');
+  };
+
+  await assert.rejects(
+    () => store.mutateInternal((data) => {
+      data.transientWriteMarker = 'must-not-be-assumed';
+    }, { requireLease: false }),
+    /cloud_state_github_request_failed:502/
+  );
+  assert.equal((await store.load()).transientWriteMarker, undefined);
+});
+
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.doesNotThrow(() => validateCloudState(

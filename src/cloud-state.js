@@ -8,6 +8,7 @@ const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const DEFAULT_LINEAGE_VALIDATION_PACE_MS = 500;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
+const GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
 const EPOCH_STATUS_MAX_PAGES = 8;
@@ -166,6 +167,14 @@ function responseError(status) {
   return new Error(`cloud_state_github_request_failed:${status}`);
 }
 
+function transientGitHubStatus(status) {
+  return [502, 503, 504].includes(status);
+}
+
+function transientCloudStateRequestError(error) {
+  return /cloud_state_github_request_failed:(?:502|503|504)(?:$|\D)/.test(String(error?.message ?? ''));
+}
+
 export class GitHubStateStore extends JsonStore {
   constructor({
     repository,
@@ -307,6 +316,11 @@ export class GitHubStateStore extends JsonStore {
           continue;
         }
       }
+      const transientDelayMs = method === 'GET' ? GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt] : undefined;
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs, deadlineAt);
+        continue;
+      }
       throw responseError(response.status);
     }
   }
@@ -412,6 +426,11 @@ export class GitHubStateStore extends JsonStore {
           await this.sleepWithinDeadline(delayMs);
           continue;
         }
+      }
+      const transientDelayMs = GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt];
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs);
+        continue;
       }
       throw responseError(response.status);
     }
@@ -1801,7 +1820,19 @@ export class GitHubStateStore extends JsonStore {
       const output = await mutator(data);
       sanitizeRemoteOnlyEvidence(data);
       if (beforeCommit) await beforeCommit();
-      await this.writeSnapshot(data, snapshot, { beforeCommit });
+      const intendedStateHash = stateHash(data);
+      try {
+        await this.writeSnapshot(data, snapshot, { beforeCommit });
+      } catch (error) {
+        if (!transientCloudStateRequestError(error)) throw error;
+        let observed;
+        try {
+          observed = await this.readSnapshot({ repair: true });
+        } catch {
+          throw error;
+        }
+        if (stateHash(observed.state) !== intendedStateHash) throw error;
+      }
       return output;
     };
     if (deadlineAt === null) return operation();
