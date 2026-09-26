@@ -171,6 +171,7 @@ test('runner keeps Vercel bypass policy out of enumerable state and validates se
       VERCEL_AUTOMATION_BYPASS_ORIGINS: 'https://preview.example.com'
     }
   });
+  assert.equal(runner.settleMs, 500);
   assert.equal(Object.keys(runner).includes('protectionBypassPolicy'), false);
   assert.equal(JSON.stringify(runner).includes('runtime-secret'), false);
   assert.throws(() => new ChromeBrowserQaRunner({

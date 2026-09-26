@@ -585,7 +585,7 @@ try {
       routeUrls: { [clientNavRoute]: clientNavUrl },
       signal: controller.signal,
       timeoutMs: 5_000,
-      settleMs: 150
+      settleMs: 500
     }),
     /browser_qa_document_navigation_forbidden/,
     'blocked client-side top-frame navigation must fail Browser QA instead of leaving the original page eligible for PASS'
@@ -600,7 +600,7 @@ try {
       routeUrls: { [frameNetworkRoute]: frameNetworkUrl },
       signal: controller.signal,
       timeoutMs: 5_000,
-      settleMs: 150
+      settleMs: 500
     }),
     /browser_qa_direct_network_forbidden/,
     'direct-network attempt markers inside same-origin/srcdoc iframe must fail the whole run'

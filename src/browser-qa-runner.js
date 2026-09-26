@@ -789,7 +789,7 @@ class ChromeCdpBrowser {
     return url;
   }
 
-  async inspectPage({ request, pagePlan, routeUrls, signal, timeoutMs, settleMs = 150 }) {
+  async inspectPage({ request, pagePlan, routeUrls, signal, timeoutMs, settleMs = 500 }) {
     throwIfAborted(signal);
     this.#allowedUrl(pagePlan.url);
     const context = await this.connection.send('Target.createBrowserContext', { disposeOnDetach: true });
@@ -939,6 +939,10 @@ class ChromeCdpBrowser {
           mobile: true
         }, sessionId)
       ]);
+
+      const initialFrameTree = await this.connection.send('Page.getFrameTree', {}, sessionId);
+      mainFrameId = initialFrameTree?.frameTree?.frame?.id ?? null;
+      if (!mainFrameId) throw new Error('browser_qa_top_frame_missing');
 
       const loadController = new AbortController();
       const forwardAbort = () => loadController.abort();
@@ -1122,7 +1126,7 @@ export class ChromeBrowserQaRunner {
   constructor({
     browserFactory = launchChromeCdpBrowser,
     networkResolver = resolvePublicNetworkUrl,
-    settleMs = 150,
+    settleMs = 500,
     environment = process.env
   } = {}) {
     if (typeof browserFactory !== 'function') throw new Error('browser_qa_runner_factory_invalid');
