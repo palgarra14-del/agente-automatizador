@@ -73,6 +73,11 @@ function assertSha(value, code = 'cloud_state_sha_invalid') {
   return value.toLowerCase();
 }
 
+function validatedLineageKey(generation, sha) {
+  if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
+  return `${generation}:${assertSha(sha)}`;
+}
+
 function checkpointTagFor(tag) {
   return `${CHECKPOINT_NAMESPACE}/${tag}`;
 }
@@ -1374,7 +1379,8 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_lineage_anchor_mismatch');
     }
     await this.validateLineageAnchor(stateEnvelope, { baseWitnessSha: latest.baseWitnessSha });
-    if (this.validatedLineageHeads.has(authority.stateSha)) return;
+    const authorityValidationKey = validatedLineageKey(authority.generation, authority.stateSha);
+    if (this.validatedLineageHeads.has(authorityValidationKey)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
     const previousAuthority = authorityByGeneration.get(authority.generation - 1);
@@ -1384,7 +1390,7 @@ export class GitHubStateStore extends JsonStore {
       previousAuthority.generation === authority.generation - 1 &&
       latest.parentSha === previousAuthority.stateSha &&
       latest.baseWitnessSha === previousAuthority.baseWitnessSha &&
-      this.validatedLineageHeads.has(previousAuthority.stateSha)
+      this.validatedLineageHeads.has(validatedLineageKey(previousAuthority.generation, previousAuthority.stateSha))
     ) {
       const currentCommit = await this.readCommit(authority.stateSha);
       if (!Array.isArray(currentCommit.parents) ||
@@ -1392,7 +1398,7 @@ export class GitHubStateStore extends JsonStore {
           assertSha(currentCommit.parents[0]?.sha, 'cloud_state_parent_invalid') !== previousAuthority.stateSha) {
         throw new Error('cloud_state_history_fork');
       }
-      this.validatedLineageHeads.add(authority.stateSha);
+      this.validatedLineageHeads.add(authorityValidationKey);
       return;
     }
 
@@ -1435,7 +1441,7 @@ export class GitHubStateStore extends JsonStore {
     }
 
     if (!done) throw new Error('cloud_state_history_incomplete');
-    this.validatedLineageHeads.add(authority.stateSha);
+    this.validatedLineageHeads.add(authorityValidationKey);
   }
 
   snapshotFrom(stateSha, checkpointSha, witnessSha, envelope, authority = null) {
@@ -1804,7 +1810,7 @@ export class GitHubStateStore extends JsonStore {
     const finalAuthority = finalAuthorities.at(-1);
     if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha &&
         finalAuthority?.generation === generation && finalAuthority.stateSha === commitSha && finalAuthority.parentSha === parentSha) {
-      this.validatedLineageHeads.add(commitSha);
+      this.validatedLineageHeads.add(validatedLineageKey(generation, commitSha));
       return commitSha;
     }
     throw new Error('cloud_state_partial_publication', { cause: stateRefError ?? checkpointError ?? witnessError ?? undefined });
