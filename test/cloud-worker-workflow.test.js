@@ -141,17 +141,18 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('scheduled recovery has the minimum commit-status authority required by Cloud State repair', () => {
+test('scheduled recovery has the minimum commit-status authority required by fused Cloud State repair and admission recovery', () => {
   const recoverStart = workflow.indexOf('  recover:');
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   assert.ok(recoverStart > 0 && cloudOnceStart > recoverStart);
   const recovery = workflow.slice(recoverStart, cloudOnceStart);
   assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|checks:\s*write/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /inbox cloud-repair --lane/);
 });
 
-test('cloud worker reuses one process for repair, control and executable-work preflight', () => {
+test('cloud worker fuses scheduled repair with admission recovery and keeps cloud preflight lean', () => {
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   const prepareStart = workflow.indexOf('- name: Prepare cloud control and executable-work preflight', cloudOnceStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
@@ -174,7 +175,7 @@ test('cloud worker reuses one process for repair, control and executable-work pr
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(recovery, /timeout-minutes: 30/);
   assert.match(recovery, /timeout --signal=TERM --kill-after=30s 20m node src\/cli\.js inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /inbox cloud-repair --lane/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
   assert.match(prepare, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
@@ -194,8 +195,12 @@ test('cloud worker reuses one process for repair, control and executable-work pr
   assert.match(cli, /action === 'cloud-prepare'/);
   const prepareCliStart = cli.indexOf("} else if (action === 'cloud-prepare') {");
   const repairCliStart = cli.indexOf("} else if (action === 'cloud-repair') {", prepareCliStart);
-  assert.ok(prepareCliStart > 0 && repairCliStart > prepareCliStart);
+  const recoverCliStart = cli.indexOf("} else if (action === 'cloud-recover') {", repairCliStart);
+  const peekCliStart = cli.indexOf("} else if (action === 'cloud-peek') {", recoverCliStart);
+  assert.ok(prepareCliStart > 0 && repairCliStart > prepareCliStart && recoverCliStart > repairCliStart && peekCliStart > recoverCliStart);
   const prepareCli = cli.slice(prepareCliStart, repairCliStart);
+  const recoverCli = cli.slice(recoverCliStart, peekCliStart);
+  assert.match(recoverCli, /readSnapshot\(\{ repair: true \}\)[\s\S]*recoverAdmissionIntents\(\)/);
   assert.doesNotMatch(prepareCli, /readSnapshot\(\{ repair: true \}\)/);
   assert.doesNotMatch(prepareCli, /autonomousSelfImprovement\.hasWork\(\)/);
   assert.match(prepareCli, /if \(autonomousSelfImprovement\)[\s\S]*queue: null, hasExecutionWork: true/);
@@ -224,7 +229,7 @@ test('production cloud execution uses the bounded drain while retaining cloud-on
 });
 
 test('autonomous cloud work is session-only and cannot spend a paid OpenAI API key', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 6);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 5);
   assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
@@ -232,7 +237,7 @@ test('autonomous cloud work is session-only and cannot spend a paid OpenAI API k
   assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
   assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
   assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 5);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY|secrets\.OPENAI_API_KEY/);
