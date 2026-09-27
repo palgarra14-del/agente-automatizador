@@ -10,7 +10,7 @@ import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousSelfImprovement } from './self-improvement.js';
-import { runCloudDrain } from './cloud-drain.js';
+import { autonomousFallbackAllowed, runCloudDrain } from './cloud-drain.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -253,7 +253,7 @@ try {
           await queue.ingestAdmissionIntents();
           const queueResult = await queue.tick();
           let autonomousResult = null;
-          if (autonomousSelfImprovement && (!queueResult || ['awaiting_start_approval', 'awaiting_workflow_approval'].includes(queueResult.status))) {
+          if (autonomousSelfImprovement && autonomousFallbackAllowed(queueResult)) {
             autonomousResult = await autonomousSelfImprovement.tick();
           }
           return { queueResult, autonomousResult };

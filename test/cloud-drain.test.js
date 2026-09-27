@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runCloudDrain } from '../src/cloud-drain.js';
+import { autonomousFallbackAllowed, runCloudDrain } from '../src/cloud-drain.js';
 
 function scriptedQueue(results, { admissions = [] } = {}) {
   let tickIndex = 0;
@@ -22,6 +22,16 @@ function scriptedQueue(results, { admissions = [] } = {}) {
     }
   };
 }
+
+test('autonomous fallback is allowed only for safe parked queue states', () => {
+  assert.equal(autonomousFallbackAllowed(null), true);
+  assert.equal(autonomousFallbackAllowed({ status: 'awaiting_start_approval' }), true);
+  assert.equal(autonomousFallbackAllowed({ status: 'awaiting_workflow_approval' }), true);
+  assert.equal(autonomousFallbackAllowed({ status: 'operator_update_pending' }), true);
+  assert.equal(autonomousFallbackAllowed({ status: 'execution_deferred' }), false);
+  assert.equal(autonomousFallbackAllowed({ status: 'operator_revision_check_failed' }), false);
+  assert.equal(autonomousFallbackAllowed({ status: 'running' }), false);
+});
 
 test('cloud drain keeps advancing governed queue work until the lane is idle', async () => {
   const queue = scriptedQueue([

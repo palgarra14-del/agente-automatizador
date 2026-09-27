@@ -25,8 +25,8 @@ function integerInRange(value, fallback, label, min, max) {
   return resolved;
 }
 
-function shouldRunAutonomous(queueResult) {
-  return !queueResult || AUTONOMOUS_FALLBACK_STATUSES.has(queueResult.status);
+export function autonomousFallbackAllowed(queueResult) {
+  return !queueResult || AUTONOMOUS_FALLBACK_STATUSES.has(queueResult?.status);
 }
 
 export async function runCloudDrain({
@@ -69,7 +69,7 @@ export async function runCloudDrain({
     const queueResult = await queue.tick();
 
     let autonomousResult = null;
-    if (autonomousSelfImprovement && shouldRunAutonomous(queueResult)) {
+    if (autonomousSelfImprovement && autonomousFallbackAllowed(queueResult)) {
       autonomousResult = await autonomousSelfImprovement.tick();
     }
 
