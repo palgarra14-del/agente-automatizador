@@ -95,6 +95,57 @@ test('parked human approvals do not stall independent autonomous maintenance', a
   assert.equal(queue.calls.hasWork, 0);
 });
 
+test('operator update pending parks governed work but keeps autonomous maintenance productive', async () => {
+  const queue = scriptedQueue([
+    { status: 'operator_update_pending', issueNumber: 290 },
+    { status: 'operator_update_pending', issueNumber: 290 }
+  ]);
+  let autonomousCalls = 0;
+  const autonomousSelfImprovement = {
+    async tick() {
+      autonomousCalls += 1;
+      return { status: autonomousCalls < 2 ? 'running' : 'completed' };
+    },
+    async hasWork() {
+      return autonomousCalls < 2;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'human_gate');
+  assert.equal(result.iterations.length, 2);
+  assert.deepEqual(
+    result.iterations.map((item) => item.queueResult.status),
+    ['operator_update_pending', 'operator_update_pending']
+  );
+  assert.equal(autonomousCalls, 2);
+  assert.equal(queue.calls.tick, 2);
+  assert.equal(queue.calls.hasWork, 0);
+});
+
+test('operator update pending still stops when no independent autonomous work exists', async () => {
+  const queue = scriptedQueue([{ status: 'operator_update_pending', issueNumber: 290 }]);
+  let autonomousCalls = 0;
+  const autonomousSelfImprovement = {
+    async tick() {
+      autonomousCalls += 1;
+      return { status: 'idle' };
+    },
+    async hasWork() {
+      return false;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'human_gate');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(autonomousCalls, 1);
+  assert.equal(queue.calls.tick, 1);
+  assert.equal(queue.calls.hasWork, 0);
+});
+
 test('operator safety gates remain fail closed even when autonomous maintenance is available', async () => {
   const queue = scriptedQueue([{ status: 'operator_revision_check_failed', issueNumber: 11 }]);
   let autonomousCalls = 0;

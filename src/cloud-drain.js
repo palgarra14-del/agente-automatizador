@@ -6,10 +6,14 @@ const PARKED_APPROVAL_STATUSES = new Set([
   'awaiting_workflow_approval'
 ]);
 
-const HUMAN_GATE_STATUSES = new Set([
+const AUTONOMOUS_FALLBACK_STATUSES = new Set([
   ...PARKED_APPROVAL_STATUSES,
+  'operator_update_pending'
+]);
+
+const HUMAN_GATE_STATUSES = new Set([
+  ...AUTONOMOUS_FALLBACK_STATUSES,
   'execution_deferred',
-  'operator_update_pending',
   'operator_revision_check_failed'
 ]);
 
@@ -22,7 +26,7 @@ function integerInRange(value, fallback, label, min, max) {
 }
 
 function shouldRunAutonomous(queueResult) {
-  return !queueResult || PARKED_APPROVAL_STATUSES.has(queueResult.status);
+  return !queueResult || AUTONOMOUS_FALLBACK_STATUSES.has(queueResult.status);
 }
 
 export async function runCloudDrain({
@@ -82,13 +86,13 @@ export async function runCloudDrain({
     }
 
     const humanGate = Boolean(queueResult && HUMAN_GATE_STATUSES.has(queueResult.status));
-    const parkedApprovalGate = Boolean(queueResult && PARKED_APPROVAL_STATUSES.has(queueResult.status));
+    const autonomousFallbackGate = Boolean(queueResult && AUTONOMOUS_FALLBACK_STATUSES.has(queueResult.status));
     const autonomousHasWork = autonomousSelfImprovement
       ? await autonomousSelfImprovement.hasWork()
       : false;
 
     if (humanGate) {
-      if (!parkedApprovalGate || !autonomousHasWork) {
+      if (!autonomousFallbackGate || !autonomousHasWork) {
         stopReason = 'human_gate';
         break;
       }
