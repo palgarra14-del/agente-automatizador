@@ -105,6 +105,21 @@ export function parseUvCourseRegistry(page) {
   return [...courses.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
 }
 
+export function parseUvVisiblePracticalGroups(page) {
+  if (!page || typeof page !== 'object') throw new Error('uv_moodle_page_invalid');
+  const sources = [String(page.text ?? '')];
+  if (Array.isArray(page.links)) {
+    sources.push(...page.links.map((link) => String(link?.text ?? '')));
+  }
+  const groups = new Set();
+  for (const source of sources) {
+    for (const match of source.matchAll(/(?:Pr[aá]cticas?[^\n]{0,120})?\bSubgrupo\s+([A-Z])\s*-\s*P(\d+)\b/gi)) {
+      groups.add(match[1].toUpperCase() + '-P' + match[2]);
+    }
+  }
+  return [...groups].sort();
+}
+
 export function parseUvCourseActivities(page) {
   if (!page || !Array.isArray(page.links)) throw new Error('uv_moodle_page_links_required');
   const seen = new Set();

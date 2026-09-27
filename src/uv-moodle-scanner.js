@@ -2,7 +2,8 @@ import {
   buildUvSnapshot,
   parseUvAssignmentPage,
   parseUvCalendarAssignmentLinks,
-  parseUvCourseActivities
+  parseUvCourseActivities,
+  parseUvVisiblePracticalGroups
 } from './uv-moodle.js';
 
 const UV_ORIGIN = 'https://aulavirtual.uv.es';
@@ -98,12 +99,17 @@ export async function scanUvMoodle({
   const materialMap = new Map();
   const assignmentTargets = new Map();
   const courseActivityCounts = [];
+  const courseGroups = [];
 
   try {
     for (const course of courses) {
       const page = authenticatedPage(await bridge.navigatePage(target.id, course.url));
       const activities = parseUvCourseActivities(page);
       courseActivityCounts.push({ subjectId: course.code, count: activities.length });
+      courseGroups.push({
+        subjectId: course.code,
+        practicalGroups: parseUvVisiblePracticalGroups(page)
+      });
 
       for (const activity of activities) {
         if (MATERIAL_TYPES.has(activity.type)) {
@@ -141,7 +147,8 @@ export async function scanUvMoodle({
       materials,
       courseActivityCounts: courseActivityCounts.sort((a, b) =>
         a.subjectId.localeCompare(b.subjectId)
-      )
+      ),
+      courseGroups: courseGroups.sort((a, b) => a.subjectId.localeCompare(b.subjectId))
     };
 
     return {

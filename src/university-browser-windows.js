@@ -48,16 +48,28 @@ export function createWindowsUniversityBrowserBridge({
     return helperWindowsPath;
   }
 
-  async function invoke(action, { targetId = null, url = null } = {}) {
+  async function invoke(action, { targetId = null, url = null, messageId = null, mailLimit = null } = {}) {
     const helper = await windowsPath();
     const environment = {
-      WSLENV: 'UNIVERSITY_CDP_ENDPOINT/w:UNIVERSITY_ALLOWED_ORIGINS/w:UNIVERSITY_BRIDGE_ACTION/w:UNIVERSITY_TARGET_ID/w:UNIVERSITY_URL/w',
+      WSLENV: 'UNIVERSITY_CDP_ENDPOINT/w:UNIVERSITY_ALLOWED_ORIGINS/w:UNIVERSITY_BRIDGE_ACTION/w:UNIVERSITY_TARGET_ID/w:UNIVERSITY_URL/w:UNIVERSITY_MESSAGE_ID/w:UNIVERSITY_MAIL_LIMIT/w',
       UNIVERSITY_CDP_ENDPOINT: endpoint,
       UNIVERSITY_ALLOWED_ORIGINS: origins.join(','),
       UNIVERSITY_BRIDGE_ACTION: action
     };
     if (targetId !== null) environment.UNIVERSITY_TARGET_ID = String(targetId);
     if (url !== null) environment.UNIVERSITY_URL = assertUniversityUrlAllowed(String(url), origins);
+    if (messageId !== null) {
+      const normalizedMessageId = String(messageId);
+      if (!/^\d+$/.test(normalizedMessageId)) throw new Error('university_windows_bridge_message_id_invalid');
+      environment.UNIVERSITY_MESSAGE_ID = normalizedMessageId;
+    }
+    if (mailLimit !== null) {
+      const normalizedLimit = Number(mailLimit);
+      if (!Number.isInteger(normalizedLimit) || normalizedLimit < 1 || normalizedLimit > 200) {
+        throw new Error('university_windows_bridge_mail_limit_invalid');
+      }
+      environment.UNIVERSITY_MAIL_LIMIT = String(normalizedLimit);
+    }
     let result;
     try {
       result = await runner(windowsNodePath, [helper], {
@@ -82,6 +94,12 @@ export function createWindowsUniversityBrowserBridge({
     },
     async readPage(targetId) {
       return (await invoke('read', { targetId })).page;
+    },
+    async scanMail(targetId, { maxMessages = 120 } = {}) {
+      return (await invoke('mail_scan', { targetId, mailLimit: maxMessages })).inbox;
+    },
+    async readMailMessage(targetId, messageId) {
+      return (await invoke('mail_read', { targetId, messageId })).message;
     },
     async navigatePage(targetId, url) {
       return (await invoke('navigate', { targetId, url })).page;

@@ -93,7 +93,29 @@ function delay(ms) {
 
 function evaluateDom(wsUrl) {
   if (!/^ws:\/\/127\.0\.0\.1:\d+\//.test(wsUrl)) throw new Error('cdp_ws_unsafe');
-  const expression = "(() => ({url: location.href, title: document.title || '', readyState: document.readyState || '', text: document.body ? document.body.innerText : '', links: Array.from(document.querySelectorAll('a[href]')).slice(0,1000).map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim()}))}))()";
+  const expression = `(() => {
+    const mailRows = Array.from(document.querySelectorAll('#messagesList md-list-item')).slice(0, 200).map((row) => {
+      const ctrl = globalThis.angular?.element(row)?.data?.('$sgMessageListItemController');
+      const message = ctrl?.message || null;
+      return {
+        subject: (row.querySelector('.sg-tile-subject')?.innerText || '').trim(),
+        sender: (row.querySelector('.sg-md-subhead > div:first-child span:last-child')?.innerText || '').trim(),
+        snippet: (row.querySelector('.sg-md-body')?.innerText || '').trim(),
+        date: (row.querySelector('.sg-tile-date')?.innerText || '').trim(),
+        unread: row.classList.contains('unread'),
+        providerId: String(message?.uid ?? ''),
+        providerFrom: Array.isArray(message?.from) ? String(message.from[0]?.email ?? '') : ''
+      };
+    });
+    return {
+      url: location.href,
+      title: document.title || '',
+      readyState: document.readyState || '',
+      text: document.body ? document.body.innerText : '',
+      links: Array.from(document.querySelectorAll('a[href]')).slice(0,1000).map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim()})),
+      mailRows
+    };
+  })()`;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     let done = false;
@@ -119,6 +141,38 @@ function evaluateDom(wsUrl) {
       if (msg.id !== 1) return;
       const value = msg && msg.result && msg.result.result && msg.result.result.value;
       if (!value || typeof value !== 'object') return finish(reject, new Error('cdp_result_invalid'));
+      finish(resolve, value);
+    });
+  });
+}
+
+function evaluateReadOnlyScript(wsUrl, expression, timeoutMs = 15_000) {
+  if (!/^ws:\/\/127\.0\.0\.1:\d+\//.test(wsUrl)) throw new Error('cdp_ws_unsafe');
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let done = false;
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {
+        // Best-effort socket cleanup.
+      }
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error('cdp_script_timeout')), timeoutMs);
+    ws.addEventListener('open', () => ws.send(JSON.stringify({
+      id: 1,
+      method: 'Runtime.evaluate',
+      params: { expression, returnByValue: true, awaitPromise: true, userGesture: false }
+    })), { once: true });
+    ws.addEventListener('error', () => finish(reject, new Error('cdp_script_error')), { once: true });
+    ws.addEventListener('message', (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.id !== 1) return;
+      const value = msg && msg.result && msg.result.result && msg.result.result.value;
+      if (!value || typeof value !== 'object') return finish(reject, new Error('cdp_script_result_invalid'));
       finish(resolve, value);
     });
   });
@@ -209,6 +263,19 @@ function sanitizeLinks(rawLinks, allowedOrigins) {
   return links;
 }
 
+function sanitizeMailRows(rawRows) {
+  if (!Array.isArray(rawRows)) return [];
+  return rawRows.slice(0, 200).map((row) => ({
+    sender: typeof row?.sender === 'string' ? row.sender.replace(/\s+/g, ' ').trim().slice(0, 500) : '',
+    subject: typeof row?.subject === 'string' ? row.subject.replace(/\s+/g, ' ').trim().slice(0, 1_000) : '',
+    snippet: typeof row?.snippet === 'string' ? row.snippet.replace(/\s+/g, ' ').trim().slice(0, 2_000) : '',
+    date: typeof row?.date === 'string' ? row.date.replace(/\s+/g, ' ').trim().slice(0, 200) : '',
+    unread: row?.unread === true,
+    providerId: typeof row?.providerId === 'string' ? row.providerId.slice(0, 200) : '',
+    providerFrom: typeof row?.providerFrom === 'string' ? row.providerFrom.slice(0, 500) : ''
+  })).filter((row) => row.subject || row.sender);
+}
+
 function sanitizePage(raw, targetId, allowedOrigins) {
   const url = allowedUrl(raw.url, allowedOrigins);
   return {
@@ -216,8 +283,100 @@ function sanitizePage(raw, targetId, allowedOrigins) {
     url,
     title: typeof raw.title === 'string' ? raw.title.slice(0, 500) : '',
     text: typeof raw.text === 'string' ? raw.text.slice(0, 100_000) : '',
-    links: sanitizeLinks(raw.links, allowedOrigins)
+    links: sanitizeLinks(raw.links, allowedOrigins),
+    mailRows: sanitizeMailRows(raw.mailRows)
   };
+}
+
+async function scanSogoInbox(wsUrl, maxMessages = 120) {
+  const limit = Math.max(1, Math.min(Number(maxMessages) || 120, 200));
+  const expression = `(async () => {
+    const row = document.querySelector('#messagesList md-list-item');
+    const ctrl = row && globalThis.angular?.element(row)?.data?.('$sgMessageListItemController');
+    const mailbox = ctrl?.message?.$mailbox;
+    if (!mailbox) return { ready: false, messages: [] };
+    const limit = Math.min(${limit}, mailbox.getLength());
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      let pending = 0;
+      for (let index = 0; index < limit; index += 1) {
+        const item = mailbox.getItemAtIndex(index);
+        if (!item || typeof item.subject !== 'string') pending += 1;
+      }
+      if (pending === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    const messages = mailbox.$visibleMessages.slice(0, limit)
+      .filter((message) => message && typeof message.subject === 'string')
+      .map((message) => ({
+        uid: String(message.uid ?? ''),
+        subject: String(message.subject ?? ''),
+        fromName: Array.isArray(message.from) ? String(message.from[0]?.name ?? '') : '',
+        fromEmail: Array.isArray(message.from) ? String(message.from[0]?.email ?? '') : '',
+        relativeDate: String(message.relativedate ?? ''),
+        isRead: message.isread === true,
+        hasAttachment: Boolean(message.hasattachment)
+      }));
+    return {
+      ready: true,
+      folder: String(mailbox.path ?? ''),
+      total: Number(mailbox.getLength()) || messages.length,
+      unread: Number(mailbox.unseenCount) || 0,
+      messages
+    };
+  })()`;
+  return evaluateReadOnlyScript(wsUrl, expression, 20_000);
+}
+
+async function readSogoMessage(wsUrl, uid) {
+  const id = String(uid ?? '');
+  if (!/^\d+$/.test(id)) throw new Error('mail_uid_invalid');
+  const expression = `(async () => {
+    const row = document.querySelector('#messagesList md-list-item');
+    const ctrl = row && globalThis.angular?.element(row)?.data?.('$sgMessageListItemController');
+    const mailbox = ctrl?.message?.$mailbox;
+    if (!mailbox) return { found: false };
+    const uid = Number(${JSON.stringify(id)});
+    let message = mailbox.$visibleMessages.find((item) => Number(item?.uid) === uid);
+    if (!message) return { found: false };
+    const wasRead = message.isread === true;
+    await message.$reload();
+    if (typeof message.$content === 'function') message.$content();
+    const partText = (part) => {
+      const raw = String(part?.content ?? part?.safeContent ?? '');
+      if (!raw) return '';
+      if (part?.html) {
+        const node = document.createElement('div');
+        node.innerHTML = raw;
+        return (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+      }
+      return raw.replace(/\\s+/g, ' ').trim();
+    };
+    const parts = Array.isArray(message.$parts) ? message.$parts : [];
+    const body = parts.map(partText).filter(Boolean).join('\\n\\n').slice(0, 100000);
+    let readStateRestored = false;
+    if (!wasRead && message.isread === true && typeof message.toggleRead === 'function') {
+      await message.toggleRead();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      readStateRestored = message.isread === false;
+    }
+    return {
+      found: true,
+      uid: String(message.uid ?? ''),
+      subject: String(message.subject ?? ''),
+      fromName: Array.isArray(message.from) ? String(message.from[0]?.name ?? '') : '',
+      fromEmail: Array.isArray(message.from) ? String(message.from[0]?.email ?? '') : '',
+      to: Array.isArray(message.to) ? message.to.slice(0, 20).map((item) => ({
+        name: String(item?.name ?? ''),
+        email: String(item?.email ?? '')
+      })) : [],
+      relativeDate: String(message.relativedate ?? ''),
+      wasRead,
+      isRead: message.isread === true,
+      readStateRestored,
+      body
+    };
+  })()`;
+  return evaluateReadOnlyScript(wsUrl, expression, 20_000);
 }
 
 async function openTemporaryPage(base, url, allowedOrigins) {
@@ -269,6 +428,23 @@ async function main() {
 
   if (action === 'list') {
     return { ok: true, pages: targets.map((item) => ({ id: item.id, url: item.url, title: item.title })) };
+  }
+
+  if (action === 'mail_scan' || action === 'mail_read') {
+    const targetId = String(process.env.UNIVERSITY_TARGET_ID || '');
+    if (!targetId || targetId.length > 300) fail('target_id_invalid');
+    const target = targets.find((item) => item.id === targetId);
+    if (!target) fail('target_forbidden_or_missing');
+    const targetUrl = new NodeURL(target.url);
+    if (targetUrl.origin !== 'https://sogo.uv.es' || !targetUrl.pathname.startsWith('/SOGo/')) {
+      fail('mail_target_forbidden');
+    }
+    if (action === 'mail_scan') {
+      const maxMessages = Number(process.env.UNIVERSITY_MAIL_LIMIT || '120');
+      return { ok: true, inbox: await scanSogoInbox(target.webSocketDebuggerUrl, maxMessages) };
+    }
+    const messageId = String(process.env.UNIVERSITY_MESSAGE_ID || '');
+    return { ok: true, message: await readSogoMessage(target.webSocketDebuggerUrl, messageId) };
   }
 
   if (action === 'navigate') {

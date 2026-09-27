@@ -18,8 +18,44 @@ function taskLine(task, index) {
         minute: '2-digit'
       }).format(new Date(task.dueAt))
     : '';
+  const target = !task.dueAt && /^\d{4}-\d{2}-\d{2}$/.test(String(task.targetDate ?? ''))
+    ? ' · fecha ' + task.targetDate
+    : '';
   const why = reason ? ' — ' + reason : '';
-  return index + 1 + '. **' + subject + '** — ' + title + minutes + deadline + why;
+  return index + 1 + '. **' + subject + '** — ' + title + minutes + deadline + target + why;
+}
+
+function signalLine(signal, today) {
+  const subject = clean(signal?.subject) || 'Universidad';
+  const title = clean(signal?.title) || 'Aviso académico';
+  const futureDates = Array.isArray(signal?.dates)
+    ? signal.dates.filter((date) => date >= today)
+    : [];
+  const dates = futureDates.length
+    ? ' · ' + futureDates.join(', ')
+    : '';
+  const labels = {
+    assessment: 'evaluación',
+    required_session: 'asistencia obligatoria',
+    schedule_change: 'cambio de horario/clase',
+    coursework: 'trabajo de clase',
+    academic_notice: 'aviso académico'
+  };
+  const kind = labels[signal?.kind] ?? clean(signal?.kind).replace(/_/g, ' ');
+  const label = kind ? ' · ' + kind : '';
+  return '- **' + subject + '** — ' + title + dates + label;
+}
+
+function mailLine(alert) {
+  const subject = clean(alert?.course?.shortName) || 'Universidad';
+  const title = clean(alert?.subject) || 'Aviso académico';
+  const status = alert?.decision === 'needs_context'
+    ? ' · subgrupo por confirmar'
+    : (alert?.decision === 'notify' ? ' · importante' : '');
+  const freshness = alert?.isNew ? ' · nuevo' : '';
+  const body = clean(alert?.body);
+  const detail = body ? '\n  - ' + body.slice(0, 260) + (body.length > 260 ? '…' : '') : '';
+  return '- **' + subject + '** — ' + title + status + freshness + detail;
 }
 
 export function formatUniversityDailyReport(report) {
@@ -35,8 +71,22 @@ export function formatUniversityDailyReport(report) {
       report.summary.newMaterials + ' materiales nuevos'
   ];
 
+  if (report.summary.mailStatus) {
+    const newRelevant = Number.isInteger(report.summary.newRelevantMail) ? report.summary.newRelevantMail : 0;
+    lines.push('**Correo UV:** ' + report.summary.mailStatus + ' · ' + newRelevant + ' correos nuevos relevantes');
+  }
   if (Number.isInteger(report.summary.suggestedMinutes) && report.summary.suggestedMinutes > 0) {
     lines.push('**Carga sugerida:** ' + report.summary.suggestedMinutes + ' min');
+  }
+
+  if (Array.isArray(report.academicSignals) && report.academicSignals.length) {
+    lines.push('', '## Lo que sigue vigente', '');
+    report.academicSignals.forEach((signal) => lines.push(signalLine(signal, report.today)));
+  }
+
+  if (Array.isArray(report.mailAlerts) && report.mailAlerts.length) {
+    lines.push('', '## Correos nuevos que sí te afectan', '');
+    report.mailAlerts.forEach((alert) => lines.push(mailLine(alert)));
   }
 
   lines.push('', '## Qué conviene hacer hoy', '');
@@ -49,7 +99,7 @@ export function formatUniversityDailyReport(report) {
 
   lines.push(
     '',
-    '_Plan generado desde Aula Virtual en modo de solo lectura. Las entregas y demás acciones siguen requiriendo intervención humana._',
+    '_Plan generado en modo de solo lectura desde Aula Virtual y correo UV. El agente preserva el estado leído/no leído y no envía mensajes ni realiza entregas._',
     ''
   );
   return lines.join('\n');

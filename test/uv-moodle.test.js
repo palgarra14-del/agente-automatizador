@@ -6,7 +6,8 @@ import {
   parseUvCalendarAssignmentLinks,
   parseUvCourseActivities,
   parseUvCourseRegistry,
-  parseUvMoodleDate
+  parseUvMoodleDate,
+  parseUvVisiblePracticalGroups
 } from '../src/uv-moodle.js';
 
 test('UV date parser converts Moodle Spanish dates to Europe/Madrid UTC', () => {
@@ -26,6 +27,14 @@ test('UV dashboard parser deduplicates course cards and marks academic subjects'
   assert.equal(courses.length, 2);
   assert.equal(courses.find((course) => course.id === '101').code, '12345');
   assert.equal(courses.find((course) => course.id === '102').academic, false);
+});
+
+test('UV course page discovers personalized practical subgroup sections', () => {
+  const groups = parseUvVisiblePracticalGroups({
+    text: 'Prácticas semanales de Análisis Matemático II (Subgrupo B-P2)',
+    links: [{ text: 'S2. Problemas', url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8' }]
+  });
+  assert.deepEqual(groups, ['B-P2']);
 });
 
 test('UV course activities keep only bounded read-view activity types', () => {
