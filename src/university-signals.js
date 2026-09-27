@@ -1,4 +1,4 @@
-export const ACADEMIC_SIGNAL_STATE_VERSION = 3;
+export const ACADEMIC_SIGNAL_STATE_VERSION = 4;
 
 const MONTHS = Object.freeze({
   enero: 0, febrero: 1, marzo: 2, abril: 3, mayo: 4, junio: 5,
@@ -115,13 +115,31 @@ function signalKind(headline, text) {
   return { kind: 'academic_notice', importance: 60 };
 }
 
+function scopeRelevantBody(body, course) {
+  const text = clean(body);
+  if (!text) return '';
+  const practicalGroups = Array.isArray(course?.practicalGroups) ? course.practicalGroups : [];
+  const theoryPrefix = clean(course?.theoryGroup).match(/^([A-Z])-T$/)?.[1] ?? null;
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => {
+      const explicit = sentence.match(/\b(?:subgrupo|grupo)\s+([A-Z])?-?P(\d+)\b/i);
+      if (!explicit) return true;
+      const prefix = explicit[1]?.toUpperCase() ?? theoryPrefix;
+      if (!prefix) return false;
+      return practicalGroups.includes(prefix + '-P' + explicit[2]);
+    })
+    .join(' ');
+}
+
 export function alertToAcademicSignal(alert, { capturedAt } = {}) {
   if (!alert || typeof alert !== 'object' || !clean(alert.id)) {
     throw new Error('academic_signal_alert_invalid');
   }
   if (Number.isNaN(Date.parse(capturedAt))) throw new Error('academic_signal_captured_at_invalid');
   const headline = clean(alert.subject);
-  const text = [headline, clean(alert.body)].filter(Boolean).join(' ');
+  const scopedBody = scopeRelevantBody(alert.body, alert.course);
+  const text = [headline, scopedBody].filter(Boolean).join(' ');
   const dates = extractAcademicDates(text, capturedAt);
   const today = dayIso(new Date(capturedAt));
   const futureDates = dates.filter((date) => date >= today);

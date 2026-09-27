@@ -59,9 +59,29 @@ test('general practice guidance is coursework, while mandatory seminar is elevat
   assert.equal(seminar.kind, 'required_session');
 });
 
+test('mixed mail drops practical-group dates unless that subgroup is known to belong to the student', () => {
+  const unknown = alertToAcademicSignal({
+    id: 'uv-mail:771',
+    relativeDate: 'Jueves 18:00',
+    subject: '[2026-27 Estructuras Algebraicas Gr.B-T (34168)] cambios de horas y semanas 3 y 4',
+    body: 'La clase de teoría del 1-10 pasa al 7-10. La practica del grupo P2 del 16-12 pasa al 15-12.',
+    course: { subjectId: '34168', shortName: 'Estructuras Algebraicas', theoryGroup: 'B-T', practicalGroups: [] }
+  }, { capturedAt: '2026-09-27T16:00:00Z' });
+  assert.deepEqual(unknown.dates, ['2026-10-07']);
+
+  const own = alertToAcademicSignal({
+    id: 'uv-mail:771',
+    relativeDate: 'Jueves 18:00',
+    subject: '[2026-27 Estructuras Algebraicas Gr.B-T (34168)] cambios de horas y semanas 3 y 4',
+    body: 'La clase de teoría del 1-10 pasa al 7-10. La practica del grupo P2 del 16-12 pasa al 15-12.',
+    course: { subjectId: '34168', shortName: 'Estructuras Algebraicas', theoryGroup: 'B-T', practicalGroups: ['B-P2'] }
+  }, { capturedAt: '2026-09-27T16:00:00Z' });
+  assert.deepEqual(own.dates, ['2026-10-07', '2026-12-15']);
+});
+
 test('merge keeps future obligations while expiring stale undated mail', () => {
   const state = mergeAcademicSignals({
-    version: 3,
+    version: 4,
     signals: [
       {
         id: 'old',
@@ -84,7 +104,7 @@ test('merge keeps future obligations while expiring stale undated mail', () => {
 
 test('attention view hides distant obligations until they approach', () => {
   const state = {
-    version: 3,
+    version: 4,
     signals: [
       {
         id: 'soon',
