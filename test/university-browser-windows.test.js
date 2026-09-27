@@ -65,3 +65,75 @@ test('Windows bridge fails closed on malformed helper output and invalid helper 
   const second = createWindowsUniversityBrowserBridge({ allowedOrigins: ['https://campus.example'], runner: badPath });
   await assert.rejects(() => second.status(), /helper_path_invalid/);
 });
+
+
+test('Windows bridge opens only allowlisted read URLs and forwards no ambient environment', async () => {
+  const calls = [];
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (command === '/usr/bin/wslpath') {
+      return { stdout: '\\\\wsl.localhost\\Ubuntu\\repo\\helper.cjs\n' };
+    }
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        page: {
+          targetId: 'temp-1',
+          url: options.env.UNIVERSITY_URL,
+          title: 'Course',
+          text: 'Visible course content',
+          links: [{ url: 'https://campus.example/mod/assign/view.php?id=7', text: 'Task' }]
+        }
+      })
+    };
+  };
+
+  const bridge = createWindowsUniversityBrowserBridge({
+    allowedOrigins: ['https://campus.example'],
+    runner
+  });
+  const page = await bridge.readUrl('https://campus.example/course/view.php?id=1#section-2');
+  assert.equal(page.url, 'https://campus.example/course/view.php?id=1');
+  assert.equal(calls[1].options.env.UNIVERSITY_URL, 'https://campus.example/course/view.php?id=1');
+  assert.equal(calls[1].options.env.PATH, undefined);
+  await assert.rejects(
+    () => bridge.readUrl('https://evil.example/course/view.php?id=1'),
+    /origin_forbidden/
+  );
+});
+
+test('Windows bridge can navigate the dedicated page using only explicit target and URL', async () => {
+  const calls = [];
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (command === '/usr/bin/wslpath') {
+      return { stdout: '\\\\wsl.localhost\\Ubuntu\\repo\\helper.cjs\n' };
+    }
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        page: {
+          targetId: options.env.UNIVERSITY_TARGET_ID,
+          url: options.env.UNIVERSITY_URL,
+          title: 'Course',
+          text: 'Course content',
+          links: []
+        }
+      })
+    };
+  };
+  const bridge = createWindowsUniversityBrowserBridge({
+    allowedOrigins: ['https://campus.example'],
+    runner
+  });
+  const page = await bridge.navigatePage(
+    'target-1',
+    'https://campus.example/course/view.php?id=7'
+  );
+  assert.equal(page.targetId, 'target-1');
+  assert.equal(calls[1].options.env.UNIVERSITY_BRIDGE_ACTION, 'navigate');
+  assert.equal(
+    calls[1].options.env.UNIVERSITY_URL,
+    'https://campus.example/course/view.php?id=7'
+  );
+});
