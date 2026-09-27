@@ -1,7 +1,11 @@
 import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { normalizeUniversityCdpEndpoint, normalizeUniversityOrigins } from './university-browser.js';
+import {
+  assertUniversityUrlAllowed,
+  normalizeUniversityCdpEndpoint,
+  normalizeUniversityOrigins
+} from './university-browser.js';
 
 const execFile = promisify(nodeExecFile);
 const DEFAULT_WINDOWS_NODE = '/mnt/c/Program Files/nodejs/node.exe';
@@ -21,11 +25,11 @@ export function createWindowsUniversityBrowserBridge({
   windowsNodePath = DEFAULT_WINDOWS_NODE,
   helperPath = DEFAULT_HELPER,
   runner = execFile,
-  timeoutMs = 15000
+  timeoutMs = 20_000
 } = {}) {
   const endpoint = normalizeUniversityCdpEndpoint(cdpEndpoint);
   const origins = normalizeUniversityOrigins(allowedOrigins);
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 60_000) {
     throw new Error('university_windows_bridge_timeout_invalid');
   }
 
@@ -34,8 +38,8 @@ export function createWindowsUniversityBrowserBridge({
   async function windowsPath() {
     if (helperWindowsPath) return helperWindowsPath;
     const result = await runner('/usr/bin/wslpath', ['-w', helperPath], {
-      timeout: 5000,
-      maxBuffer: 10000
+      timeout: 5_000,
+      maxBuffer: 10_000
     });
     helperWindowsPath = String(result.stdout || '').trim();
     if (!/^\\\\wsl(?:\.localhost)?\\/i.test(helperWindowsPath)) {
@@ -44,21 +48,22 @@ export function createWindowsUniversityBrowserBridge({
     return helperWindowsPath;
   }
 
-  async function invoke(action, targetId = null) {
+  async function invoke(action, { targetId = null, url = null } = {}) {
     const helper = await windowsPath();
     const environment = {
-      WSLENV: 'UNIVERSITY_CDP_ENDPOINT/w:UNIVERSITY_ALLOWED_ORIGINS/w:UNIVERSITY_BRIDGE_ACTION/w:UNIVERSITY_TARGET_ID/w',
+      WSLENV: 'UNIVERSITY_CDP_ENDPOINT/w:UNIVERSITY_ALLOWED_ORIGINS/w:UNIVERSITY_BRIDGE_ACTION/w:UNIVERSITY_TARGET_ID/w:UNIVERSITY_URL/w',
       UNIVERSITY_CDP_ENDPOINT: endpoint,
       UNIVERSITY_ALLOWED_ORIGINS: origins.join(','),
       UNIVERSITY_BRIDGE_ACTION: action
     };
     if (targetId !== null) environment.UNIVERSITY_TARGET_ID = String(targetId);
+    if (url !== null) environment.UNIVERSITY_URL = assertUniversityUrlAllowed(String(url), origins);
     let result;
     try {
       result = await runner(windowsNodePath, [helper], {
         env: environment,
         timeout: timeoutMs,
-        maxBuffer: 200000
+        maxBuffer: 500_000
       });
     } catch (error) {
       throw new Error('university_windows_bridge_process_failed', { cause: error });
@@ -76,7 +81,13 @@ export function createWindowsUniversityBrowserBridge({
       return (await invoke('list')).pages;
     },
     async readPage(targetId) {
-      return (await invoke('read', targetId)).page;
+      return (await invoke('read', { targetId })).page;
+    },
+    async navigatePage(targetId, url) {
+      return (await invoke('navigate', { targetId, url })).page;
+    },
+    async readUrl(url) {
+      return (await invoke('read_url', { url })).page;
     }
   });
 }
