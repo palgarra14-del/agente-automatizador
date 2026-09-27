@@ -32,11 +32,18 @@ async function writePrivateJson(path, value) {
   await chmod(path, 0o600);
 }
 
+if (process.env.UNIVERSITY_NOTIFY_DISABLED === '1') process.exit(0);
+
 const attention = await readJson(attentionFile);
 if (!attention) process.exit(0);
 const previous = await readJson(notifyStateFile);
 const decision = decideAcademicNotification(attention, previous);
 if (!decision.notify) process.exit(0);
+
+const healthAlert = Array.isArray(attention.reasons) && attention.reasons.includes('academic_monitor_degraded');
+const balloonText = healthAlert
+  ? 'La vigilancia académica necesita que revises la sesión de la UV.'
+  : 'Hay una novedad académica relevante. Revisa el informe cuando te venga bien.';
 
 const ps = [
   'Add-Type -AssemblyName System.Windows.Forms',
@@ -44,7 +51,7 @@ const ps = [
   '$n = New-Object System.Windows.Forms.NotifyIcon',
   '$n.Icon = [System.Drawing.SystemIcons]::Information',
   '$n.BalloonTipTitle = "Universidad"',
-  '$n.BalloonTipText = "Hay una novedad académica relevante. Revisa el informe cuando te venga bien."',
+  '$n.BalloonTipText = "' + balloonText + '"',
   '$n.Visible = $true',
   '$n.ShowBalloonTip(5000)',
   'Start-Sleep -Seconds 6',
