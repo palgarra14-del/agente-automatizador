@@ -1230,6 +1230,15 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.match(result.result.diagnosis.risks[1], /approval, review, verification, publication/);
   assert.equal(clientConstructions, 0);
 
+  const longGoal = 'Prioritize qualified-lead throughput, follow-up quality, demo turnaround and conversion learning while preserving every existing governance boundary. ' + 'commercial-context '.repeat(70);
+  assert.ok(longGoal.length > 1_000);
+  const longGoalResult = await executor.execute({ ...request, goal: longGoal }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(longGoalResult.ok, true);
+  assert.equal(longGoalResult.executionMode, 'deterministic');
+  assert.match(longGoalResult.result.diagnosis.recommendedChange, /Prioritize qualified-lead throughput/);
+  assert.ok(longGoalResult.result.diagnosis.recommendedChange.length <= 1_500);
+  assert.equal(clientConstructions, 0);
+
   const missing = await executor.execute({
     ...request,
     context: { priorEvidence: {}, repositoryContext: request.context.repositoryContext }

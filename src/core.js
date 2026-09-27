@@ -5370,7 +5370,8 @@ function deterministicDiagnosisResult(request) {
   } catch (error) {
     throw new Error(`deterministic_diagnosis_invalid_inspection:${clip(error.message, 500)}`, { cause: error });
   }
-  const authorizedGoal = boundedText(request.goal, 'deterministic diagnosis goal', { required: true, max: 1_000 });
+  const validatedGoal = boundedText(request.goal, 'deterministic diagnosis goal', { required: true, max: 8_000 });
+  const authorizedGoal = clip(validatedGoal, 1_000);
   const pathBinding = inspection.relevantPaths.join(', ');
   const cause = clip(`Grounded inspection findings: ${inspection.findings.join(' | ')}`, 1_200);
   const recommendedChange = clip(
