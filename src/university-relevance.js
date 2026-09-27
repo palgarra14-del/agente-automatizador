@@ -99,7 +99,11 @@ export function classifyAcademicMail(message, profile, { body = '' } = {}) {
   const course = courseForText(combined, profile);
   const groups = groupSignals(combined);
   const id = messageId(message);
-  const statedYears = [...combined.matchAll(/\b(20\d{2}-\d{2})\b/g)].map((match) => match[1]);
+  const subjectYears = [...subject.matchAll(/\b(20\d{2}-\d{2})\b/g)].map((match) => match[1]);
+  // Body references must not change the academic year of a dated subject.
+  const statedYears = subjectYears.length
+    ? subjectYears
+    : [...combined.matchAll(/\b(20\d{2}-\d{2})\b/g)].map((match) => match[1]);
   const currentYears = new Set(profile.courses.map((item) => item.academicYear).filter(Boolean));
   if (statedYears.length && !statedYears.some((year) => currentYears.has(year))) {
     return { id, decision: 'ignore', priority: 0, course, reason: 'curso_academico_anterior' };

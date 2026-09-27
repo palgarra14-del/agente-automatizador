@@ -74,6 +74,30 @@ test('mail from a previous academic year is discarded even with the same subject
   assert.equal(result.reason, 'curso_academico_anterior');
 });
 
+test('body enrichment cannot override the academic year stated in the subject', () => {
+  for (const [subjectYear, bodyYear, decision] of [
+    ['2025-26', '2026-27', 'ignore'],
+    ['2026-27', '2025-26', 'notify']
+  ]) {
+    const alert = {
+      uid: '702',
+      subject: `[${subjectYear} Estructures de dades i algorismes Gr.A-T (34670)] Test Tema 1`
+    };
+    const enriched = mergeMailBody(alert, `Referencia al curso ${bodyYear}.`, profile);
+    assert.equal(enriched.decision, decision);
+    if (decision === 'ignore') {
+      assert.equal(enriched.reason, 'curso_academico_anterior');
+    }
+  }
+
+  const bodyOnlyYear = classifyAcademicMail({
+    uid: '703',
+    subject: 'Estructures de dades i algorismes Gr.A-T (34670): examen final'
+  }, profile, { body: 'Aviso del curso 2025-26.' });
+  assert.equal(bodyOnlyYear.decision, 'ignore');
+  assert.equal(bodyOnlyYear.reason, 'curso_academico_anterior');
+});
+
 test('wrong theory group is discarded even if the subject code matches', () => {
   const result = classifyAcademicMail({
     uid: '700',
