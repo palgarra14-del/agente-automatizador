@@ -75,8 +75,21 @@ export function formatUniversityDailyReport(report) {
     const newRelevant = Number.isInteger(report.summary.newRelevantMail) ? report.summary.newRelevantMail : 0;
     lines.push('**Correo UV:** ' + report.summary.mailStatus + ' · ' + newRelevant + ' correos nuevos relevantes');
   }
+  if (report.summary.gradeStatus) {
+    const changedGrades = Number.isInteger(report.summary.changedGrades) ? report.summary.changedGrades : 0;
+    lines.push('**Calificaciones UV:** ' + report.summary.gradeStatus + ' · ' + changedGrades + ' cambios');
+  }
   if (Number.isInteger(report.summary.suggestedMinutes) && report.summary.suggestedMinutes > 0) {
     lines.push('**Carga sugerida:** ' + report.summary.suggestedMinutes + ' min');
+  }
+
+  if (Array.isArray(report.gradeChanges) && report.gradeChanges.length) {
+    lines.push('', '## Cambios de calificación', '');
+    report.gradeChanges.forEach((item) => {
+      const before = item.previousGrade ?? 'sin calificación';
+      const after = item.grade ?? 'sin calificación';
+      lines.push('- **' + clean(item.subject) + '** — ' + before + ' → ' + after);
+    });
   }
 
   if (Array.isArray(report.academicSignals) && report.academicSignals.length) {

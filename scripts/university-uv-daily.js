@@ -6,6 +6,11 @@ import { detectUniversityChanges } from '../src/university.js';
 import { planUniversityStudyDay } from '../src/university-study-planner.js';
 import { formatUniversityDailyReport } from '../src/university-report.js';
 import {
+  createUvGradeState,
+  diffUvGrades,
+  parseUvGradeOverview
+} from '../src/university-grades.js';
+import {
   ACADEMIC_SIGNAL_STATE_VERSION,
   mergeAcademicSignals,
   selectAttentionAcademicSignals
@@ -32,6 +37,9 @@ const reportMarkdownFile = join(stateDir, 'uv-daily-report.md');
 const profileFile = join(stateDir, 'uv-academic-profile.json');
 const mailStateFile = join(stateDir, 'uv-mail-state.json');
 const signalStateFile = join(stateDir, 'uv-academic-signals.json');
+const gradeStateFile = join(stateDir, 'uv-grades.json');
+const attentionFile = join(stateDir, 'uv-attention.json');
+const gradeOverviewUrl = 'https://aulavirtual.uv.es/grade/report/overview/index.php';
 
 async function readJson(path, fallback = null) {
   try {
@@ -244,6 +252,7 @@ const previousSnapshot = await readJson(snapshotFile);
 const previousHistory = await readJson(historyFile, { version: 1, lastRecommendedByMaterial: {} });
 const previousMailState = await readJson(mailStateFile);
 const previousSignalState = await readJson(signalStateFile);
+const previousGradeState = await readJson(gradeStateFile);
 
 const current = await scanUvMoodle({
   bridge,
@@ -298,6 +307,40 @@ planned = studySlots > 0
   : { tasks: [], history: previousHistory };
 const finalTasks = [...signalTasks, ...planned.tasks].slice(0, dailyTarget);
 
+let gradeStatus = 'ready';
+let gradeError = null;
+let gradeChanges = [];
+let gradeState = previousGradeState;
+try {
+  const gradePage = await bridge.readUrl(gradeOverviewUrl);
+  const grades = parseUvGradeOverview(gradePage, academicCourses);
+  gradeChanges = diffUvGrades(previousGradeState, grades);
+  gradeState = createUvGradeState(grades, capturedAt);
+} catch (error) {
+  gradeStatus = 'degraded';
+  gradeError = String(error?.message || 'uv_grade_scan_failed').slice(0, 200);
+}
+
+const profileSummary = summarizeAcademicProfile(mail.profile);
+const subjectNames = new Map(profileSummary.map((item) => [item.subjectId, item.subject]));
+const enrichedGradeChanges = gradeChanges.map((item) => ({
+  ...item,
+  subject: subjectNames.get(item.subjectId) ?? item.subjectId
+}));
+
+const attentionReasons = [];
+if (mail.alerts.some((item) => item.isNew)) attentionReasons.push('new_relevant_mail');
+if (enrichedGradeChanges.length) attentionReasons.push('grade_changed');
+if (changes.assignments.added.length || changes.assignments.updated.length) {
+  attentionReasons.push('assignment_changed');
+}
+const attention = {
+  version: 1,
+  capturedAt,
+  required: attentionReasons.length > 0,
+  reasons: attentionReasons
+};
+
 const report = {
   version: 1,
   source: 'uv-aulavirtual',
@@ -318,14 +361,20 @@ const report = {
     newRelevantMail: mail.alerts.filter((item) => item.isNew).length,
     activeAcademicSignals: signalState.signals.length,
     attentionAcademicSignals: attentionSignals.length,
+    gradeStatus,
+    changedGrades: enrichedGradeChanges.length,
+    attentionRequired: attention.required,
     suggestedMinutes: finalTasks.reduce(
       (total, item) => total + (Number.isInteger(item.suggestedMinutes) ? item.suggestedMinutes : 0),
       0
     )
   },
-  academicProfile: summarizeAcademicProfile(mail.profile),
+  academicProfile: profileSummary,
   mailAlerts: mail.alerts,
   academicSignals: attentionSignals,
+  gradeChanges: enrichedGradeChanges,
+  gradeError,
+  attention,
   tasks: finalTasks
 };
 
@@ -335,6 +384,8 @@ await writePrivateJson(historyFile, planned.history);
 await writePrivateJson(profileFile, { version: 1, capturedAt, courses: summarizeAcademicProfile(mail.profile) });
 await writePrivateJson(mailStateFile, mail.state);
 await writePrivateJson(signalStateFile, signalState);
+if (gradeState) await writePrivateJson(gradeStateFile, gradeState);
+await writePrivateJson(attentionFile, attention);
 await writePrivateJson(reportFile, report);
 await writeFile(reportMarkdownFile, formatUniversityDailyReport(report), { mode: 0o600 });
 await chmod(reportMarkdownFile, 0o600);

@@ -19,6 +19,11 @@ The local files are:
 - `uv-snapshot.json`: normalized current academic snapshot.
 - `uv-study-history.json`: recent recommendations used to rotate study work.
 - `uv-daily-report.json`: current daily plan.
+- `uv-mail-state.json`: bounded deduplication state for already-scanned UV mail.
+- `uv-academic-signals.json`: still-active academic obligations extracted from relevant mail.
+- `uv-academic-profile.json`: current subject, theory-group and discovered practical-group profile.
+- `uv-grades.json`: current-year grade baseline used only to detect later changes.
+- `uv-attention.json`: minimal high-value delta flag (`required` + bounded reasons) for the desktop agent.
 
 None of these files should be committed or copied into Cloud State.
 
@@ -31,7 +36,10 @@ The WSL agent invokes a fixed Windows helper. Allowed navigation is restricted t
 - `/my/courses.php`
 - `/course/view.php`
 - `/calendar/view.php`
+- `/grade/report/overview/index.php`
 - read views for `assign`, `forum`, `resource`, `folder`, `page`, `book` and `quiz`
+
+The same dedicated browser profile may also contain an authenticated `https://sogo.uv.es` tab. Mail access uses a separate bounded read-only action and never exposes cookies, passwords or session tokens to WSL.
 
 URLs containing a Moodle `sesskey` are rejected. Mutation routes are not allowed.
 
@@ -50,10 +58,20 @@ The scan:
 5. records course materials and preserves their first-seen timestamp;
 6. compares the normalized snapshot with the previous scan;
 7. prioritizes open assignments and new academic changes;
-8. fills remaining daily capacity with rotating study tasks from active materials;
-9. restores the dedicated browser to `Mis cursos`.
+8. scans the authenticated UV SOGo inbox by header, filters mail against the current academic year, subject and personal group, and reads bodies only for relevant candidates;
+9. restores the original read/unread state after relevant-message inspection;
+10. keeps future tests, mandatory sessions, coursework and schedule changes active after the source email stops being new;
+11. reads the current-year grade overview and reports only changes after the private baseline exists;
+12. promotes imminent academic obligations into the study plan before filling remaining capacity with rotating study tasks;
+13. restores the dedicated Aula Virtual browser to `Mis cursos`.
 
 The default target is six tasks. It may be changed with `UNIVERSITY_DAILY_TASK_TARGET` from 1 to 20.
+
+## Local monitor
+
+On the MSI the scan can run as the user-level `engineering-orchestrator-university.service`, triggered by `engineering-orchestrator-university.timer`. The deployed timer refreshes roughly hourly while the machine is available. Standard output is discarded so private report contents are not copied into the journal; failures go to the user journal for diagnosis.
+
+Each pass rewrites `uv-attention.json`. It becomes `required: true` only for a new relevant mail, a grade change, or an added/updated assignment. Routine unchanged scans therefore remain silent.
 
 ## Study planning
 
@@ -67,4 +85,4 @@ If the university session expires, the scan fails closed and requires the user t
 
 If the browser or Windows helper is unavailable, the scan fails rather than silently treating the university as having no work.
 
-Assignment submission, messages, enrollment changes, grade changes and other write actions are outside this adapter.
+Assignment submission, message sending, enrollment changes, grade mutation and other write actions are outside this adapter. Grade access is read-only and private; the agent only compares the current-year overview with its previous local baseline.

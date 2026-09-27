@@ -47,6 +47,7 @@ function readNavigationUrl(value, allowedOrigins) {
     /^\/my\/courses\.php$/,
     /^\/course\/view\.php$/,
     /^\/calendar\/view\.php$/,
+    /^\/grade\/report\/overview\/index\.php$/,
     /^\/mod\/(assign|forum|resource|folder|page|book|quiz)\/view\.php$/
   ];
   if (!readPaths.some((pattern) => pattern.test(url.pathname))) {
