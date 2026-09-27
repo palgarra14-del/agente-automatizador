@@ -100,6 +100,9 @@ export function formatUniversityDailyReport(report) {
       : 0;
     lines.push('**Notificaciones UV:** ' + report.summary.notificationStatus + ' · ' + newNotifications + ' nuevas relevantes');
   }
+  if (Number.isInteger(report.summary.upcomingReminders) && report.summary.upcomingReminders > 0) {
+    lines.push('**Recordatorios próximos:** ' + report.summary.upcomingReminders);
+  }
   if (Number.isInteger(report.summary.suggestedMinutes) && report.summary.suggestedMinutes > 0) {
     lines.push('**Carga sugerida:** ' + report.summary.suggestedMinutes + ' min');
   }
@@ -116,6 +119,14 @@ export function formatUniversityDailyReport(report) {
   if (Array.isArray(report.notificationChanges) && report.notificationChanges.length) {
     lines.push('', '## Notificaciones nuevas relevantes', '');
     report.notificationChanges.forEach((item) => lines.push('- ' + clean(item.title)));
+  }
+
+  if (Array.isArray(report.reminders) && report.reminders.length) {
+    lines.push('', '## Requiere atención pronto', '');
+    report.reminders.forEach((item) => {
+      const when = item.daysRemaining === 1 ? 'mañana' : 'en ' + item.daysRemaining + ' días';
+      lines.push('- **' + clean(item.subject) + '** — ' + clean(item.title) + ' · ' + when);
+    });
   }
 
   if (Array.isArray(report.academicSignals) && report.academicSignals.length) {

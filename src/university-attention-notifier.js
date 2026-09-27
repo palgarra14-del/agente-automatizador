@@ -13,28 +13,38 @@ export function attentionFingerprint(attention) {
 }
 
 export function decideAcademicNotification(attention, previousState = null) {
+  const items = attention?.version === 1 && attention.required === true
+    ? cleanItems(attention.items)
+    : [];
+  const notifiedItems = cleanItems(previousState?.notifiedItems);
+  const seen = new Set(notifiedItems);
+  const unseenItems = items.filter((item) => !seen.has(item));
   const fingerprint = attentionFingerprint(attention);
-  const previous = typeof previousState?.lastFingerprint === 'string'
-    ? previousState.lastFingerprint
-    : null;
   return {
-    notify: Boolean(fingerprint && fingerprint !== previous),
+    notify: unseenItems.length > 0,
     fingerprint,
+    unseenItems,
     state: {
-      version: 1,
-      lastFingerprint: fingerprint ?? previous,
+      version: 2,
+      notifiedItems,
+      lastFingerprint: previousState?.lastFingerprint ?? null,
       lastNotifiedAt: previousState?.lastNotifiedAt ?? null
     }
   };
 }
 
 export function notifiedAcademicState(decision, notifiedAt) {
-  if (!decision?.notify || typeof decision.fingerprint !== 'string' || Number.isNaN(Date.parse(notifiedAt))) {
+  if (!decision?.notify || Number.isNaN(Date.parse(notifiedAt))) {
     throw new Error('university_notification_state_invalid');
   }
+  const notifiedItems = cleanItems([
+    ...(decision.state?.notifiedItems ?? []),
+    ...(decision.unseenItems ?? [])
+  ]).slice(-1000);
   return {
-    version: 1,
-    lastFingerprint: decision.fingerprint,
-    lastNotifiedAt: notifiedAt
+    version: 2,
+    notifiedItems,
+    lastFingerprint: decision.fingerprint ?? null,
+    lastNotifiedAt: new Date(notifiedAt).toISOString()
   };
 }

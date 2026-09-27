@@ -6,6 +6,7 @@ import { detectUniversityChanges } from '../src/university.js';
 import { planUniversityStudyDay } from '../src/university-study-planner.js';
 import { formatUniversityDailyReport } from '../src/university-report.js';
 import { recommendAcademicPreparation } from '../src/university-preparation.js';
+import { buildAcademicReminders } from '../src/university-reminders.js';
 import {
   createUvGradeState,
   diffUvGrades,
@@ -310,6 +311,11 @@ const attentionSignals = selectAttentionAcademicSignals(signalState, {
   capturedAt,
   horizonDays: 14
 });
+const reminders = buildAcademicReminders({
+  signals: attentionSignals,
+  assignments: current.snapshot.assignments,
+  today
+});
 const signalTasks = academicSignalTasks(attentionSignals, current.snapshot.materials, today).slice(0, dailyTarget);
 const studySlots = Math.max(0, dailyTarget - signalTasks.length);
 planned = studySlots > 0
@@ -363,6 +369,10 @@ const enrichedGradeChanges = gradeChanges.map((item) => ({
 
 const attentionReasons = [];
 const attentionItems = [];
+if (reminders.length) {
+  attentionReasons.push('upcoming_academic_deadline');
+  attentionItems.push(...reminders.map((item) => item.id));
+}
 const newMail = mail.alerts.filter((item) => item.isNew);
 if (newMail.length) {
   attentionReasons.push('new_relevant_mail');
@@ -413,6 +423,7 @@ const report = {
     changedGrades: enrichedGradeChanges.length,
     notificationStatus,
     newRelevantNotifications: notificationChanges.length,
+    upcomingReminders: reminders.length,
     attentionRequired: attention.required,
     suggestedMinutes: finalTasks.reduce(
       (total, item) => total + (Number.isInteger(item.suggestedMinutes) ? item.suggestedMinutes : 0),
@@ -426,6 +437,7 @@ const report = {
   gradeError,
   notificationChanges,
   notificationError,
+  reminders,
   attention,
   tasks: finalTasks
 };

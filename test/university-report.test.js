@@ -34,6 +34,29 @@ test('daily university report is concise and actionable', () => {
   assert.match(output, /modo de solo lectura/);
 });
 
+test('daily report surfaces upcoming reminder windows without hourly noise', () => {
+  const output = formatUniversityDailyReport({
+    version: 1,
+    today: '2026-09-30',
+    summary: {
+      subjects: 9,
+      openAssignments: 0,
+      newMaterials: 0,
+      upcomingReminders: 1,
+      suggestedMinutes: 0
+    },
+    reminders: [{
+      subject: 'EDA',
+      title: 'Test Tema 1',
+      daysRemaining: 2
+    }],
+    tasks: []
+  });
+  assert.match(output, /Recordatorios próximos:.*1/);
+  assert.match(output, /Requiere atención pronto/);
+  assert.match(output, /Test Tema 1.*en 2 días/);
+});
+
 test('daily report shows only confirmed practical subgroups', () => {
   const output = formatUniversityDailyReport({
     version: 1,

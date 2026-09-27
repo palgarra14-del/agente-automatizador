@@ -29,6 +29,22 @@ test('same academic event is notified only once', () => {
   assert.equal(second.notify, false);
 });
 
+test('removing an already-notified event does not create a duplicate notification', () => {
+  const firstAttention = {
+    version: 1,
+    required: true,
+    items: ['due:test:2d', 'uv-mail:new']
+  };
+  const first = decideAcademicNotification(firstAttention);
+  const sent = notifiedAcademicState(first, '2026-09-27T18:00:00Z');
+  const reduced = decideAcademicNotification({
+    version: 1,
+    required: true,
+    items: ['due:test:2d']
+  }, sent);
+  assert.equal(reduced.notify, false);
+});
+
 test('a changed relevant event set creates a fresh notification', () => {
   const before = {
     version: 1,
