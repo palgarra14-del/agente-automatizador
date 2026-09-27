@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { createWindowsUniversityBrowserBridge } from '../src/university-browser-windows.js';
 import { detectUniversityChanges } from '../src/university.js';
 import { planUniversityStudyDay } from '../src/university-study-planner.js';
+import { formatUniversityDailyReport } from '../src/university-report.js';
 import { parseUvCourseRegistry } from '../src/uv-moodle.js';
 import { scanUvMoodle } from '../src/uv-moodle-scanner.js';
 
@@ -16,6 +17,7 @@ const observationsFile = join(stateDir, 'uv-observations.json');
 const snapshotFile = join(stateDir, 'uv-snapshot.json');
 const historyFile = join(stateDir, 'uv-study-history.json');
 const reportFile = join(stateDir, 'uv-daily-report.json');
+const reportMarkdownFile = join(stateDir, 'uv-daily-report.md');
 
 async function readJson(path, fallback = null) {
   try {
@@ -154,4 +156,6 @@ await writePrivateJson(observationsFile, current.observations);
 await writePrivateJson(snapshotFile, current.snapshot);
 await writePrivateJson(historyFile, planned.history);
 await writePrivateJson(reportFile, report);
+await writeFile(reportMarkdownFile, formatUniversityDailyReport(report), { mode: 0o600 });
+await chmod(reportMarkdownFile, 0o600);
 console.log(JSON.stringify(report, null, 2));
