@@ -40,6 +40,14 @@
       ],
       "tag": "agent-cloud-state-callflow-v1",
       "statePath": ".agent/cloud-state-callflow.json"
+    },
+    {
+      "id": "university",
+      "projectIds": [
+        "university"
+      ],
+      "tag": "agent-cloud-state-university-v1",
+      "statePath": ".agent/cloud-state-university.json"
     }
   ]
 }

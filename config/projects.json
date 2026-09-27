@@ -586,6 +586,116 @@
         ],
         "projectRole": "Mejorar la producción comercial: generar demos y webs rápidas, profesionales, verificables y orientadas a contacto/conversión, reduciendo retrabajo y tiempo desde prospecto cualificado hasta demo utilizable."
       }
+    },
+    {
+      "id": "university",
+      "displayName": "University Agent",
+      "repository": {
+        "owner": "palgarra14-del",
+        "name": "agente-automatizador"
+      },
+      "defaultBranch": "main",
+      "workingBranchPattern": "agent/{runId}",
+      "protectedBranches": [
+        "main"
+      ],
+      "workspace": "..",
+      "workspaceStrategy": "managed",
+      "commandEnvironment": {
+        "NEXT_TELEMETRY_DISABLED": "1"
+      },
+      "execution": {
+        "provider": "container-required",
+        "image": "agent-node22-pnpm11:local",
+        "resources": {
+          "memoryMb": 768,
+          "cpuCount": 1,
+          "pidsLimit": 96
+        }
+      },
+      "toolchain": {
+        "command": "npm"
+      },
+      "changePolicy": {
+        "forbiddenPaths": [
+          ".github/workflows",
+          "src/deployment.js",
+          "src/vercel.js"
+        ],
+        "sensitivePaths": [
+          "config",
+          "src"
+        ],
+        "budgets": {
+          "maxChangedFiles": 8,
+          "maxDiffLines": 600
+        }
+      },
+      "commands": {
+        "install": "npm ci",
+        "test": "npm test",
+        "typecheck": "node --check src/university.js",
+        "lint": "npm run lint",
+        "build": "npm run build",
+        "dependencyRefresh": "npm ci --ignore-scripts"
+      },
+      "policies": {
+        "requireApprovalFor": [
+          "merge",
+          "production_deploy",
+          "destructive_data_change",
+          "modify_secrets",
+          "send_communication"
+        ],
+        "forbidden": [
+          "force_push_main",
+          "delete_protected_branch"
+        ]
+      },
+      "acceptance": {
+        "require": [
+          "install",
+          "test",
+          "typecheck",
+          "lint",
+          "build",
+          "ci"
+        ]
+      },
+      "deployment": {
+        "provider": "none"
+      },
+      "budgets": {
+        "maxIterations": 3,
+        "maxTasks": 10,
+        "maxRuntimeMinutes": 18,
+        "maxModelCalls": 5,
+        "maxWorkerAttempts": 2,
+        "commandTimeoutMs": 30000,
+        "ciTimeoutMs": 600000,
+        "ciPollIntervalMs": 10000,
+        "deploymentTimeoutMs": 600000,
+        "deploymentPollIntervalMs": 15000
+      },
+      "skills": {
+        "allow": [
+          "workspace.prepare",
+          "project.bootstrap",
+          "project.verify",
+          "project.dependencies.refresh",
+          "human.approval",
+          "repository.observe",
+          "repository.publish",
+          "code.implement",
+          "release.observe-ci",
+          "release.publish-pr",
+          "code.inspect",
+          "code.diagnose",
+          "code.review",
+          "release.publish-reviewed-workflow"
+        ],
+        "deny": []
+      }
     }
   ]
 }

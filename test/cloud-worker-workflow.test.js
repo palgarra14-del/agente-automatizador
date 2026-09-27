@@ -51,7 +51,7 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
-  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'leadfinder', 'callflow']);
+  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'leadfinder', 'callflow', 'university']);
 });
 
 test('all active lanes have distinct durable namespaces and non-overlapping ownership', () => {
@@ -59,6 +59,7 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
   const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
   const leadfinderLane = queueConfig.cloudLanes.find((lane) => lane.id === 'leadfinder');
   const callflowLane = queueConfig.cloudLanes.find((lane) => lane.id === 'callflow');
+  const universityLane = queueConfig.cloudLanes.find((lane) => lane.id === 'university');
 
   assert.deepEqual(selfLane, {
     id: 'self',
@@ -84,10 +85,16 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
     tag: 'agent-cloud-state-callflow-v1',
     statePath: '.agent/cloud-state-callflow.json'
   });
+  assert.deepEqual(universityLane, {
+    id: 'university',
+    projectIds: ['university'],
+    tag: 'agent-cloud-state-university-v1',
+    statePath: '.agent/cloud-state-university.json'
+  });
 
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 4);
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 4);
-  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 5);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 5);
+  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 5);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
