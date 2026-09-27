@@ -1418,12 +1418,16 @@ export class GitHubStateStore extends JsonStore {
 
     let done = false;
     for (let step = 0; step < stepCount; step += 1) {
-      const commit = await this.readCommit(expectedSha);
+      // Commit ancestry and state-envelope integrity are independent reads for the
+      // same immutable SHA. Validate both, but overlap their network latency on
+      // cold lineage walks. Generation order and pacing remain sequential.
+      const [commit, envelope] = step === 0
+        ? [await this.readCommit(expectedSha), stateEnvelope]
+        : await Promise.all([this.readCommit(expectedSha), this.readEnvelopeAt(expectedSha)]);
       if (!Array.isArray(commit.parents) || commit.parents.length !== 1) {
         throw new Error('cloud_state_history_fork');
       }
       const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      const envelope = step === 0 ? stateEnvelope : await this.readEnvelopeAt(expectedSha);
       if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
         throw new Error('cloud_state_generation_discontinuity');
       }
