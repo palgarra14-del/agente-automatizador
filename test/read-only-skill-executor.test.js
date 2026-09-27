@@ -367,6 +367,30 @@ test('review context carries a bounded diff and detects diff drift', async () =>
   }
 });
 
+test('read-only skill prompt uses governed business context to prioritize commercial leverage', () => {
+  const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const prompt = buildReadOnlySkillPrompt({
+    skill: 'code.inspect',
+    goal: 'Inspect one high-impact improvement',
+    contract,
+    context: {
+      businessContext: {
+        version: 1,
+        model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+        projectRole: 'Improve qualified lead throughput.',
+        priorities: ['Improve contactability.'],
+        metrics: ['qualified leads generated'],
+        constraints: ['Do not invent prices or lead facts.']
+      }
+    }
+  });
+  assert.match(prompt, /trusted strategic context/i);
+  assert.match(prompt, /real commercial funnel/i);
+  assert.match(prompt, /do not invent prices or offers/i);
+  assert.ok(prompt.includes('LeadFinder -> Callflow -> demo -> follow-up -> conversion'));
+  assert.ok(prompt.includes('qualified leads generated'));
+});
+
 test('read-only skill prompt redacts sensitive request fields', () => {
   const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
   const prompt = buildReadOnlySkillPrompt({

@@ -186,10 +186,10 @@ jobs:
           cat "$RESULT_FILE"
           HAS_WORK="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.hasExecutionWork === true ? "true" : "false");' "$RESULT_FILE")"
           SKIP_REASON=""
-          if [[ "$AGENT_CLOUD_LANE" == "website-pilot" && "$HAS_WORK" == "true" && "$CROSS_REPO_CREDENTIAL_CONFIGURED" != "true" ]]; then
+          if [[ "$AGENT_CLOUD_LANE" != "self" && "$HAS_WORK" == "true" && "$CROSS_REPO_CREDENTIAL_CONFIGURED" != "true" ]]; then
             HAS_WORK="false"
             SKIP_REASON="cross_repo_credential_missing"
-            echo "::notice::website-pilot execution deferred because AGENT_GITHUB_TOKEN is not configured"
+            echo "::notice::$AGENT_CLOUD_LANE execution deferred because AGENT_GITHUB_TOKEN is not configured"
           fi
           echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
           echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"

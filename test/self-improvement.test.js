@@ -132,6 +132,10 @@ test('autopilot creates one bounded autonomous workflow and records a reviewed P
   assert.equal(calls.create[0].projectId, 'self');
   assert.deepEqual(calls.create[0].budgets, { timeoutMs: 18 * 60_000 });
   assert.equal(calls.create[0].goal, AUTONOMOUS_MAINTENANCE_GOAL);
+  assert.match(AUTONOMOUS_MAINTENANCE_GOAL, /LeadFinder -> Callflow/);
+  assert.match(AUTONOMOUS_MAINTENANCE_GOAL, /qualified-lead throughput/i);
+  assert.match(AUTONOMOUS_MAINTENANCE_GOAL, /conversion instrumentation/i);
+  assert.match(AUTONOMOUS_MAINTENANCE_GOAL, /Avoid speculative refactoring/i);
   assert.deepEqual(calls.create[0].scope.allowedPaths, [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths]);
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('.github'));
   assert.ok(calls.create[0].scope.forbiddenPaths.includes('config'));

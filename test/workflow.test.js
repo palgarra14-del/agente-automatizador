@@ -3198,6 +3198,8 @@ test('app-improvement implementation completes only after critic PASS and normal
     async execute(task, options) {
       assert.equal(task.objective, 'Implement safely');
       assert.equal(task.workflow.profile, 'app-improvement');
+      assert.equal(task.businessContext.projectRole, 'Prioritize commercial funnel improvements.');
+      assert.ok(task.businessContext.metrics.includes('lead-to-demo time'));
       assert.ok(task.inspectionEvidence);
       assert.ok(task.diagnosis);
       assert.ok(task.approvedPlanChange?.approvedAt);
@@ -3211,6 +3213,8 @@ test('app-improvement implementation completes only after critic PASS and normal
     async execute(request) {
       reviewCalls += 1;
       assert.equal(request.skill, 'code.review');
+      assert.equal(request.context.businessContext.projectRole, 'Prioritize commercial funnel improvements.');
+      assert.ok(request.context.businessContext.metrics.includes('lead-to-demo time'));
       assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, normalChange.changeSetFingerprint);
       assert.deepEqual(request.context.priorEvidence.implementation.changeSet.paths, ['src/feature.js']);
       return { ok: true, status: 'completed', outputBytes: 16, result: { reviewEvidence: { verdict: 'PASS', summary: 'change is safe', findings: [] } } };
@@ -3224,6 +3228,12 @@ test('app-improvement implementation completes only after critic PASS and normal
     workspace: '.',
     commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
     execution: { provider: 'local-sanitized' },
+    businessContext: {
+      version: 1,
+      model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+      projectRole: 'Prioritize commercial funnel improvements.',
+      metrics: ['lead-to-demo time']
+    },
     skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
   });
   const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, codingWorker, skillExecutor });

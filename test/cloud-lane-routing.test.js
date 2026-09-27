@@ -6,7 +6,7 @@ import { URL } from 'node:url';
 const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
 const queueConfig = JSON.parse(readFileSync(new URL('../config/issue-queue.json', import.meta.url), 'utf8'));
 
-test('routing activates exactly self, website-pilot and callflow as cloud-owned lanes', () => {
+test('routing activates exactly self, website-pilot, leadfinder and callflow as cloud-owned lanes', () => {
   assert.equal(Array.isArray(queueConfig.cloudLanes), true);
   assert.deepEqual(queueConfig.cloudLanes, [
     {
@@ -22,6 +22,12 @@ test('routing activates exactly self, website-pilot and callflow as cloud-owned 
       statePath: '.agent/cloud-state-website-pilot.json'
     },
     {
+      id: 'leadfinder',
+      projectIds: ['leadfinder'],
+      tag: 'agent-cloud-state-leadfinder-v1',
+      statePath: '.agent/cloud-state-leadfinder.json'
+    },
+    {
       id: 'callflow',
       projectIds: ['callflow'],
       tag: 'agent-cloud-state-callflow-v1',
@@ -29,9 +35,9 @@ test('routing activates exactly self, website-pilot and callflow as cloud-owned 
     }
   ]);
   assert.equal(Object.hasOwn(queueConfig, 'cloudProjectIds'), false);
-  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 3);
+  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 4);
 });
 
 test('cloud-once resolves an explicit configured lane and binds state plus queue ownership to it', () => {
