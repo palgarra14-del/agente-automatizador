@@ -3,10 +3,10 @@ import test from 'node:test';
 import { scanUvMoodle } from '../src/uv-moodle-scanner.js';
 
 const course = {
-  id: '116386',
-  code: '34670',
-  name: 'Estructuras de datos y algoritmos',
-  url: 'https://aulavirtual.uv.es/course/view.php?id=116386'
+  id: '101',
+  code: '12345',
+  name: 'Curso de Prueba A',
+  url: 'https://aulavirtual.uv.es/course/view.php?id=101'
 };
 
 function fakeBridge({ expired = false } = {}) {
@@ -22,7 +22,7 @@ function fakeBridge({ expired = false } = {}) {
       if (url.includes('/course/view.php')) {
         return {
           url,
-          title: 'EDA',
+          title: 'Curso A',
           text: 'Tema 1',
           links: [
             { url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8', text: 'Tema 1 Archivo' },
@@ -41,7 +41,7 @@ function fakeBridge({ expired = false } = {}) {
       if (url.includes('/mod/assign/view.php')) {
         return {
           url,
-          title: '2026-27 Estructures de dades i algorismes Gr.A-T (34670): Ejercicio | AulaVirtual',
+          title: '2026-27 Curso de Prueba A Gr.A-T (12345): Ejercicio | AulaVirtual',
           text: [
             'Ejercicio',
             'Apertura: viernes, 18 de septiembre de 2026, 00:00',
@@ -83,7 +83,7 @@ test('UV scanner preserves first-seen material time across scans', async () => {
     previousObservations: {
       materials: [{
         id: 'uv:resource:8',
-        subjectId: '34670',
+        subjectId: '12345',
         title: 'Tema 1',
         url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8',
         firstSeenAt: '2026-09-27T12:00:00Z'
