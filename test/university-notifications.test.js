@@ -22,11 +22,44 @@ test('notification parser keeps current-course items and marks expired deadlines
     'hace 10 días',
     'Seleccione desde la lista lateral de notificaciones para ver más detalles'
   ].join('\n') };
-  const parsed = parseUvNotifications(page, courses, { today: '2026-09-27' });
+  const parsed = parseUvNotifications(page, courses, {
+    today: '2026-09-27',
+    assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+  });
   assert.equal(parsed.length, 2);
   assert.equal(parsed[0].expired, true);
   assert.equal(parsed[1].subjectId, '34156');
   assert.equal(parsed[1].expired, false);
+});
+
+test('notification parser ignores unmatched deadlines and old-year notifications even with a current subject code', () => {
+  const page = { text: [
+    'Notificaciones',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Trabajo de otro curso',
+    'hace 1 hora',
+    '2025-26 Anàlisi matemàtica II Gr.B-T (34156) contenido nuevo',
+    'hace 1 hora'
+  ].join('\n') };
+  const parsed = parseUvNotifications(page, courses, {
+    today: '2026-09-27',
+    assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+  });
+  assert.deepEqual(parsed, []);
+});
+
+test('a matching current assignment gives a code-less deadline its real subject', () => {
+  const page = { text: [
+    'Notificaciones',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Ejercicios Tema 1',
+    'hace 1 hora'
+  ].join('\n') };
+  const parsed = parseUvNotifications(page, courses, {
+    today: '2026-09-27',
+    assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+  });
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].subjectId, '34670');
+  assert.equal(parsed[0].expired, false);
 });
 
 test('first scan is baseline only; later only new non-expired notifications surface', () => {

@@ -343,7 +343,10 @@ let notificationChanges = [];
 let notificationState = previousNotificationState;
 try {
   const notificationPage = await bridge.readUrl(notificationsUrl);
-  const notifications = parseUvNotifications(notificationPage, academicCourses, { today });
+  const notifications = parseUvNotifications(notificationPage, academicCourses, {
+    today,
+    assignments: current.snapshot.assignments
+  });
   notificationChanges = diffUvNotifications(previousNotificationState, notifications);
   notificationState = createUvNotificationState(notifications, capturedAt);
 } catch (error) {
