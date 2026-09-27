@@ -172,6 +172,8 @@ test('cloud worker reuses one process for repair, control and executable-work pr
   assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
+  assert.match(recovery, /timeout-minutes: 30/);
+  assert.match(recovery, /timeout --signal=TERM --kill-after=30s 20m node src\/cli\.js inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
