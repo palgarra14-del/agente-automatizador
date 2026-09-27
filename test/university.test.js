@@ -29,10 +29,13 @@ test('normalizes a bounded read-only university snapshot', () => {
   }));
   assert.equal(value.assignments[0].title, 'Hoja 4');
   assert.equal(value.assignments[0].status, 'open');
+  assert.throws(() => normalizeUniversitySnapshot(snapshot({
+    assignments: [{ id: 'a2', subjectId: 'mat', title: 'Unsafe', status: 'open', url: 'http://campus.example/a2' }]
+  })), /url_unsafe/);
 });
 
 test('rejects secrets and cross-subject academic records', () => {
-  assert.throws(() => normalizeUniversitySnapshot({ ...snapshot(), token: 'secret' }), /secret_material_forbidden/);
+  assert.throws(() => normalizeUniversitySnapshot({ ...snapshot(), access_token: 'secret' }), /secret_material_forbidden/);
   assert.throws(() => normalizeUniversitySnapshot(snapshot({
     materials: [{ id: 'm1', subjectId: 'unknown', title: 'Tema', publishedAt: '2026-09-27T09:00:00Z' }]
   })), /unknown_subject/);

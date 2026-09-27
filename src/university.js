@@ -4,12 +4,13 @@ export const UNIVERSITY_STATE_VERSION = 1;
 const isoDateTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const isoDate = /^\d{4}-\d{2}-\d{2}$/;
 const itemKinds = ['announcements', 'assignments', 'materials'];
-const forbiddenKeys = new Set(['password', 'passwd', 'secret', 'token', 'accessToken', 'refreshToken', 'cookie', 'cookies', 'authorization', 'credentials']);
+const forbiddenKeys = new Set(['password', 'passwd', 'secret', 'token', 'accesstoken', 'refreshtoken', 'cookie', 'cookies', 'authorization', 'credentials']);
 
 function assertObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`university_${label}_invalid`);
   for (const key of Object.keys(value)) {
-    if (forbiddenKeys.has(key)) throw new Error('university_secret_material_forbidden');
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (forbiddenKeys.has(normalizedKey)) throw new Error('university_secret_material_forbidden');
   }
   return value;
 }
@@ -37,7 +38,7 @@ function safeUrl(value, label) {
   const normalized = textValue(value, label, 2_000);
   let url;
   try { url = new URL(normalized); } catch { throw new Error(`university_${label}_invalid`); }
-  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error(`university_${label}_unsafe`);
+  if (url.protocol !== 'https:' || url.username || url.password) throw new Error(`university_${label}_unsafe`);
   return url.toString();
 }
 
