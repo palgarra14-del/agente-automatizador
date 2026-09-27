@@ -11,6 +11,11 @@ import {
   parseUvGradeOverview
 } from '../src/university-grades.js';
 import {
+  createUvNotificationState,
+  diffUvNotifications,
+  parseUvNotifications
+} from '../src/university-notifications.js';
+import {
   ACADEMIC_SIGNAL_STATE_VERSION,
   mergeAcademicSignals,
   selectAttentionAcademicSignals
@@ -38,8 +43,10 @@ const profileFile = join(stateDir, 'uv-academic-profile.json');
 const mailStateFile = join(stateDir, 'uv-mail-state.json');
 const signalStateFile = join(stateDir, 'uv-academic-signals.json');
 const gradeStateFile = join(stateDir, 'uv-grades.json');
+const notificationStateFile = join(stateDir, 'uv-notifications.json');
 const attentionFile = join(stateDir, 'uv-attention.json');
 const gradeOverviewUrl = 'https://aulavirtual.uv.es/grade/report/overview/index.php';
+const notificationsUrl = 'https://aulavirtual.uv.es/message/output/popup/notifications.php';
 
 async function readJson(path, fallback = null) {
   try {
@@ -253,6 +260,7 @@ const previousHistory = await readJson(historyFile, { version: 1, lastRecommende
 const previousMailState = await readJson(mailStateFile);
 const previousSignalState = await readJson(signalStateFile);
 const previousGradeState = await readJson(gradeStateFile);
+const previousNotificationState = await readJson(notificationStateFile);
 
 const current = await scanUvMoodle({
   bridge,
@@ -321,6 +329,20 @@ try {
   gradeError = String(error?.message || 'uv_grade_scan_failed').slice(0, 200);
 }
 
+let notificationStatus = 'ready';
+let notificationError = null;
+let notificationChanges = [];
+let notificationState = previousNotificationState;
+try {
+  const notificationPage = await bridge.readUrl(notificationsUrl);
+  const notifications = parseUvNotifications(notificationPage, academicCourses, { today });
+  notificationChanges = diffUvNotifications(previousNotificationState, notifications);
+  notificationState = createUvNotificationState(notifications, capturedAt);
+} catch (error) {
+  notificationStatus = 'degraded';
+  notificationError = String(error?.message || 'uv_notification_scan_failed').slice(0, 200);
+}
+
 const profileSummary = summarizeAcademicProfile(mail.profile);
 const subjectNames = new Map(profileSummary.map((item) => [item.subjectId, item.subject]));
 const enrichedGradeChanges = gradeChanges.map((item) => ({
@@ -331,6 +353,7 @@ const enrichedGradeChanges = gradeChanges.map((item) => ({
 const attentionReasons = [];
 if (mail.alerts.some((item) => item.isNew)) attentionReasons.push('new_relevant_mail');
 if (enrichedGradeChanges.length) attentionReasons.push('grade_changed');
+if (notificationChanges.length) attentionReasons.push('new_relevant_notification');
 if (changes.assignments.added.length || changes.assignments.updated.length) {
   attentionReasons.push('assignment_changed');
 }
@@ -363,6 +386,8 @@ const report = {
     attentionAcademicSignals: attentionSignals.length,
     gradeStatus,
     changedGrades: enrichedGradeChanges.length,
+    notificationStatus,
+    newRelevantNotifications: notificationChanges.length,
     attentionRequired: attention.required,
     suggestedMinutes: finalTasks.reduce(
       (total, item) => total + (Number.isInteger(item.suggestedMinutes) ? item.suggestedMinutes : 0),
@@ -374,6 +399,8 @@ const report = {
   academicSignals: attentionSignals,
   gradeChanges: enrichedGradeChanges,
   gradeError,
+  notificationChanges,
+  notificationError,
   attention,
   tasks: finalTasks
 };
@@ -385,6 +412,7 @@ await writePrivateJson(profileFile, { version: 1, capturedAt, courses: summarize
 await writePrivateJson(mailStateFile, mail.state);
 await writePrivateJson(signalStateFile, signalState);
 if (gradeState) await writePrivateJson(gradeStateFile, gradeState);
+if (notificationState) await writePrivateJson(notificationStateFile, notificationState);
 await writePrivateJson(attentionFile, attention);
 await writePrivateJson(reportFile, report);
 await writeFile(reportMarkdownFile, formatUniversityDailyReport(report), { mode: 0o600 });

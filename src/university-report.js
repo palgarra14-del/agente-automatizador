@@ -79,6 +79,12 @@ export function formatUniversityDailyReport(report) {
     const changedGrades = Number.isInteger(report.summary.changedGrades) ? report.summary.changedGrades : 0;
     lines.push('**Calificaciones UV:** ' + report.summary.gradeStatus + ' · ' + changedGrades + ' cambios');
   }
+  if (report.summary.notificationStatus) {
+    const newNotifications = Number.isInteger(report.summary.newRelevantNotifications)
+      ? report.summary.newRelevantNotifications
+      : 0;
+    lines.push('**Notificaciones UV:** ' + report.summary.notificationStatus + ' · ' + newNotifications + ' nuevas relevantes');
+  }
   if (Number.isInteger(report.summary.suggestedMinutes) && report.summary.suggestedMinutes > 0) {
     lines.push('**Carga sugerida:** ' + report.summary.suggestedMinutes + ' min');
   }
@@ -90,6 +96,11 @@ export function formatUniversityDailyReport(report) {
       const after = item.grade ?? 'sin calificación';
       lines.push('- **' + clean(item.subject) + '** — ' + before + ' → ' + after);
     });
+  }
+
+  if (Array.isArray(report.notificationChanges) && report.notificationChanges.length) {
+    lines.push('', '## Notificaciones nuevas relevantes', '');
+    report.notificationChanges.forEach((item) => lines.push('- ' + clean(item.title)));
   }
 
   if (Array.isArray(report.academicSignals) && report.academicSignals.length) {
