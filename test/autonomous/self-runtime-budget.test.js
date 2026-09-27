@@ -12,9 +12,10 @@ test('self-maintenance has enough bounded runtime to finish on the local runner'
   assert.ok(self.budgets.maxRuntimeMinutes < 20);
 });
 
-test('cloud self-improvement wires the self project runtime into workflow timeout milliseconds', () => {
+test('cloud autonomous improvement selects policy by lane and uses that project runtime budget', () => {
+  assert.match(cli, /autonomousPolicyForLane\(cloudLane\.id\)/);
   assert.match(
     cli,
-    /workflowTimeoutMs:\s*projects\.get\('self'\)\.budgets\.maxRuntimeMinutes \* 60_000/
+    /workflowTimeoutMs:\s*projects\.get\(autonomousPolicy\.projectId\)\.budgets\.maxRuntimeMinutes \* 60_000/
   );
 });

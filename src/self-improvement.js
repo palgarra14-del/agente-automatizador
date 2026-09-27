@@ -33,6 +33,85 @@ export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
 export const AUTONOMOUS_MAINTENANCE_GOAL =
   "Inspect authoritative main and implement exactly one bounded, high-impact improvement that makes the commercial operating system more effective: LeadFinder -> Callflow -> conversion-focused demo/site production -> follow-up -> conversion -> feedback into lead quality and automation. Prioritize measurable improvements to qualified-lead throughput, contactability, CRM outcome/follow-up quality, demo turnaround, conversion instrumentation, cross-project learning, repeated-work automation, or 24/7 reliability that directly enables those outcomes. If a decision-relevant data gap is visible, prefer bounded instrumentation or feedback-loop support over guessing. Avoid speculative refactoring, cosmetic engineering, or technical polish without a clear commercial, throughput, data-quality, conversion, or reliability benefit. Treat the autonomy controller, workflow core, Cloud State, CLI, issue queue, capability/specialist registries, workflows, config, scripts, dependencies, deployment, authentication, secrets and external communications as immutable roots of trust. Never edit existing baseline tests; add any new regression only under test/autonomous/. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
 
+export const AUTONOMOUS_LEADFINDER_SCOPE = Object.freeze({
+  allowedPaths: Object.freeze([
+    'src/providers',
+    'src/scoring',
+    'src/services',
+    'src/utils',
+    'src/lib',
+    'docs'
+  ]),
+  forbiddenPaths: Object.freeze([
+    '.github',
+    'package.json',
+    'pnpm-lock.yaml',
+    'src/app',
+    'src/lib/product-access.ts',
+    'src/lib/product-entitlements.ts',
+    'src/lib/product-metering.ts'
+  ])
+});
+
+export const AUTONOMOUS_CALLFLOW_SCOPE = Object.freeze({
+  allowedPaths: Object.freeze([
+    'app.js',
+    'crm-transport.js',
+    'crm-outbox.js',
+    'commercial-pipeline.js',
+    'project-readiness.js',
+    'prospect-utils.js',
+    'prospect.js',
+    'tests',
+    'README.md',
+    'sw.js',
+    'index.html'
+  ]),
+  forbiddenPaths: Object.freeze([
+    '.github',
+    'api',
+    'google-apps-script',
+    'config.js',
+    '.claspignore',
+    'package.json',
+    'package-lock.json'
+  ])
+});
+
+export const AUTONOMOUS_LEADFINDER_GOAL =
+  "Inspect authoritative LeadFinder main and implement exactly one bounded, high-impact improvement that increases qualified-lead throughput or commercial usefulness. Prioritize niche precision/recall, valid contactability, deduplication, website-presence evidence, provider resilience, ranking quality, sales-ready outputs, or reliable handoff to Callflow. Use repository evidence and regression tests rather than assumptions. Do not change authentication, private-access identity, entitlements, metering, billing, plans, pricing, secrets, deployment configuration or external communications. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
+
+export const AUTONOMOUS_CALLFLOW_GOAL =
+  "Inspect authoritative Callflow main and implement exactly one bounded, high-impact improvement that increases sales execution quality or reliability. Prioritize call prioritization, outcome capture, follow-up discipline, recovery from transient connectivity failures, conversion instrumentation, feedback to LeadFinder, or reduction of repeated manual work. Use repository evidence and regression tests rather than assumptions. Do not change Apps Script, authentication, secrets, deployment configuration, pricing, offers or external communications. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
+
+export const AUTONOMOUS_LANE_POLICIES = Object.freeze({
+  self: Object.freeze({
+    projectId: 'self',
+    stateKey: 'autopilotSelfImprovement',
+    goal: AUTONOMOUS_MAINTENANCE_GOAL,
+    scope: AUTONOMOUS_MAINTENANCE_SCOPE,
+    allowSensitiveImplementation: true
+  }),
+  leadfinder: Object.freeze({
+    projectId: 'leadfinder',
+    stateKey: 'autopilotLeadfinderImprovement',
+    goal: AUTONOMOUS_LEADFINDER_GOAL,
+    scope: AUTONOMOUS_LEADFINDER_SCOPE,
+    allowSensitiveImplementation: false
+  }),
+  callflow: Object.freeze({
+    projectId: 'callflow',
+    stateKey: 'autopilotCallflowImprovement',
+    goal: AUTONOMOUS_CALLFLOW_GOAL,
+    scope: AUTONOMOUS_CALLFLOW_SCOPE,
+    allowSensitiveImplementation: false
+  })
+});
+
+export function autonomousPolicyForLane(laneId) {
+  return AUTONOMOUS_LANE_POLICIES[laneId] ?? null;
+}
+
 function emptyAutopilot() {
   return {
     version: 1,
@@ -66,9 +145,9 @@ function pathWithin(root, path) {
   return path === root || path.startsWith(`${root}/`);
 }
 
-function pathAllowedForAutopilot(path) {
-  const allowed = AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths.some((root) => pathWithin(root, path));
-  const forbidden = AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths.some((root) => pathWithin(root, path));
+function pathAllowedForAutopilot(path, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
+  const allowed = scope.allowedPaths.some((root) => pathWithin(root, path));
+  const forbidden = scope.forbiddenPaths.some((root) => pathWithin(root, path));
   return allowed && !forbidden;
 }
 
@@ -91,7 +170,7 @@ function pristineWorkflowForDeadlineRefresh(plan) {
   );
 }
 
-export function autonomousSensitiveImplementationAllowed(step) {
+export function autonomousSensitiveImplementationAllowed(step, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
   if (!step ||
       step.id !== 'implementation' ||
       step.status !== 'awaiting_approval' ||
@@ -109,7 +188,7 @@ export function autonomousSensitiveImplementationAllowed(step) {
     !path.includes('..') &&
     !path.includes('\\') &&
     !path.startsWith('/') &&
-    pathAllowedForAutopilot(path)
+    pathAllowedForAutopilot(path, scope)
   )) return false;
   return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
 }
@@ -147,7 +226,18 @@ function resultSummary(plan) {
 }
 
 export class AutonomousSelfImprovement {
-  constructor({ store, workflowEngine, operatorRevision, workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
+  constructor({
+    store,
+    workflowEngine,
+    operatorRevision,
+    workflowTimeoutMs = 300_000,
+    now = () => Date.now(),
+    projectId = 'self',
+    stateKey = STATE_KEY,
+    goal = AUTONOMOUS_MAINTENANCE_GOAL,
+    scope = AUTONOMOUS_MAINTENANCE_SCOPE,
+    allowSensitiveImplementation = projectId === 'self'
+  } = {}) {
     if (!store || !workflowEngine) throw new Error('autonomous_self_improvement_dependencies_required');
     if (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision)) {
       throw new Error('autonomous_self_improvement_revision_invalid');
@@ -155,25 +245,42 @@ export class AutonomousSelfImprovement {
     if (!Number.isInteger(workflowTimeoutMs) || workflowTimeoutMs < 1_000) {
       throw new Error('autonomous_self_improvement_timeout_invalid');
     }
+    if (typeof projectId !== 'string' || !/^[a-z0-9-]+$/.test(projectId)) {
+      throw new Error('autonomous_self_improvement_project_invalid');
+    }
+    if (typeof stateKey !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(stateKey)) {
+      throw new Error('autonomous_self_improvement_state_key_invalid');
+    }
+    if (typeof goal !== 'string' || !goal.trim()) {
+      throw new Error('autonomous_self_improvement_goal_invalid');
+    }
+    if (!scope || !Array.isArray(scope.allowedPaths) || !Array.isArray(scope.forbiddenPaths) || !scope.allowedPaths.length) {
+      throw new Error('autonomous_self_improvement_scope_invalid');
+    }
     this.store = store;
     this.workflowEngine = workflowEngine;
     this.operatorRevision = operatorRevision.toLowerCase();
     this.workflowTimeoutMs = workflowTimeoutMs;
     this.now = now;
+    this.projectId = projectId;
+    this.stateKey = stateKey;
+    this.goal = goal;
+    this.scope = scope;
+    this.allowSensitiveImplementation = allowSensitiveImplementation === true;
   }
 
   async readState() {
     const root = await this.store.load();
-    return normalizeAutopilot(root[STATE_KEY]);
+    return normalizeAutopilot(root[this.stateKey]);
   }
 
   async writeState(mutator) {
     return this.store.mutate((root) => {
-      const current = normalizeAutopilot(root[STATE_KEY]);
+      const current = normalizeAutopilot(root[this.stateKey]);
       const next = mutator(current) ?? current;
       next.version = 1;
       next.updatedAt = new Date(this.now()).toISOString();
-      root[STATE_KEY] = next;
+      root[this.stateKey] = next;
       return next;
     });
   }
@@ -192,7 +299,7 @@ export class AutonomousSelfImprovement {
         Date.parse(entry.completedAt) >= cutoff
       )
       .flatMap((entry) => Array.isArray(entry.changedPaths) ? entry.changedPaths : [])
-      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path))
+      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path, this.scope))
     )].sort();
   }
 
@@ -275,15 +382,15 @@ export class AutonomousSelfImprovement {
     const recentProposalPaths = this.recentProposalPaths(state);
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
-      projectId: 'self',
+      projectId: this.projectId,
       budgets: { timeoutMs: this.workflowTimeoutMs },
       goal: recentProposalPaths.length
-        ? `${AUTONOMOUS_MAINTENANCE_GOAL} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
-        : AUTONOMOUS_MAINTENANCE_GOAL,
+        ? `${this.goal} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
+        : this.goal,
       scope: {
-        allowedPaths: [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths],
+        allowedPaths: [...this.scope.allowedPaths],
         forbiddenPaths: [...new Set([
-          ...AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths,
+          ...this.scope.forbiddenPaths,
           ...recentProposalPaths
         ])]
       }
@@ -325,7 +432,7 @@ export class AutonomousSelfImprovement {
         }));
         return { status: 'missing_workflow', workflowId };
       }
-      if (plan.profile !== PROFILE || plan.projectId !== 'self') {
+      if (plan.profile !== PROFILE || plan.projectId !== this.projectId) {
         await this.writeState((current) => ({
           ...current,
           activeWorkflowId: null,
@@ -347,7 +454,8 @@ export class AutonomousSelfImprovement {
         }
         const step = awaiting[0];
         const releaseReady = step.id === 'release-readiness';
-        const boundedSensitiveImplementation = autonomousSensitiveImplementationAllowed(step);
+        const boundedSensitiveImplementation = this.allowSensitiveImplementation &&
+          autonomousSensitiveImplementationAllowed(step, this.scope);
         if (!releaseReady && !boundedSensitiveImplementation) {
           if (typeof this.workflowEngine.cancel === 'function') {
             const cancelled = await this.workflowEngine.cancel(workflowId, {
