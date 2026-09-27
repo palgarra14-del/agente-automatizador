@@ -207,7 +207,14 @@ try {
         const snapshot = await activeStore.readSnapshot({ repair: true });
         console.log(JSON.stringify({ generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration }, null, 2));
       } else if (action === 'cloud-recover') {
-        console.log(JSON.stringify(await queue.recoverAdmissionIntents(), null, 2));
+        // Repair/validate once, then recover admissions in the same process so the
+        // verified lineage prefix can be reused by the subsequent store.load().
+        const snapshot = await activeStore.readSnapshot({ repair: true });
+        const recovery = await queue.recoverAdmissionIntents();
+        console.log(JSON.stringify({
+          repair: { generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration },
+          recovery
+        }, null, 2));
       } else if (action === 'cloud-peek') {
         const queueWork = await queue.hasWork();
         const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;

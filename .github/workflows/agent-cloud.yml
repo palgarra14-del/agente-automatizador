@@ -134,12 +134,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts
-      - name: Repair authorized partial cloud state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
-      - name: Recover missing admissions from open requests
+      - name: Repair cloud state and recover missing admissions
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
