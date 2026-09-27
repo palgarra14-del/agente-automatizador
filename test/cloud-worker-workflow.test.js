@@ -51,12 +51,13 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
-  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
+  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'leadfinder', 'callflow']);
 });
 
 test('all active lanes have distinct durable namespaces and non-overlapping ownership', () => {
   const selfLane = queueConfig.cloudLanes.find((lane) => lane.id === 'self');
   const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
+  const leadfinderLane = queueConfig.cloudLanes.find((lane) => lane.id === 'leadfinder');
   const callflowLane = queueConfig.cloudLanes.find((lane) => lane.id === 'callflow');
 
   assert.deepEqual(selfLane, {
@@ -71,6 +72,12 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
     tag: 'agent-cloud-state-website-pilot-v1',
     statePath: '.agent/cloud-state-website-pilot.json'
   });
+  assert.deepEqual(leadfinderLane, {
+    id: 'leadfinder',
+    projectIds: ['leadfinder'],
+    tag: 'agent-cloud-state-leadfinder-v1',
+    statePath: '.agent/cloud-state-leadfinder.json'
+  });
   assert.deepEqual(callflowLane, {
     id: 'callflow',
     projectIds: ['callflow'],
@@ -78,9 +85,9 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
     statePath: '.agent/cloud-state-callflow.json'
   });
 
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 3);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 4);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
@@ -172,7 +179,7 @@ test('cloud worker reuses one process for repair, control and executable-work pr
   assert.match(prepare, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ secrets\.AGENT_GITHUB_TOKEN != '' && 'true' \|\| 'false' \}\}/);
   assert.match(prepare, /inbox cloud-prepare --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(prepare, /hasExecutionWork === true/);
-  assert.match(prepare, /website-pilot[\s\S]*cross_repo_credential_missing/);
+  assert.match(prepare, /AGENT_CLOUD_LANE" != "self[\s\S]*cross_repo_credential_missing/);
   assert.match(prepare, /has_work=\$HAS_WORK/);
   assert.doesNotMatch(prepare, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
 

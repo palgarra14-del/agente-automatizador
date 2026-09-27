@@ -26,6 +26,14 @@
       "statePath": ".agent/cloud-state-website-pilot.json"
     },
     {
+      "id": "leadfinder",
+      "projectIds": [
+        "leadfinder"
+      ],
+      "tag": "agent-cloud-state-leadfinder-v1",
+      "statePath": ".agent/cloud-state-leadfinder.json"
+    },
+    {
       "id": "callflow",
       "projectIds": [
         "callflow"

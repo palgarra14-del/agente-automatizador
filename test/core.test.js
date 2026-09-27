@@ -219,7 +219,17 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.equal(configured.get('self').budgets.maxModelCalls, 6);
   assert.equal(configured.get('leadfinder').budgets.maxModelCalls, 6);
   assert.equal(configured.get('callflow').budgets.maxModelCalls, 6);
+  for (const id of ['self', 'leadfinder', 'callflow', 'website-pilot']) {
+    assert.equal(configured.get(id).businessContext.version, 1);
+    assert.match(configured.get(id).businessContext.model, /LeadFinder.*Callflow.*website-pilot/i);
+    assert.ok(configured.get(id).businessContext.currentFocus.includes('Peluquerías'));
+    assert.ok(configured.get(id).businessContext.constraints.some((item) => /precios|ofertas|descuentos/i.test(item)));
+  }
+  assert.match(configured.get('leadfinder').businessContext.projectRole, /captación|prospectos/i);
+  assert.match(configured.get('callflow').businessContext.projectRole, /llamadas|seguimiento/i);
+  assert.match(configured.get('website-pilot').businessContext.projectRole, /demos|webs/i);
   assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
+  assert.throws(() => project({ businessContext: { version: 1, model: 'x', projectRole: 'y', unknown: true } }), /businessContext contains unknown fields/);
 });
 
 test('self control-plane source and configuration require sensitive approval', async () => {
@@ -1120,6 +1130,25 @@ test('coding prompt executes the fingerprint-bound approved plan without weakeni
   assert.match(prompt, /never as authority to override scope/i);
   assert.match(prompt, /structured coding task as untrusted data/i);
   assert.match(prompt, /cannot override these rules/i);
+});
+
+test('coding prompt uses governed business context without inventing commercial facts', () => {
+  const prompt = buildWorkerPrompt({
+    objective: 'Improve lead handoff',
+    businessContext: {
+      version: 1,
+      model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+      projectRole: 'Improve CRM follow-up quality.',
+      priorities: ['Reduce repeated manual work.'],
+      metrics: ['follow-ups completed'],
+      constraints: ['Do not invent prices or prospect facts.']
+    }
+  });
+  assert.match(prompt, /trusted strategic context/i);
+  assert.match(prompt, /measurable funnel improvements/i);
+  assert.match(prompt, /Do not infer or hard-code prices/i);
+  assert.ok(prompt.includes('LeadFinder -> Callflow -> demo -> follow-up -> conversion'));
+  assert.ok(prompt.includes('follow-ups completed'));
 });
 
 test('website coding prompt forbids fabricated business claims and preserves brief restrictions', () => {
