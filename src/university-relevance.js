@@ -78,9 +78,9 @@ function wrongTheoryGroup(signals, course) {
 }
 
 function practicalGroupStatus(signals, course) {
-  if (!signals.practical.length || !course?.theoryGroup) return 'none';
-  const base = course.theoryGroup[0];
-  if (!signals.practical.some((group) => group.startsWith(base + '-P'))) return 'wrong';
+  if (!signals.practical.length || !course) return 'none';
+  const base = course?.theoryGroup?.[0];
+  if (base && !signals.practical.some((group) => group.startsWith(base + '-P'))) return 'wrong';
   if (Array.isArray(course.practicalGroups) && course.practicalGroups.length) {
     return signals.practical.some((group) => course.practicalGroups.includes(group))
       ? 'match'

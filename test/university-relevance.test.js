@@ -114,6 +114,31 @@ test('unknown practical subgroup is not treated as confirmed relevance', () => {
   assert.equal(result.reason, 'subgrupo_practicas_por_confirmar');
 });
 
+test('practical subgroup filtering does not require a known theory group', () => {
+  for (const practicalGroups of [[], ['B-P2']]) {
+    const groupProfile = buildAcademicProfile([{
+      code: '34156',
+      name: '2026-27 Análisis Matemático II (34156)',
+      practicalGroups
+    }]);
+    for (const subgroup of ['B-P1', 'B-P2']) {
+      const result = classifyAcademicMail({
+        uid: '769',
+        subject: `2026-27 Análisis Matemático II (34156): Test Subgrupo ${subgroup}`
+      }, groupProfile);
+      if (!practicalGroups.length) {
+        assert.equal(result.decision, 'needs_context');
+        assert.equal(result.reason, 'subgrupo_practicas_por_confirmar');
+      } else if (subgroup === 'B-P2') {
+        assert.equal(result.decision, 'notify');
+      } else {
+        assert.equal(result.decision, 'ignore');
+        assert.equal(result.reason, 'otro_grupo_practicas');
+      }
+    }
+  }
+});
+
 test('body enrichment keeps a relevant course message and adds body context', () => {
   const [alert] = selectRelevantAcademicMail([{
     uid: '772',
