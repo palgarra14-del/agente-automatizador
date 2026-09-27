@@ -5,6 +5,7 @@ import { createWindowsUniversityBrowserBridge } from '../src/university-browser-
 import { detectUniversityChanges } from '../src/university.js';
 import { planUniversityStudyDay } from '../src/university-study-planner.js';
 import { formatUniversityDailyReport } from '../src/university-report.js';
+import { recommendAcademicPreparation } from '../src/university-preparation.js';
 import {
   createUvGradeState,
   diffUvGrades,
@@ -94,7 +95,7 @@ function taskTarget() {
   return value;
 }
 
-function academicSignalTasks(signals, today) {
+function academicSignalTasks(signals, materials, today) {
   return signals.flatMap((signal) => {
     if (!['assessment', 'coursework'].includes(signal.kind)) return [];
     const targetDate = (signal.dates ?? []).find((date) => date >= today);
@@ -102,6 +103,9 @@ function academicSignalTasks(signals, today) {
     const rawTitle = String(signal.title ?? 'Aviso académico');
     const shortTitle = rawTitle.includes(': ') ? rawTitle.split(': ').at(-1) : rawTitle;
     const assessment = signal.kind === 'assessment';
+    const resources = recommendAcademicPreparation(signal, materials, {
+      limit: assessment ? 3 : 2
+    });
     return [{
       id: 'signal:' + signal.id,
       kind: 'academic_signal',
@@ -111,7 +115,8 @@ function academicSignalTasks(signals, today) {
       targetDate,
       priority: assessment ? 980 : 760,
       reason: assessment ? 'Evaluación próxima detectada en correo UV' : 'Trabajo próximo detectado en correo UV',
-      suggestedMinutes: assessment ? 50 : 35
+      suggestedMinutes: assessment ? 50 : 35,
+      resources
     }];
   }).sort((a, b) => b.priority - a.priority || a.targetDate.localeCompare(b.targetDate));
 }
@@ -175,10 +180,13 @@ function coursesWithObservedGroups(courses, observations) {
   const groups = new Map(
     (observations?.courseGroups ?? []).map((entry) => [entry.subjectId, entry.practicalGroups ?? []])
   );
-  return courses.map((course) => ({
-    ...course,
-    practicalGroups: groups.get(course.code) ?? []
-  }));
+  return courses.map((course) => {
+    const observed = groups.get(course.code) ?? [];
+    return {
+      ...course,
+      practicalGroups: observed.length === 1 ? observed : []
+    };
+  });
 }
 
 async function scanAcademicMail(bridge, courses, capturedAt, previousState) {
@@ -302,7 +310,7 @@ const attentionSignals = selectAttentionAcademicSignals(signalState, {
   capturedAt,
   horizonDays: 14
 });
-const signalTasks = academicSignalTasks(attentionSignals, today).slice(0, dailyTarget);
+const signalTasks = academicSignalTasks(attentionSignals, current.snapshot.materials, today).slice(0, dailyTarget);
 const studySlots = Math.max(0, dailyTarget - signalTasks.length);
 planned = studySlots > 0
   ? planUniversityStudyDay({

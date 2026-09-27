@@ -113,7 +113,10 @@ export function parseUvVisiblePracticalGroups(page) {
   }
   const groups = new Set();
   for (const source of sources) {
-    for (const match of source.matchAll(/(?:Pr[aá]cticas?[^\n]{0,120})?\bSubgrupo\s+([A-Z])\s*-\s*P(\d+)\b/gi)) {
+    for (const match of source.matchAll(/(?:Pr[aá]cticas?[^\n]{0,120})?\bSubgr(?:upo|up)\s+([A-Z])\s*-\s*P(\d+)\b/gi)) {
+      groups.add(match[1].toUpperCase() + '-P' + match[2]);
+    }
+    for (const match of source.matchAll(/\bGrup(?:o)?\s+([A-Z])\s*-\s*P(\d+)\b/gi)) {
       groups.add(match[1].toUpperCase() + '-P' + match[2]);
     }
   }

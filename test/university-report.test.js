@@ -34,6 +34,45 @@ test('daily university report is concise and actionable', () => {
   assert.match(output, /modo de solo lectura/);
 });
 
+test('daily report shows only confirmed practical subgroups', () => {
+  const output = formatUniversityDailyReport({
+    version: 1,
+    today: '2026-09-27',
+    summary: { subjects: 2, openAssignments: 0, newMaterials: 0, suggestedMinutes: 0 },
+    academicProfile: [
+      { subject: 'Análisis Matemático II', practicalGroups: ['B-P2'] },
+      { subject: 'Estructuras Algebraicas', practicalGroups: [] }
+    ],
+    tasks: []
+  });
+  assert.match(output, /Subgrupos prácticos confirmados:.*Análisis Matemático II.*B-P2/);
+  assert.doesNotMatch(output, /Estructuras Algebraicas.*P/);
+});
+
+test('daily report shows focused preparation resources below an assessment', () => {
+  const output = formatUniversityDailyReport({
+    version: 1,
+    today: '2026-09-27',
+    summary: { subjects: 9, openAssignments: 0, newMaterials: 0, suggestedMinutes: 50 },
+    tasks: [{
+      subject: 'EDA',
+      title: 'Preparar: Test Tema 1',
+      targetDate: '2026-10-02',
+      suggestedMinutes: 50,
+      reason: 'Evaluación próxima detectada en correo UV',
+      resources: [
+        { title: 'tema1', reason: 'mismo tema + teoría' },
+        { title: 'Ejer1eda', reason: 'mismo tema + práctica' },
+        { title: 'Ejer1eda resueltos', reason: 'mismo tema + comprobación' }
+      ]
+    }]
+  });
+  assert.match(output, /Test Tema 1/);
+  assert.match(output, /tema1.*teoría/);
+  assert.match(output, /Ejer1eda.*práctica/);
+  assert.match(output, /Ejer1eda resueltos.*comprobación/);
+});
+
 test('daily report surfaces grade changes without exposing unrelated history', () => {
   const output = formatUniversityDailyReport({
     version: 1,

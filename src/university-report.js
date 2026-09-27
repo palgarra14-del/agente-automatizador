@@ -22,7 +22,11 @@ function taskLine(task, index) {
     ? ' · fecha ' + task.targetDate
     : '';
   const why = reason ? ' — ' + reason : '';
-  return index + 1 + '. **' + subject + '** — ' + title + minutes + deadline + target + why;
+  const main = index + 1 + '. **' + subject + '** — ' + title + minutes + deadline + target + why;
+  const resources = Array.isArray(task.resources)
+    ? task.resources.slice(0, 4).map((item) => '   - ' + clean(item.title) + ' · ' + clean(item.reason)).join('\n')
+    : '';
+  return resources ? main + '\n' + resources : main;
 }
 
 function signalLine(signal, today) {
@@ -70,6 +74,17 @@ export function formatUniversityDailyReport(report) {
       report.summary.openAssignments + ' entregas pendientes · ' +
       report.summary.newMaterials + ' materiales nuevos'
   ];
+
+  const confirmedGroups = Array.isArray(report.academicProfile)
+    ? report.academicProfile.flatMap((course) =>
+        Array.isArray(course.practicalGroups) && course.practicalGroups.length === 1
+          ? [clean(course.subject) + ' · ' + course.practicalGroups[0]]
+          : []
+      )
+    : [];
+  if (confirmedGroups.length) {
+    lines.push('**Subgrupos prácticos confirmados:** ' + confirmedGroups.join(' · '));
+  }
 
   if (report.summary.mailStatus) {
     const newRelevant = Number.isInteger(report.summary.newRelevantMail) ? report.summary.newRelevantMail : 0;

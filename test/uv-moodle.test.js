@@ -31,7 +31,7 @@ test('UV dashboard parser deduplicates course cards and marks academic subjects'
 
 test('UV course page discovers personalized practical subgroup sections', () => {
   const groups = parseUvVisiblePracticalGroups({
-    text: 'Prácticas semanales de Análisis Matemático II (Subgrupo B-P2)',
+    text: 'Prácticas semanales de Análisis Matemático II (Subgrupo B-P2)\nPràctiques del Subgrup B-P2',
     links: [{ text: 'S2. Problemas', url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8' }]
   });
   assert.deepEqual(groups, ['B-P2']);
