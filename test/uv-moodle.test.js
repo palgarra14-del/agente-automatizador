@@ -17,15 +17,15 @@ test('UV date parser converts Moodle Spanish dates to Europe/Madrid UTC', () => 
 test('UV dashboard parser deduplicates course cards and marks academic subjects', () => {
   const page = {
     links: [
-      { url: 'https://aulavirtual.uv.es/course/view.php?id=113990', text: '2026-27 Álgebra Lineal y Geometría II Gr.B-T (34155)' },
-      { url: 'https://aulavirtual.uv.es/course/view.php?id=113990', text: 'Nombre del curso 2026-27 Álgebra Lineal y Geometría II Gr.B-T (34155)' },
-      { url: 'https://aulavirtual.uv.es/course/view.php?id=120261', text: '2026-27 Doble Grau en Matemàtiques i Enginyeria Informàtica' }
+      { url: 'https://aulavirtual.uv.es/course/view.php?id=101', text: '2026-27 Curso de Prueba A Gr.B-T (12345)' },
+      { url: 'https://aulavirtual.uv.es/course/view.php?id=101', text: 'Nombre del curso 2026-27 Curso de Prueba A Gr.B-T (12345)' },
+      { url: 'https://aulavirtual.uv.es/course/view.php?id=102', text: '2026-27 Espacio General de Prueba' }
     ]
   };
   const courses = parseUvCourseRegistry(page);
   assert.equal(courses.length, 2);
-  assert.equal(courses.find((course) => course.id === '113990').code, '34155');
-  assert.equal(courses.find((course) => course.id === '120261').academic, false);
+  assert.equal(courses.find((course) => course.id === '101').code, '12345');
+  assert.equal(courses.find((course) => course.id === '102').academic, false);
 });
 
 test('UV course activities keep only bounded read-view activity types', () => {
@@ -42,8 +42,8 @@ test('UV course activities keep only bounded read-view activity types', () => {
 
 test('UV assignment parser recognizes a submitted closed task', () => {
   const page = {
-    url: 'https://aulavirtual.uv.es/mod/assign/view.php?id=3747721',
-    title: '2026-27 Estructures de dades i algorismes Gr.A-T (34670): Ejercicios Tema 1 | AulaVirtual',
+    url: 'https://aulavirtual.uv.es/mod/assign/view.php?id=7',
+    title: '2026-27 Curso de Prueba A Gr.B-T (12345): Ejercicios Tema 1 | AulaVirtual',
     text: [
       'Ejercicios Tema 1',
       'Apertura: viernes, 18 de septiembre de 2026, 00:00',
@@ -56,7 +56,7 @@ test('UV assignment parser recognizes a submitted closed task', () => {
       'Estado de la calificación\tSin calificar'
     ].join('\n')
   };
-  const parsed = parseUvAssignmentPage(page, { id: '116386', code: '34670', name: 'EDA' });
+  const parsed = parseUvAssignmentPage(page, { id: '101', code: '12345', name: 'Curso A' });
   assert.equal(parsed.status, 'done');
   assert.equal(parsed.dueAt, '2026-09-23T09:30:00.000Z');
   assert.match(parsed.instructions, /Ejercicios: 1 d/);
@@ -80,17 +80,17 @@ test('UV snapshot includes academic subjects and normalized assignments only', (
   const snapshot = buildUvSnapshot({
     capturedAt: '2026-09-27T12:00:00Z',
     courses: [
-      { id: '1', code: '34670', name: 'EDA', academic: true },
-      { id: '2', code: null, name: 'General', academic: false }
+      { id: '101', code: '12345', name: 'Curso A', academic: true },
+      { id: '102', code: null, name: 'General', academic: false }
     ],
     assignments: [
-      { id: 'uv:assign:7', subjectId: '34670', title: 'Task', dueAt: null, status: 'open', url: 'https://aulavirtual.uv.es/mod/assign/view.php?id=7' }
+      { id: 'uv:assign:7', subjectId: '12345', title: 'Task', dueAt: null, status: 'open', url: 'https://aulavirtual.uv.es/mod/assign/view.php?id=7' }
     ],
     materials: [
-      { id: 'uv:resource:8', subjectId: '34670', title: 'Tema 1', firstSeenAt: '2026-09-27T12:00:00Z', url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8' }
+      { id: 'uv:resource:8', subjectId: '12345', title: 'Tema 1', firstSeenAt: '2026-09-27T12:00:00Z', url: 'https://aulavirtual.uv.es/mod/resource/view.php?id=8' }
     ]
   });
-  assert.deepEqual(snapshot.subjects, [{ id: '34670', name: 'EDA' }]);
+  assert.deepEqual(snapshot.subjects, [{ id: '12345', name: 'Curso A' }]);
   assert.equal(snapshot.assignments.length, 1);
   assert.equal(snapshot.materials.length, 1);
 });
