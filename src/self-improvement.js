@@ -35,12 +35,24 @@ export const AUTONOMOUS_MAINTENANCE_GOAL =
 
 export const AUTONOMOUS_LEADFINDER_SCOPE = Object.freeze({
   allowedPaths: Object.freeze([
-    'src/providers',
-    'src/scoring',
+    'src/providers/business-discovery-aggregator.ts',
+    'src/providers/business-discovery-aggregator.test.ts',
+    'src/providers/business-search.ts',
+    'src/providers/commercial-audience.ts',
+    'src/providers/niche-mapper.ts',
+    'src/providers/niche-relevance.ts',
+    'src/providers/niche-relevance.test.ts',
+    'src/providers/osm-business-search.ts',
+    'src/providers/osm-logic.test.ts',
+    'src/providers/overture-places.ts',
+    'src/providers/overture-places.test.ts',
     'src/services',
-    'src/utils',
-    'src/lib',
-    'docs'
+    'src/scoring/commercial-priority.ts',
+    'src/scoring/commercial-priority.test.ts',
+    'src/scoring/commercial-rank.ts',
+    'src/scoring/commercial-rank.test.ts',
+    'src/scoring/prospect-fit.ts',
+    'src/scoring/prospect-fit.test.ts'
   ]),
   forbiddenPaths: Object.freeze([
     '.github',

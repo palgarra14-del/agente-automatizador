@@ -47,6 +47,9 @@ test('commercial cloud lanes expose bounded autonomous policies without website-
   assert.equal(leadfinder.goal, AUTONOMOUS_LEADFINDER_GOAL);
   assert.deepEqual(leadfinder.scope, AUTONOMOUS_LEADFINDER_SCOPE);
   assert.equal(leadfinder.allowSensitiveImplementation, false);
+  assert.ok(leadfinder.scope.allowedPaths.length <= 24);
+  assert.ok(leadfinder.scope.allowedPaths.includes('src/services'));
+  assert.ok(leadfinder.scope.allowedPaths.includes('src/providers/business-discovery-aggregator.ts'));
   assert.ok(leadfinder.scope.forbiddenPaths.includes('src/app'));
   assert.ok(leadfinder.scope.forbiddenPaths.includes('src/lib/product-access.ts'));
 
