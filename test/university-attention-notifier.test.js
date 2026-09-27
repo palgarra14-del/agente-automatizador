@@ -62,3 +62,34 @@ test('a changed relevant event set creates a fresh notification', () => {
   assert.equal(second.notify, true);
   assert.notEqual(second.fingerprint, attentionFingerprint(before));
 });
+
+test('bounded notification history retains new events regardless of alphabetical order', () => {
+  const previousState = {
+    version: 2,
+    notifiedItems: Array.from({ length: 1000 }, (_, index) => 'old:' + String(index).padStart(4, '0'))
+  };
+  const attention = { version: 1, required: true, items: ['aaa:new'] };
+  const sent = notifiedAcademicState(
+    decideAcademicNotification(attention, previousState),
+    '2026-09-27T18:00:00Z'
+  );
+  assert.equal(sent.notifiedItems.length, 1000);
+  assert.equal(sent.notifiedItems.includes('old:0000'), false);
+  assert.equal(decideAcademicNotification(attention, sent).notify, false);
+
+  const next = notifiedAcademicState(
+    decideAcademicNotification({ ...attention, items: ['zzz:new'] }, sent),
+    '2026-09-27T19:00:00Z'
+  );
+  assert.equal(next.notifiedItems.length, 1000);
+  assert.equal(next.notifiedItems.includes('old:0001'), false);
+  assert.equal(decideAcademicNotification(attention, next).notify, false);
+});
+
+test('attention fingerprints remain independent of event order', () => {
+  const attention = { version: 1, required: true, items: ['event:b', 'event:a'] };
+  assert.equal(
+    attentionFingerprint(attention),
+    attentionFingerprint({ ...attention, items: ['event:a', 'event:b', 'event:a'] })
+  );
+});

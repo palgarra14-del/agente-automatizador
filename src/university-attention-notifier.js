@@ -2,12 +2,12 @@ import { createHash } from 'node:crypto';
 
 function cleanItems(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.map((item) => String(item ?? '').trim()).filter(Boolean))].sort();
+  return [...new Set(value.map((item) => String(item ?? '').trim()).filter(Boolean))];
 }
 
 export function attentionFingerprint(attention) {
   if (!attention || attention.version !== 1 || attention.required !== true) return null;
-  const items = cleanItems(attention.items);
+  const items = cleanItems(attention.items).sort();
   if (!items.length) return null;
   return createHash('sha256').update(JSON.stringify(items)).digest('hex');
 }
