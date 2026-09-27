@@ -351,17 +351,31 @@ const enrichedGradeChanges = gradeChanges.map((item) => ({
 }));
 
 const attentionReasons = [];
-if (mail.alerts.some((item) => item.isNew)) attentionReasons.push('new_relevant_mail');
-if (enrichedGradeChanges.length) attentionReasons.push('grade_changed');
-if (notificationChanges.length) attentionReasons.push('new_relevant_notification');
-if (changes.assignments.added.length || changes.assignments.updated.length) {
+const attentionItems = [];
+const newMail = mail.alerts.filter((item) => item.isNew);
+if (newMail.length) {
+  attentionReasons.push('new_relevant_mail');
+  attentionItems.push(...newMail.map((item) => item.id));
+}
+if (enrichedGradeChanges.length) {
+  attentionReasons.push('grade_changed');
+  attentionItems.push(...enrichedGradeChanges.map((item) => 'grade:' + item.subjectId + ':' + item.grade));
+}
+if (notificationChanges.length) {
+  attentionReasons.push('new_relevant_notification');
+  attentionItems.push(...notificationChanges.map((item) => item.id));
+}
+const changedAssignments = [...changes.assignments.added, ...changes.assignments.updated];
+if (changedAssignments.length) {
   attentionReasons.push('assignment_changed');
+  attentionItems.push(...changedAssignments.map((item) => 'assignment:' + item.id));
 }
 const attention = {
   version: 1,
   capturedAt,
-  required: attentionReasons.length > 0,
-  reasons: attentionReasons
+  required: attentionItems.length > 0,
+  reasons: attentionReasons,
+  items: [...new Set(attentionItems)].sort()
 };
 
 const report = {
