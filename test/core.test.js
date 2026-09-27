@@ -223,6 +223,10 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
     assert.equal(configured.get(id).businessContext.version, 1);
     assert.match(configured.get(id).businessContext.model, /LeadFinder.*Callflow.*website-pilot/i);
     assert.ok(configured.get(id).businessContext.currentFocus.includes('Peluquerías'));
+    assert.match(configured.get(id).businessContext.model, /Pack Esencial.*350.*Pack Profesional.*650/i);
+    assert.ok(configured.get(id).businessContext.funnel.some((item) => /50% inicial/i.test(item)));
+    assert.ok(configured.get(id).businessContext.metrics.includes('conversión propuesta a cliente'));
+    assert.ok(configured.get(id).businessContext.constraints.some((item) => /1 a 3 semanas.*15 días/i.test(item)));
     assert.ok(configured.get(id).businessContext.constraints.some((item) => /precios|ofertas|descuentos/i.test(item)));
   }
   assert.match(configured.get('leadfinder').businessContext.projectRole, /captación|prospectos/i);

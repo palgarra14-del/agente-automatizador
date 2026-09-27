@@ -105,41 +105,58 @@
       },
       "businessContext": {
         "version": 1,
-        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "model": "Sistema productizado de captación, venta y entrega de webs para pymes locales en España. Oferta comercial autorizada: Pack Esencial desde 350 € y Pack Profesional desde 650 €, con servicios complementarios presupuestados según necesidad. LeadFinder capta y prioriza; Callflow califica, hace seguimiento y registra cierre; website-pilot produce demos/webs; self optimiza el embudo completo.",
         "currentFocus": [
           "Peluquerías",
           "Barberías",
           "Pymes locales de servicios"
         ],
         "funnel": [
-          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
-          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
-          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
-          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos de contacto y señales de necesidad/encaje.",
+          "Callflow: contactar, registrar resultado, calificar necesidad, capturar objeciones, interés de pack y siguiente acción con fecha.",
+          "Propuesta: confirmar por escrito alcance final, pack y extras; no convertir el precio desde en precio cerrado sin alcance acordado.",
+          "Cierre: registrar aceptación y 50% inicial antes de arrancar el proyecto.",
+          "Producción: arrancar cuando estén disponibles materiales y accesos; objetivo contractual orientativo de 1 a 3 semanas desde recepción completa.",
+          "Entrega: validar revisiones acordadas, publicar y registrar el 50% restante previo a la entrega/publicación definitiva.",
+          "Postventa: 15 días naturales de soporte para errores técnicos y detección de necesidades de mantenimiento, SEO, contenidos o funcionalidades.",
+          "Cierre del bucle: usar pérdidas, objeciones, pack elegido, extras, tiempos y retrabajo para mejorar captación, guion, priorización y producción."
         ],
         "priorities": [
-          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
-          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
-          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
-          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+          "Priorizar mejoras que aumenten oportunidades cualificadas, propuestas útiles, cierres o ingresos por hora comercial, no solo volumen bruto de leads.",
+          "Capturar señales deterministas de encaje Pack Esencial frente a Pack Profesional y de posibles servicios complementarios sin inventar necesidades.",
+          "Reducir tiempo desde lead cualificado a propuesta/demo y desde aceptación a proyecto listo para producción.",
+          "Evitar demos gratuitas sobredimensionadas: producir evidencia suficiente para vender, no trabajo completo antes del cierre.",
+          "Hacer visible el cuello de botella de materiales/accesos del cliente antes de prometer fecha de entrega.",
+          "Medir motivos de pérdida y objeciones de forma estructurada para alimentar LeadFinder y el argumentario comercial.",
+          "Automatizar traspasos repetitivos LeadFinder → Callflow → propuesta/brief → website-pilot y devolver resultados al origen.",
+          "Evitar refactors, pulido técnico o trabajo cosmético sin impacto demostrable en conversión, ticket, tiempo de entrega, datos o fiabilidad."
         ],
         "metrics": [
           "leads cualificados generados",
           "tasa de datos de contacto válidos",
-          "completitud de resultados de llamada",
-          "seguimientos completados",
-          "tiempo de lead a demo/web",
-          "conversión de lead a demo",
-          "conversión de demo a cliente",
-          "retrabajo o defectos de producción"
+          "contactos efectivos por hora comercial",
+          "conversión contacto a oportunidad cualificada",
+          "conversión oportunidad a propuesta",
+          "conversión propuesta a cliente",
+          "tiempo de lead cualificado a propuesta/demo",
+          "mix Pack Esencial / Pack Profesional",
+          "tasa de servicios complementarios",
+          "motivos de pérdida y objeciones",
+          "tiempo desde aceptación a materiales completos",
+          "tiempo desde materiales completos a publicación",
+          "retrabajo o defectos de producción",
+          "incidencias dentro de soporte de 15 días"
         ],
         "constraints": [
-          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
-          "No inventar hechos sobre prospectos, clientes o negocios.",
-          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
-          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+          "Oferta autorizada actual: Pack Esencial desde 350 € y Pack Profesional desde 650 €; son precios desde, no importes finales automáticos.",
+          "Servicios complementarios se presupuestan según necesidad: dominio/hosting, mantenimiento, SEO ampliado, contenidos, funcionalidades especiales y e-commerce.",
+          "Condiciones autorizadas: 50% al inicio y 50% antes de entrega/publicación definitiva; plazo medio 1 a 3 semanas desde recepción completa de materiales; 15 días de soporte técnico por errores.",
+          "No inventar hechos, necesidades, presupuesto, contactos, reseñas ni datos del prospecto o cliente.",
+          "No enviar comunicaciones externas, cerrar ventas, cobrar, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Antes de producción real, exigir alcance confirmado y comprobar materiales/accesos necesarios y un interlocutor de aprobación.",
+          "Preferir evidencia del CRM, repositorios y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
         ],
-        "projectRole": "Mejorar el agente/orquestador compartido para que el embudo comercial funcione de forma desatendida, fiable y con aprendizaje entre proyectos. Las mejoras de infraestructura solo son prioritarias cuando desbloquean o aceleran resultados del negocio."
+        "projectRole": "Mejorar el agente/orquestador compartido para que el embudo comercial funcione de forma desatendida, fiable y con aprendizaje entre proyectos. Las mejoras de infraestructura solo son prioritarias cuando desbloquean o aceleran ingresos, cierres, entrega o aprendizaje del negocio."
       }
     },
     {
@@ -251,41 +268,58 @@
       },
       "businessContext": {
         "version": 1,
-        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "model": "Sistema productizado de captación, venta y entrega de webs para pymes locales en España. Oferta comercial autorizada: Pack Esencial desde 350 € y Pack Profesional desde 650 €, con servicios complementarios presupuestados según necesidad. LeadFinder capta y prioriza; Callflow califica, hace seguimiento y registra cierre; website-pilot produce demos/webs; self optimiza el embudo completo.",
         "currentFocus": [
           "Peluquerías",
           "Barberías",
           "Pymes locales de servicios"
         ],
         "funnel": [
-          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
-          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
-          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
-          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos de contacto y señales de necesidad/encaje.",
+          "Callflow: contactar, registrar resultado, calificar necesidad, capturar objeciones, interés de pack y siguiente acción con fecha.",
+          "Propuesta: confirmar por escrito alcance final, pack y extras; no convertir el precio desde en precio cerrado sin alcance acordado.",
+          "Cierre: registrar aceptación y 50% inicial antes de arrancar el proyecto.",
+          "Producción: arrancar cuando estén disponibles materiales y accesos; objetivo contractual orientativo de 1 a 3 semanas desde recepción completa.",
+          "Entrega: validar revisiones acordadas, publicar y registrar el 50% restante previo a la entrega/publicación definitiva.",
+          "Postventa: 15 días naturales de soporte para errores técnicos y detección de necesidades de mantenimiento, SEO, contenidos o funcionalidades.",
+          "Cierre del bucle: usar pérdidas, objeciones, pack elegido, extras, tiempos y retrabajo para mejorar captación, guion, priorización y producción."
         ],
         "priorities": [
-          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
-          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
-          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
-          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+          "Priorizar mejoras que aumenten oportunidades cualificadas, propuestas útiles, cierres o ingresos por hora comercial, no solo volumen bruto de leads.",
+          "Capturar señales deterministas de encaje Pack Esencial frente a Pack Profesional y de posibles servicios complementarios sin inventar necesidades.",
+          "Reducir tiempo desde lead cualificado a propuesta/demo y desde aceptación a proyecto listo para producción.",
+          "Evitar demos gratuitas sobredimensionadas: producir evidencia suficiente para vender, no trabajo completo antes del cierre.",
+          "Hacer visible el cuello de botella de materiales/accesos del cliente antes de prometer fecha de entrega.",
+          "Medir motivos de pérdida y objeciones de forma estructurada para alimentar LeadFinder y el argumentario comercial.",
+          "Automatizar traspasos repetitivos LeadFinder → Callflow → propuesta/brief → website-pilot y devolver resultados al origen.",
+          "Evitar refactors, pulido técnico o trabajo cosmético sin impacto demostrable en conversión, ticket, tiempo de entrega, datos o fiabilidad."
         ],
         "metrics": [
           "leads cualificados generados",
           "tasa de datos de contacto válidos",
-          "completitud de resultados de llamada",
-          "seguimientos completados",
-          "tiempo de lead a demo/web",
-          "conversión de lead a demo",
-          "conversión de demo a cliente",
-          "retrabajo o defectos de producción"
+          "contactos efectivos por hora comercial",
+          "conversión contacto a oportunidad cualificada",
+          "conversión oportunidad a propuesta",
+          "conversión propuesta a cliente",
+          "tiempo de lead cualificado a propuesta/demo",
+          "mix Pack Esencial / Pack Profesional",
+          "tasa de servicios complementarios",
+          "motivos de pérdida y objeciones",
+          "tiempo desde aceptación a materiales completos",
+          "tiempo desde materiales completos a publicación",
+          "retrabajo o defectos de producción",
+          "incidencias dentro de soporte de 15 días"
         ],
         "constraints": [
-          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
-          "No inventar hechos sobre prospectos, clientes o negocios.",
-          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
-          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+          "Oferta autorizada actual: Pack Esencial desde 350 € y Pack Profesional desde 650 €; son precios desde, no importes finales automáticos.",
+          "Servicios complementarios se presupuestan según necesidad: dominio/hosting, mantenimiento, SEO ampliado, contenidos, funcionalidades especiales y e-commerce.",
+          "Condiciones autorizadas: 50% al inicio y 50% antes de entrega/publicación definitiva; plazo medio 1 a 3 semanas desde recepción completa de materiales; 15 días de soporte técnico por errores.",
+          "No inventar hechos, necesidades, presupuesto, contactos, reseñas ni datos del prospecto o cliente.",
+          "No enviar comunicaciones externas, cerrar ventas, cobrar, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Antes de producción real, exigir alcance confirmado y comprobar materiales/accesos necesarios y un interlocutor de aprobación.",
+          "Preferir evidencia del CRM, repositorios y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
         ],
-        "projectRole": "Mejorar la captación: calidad, cobertura, normalización, deduplicación, priorización y datos accionables de prospectos para reducir llamadas desperdiciadas y alimentar Callflow con mejores leads."
+        "projectRole": "Mejorar la captación: calidad, cobertura, normalización, deduplicación, priorización y señales de encaje comercial para reducir llamadas desperdiciadas y alimentar Callflow con prospectos más comprables."
       }
     },
     {
@@ -400,41 +434,58 @@
       },
       "businessContext": {
         "version": 1,
-        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "model": "Sistema productizado de captación, venta y entrega de webs para pymes locales en España. Oferta comercial autorizada: Pack Esencial desde 350 € y Pack Profesional desde 650 €, con servicios complementarios presupuestados según necesidad. LeadFinder capta y prioriza; Callflow califica, hace seguimiento y registra cierre; website-pilot produce demos/webs; self optimiza el embudo completo.",
         "currentFocus": [
           "Peluquerías",
           "Barberías",
           "Pymes locales de servicios"
         ],
         "funnel": [
-          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
-          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
-          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
-          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos de contacto y señales de necesidad/encaje.",
+          "Callflow: contactar, registrar resultado, calificar necesidad, capturar objeciones, interés de pack y siguiente acción con fecha.",
+          "Propuesta: confirmar por escrito alcance final, pack y extras; no convertir el precio desde en precio cerrado sin alcance acordado.",
+          "Cierre: registrar aceptación y 50% inicial antes de arrancar el proyecto.",
+          "Producción: arrancar cuando estén disponibles materiales y accesos; objetivo contractual orientativo de 1 a 3 semanas desde recepción completa.",
+          "Entrega: validar revisiones acordadas, publicar y registrar el 50% restante previo a la entrega/publicación definitiva.",
+          "Postventa: 15 días naturales de soporte para errores técnicos y detección de necesidades de mantenimiento, SEO, contenidos o funcionalidades.",
+          "Cierre del bucle: usar pérdidas, objeciones, pack elegido, extras, tiempos y retrabajo para mejorar captación, guion, priorización y producción."
         ],
         "priorities": [
-          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
-          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
-          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
-          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+          "Priorizar mejoras que aumenten oportunidades cualificadas, propuestas útiles, cierres o ingresos por hora comercial, no solo volumen bruto de leads.",
+          "Capturar señales deterministas de encaje Pack Esencial frente a Pack Profesional y de posibles servicios complementarios sin inventar necesidades.",
+          "Reducir tiempo desde lead cualificado a propuesta/demo y desde aceptación a proyecto listo para producción.",
+          "Evitar demos gratuitas sobredimensionadas: producir evidencia suficiente para vender, no trabajo completo antes del cierre.",
+          "Hacer visible el cuello de botella de materiales/accesos del cliente antes de prometer fecha de entrega.",
+          "Medir motivos de pérdida y objeciones de forma estructurada para alimentar LeadFinder y el argumentario comercial.",
+          "Automatizar traspasos repetitivos LeadFinder → Callflow → propuesta/brief → website-pilot y devolver resultados al origen.",
+          "Evitar refactors, pulido técnico o trabajo cosmético sin impacto demostrable en conversión, ticket, tiempo de entrega, datos o fiabilidad."
         ],
         "metrics": [
           "leads cualificados generados",
           "tasa de datos de contacto válidos",
-          "completitud de resultados de llamada",
-          "seguimientos completados",
-          "tiempo de lead a demo/web",
-          "conversión de lead a demo",
-          "conversión de demo a cliente",
-          "retrabajo o defectos de producción"
+          "contactos efectivos por hora comercial",
+          "conversión contacto a oportunidad cualificada",
+          "conversión oportunidad a propuesta",
+          "conversión propuesta a cliente",
+          "tiempo de lead cualificado a propuesta/demo",
+          "mix Pack Esencial / Pack Profesional",
+          "tasa de servicios complementarios",
+          "motivos de pérdida y objeciones",
+          "tiempo desde aceptación a materiales completos",
+          "tiempo desde materiales completos a publicación",
+          "retrabajo o defectos de producción",
+          "incidencias dentro de soporte de 15 días"
         ],
         "constraints": [
-          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
-          "No inventar hechos sobre prospectos, clientes o negocios.",
-          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
-          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+          "Oferta autorizada actual: Pack Esencial desde 350 € y Pack Profesional desde 650 €; son precios desde, no importes finales automáticos.",
+          "Servicios complementarios se presupuestan según necesidad: dominio/hosting, mantenimiento, SEO ampliado, contenidos, funcionalidades especiales y e-commerce.",
+          "Condiciones autorizadas: 50% al inicio y 50% antes de entrega/publicación definitiva; plazo medio 1 a 3 semanas desde recepción completa de materiales; 15 días de soporte técnico por errores.",
+          "No inventar hechos, necesidades, presupuesto, contactos, reseñas ni datos del prospecto o cliente.",
+          "No enviar comunicaciones externas, cerrar ventas, cobrar, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Antes de producción real, exigir alcance confirmado y comprobar materiales/accesos necesarios y un interlocutor de aprobación.",
+          "Preferir evidencia del CRM, repositorios y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
         ],
-        "projectRole": "Mejorar la ejecución comercial: priorización de llamadas, registro de resultados, estados, seguimiento y feedback hacia LeadFinder y producción web para aumentar disciplina y aprendizaje del embudo."
+        "projectRole": "Mejorar la ejecución comercial: priorización de llamadas, calificación, objeciones, siguiente acción, propuesta y seguimiento hasta cierre, devolviendo feedback útil a LeadFinder y producción web."
       }
     },
     {
@@ -550,41 +601,58 @@
       },
       "businessContext": {
         "version": 1,
-        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "model": "Sistema productizado de captación, venta y entrega de webs para pymes locales en España. Oferta comercial autorizada: Pack Esencial desde 350 € y Pack Profesional desde 650 €, con servicios complementarios presupuestados según necesidad. LeadFinder capta y prioriza; Callflow califica, hace seguimiento y registra cierre; website-pilot produce demos/webs; self optimiza el embudo completo.",
         "currentFocus": [
           "Peluquerías",
           "Barberías",
           "Pymes locales de servicios"
         ],
         "funnel": [
-          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
-          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
-          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
-          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos de contacto y señales de necesidad/encaje.",
+          "Callflow: contactar, registrar resultado, calificar necesidad, capturar objeciones, interés de pack y siguiente acción con fecha.",
+          "Propuesta: confirmar por escrito alcance final, pack y extras; no convertir el precio desde en precio cerrado sin alcance acordado.",
+          "Cierre: registrar aceptación y 50% inicial antes de arrancar el proyecto.",
+          "Producción: arrancar cuando estén disponibles materiales y accesos; objetivo contractual orientativo de 1 a 3 semanas desde recepción completa.",
+          "Entrega: validar revisiones acordadas, publicar y registrar el 50% restante previo a la entrega/publicación definitiva.",
+          "Postventa: 15 días naturales de soporte para errores técnicos y detección de necesidades de mantenimiento, SEO, contenidos o funcionalidades.",
+          "Cierre del bucle: usar pérdidas, objeciones, pack elegido, extras, tiempos y retrabajo para mejorar captación, guion, priorización y producción."
         ],
         "priorities": [
-          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
-          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
-          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
-          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+          "Priorizar mejoras que aumenten oportunidades cualificadas, propuestas útiles, cierres o ingresos por hora comercial, no solo volumen bruto de leads.",
+          "Capturar señales deterministas de encaje Pack Esencial frente a Pack Profesional y de posibles servicios complementarios sin inventar necesidades.",
+          "Reducir tiempo desde lead cualificado a propuesta/demo y desde aceptación a proyecto listo para producción.",
+          "Evitar demos gratuitas sobredimensionadas: producir evidencia suficiente para vender, no trabajo completo antes del cierre.",
+          "Hacer visible el cuello de botella de materiales/accesos del cliente antes de prometer fecha de entrega.",
+          "Medir motivos de pérdida y objeciones de forma estructurada para alimentar LeadFinder y el argumentario comercial.",
+          "Automatizar traspasos repetitivos LeadFinder → Callflow → propuesta/brief → website-pilot y devolver resultados al origen.",
+          "Evitar refactors, pulido técnico o trabajo cosmético sin impacto demostrable en conversión, ticket, tiempo de entrega, datos o fiabilidad."
         ],
         "metrics": [
           "leads cualificados generados",
           "tasa de datos de contacto válidos",
-          "completitud de resultados de llamada",
-          "seguimientos completados",
-          "tiempo de lead a demo/web",
-          "conversión de lead a demo",
-          "conversión de demo a cliente",
-          "retrabajo o defectos de producción"
+          "contactos efectivos por hora comercial",
+          "conversión contacto a oportunidad cualificada",
+          "conversión oportunidad a propuesta",
+          "conversión propuesta a cliente",
+          "tiempo de lead cualificado a propuesta/demo",
+          "mix Pack Esencial / Pack Profesional",
+          "tasa de servicios complementarios",
+          "motivos de pérdida y objeciones",
+          "tiempo desde aceptación a materiales completos",
+          "tiempo desde materiales completos a publicación",
+          "retrabajo o defectos de producción",
+          "incidencias dentro de soporte de 15 días"
         ],
         "constraints": [
-          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
-          "No inventar hechos sobre prospectos, clientes o negocios.",
-          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
-          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+          "Oferta autorizada actual: Pack Esencial desde 350 € y Pack Profesional desde 650 €; son precios desde, no importes finales automáticos.",
+          "Servicios complementarios se presupuestan según necesidad: dominio/hosting, mantenimiento, SEO ampliado, contenidos, funcionalidades especiales y e-commerce.",
+          "Condiciones autorizadas: 50% al inicio y 50% antes de entrega/publicación definitiva; plazo medio 1 a 3 semanas desde recepción completa de materiales; 15 días de soporte técnico por errores.",
+          "No inventar hechos, necesidades, presupuesto, contactos, reseñas ni datos del prospecto o cliente.",
+          "No enviar comunicaciones externas, cerrar ventas, cobrar, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Antes de producción real, exigir alcance confirmado y comprobar materiales/accesos necesarios y un interlocutor de aprobación.",
+          "Preferir evidencia del CRM, repositorios y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
         ],
-        "projectRole": "Mejorar la producción comercial: generar demos y webs rápidas, profesionales, verificables y orientadas a contacto/conversión, reduciendo retrabajo y tiempo desde prospecto cualificado hasta demo utilizable."
+        "projectRole": "Mejorar la producción comercial: convertir oportunidades cualificadas en demos, propuestas y webs rápidas, verificables y alineadas con el pack/alcance acordado, minimizando retrabajo y tiempo hasta cobro."
       }
     }
   ]
