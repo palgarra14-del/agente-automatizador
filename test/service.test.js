@@ -553,8 +553,23 @@ test('operator upgrade unsafe Git config pattern is accepted by real git', async
 
 test('operator upgrade idle gate treats only live work as active', () => {
   assert.throws(() => assertOperatorUpgradeIdleState({ requests: { a: { status: 'running', issueNumber: 42 } } }), /operator_upgrade_active_request:42/);
-  assert.throws(() => assertOperatorUpgradeIdleState({ workflows: { w: { id: 'w', status: 'awaiting_approval' } } }), /operator_upgrade_active_workflow:w/);
-  assert.equal(assertOperatorUpgradeIdleState({ workflows: { w: { status: 'blocked' } }, requests: { a: { status: 'rejected' } }, runs: { r: { status: 'failed' } } }), true);
+  assert.throws(() => assertOperatorUpgradeIdleState({
+    requests: { a: { status: 'running', issueNumber: 43, workflowId: 'missing' } }
+  }), /operator_upgrade_active_request:43/);
+  assert.throws(() => assertOperatorUpgradeIdleState({
+    workflows: { w: { id: 'w', status: 'awaiting_approval' } },
+    requests: { a: { status: 'running', issueNumber: 44, workflowId: 'w' } }
+  }), /operator_upgrade_active_workflow:w/);
+  assert.equal(assertOperatorUpgradeIdleState({
+    workflows: { w: { id: 'w', status: 'blocked' } },
+    requests: { a: { status: 'running', issueNumber: 125, workflowId: 'w' } },
+    runs: { r: { status: 'failed' } }
+  }), true);
+  assert.equal(assertOperatorUpgradeIdleState({
+    workflows: { w: { status: 'blocked' } },
+    requests: { a: { status: 'rejected' } },
+    runs: { r: { status: 'failed' } }
+  }), true);
 });
 
 test('operator upgrade lease rejects a concurrent live upgrader before external work', async () => {

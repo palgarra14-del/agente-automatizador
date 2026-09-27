@@ -525,9 +525,18 @@ const terminalUpgradeRequestStatuses = new Set(['completed', 'failed', 'blocked'
 export function assertOperatorUpgradeIdleState(state = {}) {
   const activeRun = Object.values(state.runs ?? {}).find((entry) => entry && !terminalUpgradeRunStatuses.has(entry.status));
   if (activeRun) throw new Error(`operator_upgrade_active_run:${activeRun.id ?? 'unknown'}`);
-  const activeWorkflow = Object.values(state.workflows ?? {}).find((entry) => entry && !terminalUpgradeWorkflowStatuses.has(entry.status));
+
+  const workflows = state.workflows ?? {};
+  const activeWorkflow = Object.values(workflows).find((entry) => entry && !terminalUpgradeWorkflowStatuses.has(entry.status));
   if (activeWorkflow) throw new Error(`operator_upgrade_active_workflow:${activeWorkflow.id ?? 'unknown'}`);
-  const activeRequest = Object.values(state.requests ?? {}).find((entry) => entry && !terminalUpgradeRequestStatuses.has(entry.status));
+
+  const activeRequest = Object.values(state.requests ?? {}).find((entry) => {
+    if (!entry || terminalUpgradeRequestStatuses.has(entry.status)) return false;
+    const workflowId = typeof entry.workflowId === 'string' && entry.workflowId ? entry.workflowId : null;
+    if (!workflowId) return true;
+    const workflow = workflows[workflowId];
+    return !workflow || !terminalUpgradeWorkflowStatuses.has(workflow.status);
+  });
   if (activeRequest) throw new Error(`operator_upgrade_active_request:${activeRequest.issueNumber ?? 'unknown'}`);
   return true;
 }
