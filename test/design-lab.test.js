@@ -56,6 +56,7 @@ function strongEntry(index, patch = {}) {
     finalScore: 9.3,
     minCategory: 9.3,
     buildSeconds: 480,
+    selectedElapsedSeconds: 540,
     deterministicQaPass: true,
     verdict: 'PASS',
     conceptIdentity: `signature ${['alba','bruma','cobre','duna','esfera','fuego'][index % 6]}`,
@@ -91,13 +92,25 @@ print(json.dumps({"candidate":candidate,"recent":len(recent),"qualified":qualifi
   assert.equal(result.qualified, null);
 });
 
+test('training cannot qualify when the best sale-ready candidate arrives after ten minutes', () => {
+  const slow = Array.from({ length: 6 }, (_, i) => strongEntry(i, { selectedElapsedSeconds: 601 }));
+  const result = python(`
+entries=json.loads(sys.argv[1])
+candidate,recent,qualified=m.training_mastery_candidate(entries)
+print(json.dumps({"candidate":candidate,"recent":len(recent),"qualified":qualified}))
+`, [JSON.stringify(slow)]);
+  assert.equal(result.candidate, false);
+  assert.equal(result.recent, 6);
+  assert.equal(result.qualified, null);
+});
+
 test('design lab requires unseen holdouts after a qualifying training streak', () => {
   const training = Array.from({ length: 6 }, (_, i) => strongEntry(i));
   const result = python(`
 entries=json.loads(sys.argv[1])
 candidate,recent,qualified=m.training_mastery_candidate(entries)
 before,_=m.mastery_status(entries)
-h1={"phase":"holdout","briefSlug":"holdout-fisioterapia","completedAt":"2026-09-20T10:00:00+00:00","finalScore":9.4,"minCategory":9.1,"buildSeconds":420,"deterministicQaPass":True,"verdict":"PASS","categoryScores":{k:9.3 for k in m.SCORE_WEIGHTS}}
+h1={"phase":"holdout","briefSlug":"holdout-fisioterapia","completedAt":"2026-09-20T10:00:00+00:00","finalScore":9.4,"minCategory":9.1,"buildSeconds":420,"selectedElapsedSeconds":560,"deterministicQaPass":True,"verdict":"PASS","categoryScores":{k:9.3 for k in m.SCORE_WEIGHTS}}
 h2={**h1,"briefSlug":"holdout-carpinteria","completedAt":"2026-09-21T10:00:00+00:00"}
 after_one,_=m.mastery_status(entries+[h1])
 after_two,evidence=m.mastery_status(entries+[h1,h2])
