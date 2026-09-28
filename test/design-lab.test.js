@@ -232,6 +232,41 @@ print(json.dumps({"repeated":m.section_rhythm_from_qa(repeated),"varied":m.secti
   assert.ok(result.varied.viewports.desktop.uniqueStructures >= 4);
 });
 
+test('identity continuity flags hero-only signature treatment and accepts page-wide art direction', () => {
+  const goodMarkers = [
+    { label: 'ribbon', yVh: 0.25, widthVw: 0.45, heightVh: 0.25 },
+    { label: 'ribbon-detail', yVh: 1.15, widthVw: 0.3, heightVh: 0.18 },
+    { label: 'ribbon-transition', yVh: 2.1, widthVw: 0.5, heightVh: 0.12 }
+  ];
+  const badMarkers = [
+    { label: 'ribbon', yVh: 0.25, widthVw: 0.45, heightVh: 0.25 }
+  ];
+  const good = {
+    mobile: { designMetrics: { signatureElements: goodMarkers } },
+    desktop: { designMetrics: { signatureElements: goodMarkers } }
+  };
+  const bad = {
+    mobile: { designMetrics: { signatureElements: badMarkers } },
+    desktop: { designMetrics: { signatureElements: badMarkers } }
+  };
+  const result = python(`
+good=json.loads(sys.argv[1]); bad=json.loads(sys.argv[2])
+print(json.dumps({"good":m.identity_continuity_from_qa(good),"bad":m.identity_continuity_from_qa(bad)}))
+`, [JSON.stringify(good), JSON.stringify(bad)]);
+  assert.equal(result.good.observations.length, 0, JSON.stringify(result.good));
+  assert.equal(result.good.viewports.mobile.nonHeroCount, 2);
+  assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_mobile')));
+  assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_desktop')));
+});
+
+test('design lab learns Codex quota reset and adds a safety margin', () => {
+  const result = python(`
+reset=m.parse_usage_reset_epoch("ERROR: You've hit your usage limit. Please try again at Sep 29th, 2026 12:55 AM.")
+print(json.dumps({"iso":m.datetime.fromtimestamp(reset,m.LOCAL_TZ).isoformat()}))
+`);
+  assert.equal(result.iso, '2026-09-29T01:00:00+02:00');
+});
+
 test('static design audit rejects template-breaking technical defects', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-audit-'));
   try {
