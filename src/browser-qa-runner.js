@@ -649,6 +649,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       .filter(isRendered)
       .map((element) => {
         const rect = element.getBoundingClientRect();
+        const actionStyle = styleFor(element);
         let href = String(element.getAttribute?.('href') ?? '');
         let kind = String(element.tagName ?? '').toLowerCase() === 'button' ? 'button' : 'link';
         if (/^tel:/i.test(href)) kind = 'phone';
@@ -657,15 +658,17 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         else if (href.startsWith('#')) kind = 'anchor';
         return {
           kind,
+          recipient: ['phone', 'email'].includes(kind) ? href.slice(0, 240) : null,
           xVw: metric(rect.left / viewportWidth),
           yVh: metric(rect.top / viewportHeight),
           widthVw: metric(rect.width / viewportWidth),
           heightVh: metric(rect.height / viewportHeight),
+          fontSizePx: px(actionStyle?.fontSize),
           nameLength: nameFor(element).length
         };
       })
       .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0) || (a.xVw ?? 0) - (b.xVw ?? 0))
-      .slice(0, 12);
+      .slice(0, 24);
     const h1 = queryAll('h1').find(isRendered) ?? null;
     const bodyStyle = styleFor(document.body);
     const h1Style = h1 ? styleFor(h1) : null;

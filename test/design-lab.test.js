@@ -135,6 +135,35 @@ print(json.dumps({"candidate":candidate,"mastered":mastered,"recent":len(recent)
   assert.equal(result.qualified, null);
 });
 
+test('conversion ergonomics requires an exact above-fold comfortably tappable contact action', () => {
+  const brief = { syntheticContact: { phone: '+34000000000', email: 'demo@example.invalid' } };
+  const good = {
+    mobile: { designMetrics: { viewport: { width: 390, height: 844 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.35, widthVw: 0.62, heightVh: 0.06, fontSizePx: 16 }
+    ] } },
+    desktop: { designMetrics: { viewport: { width: 1440, height: 900 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.3, widthVw: 0.18, heightVh: 0.05, fontSizePx: 15 }
+    ] } }
+  };
+  const bad = {
+    mobile: { designMetrics: { viewport: { width: 390, height: 844 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 1.2, widthVw: 0.7, heightVh: 0.07, fontSizePx: 16 }
+    ] } },
+    desktop: { designMetrics: { viewport: { width: 1440, height: 900 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.25, widthVw: 0.02, heightVh: 0.02, fontSizePx: 12 }
+    ] } }
+  };
+  const result = python(`
+brief=json.loads(sys.argv[1]); good=json.loads(sys.argv[2]); bad=json.loads(sys.argv[3])
+print(json.dumps({"good":m.conversion_ergonomics_from_qa(good,brief),"bad":m.conversion_ergonomics_from_qa(bad,brief)}))
+`, [JSON.stringify(brief), JSON.stringify(good), JSON.stringify(bad)]);
+  assert.equal(result.good.pass, true, JSON.stringify(result.good));
+  assert.equal(result.good.viewports.mobile.ergonomicCount, 1);
+  assert.equal(result.bad.pass, false);
+  assert.ok(result.bad.defects.includes('conversion_action_not_above_fold_mobile'));
+  assert.ok(result.bad.defects.includes('conversion_target_too_small_desktop'));
+});
+
 test('static design audit rejects template-breaking technical defects', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-audit-'));
   try {
