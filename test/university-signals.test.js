@@ -30,6 +30,16 @@ test('numeric academic dates preserve explicit years and reject invalid leap day
   assert.deepEqual(state.signals, []);
 });
 
+test('numeric academic dates reject partial matches inside unsupported date formats', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  for (const value of ['2026-10-02', '2-10-25', '2-10-20250', '2-10-2026-01']) {
+    assert.deepEqual(extractAcademicDates('Test: ' + value, capturedAt), [], value);
+    assert.deepEqual(extractAcademicDates(
+      'Referencia: ' + value + '. El test será el 3-10-2026.', capturedAt
+    ), ['2026-10-03'], value);
+  }
+});
+
 test('assessment email becomes a durable high-priority academic signal', () => {
   const signal = alertToAcademicSignal({
     id: 'uv-mail:772',

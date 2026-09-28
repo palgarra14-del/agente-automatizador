@@ -88,7 +88,8 @@ export function extractAcademicDates(value, capturedAt) {
     if (from) superseded.add(from);
     if (to) dates.add(to);
   }
-  for (const match of text.matchAll(/\b(\d{1,2})-(\d{1,2})(?:-(\d{4}))?\b/g)) {
+  // Do not reinterpret fragments of ISO dates or unsupported year formats.
+  for (const match of text.matchAll(/(?<![\d-])\b(\d{1,2})-(\d{1,2})(?:-(\d{4}))?\b(?![\d-])/g)) {
     const day = Number(match[1]);
     const month = Number(match[2]) - 1;
     if (month < 0 || month > 11) continue;
