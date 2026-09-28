@@ -1,4 +1,4 @@
-import { launchChromeCdpBrowser } from '/home/pablo/projects/agente-automatizador/src/browser-qa-runner.js';
+import { launchChromeCdpBrowser } from '../../src/browser-qa-runner.js';
 
 const url = process.argv[2];
 if (!url) throw new Error('usage: node local-qa.mjs <url>');
@@ -46,21 +46,35 @@ function defectsFor(probe, label) {
   if (!probe?.metadata?.description) defects.push(`${label}:missing_description`);
   const unnamed = (probe?.interactiveControls ?? []).filter((item) => !String(item?.accessibleName ?? '').trim());
   for (const control of unnamed.slice(0, 12)) defects.push(`${label}:missing_accessible_name:${control.id ?? control.role ?? 'control'}`);
+  if ((probe?.geometry?.clippedKeyText ?? []).length) defects.push(`${label}:clipped_key_text:${probe.geometry.clippedKeyText.length}`);
+  if ((probe?.geometry?.severelySmallTouchTargets ?? []).length) defects.push(`${label}:severely_small_touch_targets:${probe.geometry.severelySmallTouchTargets.length}`);
   return defects;
+}
+
+function observationsFor(probe, label) {
+  const observations = [];
+  const small = probe?.geometry?.smallTouchTargets?.length ?? 0;
+  const tiny = probe?.geometry?.tinyText?.length ?? 0;
+  if (small && label !== 'desktop') observations.push(`${label}:touch_targets_below_44:${small}`);
+  if (tiny) observations.push(`${label}:tiny_text_below_11px:${tiny}`);
+  return observations;
 }
 
 const [mobile, tablet, desktop] = await Promise.all([inspect(390, 844), inspect(768, 1024), inspect(1440, 900)]);
 const defects = [...defectsFor(mobile, 'mobile'), ...defectsFor(tablet, 'tablet'), ...defectsFor(desktop, 'desktop')];
+const observations = [...observationsFor(mobile, 'mobile'), ...observationsFor(tablet, 'tablet'), ...observationsFor(desktop, 'desktop')];
 const result = {
   pass: defects.length === 0,
   defects,
+  observations,
   mobile: {
     status: mobile.status,
     bodyTextLength: mobile.bodyTextLength,
     horizontalOverflow: mobile.horizontalOverflow,
     errorOverlay: mobile.errorOverlay,
     metadata: mobile.metadata,
-    interactiveControls: mobile.interactiveControls
+    interactiveControls: mobile.interactiveControls,
+    geometry: mobile.geometry
   },
   tablet: {
     status: tablet.status,
@@ -68,7 +82,8 @@ const result = {
     horizontalOverflow: tablet.horizontalOverflow,
     errorOverlay: tablet.errorOverlay,
     metadata: tablet.metadata,
-    interactiveControls: tablet.interactiveControls
+    interactiveControls: tablet.interactiveControls,
+    geometry: tablet.geometry
   },
   desktop: {
     status: desktop.status,
@@ -76,7 +91,8 @@ const result = {
     horizontalOverflow: desktop.horizontalOverflow,
     errorOverlay: desktop.errorOverlay,
     metadata: desktop.metadata,
-    interactiveControls: desktop.interactiveControls
+    interactiveControls: desktop.interactiveControls,
+    geometry: desktop.geometry
   }
 };
 process.stdout.write(JSON.stringify(result, null, 2));
