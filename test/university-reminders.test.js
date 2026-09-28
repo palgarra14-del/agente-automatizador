@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildAcademicReminders } from '../src/university-reminders.js';
 
+test('reminders skip ambiguous source identities without suppressing valid events', () => {
+  const invalidIds = [undefined, null, '', '   ', 42, true, {}, []];
+  const signal = { kind: 'assessment', dates: ['2026-10-02'] };
+  const assignment = { status: 'open', dueAt: '2026-10-02T09:30:00Z' };
+  const reminders = buildAcademicReminders({
+    today: '2026-10-01',
+    signals: [...invalidIds.map((id) => ({ ...signal, id })), { ...signal, id: 'valid-signal' }],
+    assignments: [...invalidIds.map((id) => ({ ...assignment, id })), { ...assignment, id: 'valid-assignment' }]
+  });
+  assert.deepEqual(reminders.map((item) => item.id), [
+    'reminder:assignment:valid-assignment:2026-10-02:tomorrow',
+    'reminder:signal:valid-signal:2026-10-02:assessment-soon'
+  ]);
+});
+
 test('reminders reject impossible calendar days instead of normalizing them', () => {
   for (const date of ['2026-02-29', '2026-02-30', '2026-04-31', '2026-13-01']) {
     assert.throws(

@@ -41,6 +41,7 @@ export function buildAcademicReminders({
   const reminders = [];
 
   for (const signal of signals) {
+    if (typeof signal?.id !== 'string' || !signal.id.trim()) continue;
     const dates = Array.isArray(signal?.dates) ? signal.dates : [];
     for (const date of dates) {
       const remaining = daysUntil(today, date);
@@ -62,6 +63,7 @@ export function buildAcademicReminders({
   }
 
   for (const assignment of assignments) {
+    if (typeof assignment?.id !== 'string' || !assignment.id.trim()) continue;
     if (assignment?.status !== 'open' || !assignment?.dueAt) continue;
     const date = madridDay(assignment.dueAt);
     if (!date || daysUntil(today, date) !== 1) continue;
