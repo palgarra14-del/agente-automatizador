@@ -657,6 +657,21 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           background: String(style.backgroundColor ?? '').toLowerCase().slice(0, 80)
         };
       });
+    const signatureElements = queryAll('[data-design-signature]')
+      .filter(isRendered)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          label: clean(element.getAttribute('data-design-signature')).slice(0, 80),
+          xVw: metric(rect.left / viewportWidth),
+          yVh: metric(rect.top / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          heightVh: metric(rect.height / viewportHeight)
+        };
+      })
+      .filter((item) => item.widthVw > 0 && item.heightVh > 0)
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0))
+      .slice(0, 24);
     const visibleActions = queryAll('a[href], button')
       .filter(isRendered)
       .map((element) => {
@@ -710,6 +725,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       viewport: { width: viewportWidth, height: viewportHeight },
       pageHeightVh: metric(pageHeight / viewportHeight),
       visualBlocks,
+      signatureElements,
       actions: visibleActions,
       textSamples,
       typography: {

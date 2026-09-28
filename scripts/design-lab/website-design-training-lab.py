@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import json, os, shutil, subprocess, sys, time, textwrap
+import json, os, re, shutil, subprocess, sys, time, textwrap
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 HOME = Path.home()
 REPO = Path(os.environ.get("AGENT_REPO", "/home/pablo/projects/agente-automatizador")).resolve()
@@ -12,6 +13,8 @@ PLAYBOOK = STATE / "playbook.md"
 PLAYBOOK_SEED = REPO / "docs/design-training-playbook.md"
 HISTORY = STATE / "history.jsonl"
 MASTERY = STATE / "mastery.json"
+QUOTA_NOT_BEFORE = STATE / "quota-not-before.txt"
+LOCAL_TZ = ZoneInfo("Europe/Madrid")
 CODEX = str(REPO / "node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 CHROME = os.environ.get("BROWSER_QA_CHROME_PATH", "/usr/bin/google-chrome")
 PORT = 4187
@@ -153,6 +156,38 @@ def now():
 
 def run(cmd, cwd=None, timeout=None, check=True, stdout=None, stderr=None, input=None):
     return subprocess.run(cmd, cwd=cwd, timeout=timeout, check=check, text=True, stdout=stdout, stderr=stderr, input=input)
+
+def parse_usage_reset_epoch(text):
+    match=re.search(
+      r"try again at\s+([A-Za-z]{3})\s+(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})\s+(\d{1,2}):(\d{2})\s+(AM|PM)",
+      str(text), flags=re.I
+    )
+    if not match: return None
+    stamp=f"{match.group(1)} {match.group(2)} {match.group(3)} {match.group(4)}:{match.group(5)} {match.group(6).upper()}"
+    try:
+        reset=datetime.strptime(stamp,"%b %d %Y %I:%M %p").replace(tzinfo=LOCAL_TZ)
+    except ValueError:
+        return None
+    return int(reset.timestamp()) + 300
+
+def register_usage_cooldown(text):
+    reset_epoch=parse_usage_reset_epoch(text)
+    if reset_epoch is None:
+        reset_epoch=int(time.time()) + 3600
+    QUOTA_NOT_BEFORE.write_text(str(reset_epoch),encoding="utf-8")
+    return reset_epoch
+
+def active_usage_cooldown(now_epoch=None):
+    if not QUOTA_NOT_BEFORE.exists(): return None
+    try: reset_epoch=int(QUOTA_NOT_BEFORE.read_text(encoding="utf-8").strip())
+    except (ValueError,OSError):
+        QUOTA_NOT_BEFORE.unlink(missing_ok=True)
+        return None
+    current=time.time() if now_epoch is None else now_epoch
+    if current >= reset_epoch:
+        QUOTA_NOT_BEFORE.unlink(missing_ok=True)
+        return None
+    return reset_epoch
 
 def ensure_state():
     STATE.mkdir(parents=True, exist_ok=True)
@@ -453,6 +488,36 @@ def section_rhythm_from_qa(qa):
         }
     return {"observations":observations,"viewports":viewports}
 
+def identity_continuity_from_qa(qa):
+    observations=[]
+    viewports={}
+    for label in ("mobile","desktop"):
+        view=qa.get(label,{}) if isinstance(qa,dict) else {}
+        metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
+        raw=metrics.get("signatureElements",[]) if isinstance(metrics.get("signatureElements"),list) else []
+        markers=[
+          item for item in raw
+          if isinstance(item,dict) and isinstance(item.get("yVh"),(int,float)) and
+          isinstance(item.get("widthVw"),(int,float)) and isinstance(item.get("heightVh"),(int,float)) and
+          item["widthVw"]*item["heightVh"] >= 0.001
+        ]
+        nonhero=[item for item in markers if item["yVh"] >= 0.85]
+        deep=[item for item in markers if item["yVh"] >= 1.50]
+        labels={str(item.get("label","")).strip().lower() for item in markers if str(item.get("label","")).strip()}
+        if not markers:
+            observations.append(f"signature_identity_unmarked_{label}")
+        elif len(markers) < 3 or len(nonhero) < 2:
+            observations.append(f"signature_identity_hero_heavy_{label}:{len(nonhero)}/{len(markers)}")
+        elif not deep:
+            observations.append(f"signature_identity_shallow_{label}:{len(nonhero)}/{len(markers)}")
+        viewports[label]={
+          "markerCount":len(markers),
+          "nonHeroCount":len(nonhero),
+          "deepPageCount":len(deep),
+          "distinctLabels":len(labels)
+        }
+    return {"observations":observations,"viewports":viewports}
+
 def training_history():
     return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
 
@@ -624,6 +689,7 @@ Required deliverables: index.html plus any local CSS/JS/assets you create, and d
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
 Use only HTML/CSS/JS for the website. It must work by opening index.html through a local HTTP server.
 The page must be visually distinctive, responsive at 390px and 1440px, accessible, conversion-oriented, and honest when real photos are unavailable.
+Do not let the identity peak in the hero and dissolve into generic sections. Reinterpret the signature visual device or its underlying spatial/typographic logic in at least two meaningful non-hero moments, changing scale, density or composition to fit the content instead of stamping the same decoration everywhere. Mark only the rendered elements that genuinely embody this device with a concise data-design-signature attribute so QA can verify where the identity survives; include the main hero expression and at least two meaningful non-hero expressions, never invisible/dummy markers. At least one mid/late-page section should deliberately break the preceding composition pattern when the content benefits from it.
 Do not merely describe the design: implement it fully.
 At the end, briefly state what you built.
 Business: {brief['business']}
@@ -809,12 +875,15 @@ def deterministic_qa(run_dir, label):
         conversion=conversion_ergonomics_from_qa(result,brief_data)
         typography=typography_ergonomics_from_qa(result)
         rhythm=section_rhythm_from_qa(result)
+        identity=identity_continuity_from_qa(result)
         result["conversionErgonomics"]=conversion
         result["typographyErgonomics"]=typography
         result["sectionRhythm"]=rhythm
+        result["identityContinuity"]=identity
         result["static"]["observations"].extend(conversion.get("observations",[]))
         result["static"]["observations"].extend(typography.get("observations",[]))
         result["static"]["observations"].extend(rhythm.get("observations",[]))
+        result["static"]["observations"].extend(identity.get("observations",[]))
         profile=layout_profile_from_qa(result)
         result["layoutProfile"]=profile
         layout_matches=[]
@@ -896,8 +965,8 @@ Brief: {brief['brief']}
 Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale-ready; 9.5 means exceptional. Do not inflate.
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
-Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic.
+Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper. Judge identity continuity across the whole page, not just hero quality: penalize a strong opening followed by generic service/info sections, and reward purposeful reinterpretation of the signature device or its spatial/typographic logic in later sections without repetitive decoration.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic. If identityContinuity reports signature_identity_unmarked, hero_heavy or shallow, inspect the screenshots rather than trusting the marker alone, but scrutinize whether the signature device actually survives past the opening and on mobile; penalize hero-only art direction when later sections revert to generic presentation.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -909,6 +978,7 @@ Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every categ
         trace_path = run_dir/f"review-{label}-trace.txt"
         trace = trace_path.read_text(encoding="utf-8", errors="ignore") if trace_path.exists() else ""
         if "usage limit" in trace.lower() or "try again at" in trace.lower():
+            register_usage_cooldown(trace)
             raise RuntimeError("codex_usage_limit")
         raise RuntimeError(f"review_failed:{label}:{proc.returncode}")
     return json.loads(output.read_text(encoding="utf-8"))
@@ -920,7 +990,7 @@ def fix_site(run_dir, brief, review, pass_no):
 Read design-intent.json, critique-pass-{pass_no}.json, the latest qa-*.json and the current site files. Implement the most important fixes, not cosmetic busywork. Preserve the core concept when it is strong; refine design-intent.json only when the review shows the concept itself is weak or incoherent.
 Treat deterministic QA defects as mandatory fixes before aesthetic refinements. Treat static template-smell observations as prompts for judgment, not mechanical rules.
 Preserve factual honesty and the business brief. Do not browse or add remote dependencies.
-Prioritize the lowest scoring categories and the review fixBrief. Make the design more authored, coherent and professional, while preserving conversion and accessibility.
+Prioritize the lowest scoring categories and the review fixBrief. Make the design more authored, coherent and professional, while preserving conversion and accessibility. If identity or composition weakens after the hero, carry the core visual/spatial idea into later sections in content-appropriate forms and introduce a purposeful rhythm change rather than another cosmetic band.
 Do not just explain changes; edit the site. Avoid regressions at desktop and mobile.
 Business: {brief['business']} | {brief['category']}
 """
@@ -941,8 +1011,13 @@ Do not add business-specific styling, names, colors or claims. Prefer concise pr
 Keep the whole playbook under 14 KB. Preserve strong existing rules and deduplicate rather than endlessly appending.
 If this run does not justify a general lesson, make no changes.
 """
-    with (STATE/"coach-trace.txt").open("w",encoding="utf-8") as f:
-        run(codex_base(STATE)+["-"],cwd=STATE,timeout=240,check=False,stdout=f,stderr=subprocess.STDOUT,input=prompt)
+    trace_path=STATE/"coach-trace.txt"
+    with trace_path.open("w",encoding="utf-8") as f:
+        proc=run(codex_base(STATE)+["-"],cwd=STATE,timeout=240,check=False,stdout=f,stderr=subprocess.STDOUT,input=prompt)
+    if proc.returncode!=0:
+        trace=trace_path.read_text(encoding="utf-8",errors="ignore") if trace_path.exists() else ""
+        if "usage limit" in trace.lower() or "try again at" in trace.lower():
+            register_usage_cooldown(trace)
 
 def mastery_status(entries):
     training_ready,recent,qualified_at=training_mastery_candidate(entries)
@@ -962,6 +1037,11 @@ def mastery_status(entries):
 def main():
     ensure_state()
     lock=acquire_lock()
+    quota_not_before=active_usage_cooldown()
+    if quota_not_before:
+        print("design_lab_status=waiting_quota_reset")
+        print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
+        return
     not_before=os.environ.get("DESIGN_LAB_NOT_BEFORE")
     if not_before:
         try: quota_not_before=datetime.fromisoformat(not_before).timestamp()
@@ -993,7 +1073,9 @@ def main():
         if build_rc!=0 or not (run_dir/"index.html").exists():
             build_trace=(run_dir/"build-output.txt").read_text(encoding="utf-8", errors="ignore") if (run_dir/"build-output.txt").exists() else ""
             if "usage limit" in build_trace.lower() or "try again at" in build_trace.lower():
+                reset_epoch=register_usage_cooldown(build_trace)
                 print("design_lab_status=codex_usage_limited")
+                print("design_lab_quota_not_before="+datetime.fromtimestamp(reset_epoch,LOCAL_TZ).isoformat())
                 return
             raise RuntimeError(f"build_failed:{build_rc}")
         desktop,tablet,mobile=serve_and_capture(run_dir,"initial")
@@ -1014,6 +1096,7 @@ def main():
             if rc!=0:
                 fix_trace=(run_dir/f"fix-{pass_no}-trace.txt").read_text(encoding="utf-8", errors="ignore") if (run_dir/f"fix-{pass_no}-trace.txt").exists() else ""
                 if "usage limit" in fix_trace.lower() or "try again at" in fix_trace.lower():
+                    register_usage_cooldown(fix_trace)
                     raise RuntimeError("codex_usage_limit")
                 break
             desktop,tablet,mobile=serve_and_capture(run_dir,f"fix{pass_no}")
@@ -1061,6 +1144,7 @@ def main():
           "conversionErgonomics":qa.get("conversionErgonomics",{}),
           "typographyErgonomics":qa.get("typographyErgonomics",{}),
           "sectionRhythm":qa.get("sectionRhythm",{}),
+          "identityContinuity":qa.get("identityContinuity",{}),
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],
