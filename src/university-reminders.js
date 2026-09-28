@@ -14,8 +14,11 @@ function daysUntil(today, target) {
 }
 
 function madridDay(value) {
+  // Assignment state uses explicit UTC timestamps; reject parser normalization.
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
+  if (date.toISOString().slice(0, 10) !== value.slice(0, 10)) return null;
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Madrid',
     year: 'numeric',

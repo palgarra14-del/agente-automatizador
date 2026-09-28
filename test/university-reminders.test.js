@@ -85,3 +85,35 @@ test('open assignments remind one day before but completed assignments do not', 
   });
   assert.deepEqual(reminders.map((item) => item.id), ['reminder:assignment:a1:2026-09-28:tomorrow']);
 });
+
+test('assignment reminders fail closed for normalized or ambiguous deadlines', () => {
+  for (const [today, dueAt] of [
+    ['2026-03-01', '2026-02-30T09:30:00.000Z'],
+    ['2026-02-28', '2026-02-29T09:30:00Z'],
+    ['2026-04-30', '2026-04-31T09:30:00Z'],
+    ['2026-09-27', '2026-09-27T24:00:00Z'],
+    ['2026-09-27', '2026-09-28T09:30:00'],
+    ['2026-09-27', '2026-09-28']
+  ]) {
+    assert.deepEqual(buildAcademicReminders({
+      today,
+      assignments: [{ id: 'invalid', status: 'open', dueAt }]
+    }), [], dueAt);
+  }
+});
+
+test('valid assignment deadlines retain leap-day and Madrid midnight timing', () => {
+  for (const [today, dueAt, expectedDate] of [
+    ['2028-02-28', '2028-02-29T09:30:00Z', '2028-02-29'],
+    ['2026-09-27', '2026-09-27T22:30:00.000Z', '2026-09-28'],
+    ['2026-12-31', '2026-12-31T23:30:00Z', '2027-01-01']
+  ]) {
+    const reminders = buildAcademicReminders({
+      today,
+      assignments: [{ id: 'valid', status: 'open', dueAt }]
+    });
+    assert.equal(reminders.length, 1, dueAt);
+    assert.equal(reminders[0].date, expectedDate);
+    assert.equal(reminders[0].daysRemaining, 1);
+  }
+});
