@@ -597,6 +597,47 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(invalid.error, /websitePlan\.pages\[0\]\.slug is invalid/);
 });
 
+test('website planner applies a universal professional design standard and distinct cross-industry modes', () => {
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const promptFor = (businessBrief) => buildReadOnlySkillPrompt({
+    skill: 'website.plan',
+    goal: 'Create a visually exceptional conversion-focused website',
+    contract,
+    context: { businessBrief, websiteBlueprint: { version: 1, profileId: 'generic-local' } }
+  });
+
+  const tech = promptFor({ category: 'SaaS de analítica', summary: 'Plataforma de datos para equipos', services: [{ name: 'Dashboard' }], brand: { tone: 'preciso y moderno' } });
+  assert.match(tech, /Universal design-excellence standard/);
+  assert.match(tech, /Product\/technology mode/);
+  assert.match(tech, /product or capability is the hero/);
+  assert.match(tech, /supporting navigation should recede/i);
+  assert.match(tech, /Avoid template tells/);
+
+  const luxury = promptFor({ category: 'Estudio de arquitectura premium', summary: 'Arquitectura residencial', services: [{ name: 'Interiorismo' }], brand: { tone: 'sobrio y sofisticado' } });
+  assert.match(luxury, /Premium\/editorial mode/);
+  assert.match(luxury, /confident scale/);
+  assert.match(luxury, /tactile or cinematic media/);
+
+  const hospitality = promptFor({ category: 'Restaurante', summary: 'Cocina local', services: [{ name: 'Reservas' }], brand: { tone: 'cálido y contemporáneo' } });
+  assert.match(hospitality, /Hospitality\/sensory mode/);
+  assert.match(hospitality, /place, food, material, atmosphere and human experience/);
+
+  const professional = promptFor({ category: 'Consultoría financiera B2B', summary: 'Asesoramiento para empresas', services: [{ name: 'Consultoría' }], brand: { tone: 'serio y cercano' } });
+  assert.match(professional, /Professional\/trust mode/);
+  assert.match(professional, /bland corporate templates are not acceptable/);
+
+  const craft = promptFor({ category: 'Reformas integrales', summary: 'Obra y reforma local', services: [{ name: 'Reformas' }], brand: { tone: 'directo y fiable' } });
+  assert.match(craft, /Craft\/local mode/);
+  assert.match(craft, /real work, process, material, locality and people/);
+
+  for (const prompt of [tech, luxury, hospitality, professional, craft]) {
+    assert.match(prompt, /first viewport/i);
+    assert.match(prompt, /Design mobile as its own composition/);
+    assert.match(prompt, /prefers-reduced-motion/);
+    assert.match(prompt, /one or two signature visual ideas|small number of memorable visual moments/);
+  }
+});
+
 test('beauty niche planner applies distinct visual art direction for hair salons, barbershops and wellness', () => {
   const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
   const promptFor = (businessBrief) => buildReadOnlySkillPrompt({
