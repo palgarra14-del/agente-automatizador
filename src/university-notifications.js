@@ -69,7 +69,7 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     const matchedAssignment = !code && /^(Vence|Venciment)\b/i.test(title)
       ? matchingAssignment(title, assignments)
       : null;
-    const belongs = codedBelongs || Boolean(matchedAssignment);
+    const belongs = codedBelongs || Boolean(matchedAssignment && subjects.has(clean(matchedAssignment.subjectId)));
     if (!belongs) continue;
     out.push({
       id: notificationId(title),

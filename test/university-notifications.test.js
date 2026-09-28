@@ -73,6 +73,26 @@ test('first scan is baseline only; later only new non-expired notifications surf
   assert.deepEqual(diffUvNotifications(state, next).map((item) => item.id), ['c']);
 });
 
+test('code-less deadlines require a matching assignment from a current course', () => {
+  const page = { text: [
+    'Notificaciones',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Ejercicios Tema 1',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Práctica de árboles'
+  ].join('\n') };
+  for (const subjectId of [undefined, null, '', '   ', '34653', '34670']) {
+    const parsed = parseUvNotifications(page, courses, {
+      today: '2026-09-27',
+      assignments: [
+        { subjectId, title: 'Ejercicios Tema 1' },
+        { subjectId: '34156', title: 'Práctica de árboles' }
+      ]
+    });
+    assert.deepEqual(parsed.map((item) => item.subjectId),
+      subjectId === '34670' ? ['34670', '34156'] : ['34156']);
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+  }
+});
+
 test('invalid explicit notification dates fail closed without suppressing valid deadlines', () => {
   const dates = [
     '31 de septiembre de 2026',
