@@ -96,6 +96,8 @@ test('assignment tasks attach matching compact practical material from the same 
   }];
   source.materials.push(
     { id: 'pr1', subjectId: 'E', title: 'Pr1eda2627', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/pr1' },
+    { id: 'topic1', subjectId: 'E', title: 'tema1', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/topic1' },
+    { id: 'exercise1', subjectId: 'E', title: 'Ejer1eda', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/exercise1' },
     { id: 'pr2', subjectId: 'E', title: 'Pr2eda2627', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/pr2' },
     { id: 'other-pr1', subjectId: 'A', title: 'Práctica 1', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/other-pr1' }
   );
@@ -107,5 +109,5 @@ test('assignment tasks attach matching compact practical material from the same 
   });
   const assignment = result.tasks.find((item) => item.id === 'assignment:a-pr1');
   assert.ok(assignment);
-  assert.deepEqual(assignment.resources.map((item) => item.id), ['pr1']);
+  assert.deepEqual(assignment.resources.map((item) => item.id), ['pr1', 'topic1']);
 });

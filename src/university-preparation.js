@@ -23,7 +23,7 @@ function materialNumber(title) {
 function kind(title) {
   const text = fold(title);
   if (/resuelt|solucion|correccion/.test(text)) return 'solution';
-  if (/problema|ejercicio|\bejer\w*|practica|seminario/.test(text)) return 'practice';
+  if (/problema|ejercicio|\bejer\w*|\bpr(?:actica)?\s*[-_. ]?\d+|practica|seminario/.test(text)) return 'practice';
   if (/\btema\s*\d+|apuntes|clase|teoria/.test(text)) return 'theory';
   if (/examen|convocatoria|parcial/.test(text)) return 'exam';
   return 'reference';
@@ -51,7 +51,7 @@ function scoreMaterial(material, signal) {
         score += 100;
       }
       if (/\bpractica\s*[-_. ]?\d{1,2}\b/.test(signalText) &&
-          new RegExp('^pr(?:actica)?\\s*[-_. ]?' + number + '\\b', 'i').test(lower)) {
+          new RegExp('^pr(?:actica)?\\s*[-_. ]?' + number + '(?!\\d)', 'i').test(lower)) {
         score += 220;
         reasons.unshift('misma práctica');
       }
@@ -102,7 +102,10 @@ export function recommendAcademicPreparation(signal, materials, { limit = 3 } = 
 
   const selected = [];
   const used = new Set();
-  const categoryOrder = ['theory', 'practice', 'solution'];
+  const signalText = fold([signal?.title, signal?.body].filter(Boolean).join(' '));
+  const categoryOrder = /\bpractica\s*[-_. ]?\d{1,2}\b/.test(signalText)
+    ? ['practice', 'theory', 'solution']
+    : ['theory', 'practice', 'solution'];
   for (const category of categoryOrder) {
     if (selected.length >= limit) break;
     const item = candidates.find((candidate) => candidate.category === category && !used.has(candidate.material.id));
