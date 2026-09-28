@@ -54,6 +54,22 @@ test('numeric academic dates preserve explicit years and reject invalid leap day
   assert.deepEqual(state.signals, []);
 });
 
+test('named dates reject unsupported explicit years without inventing assessment reminders', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  for (const value of ['2 de octubre de 25', '2 de octubre de 20250', "2 d’octubre de 1999"]) {
+    const signal = alertToAcademicSignal({
+      id: 'uv-mail:ambiguous-year',
+      subject: 'Test Tema 1',
+      body: value
+    }, { capturedAt });
+    assert.deepEqual(signal.dates, [], value);
+    assert.deepEqual(buildAcademicReminders({ today: '2026-09-30', signals: [signal] }), [], value);
+    assert.deepEqual(extractAcademicDates(
+      value + '. El test será el 3 de octubre de 2026.', capturedAt
+    ), ['2026-10-03'], value);
+  }
+});
+
 test('numeric academic dates reject partial matches inside unsupported date formats', () => {
   const capturedAt = '2026-09-27T16:00:00Z';
   for (const value of ['2026-10-02', '2-10-25', '2-10-20250', '2-10-2026-01']) {
