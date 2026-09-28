@@ -1166,6 +1166,8 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   });
   for (const required of [
     'complete authoritative source of business facts',
+    'approved websitePlan.design direction',
+    'do not collapse it into a generic template',
     'Do not invent or imply testimonials',
     'prices',
     'guarantees',
