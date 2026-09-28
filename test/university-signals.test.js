@@ -64,6 +64,26 @@ test('numeric academic dates reject partial matches inside unsupported date form
   }
 });
 
+test('rescheduled numeric dates preserve explicit years without creating phantom reminders', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  for (const [body, expected] of [
+    ['La clase del 1-10 pasa al 7-10-2025.', ['2025-10-07']],
+    ['La clase del 1-10-2026 pasa al 7-10-2026.', ['2026-10-07']],
+    ['La clase del 1-10-2026 passa al 7-10.', ['2026-10-07']],
+    ['La clase del 1-10 pasa al 7-10-25.', ['2026-10-01']],
+    ['La clase del 1-10 pasa al 7-10-20250.', ['2026-10-01']],
+    ['La clase del 1-10 pasa al 7-10-2026-01.', ['2026-10-01']]
+  ]) {
+    assert.deepEqual(extractAcademicDates(body, capturedAt), expected, body);
+  }
+  const signal = alertToAcademicSignal({
+    id: 'uv-mail:past-reschedule',
+    subject: 'Cambio de clase',
+    body: 'La clase del 1-10 pasa al 7-10-2025.'
+  }, { capturedAt });
+  assert.deepEqual(buildAcademicReminders({ today: '2026-10-06', signals: [signal] }), []);
+});
+
 test('assessment email becomes a durable high-priority academic signal', () => {
   const signal = alertToAcademicSignal({
     id: 'uv-mail:772',

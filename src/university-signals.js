@@ -82,9 +82,9 @@ export function extractAcademicDates(value, capturedAt) {
     if (date) dates.add(date);
   }
   const superseded = new Set();
-  for (const match of text.matchAll(/\b(?:del?|de)\s+(\d{1,2})-(\d{1,2})\s+(?:pasa|passa)\s+al?\s+(\d{1,2})-(\d{1,2})\b/g)) {
-    const from = inferredDate(Number(match[1]), Number(match[2]) - 1, null, capturedAt);
-    const to = inferredDate(Number(match[3]), Number(match[4]) - 1, null, capturedAt);
+  for (const match of text.matchAll(/\b(?:del?|de)\s+(\d{1,2})-(\d{1,2})(?:-(\d{4}))?\s+(?:pasa|passa)\s+al?\s+(\d{1,2})-(\d{1,2})(?:-(\d{4}))?\b(?![\d-])/g)) {
+    const from = inferredDate(Number(match[1]), Number(match[2]) - 1, match[3] ? Number(match[3]) : null, capturedAt);
+    const to = inferredDate(Number(match[4]), Number(match[5]) - 1, match[6] ? Number(match[6]) : null, capturedAt);
     if (from) superseded.add(from);
     if (to) dates.add(to);
   }
