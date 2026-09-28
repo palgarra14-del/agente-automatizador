@@ -19,6 +19,7 @@ THRESHOLD = 9.2
 CATEGORY_FLOOR = 8.8
 STREAK_NEEDED = 6
 BUILD_LIMIT_SECONDS = 600
+FINAL_DELIVERY_LIMIT_SECONDS = 600
 MAX_FIX_PASSES = 2
 SYNTHETIC_CONTACT = {"phone": "+34000000000", "email": "demo@example.invalid"}
 LOCAL_QA = (REPO / "scripts/design-lab/local-qa.mjs") if (REPO / "scripts/design-lab/local-qa.mjs").exists() else (STATE / "local-qa.mjs")
@@ -360,6 +361,7 @@ def record_passes(entry):
       entry.get("finalScore",0) >= THRESHOLD and
       entry.get("minCategory",0) >= CATEGORY_FLOOR and
       entry.get("buildSeconds",999999) <= BUILD_LIMIT_SECONDS and
+      entry.get("selectedElapsedSeconds",999999) <= FINAL_DELIVERY_LIMIT_SECONDS and
       entry.get("deterministicQaPass") is True and
       entry.get("verdict") == "PASS"
     )
@@ -461,6 +463,10 @@ def write_training_summary():
         for issue in [*entry.get("qaDefects",[]),*entry.get("templateSignals",[]),*entry.get("topIssues",[])]:
             key=str(issue)[:240]
             issues[key]=issues.get(key,0)+1
+    selected_times=[
+      float(entry["selectedElapsedSeconds"]) for entry in entries
+      if isinstance(entry.get("selectedElapsedSeconds"),(int,float))
+    ]
     summary={
       "updatedAt":now(),
       "completedRuns":len(entries),
@@ -474,6 +480,8 @@ def write_training_summary():
       "recentConcepts":[{"briefSlug":e.get("briefSlug"),"concept":e.get("conceptIdentity")} for e in entries[-8:] if e.get("conceptIdentity")],
       "averageScoreGain":round(sum(e.get("scoreGain",0) for e in entries)/len(entries),3) if entries else None,
       "averageCycleSeconds":round(sum(e.get("cycleSeconds",0) for e in entries)/len(entries),2) if entries else None,
+      "averageSelectedElapsedSeconds":round(sum(selected_times)/len(selected_times),2) if selected_times else None,
+      "deliveryWithin10MinRate":round(sum(1 for value in selected_times if value <= FINAL_DELIVERY_LIMIT_SECONDS)/len(selected_times),3) if selected_times else None,
       "holdoutAttempts":len(holdout_history()),
       "holdoutPasses":sum(1 for e in holdout_history() if record_passes(e)),
       "lastHoldoutFailure":next(({
@@ -507,7 +515,7 @@ def build_site(run_dir, brief):
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
 Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
-You have a hard creation budget of 10 minutes. Build the best professional result you can inside this directory.
+You have a hard creation budget of 10 minutes, and the product goal is a sale-ready reviewed result within 10 minutes end-to-end. Make high-leverage design decisions early, avoid over-engineering, and leave enough quality in the first implementation that review needs at most focused correction.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
 Use only HTML/CSS/JS for the website. It must work by opening index.html through a local HTTP server.
@@ -884,7 +892,7 @@ def main():
         initial_score=calibrated_score(review)
         initial_model_score=review["totalScore"]
         snapshot_site(run_dir,"initial")
-        candidates=[{"label":"initial","review":review,"qa":qa,"snapshot":STATE/"site-snapshots"/run_id/"initial"}]
+        candidates=[{"label":"initial","review":review,"qa":qa,"snapshot":STATE/"site-snapshots"/run_id/"initial","elapsedSeconds":round(time.monotonic()-cycle_started,2)}]
         final_review=review
         fix_passes=0
         for pass_no in range(1,MAX_FIX_PASSES+1):
@@ -902,7 +910,7 @@ def main():
             qa=deterministic_qa(run_dir,f"fix{pass_no}")
             final_review=review_site(run_dir,brief,desktop,tablet,mobile,f"fix{pass_no}",qa)
             snapshot=snapshot_site(run_dir,f"fix{pass_no}")
-            candidates.append({"label":f"fix{pass_no}","review":final_review,"qa":qa,"snapshot":snapshot})
+            candidates.append({"label":f"fix{pass_no}","review":final_review,"qa":qa,"snapshot":snapshot,"elapsedSeconds":round(time.monotonic()-cycle_started,2)})
         best=max(candidates,key=lambda candidate: pass_quality(candidate["review"],candidate["qa"]))
         restore_site(run_dir,best["snapshot"])
         final_review=best["review"]
@@ -922,6 +930,8 @@ def main():
           "category":brief["category"],
           "buildSeconds":round(build_seconds,2),
           "cycleSeconds":round(time.monotonic()-cycle_started,2),
+          "selectedElapsedSeconds":best.get("elapsedSeconds",999999),
+          "deliveryWithin10Min":best.get("elapsedSeconds",999999) <= FINAL_DELIVERY_LIMIT_SECONDS,
           "initialScore":initial_score,
           "initialModelScore":initial_model_score,
           "finalScore":calibrated_score(final_review),
