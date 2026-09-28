@@ -402,6 +402,57 @@ def typography_ergonomics_from_qa(qa):
         }
     return {"pass":len(defects)==0,"defects":defects,"observations":observations,"viewports":viewports}
 
+def _section_signature(block):
+    if not isinstance(block,dict): return None
+    if block.get("tag") in {"header","footer"}: return None
+    child_count=block.get("directChildCount")
+    if isinstance(child_count,(int,float)):
+        child_bucket="1" if child_count <= 1 else "2" if child_count == 2 else "3" if child_count == 3 else "4+"
+    else:
+        child_bucket="?"
+    grid_columns=block.get("gridColumnCount")
+    grid_bucket=str(int(grid_columns)) if isinstance(grid_columns,(int,float)) else "-"
+    return "|".join([
+      str(block.get("display","")),
+      grid_bucket,
+      child_bucket,
+      str(block.get("textAlign",""))
+    ])
+
+def section_rhythm_from_qa(qa):
+    observations=[]
+    viewports={}
+    for label in ("mobile","desktop"):
+        view=qa.get(label,{}) if isinstance(qa,dict) else {}
+        metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
+        blocks=metrics.get("visualBlocks",[]) if isinstance(metrics.get("visualBlocks"),list) else []
+        content_blocks=[block for block in blocks if isinstance(block,dict) and block.get("tag") not in {"header","footer"}]
+        signatures=[sig for sig in (_section_signature(block) for block in content_blocks) if sig]
+        counts={}
+        for signature in signatures:
+            counts[signature]=counts.get(signature,0)+1
+        dominant=max(counts.values(),default=0)
+        dominant_ratio=(dominant/len(signatures)) if signatures else 0.0
+        heights=[float(block["heightVh"]) for block in content_blocks if isinstance(block.get("heightVh"),(int,float)) and block["heightVh"] > 0]
+        if heights:
+            mean=sum(heights)/len(heights)
+            variance=sum((height-mean)**2 for height in heights)/len(heights)
+            height_cv=(variance**0.5/mean) if mean else 0.0
+        else:
+            height_cv=0.0
+        if len(signatures) >= 4 and dominant >= 3 and dominant_ratio >= 0.60:
+            observations.append(f"repeated_section_structure_{label}:{dominant}/{len(signatures)}")
+        if len(heights) >= 4 and height_cv < 0.12 and len(set(signatures)) <= 2:
+            observations.append(f"flat_section_rhythm_{label}:{height_cv:.2f}")
+        viewports[label]={
+          "sectionCount":len(signatures),
+          "uniqueStructures":len(set(signatures)),
+          "dominantStructureCount":dominant,
+          "dominantStructureRatio":round(dominant_ratio,3),
+          "heightVariation":round(height_cv,3)
+        }
+    return {"observations":observations,"viewports":viewports}
+
 def training_history():
     return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
 
@@ -757,10 +808,13 @@ def deterministic_qa(run_dir, label):
             except Exception: brief_data={}
         conversion=conversion_ergonomics_from_qa(result,brief_data)
         typography=typography_ergonomics_from_qa(result)
+        rhythm=section_rhythm_from_qa(result)
         result["conversionErgonomics"]=conversion
         result["typographyErgonomics"]=typography
+        result["sectionRhythm"]=rhythm
         result["static"]["observations"].extend(conversion.get("observations",[]))
         result["static"]["observations"].extend(typography.get("observations",[]))
+        result["static"]["observations"].extend(rhythm.get("observations",[]))
         profile=layout_profile_from_qa(result)
         result["layoutProfile"]=profile
         layout_matches=[]
@@ -843,7 +897,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -1006,6 +1060,7 @@ def main():
           "layoutProfile":qa.get("layoutProfile",{}),
           "conversionErgonomics":qa.get("conversionErgonomics",{}),
           "typographyErgonomics":qa.get("typographyErgonomics",{}),
+          "sectionRhythm":qa.get("sectionRhythm",{}),
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],
