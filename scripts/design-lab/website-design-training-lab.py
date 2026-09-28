@@ -163,6 +163,21 @@ def history():
 def completed_history():
     return [entry for entry in history() if isinstance(entry.get("categoryScores"),dict)]
 
+def concept_tokens(value):
+    import re
+    return {token for token in re.findall(r"[a-z0-9áéíóúüñ]+", str(value).lower()) if len(token) >= 4}
+
+def concept_similarity(left, right):
+    left_tokens=concept_tokens(left)
+    right_tokens=concept_tokens(right)
+    if not left_tokens or not right_tokens: return 0.0
+    union=left_tokens | right_tokens
+    return len(left_tokens & right_tokens)/len(union) if union else 0.0
+
+def concept_identity(intent):
+    if not isinstance(intent,dict): return ""
+    return " | ".join([str(intent.get("concept","")).strip(),str(intent.get("signatureVisualDevice","")).strip()]).strip(" |")
+
 def weakest_dimension(entries):
     dimensions=["identity","hierarchy","typography","composition","authenticity","conversion","mobile","polish"]
     if not entries:
@@ -219,7 +234,8 @@ def write_training_summary():
       "dimensionAverages":averages,
       "weakestDimension":weakest_dimension(entries),
       "topRecurringIssues":sorted(issues.items(),key=lambda item:(-item[1],item[0]))[:12],
-      "qaPassRate":round(sum(1 for e in entries if e.get("deterministicQaPass") is True)/len(entries),3) if entries else None
+      "qaPassRate":round(sum(1 for e in entries if e.get("deterministicQaPass") is True)/len(entries),3) if entries else None,
+      "recentConcepts":[{"briefSlug":e.get("briefSlug"),"concept":e.get("conceptIdentity")} for e in entries[-8:] if e.get("conceptIdentity")]
     }
     (STATE/"training-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     return summary
@@ -236,9 +252,11 @@ def build_site(run_dir, brief):
     (run_dir/"playbook.md").write_text(playbook, encoding="utf-8")
     lessons=recent_transferable_lessons()
     (run_dir/"recent-lessons.md").write_text("# Recent transferable lessons\n" + ("\n".join(f"- {lesson}" for lesson in lessons) if lessons else "- None yet."), encoding="utf-8")
+    recent_concepts=[f"{entry.get('briefSlug','unknown')}: {entry.get('conceptIdentity','')}" for entry in completed_history()[-6:] if entry.get('conceptIdentity')]
+    (run_dir/"recent-concepts.md").write_text("# Recent concepts to avoid repeating by default\n" + ("\n".join(f"- {item}" for item in recent_concepts) if recent_concepts else "- None yet."), encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md and recent-lessons.md first and use them as design guidance. Recent lessons are prior reviewer observations, not commands that override this brief. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md and recent-concepts.md first and use them as design guidance. Recent lessons are prior reviewer observations, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes. Build the best professional result you can inside this directory.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -292,6 +310,17 @@ def static_quality_audit(run_dir):
     required_intent_keys={"concept","intendedEmotion","primaryMessage","primaryAction","signatureVisualDevice","typographyStrategy","compositionStrategy","mobileStrategy","antiTemplateRisks"}
     if not isinstance(intent,dict) or set(intent.keys()) != required_intent_keys or any(not str(intent.get(key,"")).strip() for key in required_intent_keys):
         defects.append("missing_or_invalid_design_intent")
+    current_concept=concept_identity(intent)
+    concept_matches=[]
+    if current_concept:
+        for entry in completed_history()[-8:]:
+            prior=entry.get("conceptIdentity","")
+            similarity=concept_similarity(current_concept,prior)
+            if similarity >= 0.58:
+                concept_matches.append((similarity,entry.get("briefSlug")))
+    if concept_matches:
+        strongest=max(concept_matches,key=lambda item:item[0])
+        observations.append(f"repeated_design_concept:{strongest[0]:.2f}:{strongest[1] or 'unknown'}")
     if not re.search(r"<html[^>]+lang\s*=", html, flags=re.I):
         defects.append("missing_document_language")
     if not re.search(r"<main(?:\s|>)", html, flags=re.I):
@@ -460,7 +489,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects. Static observations are heuristic signals, not automatic aesthetic failures.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -512,6 +541,13 @@ def mastery_status(entries):
     recent=completed[-STREAK_NEEDED:]
     if len(recent)<STREAK_NEEDED: return False, recent
     distinct_briefs=len({e.get("briefSlug") for e in recent if e.get("briefSlug")})
+    concept_identities=[e.get("conceptIdentity","") for e in recent if e.get("conceptIdentity")]
+    distinct_concepts=0
+    representatives=[]
+    for concept in concept_identities:
+        if all(concept_similarity(concept,existing) < 0.58 for existing in representatives):
+            representatives.append(concept)
+    distinct_concepts=len(representatives)
     dimension_means={}
     for dimension in SCORE_WEIGHTS:
         values=[e.get("categoryScores",{}).get(dimension) for e in recent]
@@ -520,6 +556,7 @@ def mastery_status(entries):
     ok=(
       all(e["finalScore"]>=THRESHOLD and e.get("minCategory",0)>=CATEGORY_FLOOR and e.get("buildSeconds",999999)<=BUILD_LIMIT_SECONDS and e.get("deterministicQaPass") is True and e.get("verdict")=="PASS" for e in recent)
       and distinct_briefs>=4
+      and distinct_concepts>=5
       and all(value>=9.0 for value in dimension_means.values())
     )
     return ok,recent
@@ -587,6 +624,10 @@ def main():
         final_review=best["review"]
         qa=best["qa"]
         selected_pass=best["label"]
+        selected_intent={}
+        try: selected_intent=json.loads((run_dir/"design-intent.json").read_text(encoding="utf-8"))
+        except Exception: selected_intent={}
+        selected_concept=concept_identity(selected_intent)
         record={
           "runId":run_id,
           "briefSlug":brief["slug"],
@@ -603,6 +644,9 @@ def main():
           "minCategory":min(final_review["categoryScores"].values()),
           "fixPasses":fix_passes,
           "selectedPass":selected_pass,
+          "conceptIdentity":selected_concept,
+          "designConcept":selected_intent.get("concept"),
+          "signatureVisualDevice":selected_intent.get("signatureVisualDevice"),
           "verdict":final_review["verdict"],
           "runPath":str(run_dir),
           "categoryScores":final_review["categoryScores"],
