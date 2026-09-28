@@ -636,6 +636,27 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         const rect = element.getBoundingClientRect();
         const style = styleFor(element);
         const directChildren = [...(element.children ?? [])].filter(isRendered);
+        const childBoxes = directChildren.slice(0, 8).map((child) => {
+          const childRect = child.getBoundingClientRect();
+          const contentNodes = [
+            ...child.querySelectorAll('h1,h2,h3,h4,p,li,blockquote,figcaption,a[href],button,img,svg,canvas,video')
+          ].filter(isRendered);
+          const contentRects = contentNodes.map((node) => node.getBoundingClientRect())
+            .filter((contentRect) => contentRect.width > 0 && contentRect.height > 0);
+          const contentTop = contentRects.length
+            ? Math.max(childRect.top, Math.min(...contentRects.map((contentRect) => contentRect.top)))
+            : childRect.top;
+          const contentBottom = contentRects.length
+            ? Math.min(childRect.bottom, Math.max(...contentRects.map((contentRect) => contentRect.bottom)))
+            : childRect.bottom;
+          return {
+            xVw: metric(childRect.left / viewportWidth),
+            widthVw: metric(childRect.width / viewportWidth),
+            topRel: rect.height > 0 ? metric((childRect.top - rect.top) / rect.height) : null,
+            heightRel: rect.height > 0 ? metric(childRect.height / rect.height) : null,
+            contentHeightRel: rect.height > 0 ? metric(Math.max(0, contentBottom - contentTop) / rect.height) : null
+          };
+        }).filter((box) => box.widthVw > 0 && box.heightRel > 0);
         const heading = queryAll('h2, h3').find((candidate) => element.contains(candidate) && isRendered(candidate)) ?? null;
         const headingRect = heading?.getBoundingClientRect?.() ?? null;
         const gridTemplate = String(style.gridTemplateColumns ?? '').trim();
@@ -652,6 +673,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           flexDirection: String(style.flexDirection ?? '').toLowerCase(),
           gridColumnCount,
           directChildCount: Math.min(directChildren.length, 20),
+          childBoxes,
           headingXVw: headingRect ? metric(headingRect.left / viewportWidth) : null,
           headingWidthVw: headingRect ? metric(headingRect.width / viewportWidth) : null,
           background: String(style.backgroundColor ?? '').toLowerCase().slice(0, 80)

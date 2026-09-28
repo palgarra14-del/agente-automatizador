@@ -257,6 +257,35 @@ print(json.dumps({"repeated":m.section_rhythm_from_qa(repeated),"varied":m.secti
   assert.ok(result.varied.viewports.desktop.uniqueStructures >= 4);
 });
 
+test('spatial balance flags stranded column whitespace without penalizing balanced asymmetry', () => {
+  const balanced = {
+    tag: 'section', heightVh: 0.7, display: 'grid', gridColumnCount: 2,
+    childBoxes: [
+      { widthVw: 0.42, heightRel: 0.8, contentHeightRel: 0.62 },
+      { widthVw: 0.44, heightRel: 0.8, contentHeightRel: 0.76 }
+    ]
+  };
+  const imbalanced = {
+    tag: 'section', heightVh: 0.64, display: 'grid', gridColumnCount: 2,
+    childBoxes: [
+      { widthVw: 0.40, heightRel: 0.74, contentHeightRel: 0.36 },
+      { widthVw: 0.44, heightRel: 0.74, contentHeightRel: 0.71 }
+    ]
+  };
+  const qa = {
+    tablet: { designMetrics: { visualBlocks: [balanced, imbalanced] } },
+    desktop: { designMetrics: { visualBlocks: [balanced] } }
+  };
+  const result = python(`
+qa=json.loads(sys.argv[1])
+print(json.dumps(m.spatial_balance_from_qa(qa)))
+`, [JSON.stringify(qa)]);
+  assert.equal(result.viewports.tablet.imbalancedSectionCount, 1);
+  assert.equal(result.viewports.desktop.imbalancedSectionCount, 0);
+  assert.ok(result.observations.some(item => item.startsWith('column_height_imbalance_tablet:1:')));
+  assert.equal(result.observations.some(item => item.startsWith('column_height_imbalance_desktop')), false);
+});
+
 test('identity continuity flags hero-only signature treatment and accepts page-wide art direction', () => {
   const goodMarkers = [
     { label: 'ribbon', yVh: 0.25, widthVw: 0.45, heightVh: 0.25 },

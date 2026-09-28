@@ -500,6 +500,41 @@ def section_rhythm_from_qa(qa):
         }
     return {"observations":observations,"viewports":viewports}
 
+def spatial_balance_from_qa(qa):
+    observations=[]
+    viewports={}
+    for label in ("tablet","desktop"):
+        view=qa.get(label,{}) if isinstance(qa,dict) else {}
+        metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
+        blocks=metrics.get("visualBlocks",[]) if isinstance(metrics.get("visualBlocks"),list) else []
+        imbalanced=[]
+        for index,block in enumerate(blocks):
+            if not isinstance(block,dict) or block.get("tag") in {"header","footer"}: continue
+            is_columns=(
+              (block.get("display")=="grid" and isinstance(block.get("gridColumnCount"),(int,float)) and block["gridColumnCount"] >= 2) or
+              (block.get("display")=="flex" and block.get("flexDirection")=="row")
+            )
+            if not is_columns: continue
+            boxes=block.get("childBoxes",[]) if isinstance(block.get("childBoxes"),list) else []
+            boxes=[
+              box for box in boxes
+              if isinstance(box,dict) and isinstance(box.get("heightRel"),(int,float)) and
+              isinstance(box.get("widthVw"),(int,float)) and box["widthVw"] >= 0.16
+            ]
+            if len(boxes) < 2: continue
+            heights=[
+              max(0.0,float(box.get("contentHeightRel",box["heightRel"])))
+              for box in boxes
+            ]
+            low=min(heights); high=max(heights)
+            ratio=(high/low) if low > 0 else 99.0
+            section_height=float(block.get("heightVh",0) or 0)
+            if section_height >= 0.45 and high >= 0.68 and low <= 0.42 and ratio >= 1.75:
+                imbalanced.append({"index":index,"low":round(low,2),"high":round(high,2),"ratio":round(ratio,2)})
+                observations.append(f"column_height_imbalance_{label}:{index}:{low:.2f}/{high:.2f}")
+        viewports[label]={"imbalancedSectionCount":len(imbalanced),"sections":imbalanced[:6]}
+    return {"observations":observations,"viewports":viewports}
+
 def identity_continuity_from_qa(qa):
     observations=[]
     viewports={}
@@ -700,7 +735,7 @@ You have a hard creation budget of 10 minutes, and the product goal is a sale-re
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
 Use only HTML/CSS/JS for the website. It must work by opening index.html through a local HTTP server.
-The page must be visually distinctive, responsive at 390px and 1440px, accessible, conversion-oriented, and honest when real photos are unavailable.
+The page must be visually distinctive, responsive at 390px, 768px and 1440px, accessible, conversion-oriented, and honest when real photos are unavailable. Treat tablet as a designed composition rather than an accidental midpoint: rebalance columns, artwork scale and section height when the desktop arrangement leaves stranded whitespace at intermediate widths.
 Do not let the identity peak in the hero and dissolve into generic sections. Reinterpret the signature visual device or its underlying spatial/typographic logic in at least two meaningful non-hero moments, changing scale, density or composition to fit the content instead of stamping the same decoration everywhere. Mark only the rendered elements that genuinely embody this device with a concise data-design-signature attribute so QA can verify where the identity survives; include the main hero expression and at least two meaningful non-hero expressions, never invisible/dummy markers. At least one mid/late-page section should deliberately break the preceding composition pattern when the content benefits from it.
 When the brief contains little verified evidence, prefer a shorter, stronger page over filler. Every supporting section must add decision-relevant information, a genuinely new visual role, or a necessary conversion step; do not stack multiple sections that merely restate the same emotion, philosophy or promise in different words.
 Do not merely describe the design: implement it fully.
@@ -888,14 +923,17 @@ def deterministic_qa(run_dir, label):
         conversion=conversion_ergonomics_from_qa(result,brief_data)
         typography=typography_ergonomics_from_qa(result)
         rhythm=section_rhythm_from_qa(result)
+        spatial=spatial_balance_from_qa(result)
         identity=identity_continuity_from_qa(result)
         result["conversionErgonomics"]=conversion
         result["typographyErgonomics"]=typography
         result["sectionRhythm"]=rhythm
+        result["spatialBalance"]=spatial
         result["identityContinuity"]=identity
         result["static"]["observations"].extend(conversion.get("observations",[]))
         result["static"]["observations"].extend(typography.get("observations",[]))
         result["static"]["observations"].extend(rhythm.get("observations",[]))
+        result["static"]["observations"].extend(spatial.get("observations",[]))
         result["static"]["observations"].extend(identity.get("observations",[]))
         profile=layout_profile_from_qa(result)
         result["layoutProfile"]=profile
@@ -979,7 +1017,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile. Also penalize content padding: successive brand-manifesto sections that repeat the same emotional positioning without adding practical or decision-relevant information should reduce hierarchy/composition/polish rather than being rewarded for page length.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper. Judge identity continuity across the whole page, not just hero quality: penalize a strong opening followed by generic service/info sections, and reward purposeful reinterpretation of the signature device or its spatial/typographic logic in later sections without repetitive decoration.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic. If identityContinuity reports signature_identity_unmarked, hero_heavy or shallow, inspect the screenshots rather than trusting the marker alone, but scrutinize whether the signature device actually survives past the opening and on mobile; penalize hero-only art direction when later sections revert to generic presentation.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic. If spatialBalance reports column_height_imbalance, inspect that two-column section in the screenshots: intentional asymmetry can be excellent, but stranded empty space beside a much denser column should reduce composition/mobile scores and trigger recomposition, especially on tablet. If identityContinuity reports signature_identity_unmarked, hero_heavy or shallow, inspect the screenshots rather than trusting the marker alone, but scrutinize whether the signature device actually survives past the opening and on mobile; penalize hero-only art direction when later sections revert to generic presentation.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -1003,8 +1041,8 @@ def fix_site(run_dir, brief, review, pass_no):
 Read design-intent.json, critique-pass-{pass_no}.json, the latest qa-*.json and the current site files. Implement the most important fixes, not cosmetic busywork. Preserve the core concept when it is strong; refine design-intent.json only when the review shows the concept itself is weak or incoherent.
 Treat deterministic QA defects as mandatory fixes before aesthetic refinements. Treat static template-smell observations as prompts for judgment, not mechanical rules.
 Preserve factual honesty and the business brief. Do not browse or add remote dependencies.
-Prioritize the lowest scoring categories and the review fixBrief. Make the design more authored, coherent and professional, while preserving conversion and accessibility. If identity or composition weakens after the hero, carry the core visual/spatial idea into later sections in content-appropriate forms and introduce a purposeful rhythm change rather than another cosmetic band. If multiple sections repeat the same broad promise, consolidate or remove them and use the recovered space for clearer practical information or stronger visual pacing; never invent facts to fill the gap.
-Do not just explain changes; edit the site. Avoid regressions at desktop and mobile.
+Prioritize the lowest scoring categories and the review fixBrief. Make the design more authored, coherent and professional, while preserving conversion and accessibility. If identity or composition weakens after the hero, carry the core visual/spatial idea into later sections in content-appropriate forms and introduce a purposeful rhythm change rather than another cosmetic band. If spatialBalance flags a section, rebalance its columns at the affected viewport by changing proportions, alignment, stacking threshold, density or section height rather than filling space with decorative noise. If multiple sections repeat the same broad promise, consolidate or remove them and use the recovered space for clearer practical information or stronger visual pacing; never invent facts to fill the gap.
+Do not just explain changes; edit the site. Avoid regressions at desktop, tablet and mobile.
 Business: {brief['business']} | {brief['category']}
 """
     with (run_dir/f"fix-{pass_no}-trace.txt").open("w",encoding="utf-8") as f:
@@ -1157,6 +1195,7 @@ def main():
           "conversionErgonomics":qa.get("conversionErgonomics",{}),
           "typographyErgonomics":qa.get("typographyErgonomics",{}),
           "sectionRhythm":qa.get("sectionRhythm",{}),
+          "spatialBalance":qa.get("spatialBalance",{}),
           "identityContinuity":qa.get("identityContinuity",{}),
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
