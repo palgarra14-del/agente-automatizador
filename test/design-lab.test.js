@@ -148,6 +148,43 @@ print(json.dumps({"candidate":candidate,"mastered":mastered,"recent":len(recent)
   assert.equal(result.qualified, null);
 });
 
+test('training focus calibration removes synthetic-contact bias without hiding real conversion friction', () => {
+  const base = {
+    deterministicQaPass: true,
+    categoryScores: { identity: 8.4, hierarchy: 8.5, typography: 8.3, composition: 8.2, authenticity: 8.6, conversion: 5.5, mobile: 8.4, polish: 8.1 }
+  };
+  const synthetic = {
+    ...base,
+    topIssues: ['The primary business objective remains impossible: reservationPhone is empty and booking is unavailable.']
+  };
+  const realFriction = {
+    ...base,
+    categoryScores: { ...base.categoryScores, conversion: 7.2 },
+    topIssues: ['The first-visit checklist adds unnecessary friction to a simple phone action.']
+  };
+  const result = python(`
+synthetic=json.loads(sys.argv[1]); friction=json.loads(sys.argv[2])
+entries=[synthetic,friction]
+print(json.dumps({
+  "synthetic":m.effective_dimension_score(synthetic,"conversion"),
+  "friction":m.effective_dimension_score(friction,"conversion"),
+  "weakest":m.weakest_dimension(entries),
+  "calibrated":m.dimension_averages(entries,calibrated=True)
+}))
+`, [JSON.stringify(synthetic), JSON.stringify(realFriction)]);
+  assert.equal(result.synthetic, 8.8);
+  assert.equal(result.friction, 7.2);
+  assert.equal(result.calibrated.conversion, 8);
+  assert.equal(result.weakest, 'conversion');
+  const syntheticOnly = python(`
+synthetic=json.loads(sys.argv[1])
+entries=[synthetic,{**synthetic,"categoryScores":{**synthetic["categoryScores"],"conversion":6.4}}]
+print(json.dumps({"weakest":m.weakest_dimension(entries),"issue":m.synthetic_conversion_issue(synthetic["topIssues"][0])}))
+`, [JSON.stringify(synthetic)]);
+  assert.equal(syntheticOnly.issue, true);
+  assert.equal(syntheticOnly.weakest, 'polish');
+});
+
 test('conversion ergonomics requires an exact above-fold comfortably tappable contact action', () => {
   const brief = { syntheticContact: { phone: '+34000000000', email: 'demo@example.invalid' } };
   const good = {
