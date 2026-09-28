@@ -582,15 +582,49 @@ def record_passes(entry):
       entry.get("verdict") == "PASS"
     )
 
-def weakest_dimension(entries):
+SYNTHETIC_CONVERSION_MARKERS=(
+  "reservationphone is empty",
+  "unavailable-booking",
+  "teléfono no operativo",
+  "correo de prueba",
+  "non-operational contact",
+  "non-operational contacts",
+  "demonstration phone number",
+  "dummy contact"
+)
+
+def synthetic_conversion_issue(value):
+    text=str(value or "").lower()
+    return any(marker in text for marker in SYNTHETIC_CONVERSION_MARKERS)
+
+def synthetic_conversion_penalty(entry):
+    if entry.get("deterministicQaPass") is not True: return False
+    issues=entry.get("topIssues",[])
+    if not isinstance(issues,list) or not issues: return False
+    return synthetic_conversion_issue(issues[0])
+
+def effective_dimension_score(entry,dimension):
+    scores=entry.get("categoryScores",{}) if isinstance(entry,dict) else {}
+    value=scores.get(dimension)
+    if not isinstance(value,(int,float)): return None
+    if dimension=="conversion" and synthetic_conversion_penalty(entry):
+        return max(float(value),CATEGORY_FLOOR)
+    return float(value)
+
+def dimension_averages(entries,calibrated=False):
     dimensions=["identity","hierarchy","typography","composition","authenticity","conversion","mobile","polish"]
-    if not entries:
-        return None
     averages={}
     for dimension in dimensions:
-        values=[entry["categoryScores"].get(dimension) for entry in entries if isinstance(entry["categoryScores"].get(dimension),(int,float))]
-        if values:
-            averages[dimension]=sum(values)/len(values)
+        values=[]
+        for entry in entries:
+            value=effective_dimension_score(entry,dimension) if calibrated else entry.get("categoryScores",{}).get(dimension)
+            if isinstance(value,(int,float)): values.append(float(value))
+        averages[dimension]=(sum(values)/len(values)) if values else None
+    return averages
+
+def weakest_dimension(entries):
+    if not entries: return None
+    averages={key:value for key,value in dimension_averages(entries,calibrated=True).items() if value is not None}
     return min(averages,key=averages.get) if averages else None
 
 def recent_transferable_lessons(limit=12):
@@ -669,16 +703,18 @@ def choose_holdout(entries, qualified_at):
 
 def write_training_summary():
     entries=training_history()
-    dimensions=["identity","hierarchy","typography","composition","authenticity","conversion","mobile","polish"]
-    averages={}
-    for dimension in dimensions:
-        values=[entry["categoryScores"].get(dimension) for entry in entries if isinstance(entry["categoryScores"].get(dimension),(int,float))]
-        averages[dimension]=round(sum(values)/len(values),3) if values else None
+    raw_averages=dimension_averages(entries,calibrated=False)
+    calibrated_averages=dimension_averages(entries,calibrated=True)
+    averages={key:(round(value,3) if value is not None else None) for key,value in raw_averages.items()}
+    focus_averages={key:(round(value,3) if value is not None else None) for key,value in calibrated_averages.items()}
     issues={}
+    focus_issues={}
     for entry in entries:
         for issue in [*entry.get("qaDefects",[]),*entry.get("templateSignals",[]),*entry.get("topIssues",[])]:
             key=str(issue)[:240]
             issues[key]=issues.get(key,0)+1
+            if not synthetic_conversion_issue(key):
+                focus_issues[key]=focus_issues.get(key,0)+1
     selected_times=[
       float(entry["selectedElapsedSeconds"]) for entry in entries
       if isinstance(entry.get("selectedElapsedSeconds"),(int,float))
@@ -690,8 +726,10 @@ def write_training_summary():
       "averageFinalScore":round(sum(e.get("finalScore",0) for e in entries)/len(entries),3) if entries else None,
       "averageBuildSeconds":round(sum(e.get("buildSeconds",0) for e in entries)/len(entries),2) if entries else None,
       "dimensionAverages":averages,
+      "trainingFocusDimensionAverages":focus_averages,
       "weakestDimension":weakest_dimension(entries),
       "topRecurringIssues":sorted(issues.items(),key=lambda item:(-item[1],item[0]))[:12],
+      "trainingFocusRecurringIssues":sorted(focus_issues.items(),key=lambda item:(-item[1],item[0]))[:12],
       "qaPassRate":round(sum(1 for e in entries if e.get("deterministicQaPass") is True)/len(entries),3) if entries else None,
       "recentConcepts":[{"briefSlug":e.get("briefSlug"),"concept":e.get("conceptIdentity")} for e in entries[-8:] if e.get("conceptIdentity")],
       "averageScoreGain":round(sum(e.get("scoreGain",0) for e in entries)/len(entries),3) if entries else None,
@@ -730,7 +768,7 @@ def build_site(run_dir, brief):
     (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. For training priority, prefer trainingFocusDimensionAverages, weakestDimension and trainingFocusRecurringIssues; raw dimensionAverages/topRecurringIssues are retained for audit and may contain older penalties caused only by non-operational synthetic contact details. Do not spend design effort trying to make syntheticContact "real". Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes, and the product goal is a sale-ready reviewed result within 10 minutes end-to-end. Make high-leverage design decisions early, avoid over-engineering, and leave enough quality in the first implementation that review needs at most focused correction.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -1017,7 +1055,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile. Also penalize content padding: successive brand-manifesto sections that repeat the same emotional positioning without adding practical or decision-relevant information should reduce hierarchy/composition/polish rather than being rewarded for page length.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper. Judge identity continuity across the whole page, not just hero quality: penalize a strong opening followed by generic service/info sections, and reward purposeful reinterpretation of the signature device or its spatial/typographic logic in later sections without repetitive decoration.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic. If spatialBalance reports column_height_imbalance, inspect that two-column section in the screenshots: intentional asymmetry can be excellent, but stranded empty space beside a much denser column should reduce composition/mobile scores and trigger recomposition, especially on tablet. If identityContinuity reports signature_identity_unmarked, hero_heavy or shallow, inspect the screenshots rather than trusting the marker alone, but scrutinize whether the signature device actually survives past the opening and on mobile; penalize hero-only art direction when later sections revert to generic presentation.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. This is a synthetic training business: syntheticContact is deliberately test-only and non-operational. If conversionErgonomics passes, score conversion from the quality of the journey you can actually judge—CTA clarity, hierarchy, placement, ergonomics and path coherence—and do not reduce conversion or the overall verdict merely because the injected test phone/email is not a live business destination. Likewise, do not demand real addresses, testimonials, staff, coverage or project evidence that the brief does not provide; reward honest handling of missing evidence and penalize fabrication instead. Genuine conversion friction, vague actions, CTA clutter or poor information architecture should still be penalized. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive. If sectionRhythm reports repeated_section_structure or flat_section_rhythm, judge whether repeated composition genuinely serves the content; otherwise penalize mechanical left/right repetition and ask for purposeful changes of scale, density, alignment or spatial logic. If spatialBalance reports column_height_imbalance, inspect that two-column section in the screenshots: intentional asymmetry can be excellent, but stranded empty space beside a much denser column should reduce composition/mobile scores and trigger recomposition, especially on tablet. If identityContinuity reports signature_identity_unmarked, hero_heavy or shallow, inspect the screenshots rather than trusting the marker alone, but scrutinize whether the signature device actually survives past the opening and on mobile; penalize hero-only art direction when later sections revert to generic presentation.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
