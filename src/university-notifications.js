@@ -57,7 +57,12 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     if (deadline) {
       const months = { enero:0,febrero:1,marzo:2,abril:3,mayo:4,junio:5,julio:6,agosto:7,septiembre:8,octubre:9,noviembre:10,diciembre:11 };
       const month = months[deadline[2].toLowerCase()];
-      if (Number.isInteger(month)) dueDate = new Date(Date.UTC(Number(deadline[3]), month, Number(deadline[1]), 12)).toISOString().slice(0,10);
+      if (!Number.isInteger(month)) continue;
+      const day = Number(deadline[1]);
+      const parsed = new Date(Date.UTC(Number(deadline[3]), month, day, 12));
+      // Date.UTC normalizes impossible days into a different month.
+      if (parsed.getUTCMonth() !== month || parsed.getUTCDate() !== day) continue;
+      dueDate = parsed.toISOString().slice(0,10);
     }
     const currentYear = code ? subjects.get(code) : null;
     const codedBelongs = Boolean(code && currentYear !== undefined && (!year || !currentYear || year === currentYear));

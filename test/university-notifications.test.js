@@ -73,6 +73,28 @@ test('first scan is baseline only; later only new non-expired notifications surf
   assert.deepEqual(diffUvNotifications(state, next).map((item) => item.id), ['c']);
 });
 
+test('invalid explicit notification dates fail closed without suppressing valid deadlines', () => {
+  const dates = [
+    '31 de septiembre de 2026',
+    '29 de febrero de 2026',
+    '00 de octubre de 2026',
+    '28 de octubree de 2026',
+    '28 de septiembre de 2026',
+    '29 de febrero de 2028'
+  ];
+  for (const coded of [false, true]) {
+    const page = { text: ['Notificaciones', ...dates.map((date) =>
+      `Vence el ${date}, 11:30: Ejercicios Tema 1${coded ? ' (34670)' : ''}`
+    )].join('\n') };
+    const parsed = parseUvNotifications(page, courses, {
+      today: '2026-09-27',
+      assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+    });
+    assert.deepEqual(parsed.map((item) => item.dueDate), ['2026-09-28', '2028-02-29']);
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+  }
+});
+
 test('code-less deadlines fail closed when multiple assignments match regardless of order', () => {
   const page = { text: [
     'Notificaciones',
