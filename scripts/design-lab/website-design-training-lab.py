@@ -200,6 +200,83 @@ def concept_identity(intent):
     if not isinstance(intent,dict): return ""
     return " | ".join([str(intent.get("concept","")).strip(),str(intent.get("signatureVisualDevice","")).strip()]).strip(" |")
 
+def _metric_number(value, default=None):
+    return float(value) if isinstance(value,(int,float)) else default
+
+def _viewport_layout_profile(view):
+    metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
+    blocks=metrics.get("visualBlocks",[]) if isinstance(metrics.get("visualBlocks"),list) else []
+    actions=metrics.get("actions",[]) if isinstance(metrics.get("actions"),list) else []
+    typography=metrics.get("typography",{}) if isinstance(metrics.get("typography"),dict) else {}
+    heights=[round(max(0.0,min(6.0,_metric_number(block.get("heightVh"),0.0))),2) for block in blocks[:10] if isinstance(block,dict)]
+    widths=[round(max(0.0,min(1.5,_metric_number(block.get("widthVw"),0.0))),2) for block in blocks[:10] if isinstance(block,dict)]
+    aligns=[str(block.get("textAlign",""))[:16] for block in blocks[:10] if isinstance(block,dict)]
+    displays=[str(block.get("display",""))[:16] for block in blocks[:10] if isinstance(block,dict)]
+    body_size=_metric_number(typography.get("bodyFontSizePx"))
+    h1_size=_metric_number(typography.get("h1FontSizePx"))
+    ratio=round(h1_size/body_size,2) if body_size and h1_size and body_size > 0 else None
+    visible_actions=[action for action in actions if isinstance(action,dict) and isinstance(action.get("yVh"),(int,float))]
+    first_action=min(visible_actions,key=lambda action:action["yVh"]) if visible_actions else {}
+    return {
+      "blockCount":len(blocks[:10]),
+      "heights":heights,
+      "widths":widths,
+      "aligns":aligns,
+      "displays":displays,
+      "pageHeightVh":round(_metric_number(metrics.get("pageHeightVh"),0.0),2),
+      "h1BodyRatio":ratio,
+      "firstActionYVh":round(_metric_number(first_action.get("yVh"),99.0),2) if first_action else None,
+      "firstActionWidthVw":round(_metric_number(first_action.get("widthVw"),0.0),2) if first_action else None
+    }
+
+def layout_profile_from_qa(qa):
+    if not isinstance(qa,dict): return {}
+    return {
+      "desktop":_viewport_layout_profile(qa.get("desktop",{})),
+      "mobile":_viewport_layout_profile(qa.get("mobile",{}))
+    }
+
+def _ratio_similarity(left,right):
+    if not isinstance(left,(int,float)) or not isinstance(right,(int,float)): return 0.0
+    scale=max(abs(left),abs(right),1.0)
+    return max(0.0,1.0-abs(left-right)/scale)
+
+def _numeric_sequence_similarity(left,right,divisor=2.0):
+    if not isinstance(left,list) or not isinstance(right,list) or not left or not right: return 0.0
+    length=max(len(left),len(right))
+    overlap=min(len(left),len(right))
+    distance=sum(min(1.0,abs(float(left[i])-float(right[i]))/divisor) for i in range(overlap))
+    distance += length-overlap
+    return max(0.0,1.0-distance/length)
+
+def _categorical_sequence_similarity(left,right):
+    if not isinstance(left,list) or not isinstance(right,list) or not left or not right: return 0.0
+    length=max(len(left),len(right))
+    overlap=min(len(left),len(right))
+    matches=sum(1 for i in range(overlap) if left[i] == right[i])
+    return matches/length
+
+def _viewport_layout_similarity(left,right):
+    if not isinstance(left,dict) or not isinstance(right,dict): return 0.0
+    parts=[
+      (0.12,_ratio_similarity(left.get("blockCount"),right.get("blockCount"))),
+      (0.28,_numeric_sequence_similarity(left.get("heights"),right.get("heights"),2.0)),
+      (0.10,_numeric_sequence_similarity(left.get("widths"),right.get("widths"),0.6)),
+      (0.10,_categorical_sequence_similarity(left.get("aligns"),right.get("aligns"))),
+      (0.10,_categorical_sequence_similarity(left.get("displays"),right.get("displays"))),
+      (0.10,_ratio_similarity(left.get("pageHeightVh"),right.get("pageHeightVh"))),
+      (0.08,_ratio_similarity(left.get("h1BodyRatio"),right.get("h1BodyRatio"))),
+      (0.07,_ratio_similarity(left.get("firstActionYVh"),right.get("firstActionYVh"))),
+      (0.05,_ratio_similarity(left.get("firstActionWidthVw"),right.get("firstActionWidthVw")))
+    ]
+    return sum(weight*score for weight,score in parts)
+
+def layout_similarity(left,right):
+    if not isinstance(left,dict) or not isinstance(right,dict): return 0.0
+    desktop=_viewport_layout_similarity(left.get("desktop"),right.get("desktop"))
+    mobile=_viewport_layout_similarity(left.get("mobile"),right.get("mobile"))
+    return round(0.55*desktop+0.45*mobile,3)
+
 def training_history():
     return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
 
@@ -271,6 +348,11 @@ def training_mastery_candidate(entries):
         if all(concept_similarity(concept,existing) < 0.58 for existing in representatives):
             representatives.append(concept)
     distinct_concepts=len(representatives)
+    layout_representatives=[]
+    for profile in [entry.get("layoutProfile") for entry in recent if isinstance(entry.get("layoutProfile"),dict)]:
+        if all(layout_similarity(profile,existing) < 0.90 for existing in layout_representatives):
+            layout_representatives.append(profile)
+    distinct_layouts=len(layout_representatives)
     dimension_means={}
     for dimension in SCORE_WEIGHTS:
         values=[entry.get("categoryScores",{}).get(dimension) for entry in recent]
@@ -280,6 +362,7 @@ def training_mastery_candidate(entries):
       all(record_passes(entry) for entry in recent) and
       distinct_briefs>=4 and
       distinct_concepts>=5 and
+      distinct_layouts>=5 and
       all(value>=9.0 for value in dimension_means.values())
     )
     qualified_at=max((entry.get("completedAt","") for entry in recent),default=None) if ok else None
@@ -535,6 +618,17 @@ def deterministic_qa(run_dir, label):
         else:
             result=json.loads(proc.stdout)
         result["static"]=static_quality_audit(run_dir)
+        profile=layout_profile_from_qa(result)
+        result["layoutProfile"]=profile
+        layout_matches=[]
+        for entry in completed_history()[-10:]:
+            prior=entry.get("layoutProfile")
+            similarity=layout_similarity(profile,prior)
+            if similarity >= 0.90:
+                layout_matches.append((similarity,entry.get("briefSlug")))
+        if layout_matches:
+            strongest=max(layout_matches,key=lambda item:item[0])
+            result["static"]["observations"].append(f"repeated_layout_profile:{strongest[0]:.3f}:{strongest[1] or 'unknown'}")
         result["pass"]=bool(result.get("pass")) and bool(result["static"].get("pass"))
         result["defects"]=[*result.get("defects",[]),*result["static"].get("defects",[])]
         (run_dir/f"qa-{label}.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
@@ -606,7 +700,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -764,6 +858,7 @@ def main():
           "runPath":str(run_dir),
           "categoryScores":final_review["categoryScores"],
           "deterministicQaPass":qa.get("pass") is True,
+          "layoutProfile":qa.get("layoutProfile",{}),
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],

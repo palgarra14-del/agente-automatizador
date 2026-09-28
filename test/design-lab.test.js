@@ -20,6 +20,30 @@ ${body}
   return JSON.parse(run.stdout);
 }
 
+function layoutProfile(index) {
+  const variants = [
+    { heights: [0.5,1.1,0.8,1.4], aligns: ['left','left','center','left'], displays: ['flex','grid','block','grid'], h1: 3.4, action: 0.45 },
+    { heights: [0.8,0.7,1.6,0.6], aligns: ['center','left','left','center'], displays: ['grid','block','flex','block'], h1: 4.2, action: 0.68 },
+    { heights: [1.3,0.5,0.9,1.0], aligns: ['left','right','left','left'], displays: ['block','grid','grid','flex'], h1: 2.8, action: 0.35 },
+    { heights: [0.6,1.8,0.6,0.9], aligns: ['right','left','center','left'], displays: ['flex','flex','grid','block'], h1: 5.0, action: 0.82 },
+    { heights: [1.0,0.9,1.2,0.5], aligns: ['center','center','left','right'], displays: ['grid','grid','block','flex'], h1: 3.0, action: 0.52 },
+    { heights: [1.5,0.6,0.7,1.3], aligns: ['left','center','right','center'], displays: ['block','flex','block','grid'], h1: 4.6, action: 0.28 }
+  ];
+  const v = variants[index % variants.length];
+  const view = {
+    blockCount: v.heights.length,
+    heights: v.heights,
+    widths: [1,0.92,1,0.88],
+    aligns: v.aligns,
+    displays: v.displays,
+    pageHeightVh: v.heights.reduce((a,b) => a + b, 0) + 0.5,
+    h1BodyRatio: v.h1,
+    firstActionYVh: v.action,
+    firstActionWidthVw: 0.32
+  };
+  return { desktop: view, mobile: { ...view, widths: [1,1,1,1], firstActionWidthVw: 0.82 } };
+}
+
 function strongEntry(index, patch = {}) {
   const scores = {
     identity: 9.3, hierarchy: 9.3, typography: 9.3, composition: 9.3,
@@ -35,10 +59,37 @@ function strongEntry(index, patch = {}) {
     deterministicQaPass: true,
     verdict: 'PASS',
     conceptIdentity: `signature ${['alba','bruma','cobre','duna','esfera','fuego'][index % 6]}`,
+    layoutProfile: layoutProfile(index),
     categoryScores: scores,
     ...patch
   };
 }
+
+test('layout fingerprint distinguishes materially different compositions', () => {
+  const a = layoutProfile(0);
+  const b = JSON.parse(JSON.stringify(a));
+  b.desktop.heights[1] += 0.03;
+  b.mobile.firstActionYVh += 0.02;
+  const c = layoutProfile(3);
+  const result = python(`
+a=json.loads(sys.argv[1]); b=json.loads(sys.argv[2]); c=json.loads(sys.argv[3])
+print(json.dumps({"near":m.layout_similarity(a,b),"different":m.layout_similarity(a,c)}))
+`, [JSON.stringify(a), JSON.stringify(b), JSON.stringify(c)]);
+  assert.ok(result.near >= 0.95, JSON.stringify(result));
+  assert.ok(result.different < 0.9, JSON.stringify(result));
+});
+
+test('training cannot qualify by recycling one layout across distinct concepts', () => {
+  const repeated = Array.from({ length: 6 }, (_, i) => strongEntry(i, { layoutProfile: layoutProfile(0) }));
+  const result = python(`
+entries=json.loads(sys.argv[1])
+candidate,recent,qualified=m.training_mastery_candidate(entries)
+print(json.dumps({"candidate":candidate,"recent":len(recent),"qualified":qualified}))
+`, [JSON.stringify(repeated)]);
+  assert.equal(result.candidate, false);
+  assert.equal(result.recent, 6);
+  assert.equal(result.qualified, null);
+});
 
 test('design lab requires unseen holdouts after a qualifying training streak', () => {
   const training = Array.from({ length: 6 }, (_, i) => strongEntry(i));

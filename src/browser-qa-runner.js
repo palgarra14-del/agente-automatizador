@@ -621,6 +621,70 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
+    const metric = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) * 1000) / 1000 : null;
+    const px = (value) => {
+      const parsed = Number.parseFloat(String(value ?? ''));
+      return Number.isFinite(parsed) ? metric(parsed) : null;
+    };
+    const viewportWidth = Math.max(1, window.innerWidth || document.documentElement?.clientWidth || 1);
+    const viewportHeight = Math.max(1, window.innerHeight || document.documentElement?.clientHeight || 1);
+    const pageHeight = Math.max(document.documentElement?.scrollHeight ?? 0, document.body?.scrollHeight ?? 0, viewportHeight);
+    const visualBlocks = queryAll('body > header, body > main > section, body > main > article, body > main > div, body > footer')
+      .filter(isRendered)
+      .slice(0, 20)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = styleFor(element);
+        return {
+          tag: String(element.tagName ?? '').toLowerCase(),
+          topVh: metric(rect.top / viewportHeight),
+          heightVh: metric(rect.height / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          textAlign: String(style.textAlign ?? '').toLowerCase(),
+          display: String(style.display ?? '').toLowerCase(),
+          background: String(style.backgroundColor ?? '').toLowerCase().slice(0, 80)
+        };
+      });
+    const visibleActions = queryAll('a[href], button')
+      .filter(isRendered)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        let href = String(element.getAttribute?.('href') ?? '');
+        let kind = String(element.tagName ?? '').toLowerCase() === 'button' ? 'button' : 'link';
+        if (/^tel:/i.test(href)) kind = 'phone';
+        else if (/^mailto:/i.test(href)) kind = 'email';
+        else if (/^https?:/i.test(href)) kind = 'external';
+        else if (href.startsWith('#')) kind = 'anchor';
+        return {
+          kind,
+          xVw: metric(rect.left / viewportWidth),
+          yVh: metric(rect.top / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          heightVh: metric(rect.height / viewportHeight),
+          nameLength: nameFor(element).length
+        };
+      })
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0) || (a.xVw ?? 0) - (b.xVw ?? 0))
+      .slice(0, 12);
+    const h1 = queryAll('h1').find(isRendered) ?? null;
+    const bodyStyle = styleFor(document.body);
+    const h1Style = h1 ? styleFor(h1) : null;
+    const designMetrics = {
+      viewport: { width: viewportWidth, height: viewportHeight },
+      pageHeightVh: metric(pageHeight / viewportHeight),
+      visualBlocks,
+      actions: visibleActions,
+      typography: {
+        bodyFontSizePx: px(bodyStyle?.fontSize),
+        bodyLineHeightPx: px(bodyStyle?.lineHeight),
+        bodyFamily: String(bodyStyle?.fontFamily ?? '').toLowerCase().slice(0, 120),
+        h1FontSizePx: px(h1Style?.fontSize),
+        h1LineHeightPx: px(h1Style?.lineHeight),
+        h1Weight: String(h1Style?.fontWeight ?? '').slice(0, 20),
+        h1Align: String(h1Style?.textAlign ?? '').toLowerCase(),
+        h1Family: String(h1Style?.fontFamily ?? '').toLowerCase().slice(0, 120)
+      }
+    };
     return {
       finalUrl: location.href,
       bodyTextLength: clean(document.body?.innerText).length,
@@ -634,6 +698,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         title: clean(document.title),
         description: clean(document.querySelector('meta[name="description"]')?.getAttribute('content'))
       },
+      designMetrics,
       interactiveControls: [],
       targets: expectedTargets.map(targetFor).filter(Boolean)
     };
