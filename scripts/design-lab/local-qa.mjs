@@ -1,4 +1,4 @@
-import { launchChromeCdpBrowser } from '/home/pablo/projects/agente-automatizador/src/browser-qa-runner.js';
+import { launchChromeCdpBrowser } from '../../src/browser-qa-runner.js';
 
 const url = process.argv[2];
 if (!url) throw new Error('usage: node local-qa.mjs <url>');
@@ -60,6 +60,7 @@ const result = {
     horizontalOverflow: mobile.horizontalOverflow,
     errorOverlay: mobile.errorOverlay,
     metadata: mobile.metadata,
+    designMetrics: mobile.designMetrics,
     interactiveControls: mobile.interactiveControls
   },
   tablet: {
@@ -68,6 +69,7 @@ const result = {
     horizontalOverflow: tablet.horizontalOverflow,
     errorOverlay: tablet.errorOverlay,
     metadata: tablet.metadata,
+    designMetrics: tablet.designMetrics,
     interactiveControls: tablet.interactiveControls
   },
   desktop: {
@@ -76,6 +78,7 @@ const result = {
     horizontalOverflow: desktop.horizontalOverflow,
     errorOverlay: desktop.errorOverlay,
     metadata: desktop.metadata,
+    designMetrics: desktop.designMetrics,
     interactiveControls: desktop.interactiveControls
   }
 };
