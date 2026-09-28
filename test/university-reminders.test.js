@@ -75,6 +75,32 @@ test('coursework and schedule changes remind only the day before', () => {
   assert.deepEqual(reminders.map((item) => item.kind).sort(), ['coursework', 'schedule_change']);
 });
 
+test('mandatory attendance sessions remind only the day before with a stable identity', () => {
+  const signal = {
+    id: 'uv-mail:required-session',
+    subjectId: '34670',
+    subject: 'EDA',
+    title: 'Sesión de asistencia obligatoria',
+    kind: 'required_session',
+    dates: ['2026-10-02']
+  };
+  for (const today of ['2026-09-30', '2026-10-02', '2026-10-03']) {
+    assert.deepEqual(buildAcademicReminders({ today, signals: [signal] }), [], today);
+  }
+  const reminders = buildAcademicReminders({ today: '2026-10-01', signals: [signal] });
+  assert.deepEqual(reminders, [{
+    id: 'reminder:signal:uv-mail:required-session:2026-10-02:tomorrow',
+    source: 'signal',
+    subjectId: '34670',
+    subject: 'EDA',
+    title: 'Sesión de asistencia obligatoria',
+    date: '2026-10-02',
+    daysRemaining: 1,
+    kind: 'required_session'
+  }]);
+  assert.deepEqual(buildAcademicReminders({ today: '2026-10-01', signals: [signal] }), reminders);
+});
+
 test('open assignments remind one day before but completed assignments do not', () => {
   const reminders = buildAcademicReminders({
     today: '2026-09-27',

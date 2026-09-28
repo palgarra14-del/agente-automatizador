@@ -46,7 +46,7 @@ export function buildAcademicReminders({
       const remaining = daysUntil(today, date);
       let stage = null;
       if (signal.kind === 'assessment' && remaining >= 1 && remaining <= 2) stage = 'assessment-soon';
-      else if (['coursework', 'schedule_change'].includes(signal.kind) && remaining === 1) stage = 'tomorrow';
+      else if (['coursework', 'schedule_change', 'required_session'].includes(signal.kind) && remaining === 1) stage = 'tomorrow';
       if (!stage) continue;
       reminders.push({
         id: 'reminder:signal:' + signal.id + ':' + date + ':' + stage,
