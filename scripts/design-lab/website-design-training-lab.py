@@ -74,6 +74,27 @@ BRIEFS = [
   }
 ]
 
+HOLDOUT_BRIEFS = [
+  {
+    "slug": "holdout-fisioterapia",
+    "business": "Movimiento Fisio",
+    "category": "Centro de fisioterapia",
+    "brief": "Centro local de fisioterapia con posicionamiento humano, técnico y contemporáneo. Objetivo: pedir cita. No inventar resultados clínicos, especialistas, tratamientos concretos, reseñas, cifras ni acreditaciones."
+  },
+  {
+    "slug": "holdout-carpinteria",
+    "business": "Veta Taller",
+    "category": "Carpintería a medida",
+    "brief": "Taller local de carpintería y mobiliario a medida. Debe transmitir oficio, materialidad y detalle sin inventar proyectos, clientes, maderas concretas, años de experiencia ni certificaciones. Objetivo: solicitar una conversación."
+  },
+  {
+    "slug": "holdout-academia",
+    "business": "Punto Idiomas",
+    "category": "Academia local de idiomas",
+    "brief": "Academia de idiomas para jóvenes y adultos con imagen clara, viva y profesional. Objetivo: solicitar información. No inventar niveles, profesores, aprobados, precios, titulaciones oficiales ni testimonios."
+  }
+]
+
 BRIEF_FOCUS = {
   "salon-color-premium": ["identity","typography","composition","mobile"],
   "barberia-contemporanea": ["identity","typography","composition","polish"],
@@ -178,6 +199,22 @@ def concept_identity(intent):
     if not isinstance(intent,dict): return ""
     return " | ".join([str(intent.get("concept","")).strip(),str(intent.get("signatureVisualDevice","")).strip()]).strip(" |")
 
+def training_history():
+    return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
+
+def holdout_history():
+    return [entry for entry in completed_history() if entry.get("phase") == "holdout"]
+
+def record_passes(entry):
+    return bool(
+      isinstance(entry.get("finalScore"),(int,float)) and
+      entry.get("finalScore",0) >= THRESHOLD and
+      entry.get("minCategory",0) >= CATEGORY_FLOOR and
+      entry.get("buildSeconds",999999) <= BUILD_LIMIT_SECONDS and
+      entry.get("deterministicQaPass") is True and
+      entry.get("verdict") == "PASS"
+    )
+
 def weakest_dimension(entries):
     dimensions=["identity","hierarchy","typography","composition","authenticity","conversion","mobile","polish"]
     if not entries:
@@ -192,7 +229,7 @@ def weakest_dimension(entries):
 def recent_transferable_lessons(limit=12):
     lessons=[]
     seen=set()
-    for entry in completed_history()[-6:]:
+    for entry in training_history()[-6:]:
         for raw in entry.get("transferableLessons",[]):
             lesson=str(raw).strip()
             key=" ".join(lesson.lower().split())
@@ -202,7 +239,7 @@ def recent_transferable_lessons(limit=12):
     return lessons[-limit:]
 
 def choose_brief():
-    entries=completed_history()
+    entries=training_history()
     if not entries:
         return BRIEFS[0]
     weakest=weakest_dimension(entries)
@@ -213,8 +250,52 @@ def choose_brief():
     candidates=sorted(candidates,key=lambda brief: brief["slug"])
     return candidates[len(entries) % len(candidates)]
 
+def last_failed_holdout_at(entries):
+    failed=[entry for entry in entries if entry.get("phase")=="holdout" and not record_passes(entry) and entry.get("completedAt")]
+    return max((entry["completedAt"] for entry in failed), default=None)
+
+def training_mastery_candidate(entries):
+    cutoff=last_failed_holdout_at(entries)
+    training=[
+      entry for entry in entries
+      if entry.get("phase","training")=="training" and
+      (cutoff is None or str(entry.get("completedAt","")) > cutoff)
+    ]
+    recent=training[-STREAK_NEEDED:]
+    if len(recent)<STREAK_NEEDED:
+        return False,recent,None
+    distinct_briefs=len({entry.get("briefSlug") for entry in recent if entry.get("briefSlug")})
+    representatives=[]
+    for concept in [entry.get("conceptIdentity","") for entry in recent if entry.get("conceptIdentity")]:
+        if all(concept_similarity(concept,existing) < 0.58 for existing in representatives):
+            representatives.append(concept)
+    distinct_concepts=len(representatives)
+    dimension_means={}
+    for dimension in SCORE_WEIGHTS:
+        values=[entry.get("categoryScores",{}).get(dimension) for entry in recent]
+        values=[value for value in values if isinstance(value,(int,float))]
+        dimension_means[dimension]=(sum(values)/len(values)) if len(values)==len(recent) else 0.0
+    ok=(
+      all(record_passes(entry) for entry in recent) and
+      distinct_briefs>=4 and
+      distinct_concepts>=5 and
+      all(value>=9.0 for value in dimension_means.values())
+    )
+    qualified_at=max((entry.get("completedAt","") for entry in recent),default=None) if ok else None
+    return ok,recent,qualified_at
+
+def choose_holdout(entries, qualified_at):
+    passed={
+      entry.get("briefSlug") for entry in entries
+      if entry.get("phase")=="holdout" and
+      qualified_at and str(entry.get("completedAt","")) > qualified_at and
+      record_passes(entry)
+    }
+    remaining=[brief for brief in HOLDOUT_BRIEFS if brief["slug"] not in passed]
+    return remaining[0] if remaining else HOLDOUT_BRIEFS[0]
+
 def write_training_summary():
-    entries=completed_history()
+    entries=training_history()
     dimensions=["identity","hierarchy","typography","composition","authenticity","conversion","mobile","polish"]
     averages={}
     for dimension in dimensions:
@@ -235,7 +316,17 @@ def write_training_summary():
       "weakestDimension":weakest_dimension(entries),
       "topRecurringIssues":sorted(issues.items(),key=lambda item:(-item[1],item[0]))[:12],
       "qaPassRate":round(sum(1 for e in entries if e.get("deterministicQaPass") is True)/len(entries),3) if entries else None,
-      "recentConcepts":[{"briefSlug":e.get("briefSlug"),"concept":e.get("conceptIdentity")} for e in entries[-8:] if e.get("conceptIdentity")]
+      "recentConcepts":[{"briefSlug":e.get("briefSlug"),"concept":e.get("conceptIdentity")} for e in entries[-8:] if e.get("conceptIdentity")],
+      "averageScoreGain":round(sum(e.get("scoreGain",0) for e in entries)/len(entries),3) if entries else None,
+      "averageCycleSeconds":round(sum(e.get("cycleSeconds",0) for e in entries)/len(entries),2) if entries else None,
+      "holdoutAttempts":len(holdout_history()),
+      "holdoutPasses":sum(1 for e in holdout_history() if record_passes(e)),
+      "lastHoldoutFailure":next(({
+        "briefSlug":e.get("briefSlug"),
+        "categoryScores":e.get("categoryScores",{}),
+        "topIssues":e.get("topIssues",[])[:5],
+        "qaDefects":e.get("qaDefects",[])[:8]
+      } for e in reversed(holdout_history()) if not record_passes(e)),None)
     }
     (STATE/"training-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     return summary
@@ -252,11 +343,14 @@ def build_site(run_dir, brief):
     (run_dir/"playbook.md").write_text(playbook, encoding="utf-8")
     lessons=recent_transferable_lessons()
     (run_dir/"recent-lessons.md").write_text("# Recent transferable lessons\n" + ("\n".join(f"- {lesson}" for lesson in lessons) if lessons else "- None yet."), encoding="utf-8")
-    recent_concepts=[f"{entry.get('briefSlug','unknown')}: {entry.get('conceptIdentity','')}" for entry in completed_history()[-6:] if entry.get('conceptIdentity')]
+    recent_concepts=[f"{entry.get('briefSlug','unknown')}: {entry.get('conceptIdentity','')}" for entry in training_history()[-6:] if entry.get('conceptIdentity')]
     (run_dir/"recent-concepts.md").write_text("# Recent concepts to avoid repeating by default\n" + ("\n".join(f"- {item}" for item in recent_concepts) if recent_concepts else "- None yet."), encoding="utf-8")
+    summary_path=STATE/"training-summary.json"
+    training_context=json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md and recent-concepts.md first and use them as design guidance. Recent lessons are prior reviewer observations, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes. Build the best professional result you can inside this directory.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -430,7 +524,7 @@ def deterministic_qa(run_dir, label):
 
 def site_source_paths(run_dir):
     excluded_prefixes=("build-","server-","desktop-","mobile-","qa-","review-","critique-","fix-","result")
-    excluded_names={"brief.txt","playbook.md"}
+    excluded_names={"brief.txt","playbook.md","recent-lessons.md","recent-concepts.md","training-context.json"}
     allowed_dirs={"assets","css","js","images","img","fonts","servicios","contacto"}
     allowed_suffixes={".html",".css",".js",".json",".svg",".png",".jpg",".jpeg",".webp",".gif",".avif",".woff",".woff2"}
     paths=[]
@@ -537,29 +631,19 @@ If this run does not justify a general lesson, make no changes.
         run(codex_base(STATE)+["-"],cwd=STATE,timeout=240,check=False,stdout=f,stderr=subprocess.STDOUT,input=prompt)
 
 def mastery_status(entries):
-    completed=[e for e in entries if isinstance(e.get("finalScore"),(int,float))]
-    recent=completed[-STREAK_NEEDED:]
-    if len(recent)<STREAK_NEEDED: return False, recent
-    distinct_briefs=len({e.get("briefSlug") for e in recent if e.get("briefSlug")})
-    concept_identities=[e.get("conceptIdentity","") for e in recent if e.get("conceptIdentity")]
-    distinct_concepts=0
-    representatives=[]
-    for concept in concept_identities:
-        if all(concept_similarity(concept,existing) < 0.58 for existing in representatives):
-            representatives.append(concept)
-    distinct_concepts=len(representatives)
-    dimension_means={}
-    for dimension in SCORE_WEIGHTS:
-        values=[e.get("categoryScores",{}).get(dimension) for e in recent]
-        values=[value for value in values if isinstance(value,(int,float))]
-        dimension_means[dimension]=(sum(values)/len(values)) if len(values)==len(recent) else 0.0
-    ok=(
-      all(e["finalScore"]>=THRESHOLD and e.get("minCategory",0)>=CATEGORY_FLOOR and e.get("buildSeconds",999999)<=BUILD_LIMIT_SECONDS and e.get("deterministicQaPass") is True and e.get("verdict")=="PASS" for e in recent)
-      and distinct_briefs>=4
-      and distinct_concepts>=5
-      and all(value>=9.0 for value in dimension_means.values())
-    )
-    return ok,recent
+    training_ready,recent,qualified_at=training_mastery_candidate(entries)
+    if not training_ready:
+        return False,recent
+    holdouts=[
+      entry for entry in entries
+      if entry.get("phase")=="holdout" and
+      qualified_at and str(entry.get("completedAt","")) > qualified_at
+    ]
+    if any(not record_passes(entry) for entry in holdouts):
+        return False,recent
+    passing=[entry for entry in holdouts if record_passes(entry)]
+    distinct_holdouts={entry.get("briefSlug") for entry in passing if entry.get("briefSlug")}
+    return len(passing)>=2 and len(distinct_holdouts)>=2, [*recent,*passing[-2:]]
 
 def main():
     ensure_state()
@@ -579,13 +663,17 @@ def main():
         subprocess.run(["systemctl","--user","disable","--now","engineering-orchestrator-design-lab.timer"],check=False)
         print("design_lab_status=mastery_reached")
         return
-    brief=choose_brief()
-    run_id=f"run-{len(entries)+1:04d}-{brief['slug']}"
+    training_ready,_,qualified_at=training_mastery_candidate(entries)
+    phase="holdout" if training_ready else "training"
+    brief=choose_holdout(entries,qualified_at) if phase=="holdout" else choose_brief()
+    run_id=f"run-{len(entries)+1:04d}-{phase}-{brief['slug']}"
     run_dir=RUNS/run_id
     if run_dir.exists(): shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
     print(f"design_lab_run={run_id}")
     print(f"design_lab_business={brief['business']}")
+    print(f"design_lab_phase={phase}")
+    cycle_started=time.monotonic()
     try:
         build_seconds,build_rc=build_site(run_dir,brief)
         if build_rc!=0 or not (run_dir/"index.html").exists():
@@ -630,12 +718,14 @@ def main():
         selected_concept=concept_identity(selected_intent)
         record={
           "runId":run_id,
+          "phase":phase,
           "briefSlug":brief["slug"],
           "trainingFocus":BRIEF_FOCUS.get(brief["slug"],[]),
           "completedAt":now(),
           "business":brief["business"],
           "category":brief["category"],
           "buildSeconds":round(build_seconds,2),
+          "cycleSeconds":round(time.monotonic()-cycle_started,2),
           "initialScore":initial_score,
           "initialModelScore":initial_model_score,
           "finalScore":calibrated_score(final_review),
@@ -659,6 +749,8 @@ def main():
         with HISTORY.open("a",encoding="utf-8") as f:
             f.write(json.dumps(record,ensure_ascii=False)+"\n")
         (run_dir/"result.json").write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding="utf-8")
+        if phase=="training" or not record_passes(record):
+            coach_playbook(run_dir,brief,final_review)
         write_training_summary()
         mastered,recent=mastery_status(history())
         if mastered:
