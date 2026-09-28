@@ -4156,6 +4156,19 @@ export class LocalSanitizedExecution extends ExecutionProvider {
 export class DockerContainerExecution extends ExecutionProvider {
   constructor({ processRunner = runProcess, dockerBinary = 'docker', now = () => Date.now() } = {}) { super(); Object.assign(this, { processRunner, dockerBinary, now }); }
 
+  packageCacheMount(project, stage) {
+    if (!['bootstrap', 'dependency-refresh'].includes(stage) || project.toolchain?.command !== 'pnpm') return null;
+    const major = String(project.toolchain?.version ?? '').split('.')[0];
+    if (!/^\d+$/.test(major)) throw new Error('pnpm_cache_requires_versioned_toolchain');
+    const root = resolve(project.managedWorkspaceRoot);
+    const source = resolve(root, '.cache', project.id, `pnpm-store-v${major}`);
+    if (!isWithin(root, source)) throw new Error('package_cache_mount_escapes_managed_root');
+    return {
+      source,
+      target: `/tmp/agent-home/.local/share/pnpm/store/v${major}`
+    };
+  }
+
   dockerClientOptions(timeoutMs = 5_000) {
     const environment = safeCommandEnvironment({ CI: 'true' });
     for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) delete environment[name];
@@ -4189,7 +4202,7 @@ export class DockerContainerExecution extends ExecutionProvider {
     return metadata;
   }
 
-  commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git') } = {}) {
+  commandArguments(project, name, { stage = 'post-worker', containerName, gitMetadata = resolve(project.workspace, '.git'), packageCache = null } = {}) {
     if (!['bootstrap', 'post-worker', 'dependency-refresh'].includes(stage)) throw new Error('Unknown execution stage');
     if (stage === 'dependency-refresh' && name !== 'dependencyRefresh') throw new Error('Dependency refresh stage only allows dependencyRefresh');
     const execution = project.execution;
@@ -4197,13 +4210,14 @@ export class DockerContainerExecution extends ExecutionProvider {
     const workspace = resolve(project.workspace);
     const postWorker = stage === 'post-worker';
     const networkEnabled = stage === 'bootstrap' || stage === 'dependency-refresh';
+    const tmpfsSize = networkEnabled ? '128m' : '64m';
     const containerArgs = [
       'run', '--pull', 'never', '--rm', '--init', '--name', containerName,
       '--workdir', '/workspace',
       '--mount', `type=bind,src=${workspace},dst=/workspace`,
       '--mount', `type=bind,src=${gitMetadata},dst=/workspace/.git,readonly`,
       '--read-only',
-      '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=64m',
+      '--tmpfs', `/tmp:rw,nosuid,nodev,noexec,size=${tmpfsSize}`,
       '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges=true',
       '--pids-limit', String(execution.resources.pidsLimit),
@@ -4214,6 +4228,7 @@ export class DockerContainerExecution extends ExecutionProvider {
       '--env', 'CI=true',
       '--env', 'npm_config_cache=/tmp/npm-cache'
     ];
+    if (packageCache) containerArgs.push('--mount', `type=bind,src=${packageCache.source},dst=${packageCache.target}`);
     for (const [key, value] of Object.entries(project.commandEnvironment)) containerArgs.push('--env', `${key}=${value}`);
     if (!networkEnabled) containerArgs.push('--network', 'none');
     containerArgs.push(execution.image, binary, ...args);
@@ -4223,7 +4238,14 @@ export class DockerContainerExecution extends ExecutionProvider {
   async execute(project, name, { timeoutMs = project.budgets.commandTimeoutMs, dryRun = false, stage = 'post-worker', preflight = null } = {}) {
     const containerName = `agent-command-${randomUUID()}`;
     const gitMetadata = dryRun ? resolve(project.workspace, '.git') : await this.gitMetadataPath(project);
-    const { command, containerArgs, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata });
+    const packageCache = this.packageCacheMount(project, stage);
+    if (!dryRun && packageCache) {
+      await assertSafePathChain(packageCache.source);
+      await mkdir(packageCache.source, { recursive: true, mode: 0o700 });
+      await chmod(packageCache.source, 0o700);
+      await assertSafePathChain(packageCache.source);
+    }
+    const { command, containerArgs, networkEnabled } = this.commandArguments(project, name, { stage, containerName, gitMetadata, packageCache });
     const networkPolicy = networkEnabled ? (stage === 'dependency-refresh' ? 'dependency-refresh-network-enabled' : 'bootstrap-network-enabled') : 'none';
     if (dryRun) return { name, command, skipped: true, ok: true, durationMs: 0, stdout: 'dry-run', stderr: '', execution: { provider: 'container', simulated: true, stage, postWorkerNetwork: networkPolicy } };
     const startedAt = this.now();

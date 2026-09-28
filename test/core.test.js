@@ -640,6 +640,7 @@ test('v0.5 container execution mounts workspace read-write and nested git metada
   assert.match(container.args[container.args.indexOf('--name') + 1], /^agent-command-[0-9a-f-]+$/);
   assert.equal(container.args[container.args.indexOf('--network') + 1], 'none');
   for (const flag of ['--read-only', '--tmpfs', '--cap-drop', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--user']) assert.ok(container.args.includes(flag));
+  assert.equal(container.args[container.args.indexOf('--tmpfs') + 1], '/tmp:rw,nosuid,nodev,noexec,size=64m');
   const mounts = container.args.filter((value) => String(value).includes('type=bind,'));
   assert.equal(mounts.length, 2);
   assert.equal(mounts.filter((value) => /dst=\/workspace(?:,|$)/.test(value)).length, 1);
@@ -653,6 +654,49 @@ test('v0.5 container execution mounts workspace read-write and nested git metada
   assert.equal(container.options.inheritEnvironment, false);
   assert.equal(container.options.restrictEnvironment, true);
   assert.ok(container.options.timeoutMs > 0 && container.options.timeoutMs <= configured.budgets.commandTimeoutMs);
+});
+
+test('pnpm bootstrap uses a project-scoped persistent store without exposing it post-worker', () => {
+  const configured = project({
+    id: 'leadfinder',
+    workspaceStrategy: 'managed',
+    toolchain: { command: 'pnpm', version: '11.19.0' },
+    commands: {
+      install: 'pnpm install --frozen-lockfile',
+      test: 'pnpm test',
+      typecheck: 'node --version',
+      lint: 'pnpm lint',
+      build: 'pnpm build',
+      dependencyRefresh: 'pnpm install --frozen-lockfile --ignore-scripts'
+    },
+    execution: {
+      provider: 'container-required',
+      image: 'agent-node22-pnpm11:local',
+      resources: { memoryMb: 1024, cpuCount: 1, pidsLimit: 128 }
+    }
+  });
+  const execution = new DockerContainerExecution();
+  const cache = execution.packageCacheMount(configured, 'bootstrap');
+  assert.ok(cache);
+  assert.ok(cache.source.startsWith(configured.managedWorkspaceRoot));
+  assert.match(cache.source, /\.agent-workspaces.*\.cache.*leadfinder.*pnpm-store-v11/);
+  assert.equal(cache.target, '/tmp/agent-home/.local/share/pnpm/store/v11');
+
+  const bootstrap = execution.commandArguments(configured, 'install', {
+    stage: 'bootstrap',
+    containerName: 'agent-bootstrap-fixture',
+    packageCache: cache
+  }).containerArgs;
+  assert.equal(bootstrap[bootstrap.indexOf('--tmpfs') + 1], '/tmp:rw,nosuid,nodev,noexec,size=128m');
+  assert.ok(bootstrap.some((value) => String(value).includes('dst=/tmp/agent-home/.local/share/pnpm/store/v11')));
+
+  const postWorker = execution.commandArguments(configured, 'test', {
+    stage: 'post-worker',
+    containerName: 'agent-post-worker-fixture'
+  }).containerArgs;
+  assert.equal(postWorker[postWorker.indexOf('--tmpfs') + 1], '/tmp:rw,nosuid,nodev,noexec,size=64m');
+  assert.equal(postWorker.some((value) => String(value).includes('pnpm-store-v11')), false);
+  assert.equal(postWorker[postWorker.indexOf('--network') + 1], 'none');
 });
 
 test('v0.5 force-removes a named container after a timed out project command', async () => {
@@ -682,6 +726,7 @@ test('v0.5 allows network only for pre-worker bootstrap and never pulls a missin
   const configured = project({ execution: { provider: 'container-required', image: 'node:22-bookworm-slim' }, commands: { install: 'npm ci', test: 'npm test', typecheck: 'node --version', lint: 'npm test', build: 'npm test' } });
   await new DockerContainerExecution({ processRunner: availableRunner }).execute(configured, 'install', { stage: 'bootstrap' });
   assert.equal(calls.at(-1).includes('--network'), false);
+  assert.equal(calls.at(-1)[calls.at(-1).indexOf('--tmpfs') + 1], '/tmp:rw,nosuid,nodev,noexec,size=128m');
   assert.equal(calls.some((args) => args[0] === 'pull'), false);
   const unavailable = new DockerContainerExecution({ processRunner: async (_binary, args) => args[0] === 'version' ? { ok: true, exitCode: 0, stdout: 'ok', stderr: '' } : { ok: false, exitCode: 1, stdout: '', stderr: 'missing image' } });
   const blocked = await unavailable.execute(configured, 'test', { stage: 'post-worker' });
