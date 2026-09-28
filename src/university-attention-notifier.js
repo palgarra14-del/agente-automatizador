@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 function cleanItems(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.map((item) => String(item ?? '').trim()).filter(Boolean))];
+  return [...new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean))];
 }
 
 export function attentionFingerprint(attention) {

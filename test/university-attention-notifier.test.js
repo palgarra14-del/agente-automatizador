@@ -16,6 +16,26 @@ test('no attention means no desktop notification', () => {
   assert.equal(decision.fingerprint, null);
 });
 
+test('malformed attention items cannot create notifications or suppress valid events', () => {
+  const malformedItems = [{ id: 'uv-mail:10' }, true, 42, null, undefined, [], '   '];
+  const attention = { version: 1, required: true, items: malformedItems };
+  const invalid = decideAcademicNotification(attention);
+  assert.equal(invalid.notify, false);
+  assert.equal(invalid.fingerprint, null);
+  assert.deepEqual(invalid.unseenItems, []);
+
+  const mixed = { ...attention, items: [...malformedItems, ' uv-mail:10 ', 'uv-mail:10', '42'] };
+  const decision = decideAcademicNotification(mixed, { version: 2, notifiedItems: malformedItems });
+  assert.equal(decision.notify, true);
+  assert.deepEqual(decision.unseenItems, ['uv-mail:10', '42']);
+  assert.deepEqual(decision.state.notifiedItems, []);
+  assert.equal(decision.fingerprint, attentionFingerprint({ ...attention, items: ['uv-mail:10', '42'] }));
+
+  const sent = notifiedAcademicState(decision, '2026-09-27T18:00:00Z');
+  assert.deepEqual(sent.notifiedItems, ['uv-mail:10', '42']);
+  assert.equal(decideAcademicNotification(mixed, sent).notify, false);
+});
+
 test('same academic event is notified only once', () => {
   const attention = {
     version: 1,
