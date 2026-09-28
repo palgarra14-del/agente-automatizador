@@ -24,11 +24,12 @@ function matchingAssignment(title, assignments) {
   const label = clean(title).replace(/^(?:Vence|Venciment)\b[^:]*:\s*/i, '');
   const target = fold(label);
   if (!target) return null;
-  return assignments.find((assignment) => {
+  const matches = assignments.filter((assignment) => {
     const candidate = fold(assignment?.title);
     if (!candidate || candidate.length < 5) return false;
     return candidate === target || candidate.includes(target) || target.includes(candidate);
-  }) ?? null;
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function notificationId(title) {

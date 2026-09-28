@@ -72,3 +72,27 @@ test('first scan is baseline only; later only new non-expired notifications surf
   const next = [...current, { id: 'c', title: 'new', subjectId: '34670', dueDate: null, expired: false }];
   assert.deepEqual(diffUvNotifications(state, next).map((item) => item.id), ['c']);
 });
+
+test('code-less deadlines fail closed when multiple assignments match regardless of order', () => {
+  const page = { text: [
+    'Notificaciones',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Ejercicios Tema 1',
+    'Vence el lunes, 28 de septiembre de 2026, 11:30: Práctica de árboles'
+  ].join('\n') };
+  for (const secondTitle of ['Ejercicios Tema 1', 'Ejercicios Tema']) {
+    const assignments = [
+      { subjectId: '34670', title: 'Ejercicios Tema 1' },
+      { subjectId: '34156', title: secondTitle },
+      { subjectId: '34670', title: 'Práctica de árboles' }
+    ];
+    for (const ordered of [assignments, [...assignments].reverse()]) {
+      const parsed = parseUvNotifications(page, courses, {
+        today: '2026-09-27',
+        assignments: ordered
+      });
+      assert.equal(parsed.length, 1);
+      assert.match(parsed[0].title, /Práctica de árboles$/);
+      assert.equal(parsed[0].subjectId, '34670');
+    }
+  }
+});
