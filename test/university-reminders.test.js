@@ -2,6 +2,37 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildAcademicReminders } from '../src/university-reminders.js';
 
+test('reminders reject impossible calendar days instead of normalizing them', () => {
+  for (const date of ['2026-02-29', '2026-02-30', '2026-04-31', '2026-13-01']) {
+    assert.throws(
+      () => buildAcademicReminders({ today: date }),
+      /academic_reminder_day_invalid/
+    );
+    assert.throws(
+      () => buildAcademicReminders({
+        today: '2026-02-28',
+        signals: [{ id: 'invalid-date', kind: 'assessment', dates: [date] }]
+      }),
+      /academic_reminder_day_invalid/
+    );
+  }
+});
+
+test('assessment reminders preserve valid leap-day and month-boundary timing', () => {
+  const reminders = buildAcademicReminders({
+    today: '2028-02-28',
+    signals: [{
+      id: 'leap-year',
+      kind: 'assessment',
+      dates: ['2028-02-29', '2028-03-01']
+    }]
+  });
+  assert.deepEqual(
+    reminders.map(({ date, daysRemaining }) => ({ date, daysRemaining })),
+    [{ date: '2028-02-29', daysRemaining: 1 }, { date: '2028-03-01', daysRemaining: 2 }]
+  );
+});
+
 test('assessment reminder becomes active once inside the 48 hour window', () => {
   const reminders = buildAcademicReminders({
     today: '2026-09-30',

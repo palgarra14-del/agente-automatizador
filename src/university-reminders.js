@@ -2,7 +2,11 @@ function dayNumber(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value ?? ''))) {
     throw new Error('academic_reminder_day_invalid');
   }
-  return Math.floor(Date.parse(value + 'T12:00:00Z') / 86_400_000);
+  const parsed = Date.parse(value + 'T12:00:00Z');
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== value) {
+    throw new Error('academic_reminder_day_invalid');
+  }
+  return Math.floor(parsed / 86_400_000);
 }
 
 function daysUntil(today, target) {
