@@ -349,6 +349,59 @@ def conversion_ergonomics_from_qa(qa, brief_data):
         }
     return {"pass":len(defects)==0,"defects":defects,"observations":observations,"viewports":viewports}
 
+def typography_ergonomics_from_qa(qa):
+    defects=[]
+    observations=[]
+    viewports={}
+    for label in ("mobile","desktop"):
+        view=qa.get(label,{}) if isinstance(qa,dict) else {}
+        metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
+        samples=metrics.get("textSamples",[]) if isinstance(metrics.get("textSamples"),list) else []
+        substantial=[
+          sample for sample in samples
+          if isinstance(sample,dict) and sample.get("tag") in {"p","li","blockquote","figcaption"} and
+          isinstance(sample.get("textLength"),int) and sample["textLength"] >= 40 and
+          isinstance(sample.get("fontSizePx"),(int,float))
+        ]
+        reading_body=[sample for sample in substantial if sample.get("tag") in {"p","li","blockquote"}]
+        severe_small=[
+          sample for sample in reading_body
+          if sample["fontSizePx"] < (13.0 if label=="mobile" else 12.0)
+        ]
+        quality_small=[
+          sample for sample in substantial
+          if sample["fontSizePx"] < (14.5 if label=="mobile" else 13.5)
+        ]
+        dense=[
+          sample for sample in reading_body
+          if sample.get("textLength",0) >= 70 and isinstance(sample.get("lineHeightRatio"),(int,float)) and sample["lineHeightRatio"] < 1.18
+        ]
+        wide=[
+          sample for sample in substantial
+          if sample.get("textLength",0) >= 100 and isinstance(sample.get("measureEm"),(int,float)) and sample["measureEm"] > (46.0 if label=="mobile" else 78.0)
+        ]
+        if severe_small:
+            defects.append(f"substantial_copy_too_small_{label}")
+        if dense:
+            defects.append(f"substantial_copy_line_height_too_dense_{label}")
+        if quality_small and not severe_small:
+            observations.append(f"secondary_copy_small_{label}:{len(quality_small)}")
+        if wide:
+            observations.append(f"reading_measure_too_wide_{label}:{len(wide)}")
+        font_sizes=sorted(sample["fontSizePx"] for sample in substantial)
+        line_ratios=sorted(sample["lineHeightRatio"] for sample in substantial if isinstance(sample.get("lineHeightRatio"),(int,float)))
+        viewports[label]={
+          "sampleCount":len(substantial),
+          "smallCount":len(quality_small),
+          "severeSmallCount":len(severe_small),
+          "denseLineHeightCount":len(dense),
+          "wideMeasureCount":len(wide),
+          "minFontSizePx":round(font_sizes[0],2) if font_sizes else None,
+          "medianFontSizePx":round(font_sizes[len(font_sizes)//2],2) if font_sizes else None,
+          "minLineHeightRatio":round(line_ratios[0],2) if line_ratios else None
+        }
+    return {"pass":len(defects)==0,"defects":defects,"observations":observations,"viewports":viewports}
+
 def training_history():
     return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
 
@@ -703,8 +756,11 @@ def deterministic_qa(run_dir, label):
             try: brief_data=json.loads(brief_path.read_text(encoding="utf-8"))
             except Exception: brief_data={}
         conversion=conversion_ergonomics_from_qa(result,brief_data)
+        typography=typography_ergonomics_from_qa(result)
         result["conversionErgonomics"]=conversion
+        result["typographyErgonomics"]=typography
         result["static"]["observations"].extend(conversion.get("observations",[]))
+        result["static"]["observations"].extend(typography.get("observations",[]))
         profile=layout_profile_from_qa(result)
         result["layoutProfile"]=profile
         layout_matches=[]
@@ -716,8 +772,8 @@ def deterministic_qa(run_dir, label):
         if layout_matches:
             strongest=max(layout_matches,key=lambda item:item[0])
             result["static"]["observations"].append(f"repeated_layout_profile:{strongest[0]:.3f}:{strongest[1] or 'unknown'}")
-        result["pass"]=bool(result.get("pass")) and bool(result["static"].get("pass")) and bool(conversion.get("pass"))
-        result["defects"]=[*result.get("defects",[]),*result["static"].get("defects",[]),*conversion.get("defects",[])]
+        result["pass"]=bool(result.get("pass")) and bool(result["static"].get("pass")) and bool(conversion.get("pass")) and bool(typography.get("pass"))
+        result["defects"]=[*result.get("defects",[]),*result["static"].get("defects",[]),*conversion.get("defects",[]),*typography.get("defects",[])]
         (run_dir/f"qa-{label}.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
         return result
     finally:
@@ -787,7 +843,7 @@ Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
 Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
-Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics: the primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive.
+Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects, including conversionErgonomics and typographyErgonomics. Substantial body copy must remain comfortably readable; treat typography observations about small secondary copy, dense line-height or overly wide measures as evidence to inspect rather than automatic failure. The primary actionable contact must be rendered, visible in the first viewport and comfortably tappable/clickable. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business. If they report repeated_layout_profile, scrutinize composition, section rhythm and mobile recomposition: a new concept on substantially recycled layout architecture is not sufficiently distinctive.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
@@ -949,6 +1005,7 @@ def main():
           "deterministicQaPass":qa.get("pass") is True,
           "layoutProfile":qa.get("layoutProfile",{}),
           "conversionErgonomics":qa.get("conversionErgonomics",{}),
+          "typographyErgonomics":qa.get("typographyErgonomics",{}),
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],

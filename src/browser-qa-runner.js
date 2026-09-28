@@ -669,6 +669,28 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       })
       .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0) || (a.xVw ?? 0) - (b.xVw ?? 0))
       .slice(0, 24);
+    const textSamples = queryAll('p, li, blockquote, figcaption, small, label')
+      .filter(isRendered)
+      .map((element) => {
+        const text = clean(element.innerText ?? element.textContent);
+        const rect = element.getBoundingClientRect();
+        const style = styleFor(element);
+        const fontSize = px(style?.fontSize);
+        const lineHeight = px(style?.lineHeight);
+        return {
+          tag: String(element.tagName ?? '').toLowerCase(),
+          textLength: text.length,
+          fontSizePx: fontSize,
+          lineHeightPx: lineHeight,
+          lineHeightRatio: fontSize && lineHeight ? metric(lineHeight / fontSize) : null,
+          measureEm: fontSize ? metric(rect.width / fontSize) : null,
+          widthVw: metric(rect.width / viewportWidth),
+          yVh: metric(rect.top / viewportHeight)
+        };
+      })
+      .filter((sample) => sample.textLength >= 24)
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0))
+      .slice(0, 80);
     const h1 = queryAll('h1').find(isRendered) ?? null;
     const bodyStyle = styleFor(document.body);
     const h1Style = h1 ? styleFor(h1) : null;
@@ -677,6 +699,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       pageHeightVh: metric(pageHeight / viewportHeight),
       visualBlocks,
       actions: visibleActions,
+      textSamples,
       typography: {
         bodyFontSizePx: px(bodyStyle?.fontSize),
         bodyLineHeightPx: px(bodyStyle?.lineHeight),
