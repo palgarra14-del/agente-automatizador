@@ -79,6 +79,23 @@ test('the same assessment reminder keeps the same id the next day', () => {
   assert.equal(atTwoDays[0].id, atOneDay[0].id);
 });
 
+test('repeated signal dates remind once while distinct dates and signals remain separate', () => {
+  const reminders = buildAcademicReminders({
+    today: '2026-09-30',
+    signals: [
+      { id: 'exam-a', kind: 'assessment', dates: ['2026-10-01', '2026-10-01', '2026-10-02', '2026-10-02'] },
+      { id: 'exam-b', kind: 'assessment', dates: ['2026-10-01'] },
+      { id: 'coursework', kind: 'coursework', dates: ['2026-10-01', '2026-10-01'] }
+    ]
+  });
+  assert.deepEqual(reminders.map((item) => item.id), [
+    'reminder:signal:coursework:2026-10-01:tomorrow',
+    'reminder:signal:exam-a:2026-10-01:assessment-soon',
+    'reminder:signal:exam-b:2026-10-01:assessment-soon',
+    'reminder:signal:exam-a:2026-10-02:assessment-soon'
+  ]);
+});
+
 test('coursework and schedule changes remind only the day before', () => {
   const reminders = buildAcademicReminders({
     today: '2026-09-30',

@@ -43,7 +43,7 @@ export function buildAcademicReminders({
   for (const signal of signals) {
     if (typeof signal?.id !== 'string' || !signal.id.trim()) continue;
     const dates = Array.isArray(signal?.dates) ? signal.dates : [];
-    for (const date of dates) {
+    for (const date of new Set(dates)) {
       const remaining = daysUntil(today, date);
       let stage = null;
       if (signal.kind === 'assessment' && remaining >= 1 && remaining <= 2) stage = 'assessment-soon';
