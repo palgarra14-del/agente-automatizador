@@ -22,6 +22,19 @@ test('assessment preparation picks matching theory, exercise and solution for th
   assert.deepEqual(resources.map((item) => item.category), ['theory', 'practice', 'solution']);
 });
 
+test('preparation does not mistake word endings for session markers', () => {
+  const resources = recommendAcademicPreparation({
+    subjectId: '34670',
+    title: 'Test Tema 1',
+    kind: 'assessment'
+  }, [
+    materials[0],
+    { id: 'practice', subjectId: '34670', title: 'Problemas 2 — Tema 1', url: materials[1].url },
+    { id: 'unrelated', subjectId: '34670', title: 'Problemas 1 — Tema 2', url: materials[4].url }
+  ]);
+  assert.deepEqual(resources.map((item) => item.id), ['m1', 'practice']);
+});
+
 test('preparation never crosses subject boundaries or prefers unrelated admin resources', () => {
   const resources = recommendAcademicPreparation({
     subjectId: '34670',
