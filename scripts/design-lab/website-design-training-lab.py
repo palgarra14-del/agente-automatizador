@@ -222,7 +222,7 @@ def write_training_summary():
         averages[dimension]=round(sum(values)/len(values),3) if values else None
     issues={}
     for entry in entries:
-        for issue in [*entry.get("qaDefects",[]),*entry.get("templateSignals",[]),*entry.get("topIssues",[])]:
+        for issue in [*entry.get("qaDefects",[]),*entry.get("qaObservations",[]),*entry.get("templateSignals",[]),*entry.get("topIssues",[])]:
             key=str(issue)[:240]
             issues[key]=issues.get(key,0)+1
     summary={
@@ -652,6 +652,7 @@ def main():
           "categoryScores":final_review["categoryScores"],
           "deterministicQaPass":qa.get("pass") is True,
           "qaDefects":qa.get("defects",[])[:12],
+          "qaObservations":qa.get("observations",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],
           "transferableLessons":final_review.get("transferableLessons",[])[:4]

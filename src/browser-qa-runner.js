@@ -620,6 +620,21 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       isRendered(node) && (node.id === section || node.getAttribute('data-section') === section || node.getAttribute('data-section-id') === section)
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
+    const geometryControls = queryAll('a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])')
+      .filter(isRendered).slice(0, 300).map((element, index) => {
+        const rect = element.getBoundingClientRect();
+        const style = styleFor(element);
+        const inlineText = style.display === 'inline' && ['P', 'LI', 'SPAN'].includes(element.parentElement?.tagName ?? '');
+        return { id: index, tag: element.tagName, width: rect.width, height: rect.height, inlineText, text: clean(element.innerText || element.value || element.getAttribute('aria-label')).slice(0, 120) };
+      });
+    const clippedKeyText = queryAll('h1, h2, h3, button, a[href], [role="button"]').filter(isRendered).map((element, index) => {
+      const style = styleFor(element);
+      const clippedX = ['hidden', 'clip'].includes(style.overflowX) && element.scrollWidth > element.clientWidth + 2;
+      const clippedY = ['hidden', 'clip'].includes(style.overflowY) && element.scrollHeight > element.clientHeight + 2;
+      return { id: index, tag: element.tagName, text: clean(element.innerText).slice(0, 120), clippedX, clippedY };
+    }).filter((item) => item.clippedX || item.clippedY).slice(0, 30);
+    const tinyText = queryAll('body *').filter(isRendered).map((element) => ({ tag: element.tagName, text: clean(element.innerText).slice(0, 80), fontSize: Number.parseFloat(styleFor(element).fontSize) || 0 }))
+      .filter((item) => item.text && item.fontSize > 0 && item.fontSize < 11).slice(0, 30);
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
     return {
       finalUrl: location.href,
@@ -633,6 +648,12 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       metadata: {
         title: clean(document.title),
         description: clean(document.querySelector('meta[name="description"]')?.getAttribute('content'))
+      },
+      geometry: {
+        smallTouchTargets: geometryControls.filter((item) => !item.inlineText && (item.width < 44 || item.height < 44)).slice(0, 30),
+        severelySmallTouchTargets: geometryControls.filter((item) => !item.inlineText && (item.width < 24 || item.height < 24)).slice(0, 30),
+        clippedKeyText,
+        tinyText
       },
       interactiveControls: [],
       targets: expectedTargets.map(targetFor).filter(Boolean)
