@@ -154,6 +154,9 @@ test('conversion ergonomics requires an exact above-fold comfortably tappable co
     mobile: { designMetrics: { viewport: { width: 390, height: 844 }, actions: [
       { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.35, widthVw: 0.62, heightVh: 0.06, fontSizePx: 16 }
     ] } },
+    tablet: { designMetrics: { viewport: { width: 768, height: 1024 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.32, widthVw: 0.32, heightVh: 0.045, fontSizePx: 15 }
+    ] } },
     desktop: { designMetrics: { viewport: { width: 1440, height: 900 }, actions: [
       { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.3, widthVw: 0.18, heightVh: 0.05, fontSizePx: 15 }
     ] } }
@@ -161,6 +164,9 @@ test('conversion ergonomics requires an exact above-fold comfortably tappable co
   const bad = {
     mobile: { designMetrics: { viewport: { width: 390, height: 844 }, actions: [
       { kind: 'phone', recipient: 'tel:+34000000000', yVh: 1.2, widthVw: 0.7, heightVh: 0.07, fontSizePx: 16 }
+    ] } },
+    tablet: { designMetrics: { viewport: { width: 768, height: 1024 }, actions: [
+      { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.25, widthVw: 0.04, heightVh: 0.02, fontSizePx: 12 }
     ] } },
     desktop: { designMetrics: { viewport: { width: 1440, height: 900 }, actions: [
       { kind: 'phone', recipient: 'tel:+34000000000', yVh: 0.25, widthVw: 0.02, heightVh: 0.02, fontSizePx: 12 }
@@ -174,6 +180,7 @@ print(json.dumps({"good":m.conversion_ergonomics_from_qa(good,brief),"bad":m.con
   assert.equal(result.good.viewports.mobile.ergonomicCount, 1);
   assert.equal(result.bad.pass, false);
   assert.ok(result.bad.defects.includes('conversion_action_not_above_fold_mobile'));
+  assert.ok(result.bad.defects.includes('conversion_target_too_small_tablet'));
   assert.ok(result.bad.defects.includes('conversion_target_too_small_desktop'));
 });
 
@@ -183,6 +190,9 @@ test('typography ergonomics rejects unreadable body copy but allows editorial mi
       { tag: 'p', textLength: 140, fontSizePx: 16, lineHeightRatio: 1.5, measureEm: 31 },
       { tag: 'figcaption', textLength: 58, fontSizePx: 12, lineHeightRatio: 1.25, measureEm: 24 }
     ] } },
+    tablet: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 160, fontSizePx: 15, lineHeightRatio: 1.5, measureEm: 48 }
+    ] } },
     desktop: { designMetrics: { textSamples: [
       { tag: 'p', textLength: 180, fontSizePx: 16, lineHeightRatio: 1.55, measureEm: 62 }
     ] } }
@@ -190,6 +200,9 @@ test('typography ergonomics rejects unreadable body copy but allows editorial mi
   const bad = {
     mobile: { designMetrics: { textSamples: [
       { tag: 'p', textLength: 150, fontSizePx: 11.5, lineHeightRatio: 1.08, measureEm: 52 }
+    ] } },
+    tablet: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 170, fontSizePx: 12, lineHeightRatio: 1.1, measureEm: 72 }
     ] } },
     desktop: { designMetrics: { textSamples: [
       { tag: 'p', textLength: 180, fontSizePx: 13, lineHeightRatio: 1.45, measureEm: 92 }
@@ -205,6 +218,9 @@ print(json.dumps({"good":m.typography_ergonomics_from_qa(good),"bad":m.typograph
   assert.equal(result.bad.pass, false);
   assert.ok(result.bad.defects.includes('substantial_copy_too_small_mobile'));
   assert.ok(result.bad.defects.includes('substantial_copy_line_height_too_dense_mobile'));
+  assert.ok(result.bad.defects.includes('substantial_copy_too_small_tablet'));
+  assert.ok(result.bad.defects.includes('substantial_copy_line_height_too_dense_tablet'));
+  assert.ok(result.bad.observations.some(item => item.startsWith('reading_measure_too_wide_tablet')));
   assert.ok(result.bad.observations.some(item => item.startsWith('reading_measure_too_wide_')));
 });
 
@@ -220,8 +236,16 @@ test('section rhythm flags repeated structure but tolerates deliberate variety',
     { tag: 'section', heightVh: 1.05, display: 'grid', flexDirection: 'row', gridColumnCount: 3, directChildCount: 5, headingXVw: 0.12, textAlign: 'start' },
     { tag: 'section', heightVh: 0.45, display: 'block', flexDirection: 'row', gridColumnCount: null, directChildCount: 1, headingXVw: null, textAlign: 'start' }
   ];
-  const repeated = { mobile: { designMetrics: { visualBlocks: repeatedBlocks } }, desktop: { designMetrics: { visualBlocks: repeatedBlocks } } };
-  const varied = { mobile: { designMetrics: { visualBlocks: variedBlocks } }, desktop: { designMetrics: { visualBlocks: variedBlocks } } };
+  const repeated = {
+    mobile: { designMetrics: { visualBlocks: repeatedBlocks } },
+    tablet: { designMetrics: { visualBlocks: repeatedBlocks } },
+    desktop: { designMetrics: { visualBlocks: repeatedBlocks } }
+  };
+  const varied = {
+    mobile: { designMetrics: { visualBlocks: variedBlocks } },
+    tablet: { designMetrics: { visualBlocks: variedBlocks } },
+    desktop: { designMetrics: { visualBlocks: variedBlocks } }
+  };
   const result = python(`
 repeated=json.loads(sys.argv[1]); varied=json.loads(sys.argv[2])
 print(json.dumps({"repeated":m.section_rhythm_from_qa(repeated),"varied":m.section_rhythm_from_qa(varied)}))
@@ -229,6 +253,7 @@ print(json.dumps({"repeated":m.section_rhythm_from_qa(repeated),"varied":m.secti
   assert.ok(result.repeated.observations.some(item => item.startsWith('repeated_section_structure_')));
   assert.ok(result.repeated.observations.some(item => item.startsWith('flat_section_rhythm_')));
   assert.equal(result.varied.observations.length, 0, JSON.stringify(result.varied));
+  assert.ok(result.varied.viewports.tablet.uniqueStructures >= 4);
   assert.ok(result.varied.viewports.desktop.uniqueStructures >= 4);
 });
 
@@ -243,10 +268,12 @@ test('identity continuity flags hero-only signature treatment and accepts page-w
   ];
   const good = {
     mobile: { designMetrics: { signatureElements: goodMarkers } },
+    tablet: { designMetrics: { signatureElements: goodMarkers } },
     desktop: { designMetrics: { signatureElements: goodMarkers } }
   };
   const bad = {
     mobile: { designMetrics: { signatureElements: badMarkers } },
+    tablet: { designMetrics: { signatureElements: badMarkers } },
     desktop: { designMetrics: { signatureElements: badMarkers } }
   };
   const result = python(`
@@ -255,7 +282,9 @@ print(json.dumps({"good":m.identity_continuity_from_qa(good),"bad":m.identity_co
 `, [JSON.stringify(good), JSON.stringify(bad)]);
   assert.equal(result.good.observations.length, 0, JSON.stringify(result.good));
   assert.equal(result.good.viewports.mobile.nonHeroCount, 2);
+  assert.equal(result.good.viewports.tablet.nonHeroCount, 2);
   assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_mobile')));
+  assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_tablet')));
   assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_desktop')));
 });
 

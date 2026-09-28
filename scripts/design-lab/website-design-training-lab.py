@@ -340,12 +340,18 @@ def conversion_ergonomics_from_qa(qa, brief_data):
             return _email_address(recipient) == expected_email
         return False
 
-    for label,min_height in (("mobile",44.0),("desktop",36.0)):
+    viewport_defaults={
+      "mobile":(390.0,844.0,44.0,14.0),
+      "tablet":(768.0,1024.0,40.0,13.5),
+      "desktop":(1440.0,900.0,36.0,13.0)
+    }
+    for label in ("mobile","tablet","desktop"):
+        default_width,default_height,min_height,min_font=viewport_defaults[label]
         view=qa.get(label,{}) if isinstance(qa,dict) else {}
         metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
         viewport=metrics.get("viewport",{}) if isinstance(metrics,dict) else {}
-        viewport_width=_metric_number(viewport.get("width"),390.0 if label=="mobile" else 1440.0)
-        viewport_height=_metric_number(viewport.get("height"),844.0 if label=="mobile" else 900.0)
+        viewport_width=_metric_number(viewport.get("width"),default_width)
+        viewport_height=_metric_number(viewport.get("height"),default_height)
         actions=metrics.get("actions",[]) if isinstance(metrics.get("actions"),list) else []
         matched=[action for action in actions if matches(action)]
         visible=[]
@@ -373,7 +379,7 @@ def conversion_ergonomics_from_qa(qa, brief_data):
             defects.append(f"conversion_action_not_above_fold_{label}")
         elif not ergonomic:
             defects.append(f"conversion_target_too_small_{label}")
-        if visible and all((_metric_number(action.get("fontSizePx"),99.0) < (14.0 if label=="mobile" else 13.0)) for action in visible):
+        if visible and all((_metric_number(action.get("fontSizePx"),99.0) < min_font) for action in visible):
             observations.append(f"conversion_label_text_small_{label}")
         viewports[label]={
           "matchedCount":len(matched),
@@ -388,7 +394,13 @@ def typography_ergonomics_from_qa(qa):
     defects=[]
     observations=[]
     viewports={}
-    for label in ("mobile","desktop"):
+    limits={
+      "mobile":{"severe":13.0,"quality":14.5,"measure":46.0},
+      "tablet":{"severe":13.0,"quality":14.0,"measure":64.0},
+      "desktop":{"severe":12.0,"quality":13.5,"measure":78.0}
+    }
+    for label in ("mobile","tablet","desktop"):
+        limit=limits[label]
         view=qa.get(label,{}) if isinstance(qa,dict) else {}
         metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
         samples=metrics.get("textSamples",[]) if isinstance(metrics.get("textSamples"),list) else []
@@ -401,11 +413,11 @@ def typography_ergonomics_from_qa(qa):
         reading_body=[sample for sample in substantial if sample.get("tag") in {"p","li","blockquote"}]
         severe_small=[
           sample for sample in reading_body
-          if sample["fontSizePx"] < (13.0 if label=="mobile" else 12.0)
+          if sample["fontSizePx"] < limit["severe"]
         ]
         quality_small=[
           sample for sample in substantial
-          if sample["fontSizePx"] < (14.5 if label=="mobile" else 13.5)
+          if sample["fontSizePx"] < limit["quality"]
         ]
         dense=[
           sample for sample in reading_body
@@ -413,7 +425,7 @@ def typography_ergonomics_from_qa(qa):
         ]
         wide=[
           sample for sample in substantial
-          if sample.get("textLength",0) >= 100 and isinstance(sample.get("measureEm"),(int,float)) and sample["measureEm"] > (46.0 if label=="mobile" else 78.0)
+          if sample.get("textLength",0) >= 100 and isinstance(sample.get("measureEm"),(int,float)) and sample["measureEm"] > limit["measure"]
         ]
         if severe_small:
             defects.append(f"substantial_copy_too_small_{label}")
@@ -457,7 +469,7 @@ def _section_signature(block):
 def section_rhythm_from_qa(qa):
     observations=[]
     viewports={}
-    for label in ("mobile","desktop"):
+    for label in ("mobile","tablet","desktop"):
         view=qa.get(label,{}) if isinstance(qa,dict) else {}
         metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
         blocks=metrics.get("visualBlocks",[]) if isinstance(metrics.get("visualBlocks"),list) else []
@@ -491,7 +503,7 @@ def section_rhythm_from_qa(qa):
 def identity_continuity_from_qa(qa):
     observations=[]
     viewports={}
-    for label in ("mobile","desktop"):
+    for label in ("mobile","tablet","desktop"):
         view=qa.get(label,{}) if isinstance(qa,dict) else {}
         metrics=view.get("designMetrics",{}) if isinstance(view,dict) else {}
         raw=metrics.get("signatureElements",[]) if isinstance(metrics.get("signatureElements"),list) else []
