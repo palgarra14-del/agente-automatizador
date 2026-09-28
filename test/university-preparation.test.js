@@ -33,6 +33,24 @@ test('preparation never crosses subject boundaries or prefers unrelated admin re
   assert.ok(resources.every((item) => item.id !== 'm4'));
 });
 
+test('preparation requires explicit course identities before matching materials', () => {
+  const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
+  const ambiguousIds = [undefined, null, '', '   ', {}, [], true, 34670];
+  const ambiguousMaterials = ambiguousIds.map((subjectId, index) => ({
+    ...materials[0], id: 'ambiguous-' + index, subjectId
+  }));
+
+  for (const subjectId of ambiguousIds) {
+    assert.deepEqual(recommendAcademicPreparation(
+      { ...signal, subjectId }, [...ambiguousMaterials, ...materials]
+    ), []);
+  }
+  assert.deepEqual(
+    recommendAcademicPreparation(signal, [...ambiguousMaterials, ...materials]).map((item) => item.id),
+    ['m1', 'm2', 'm3']
+  );
+});
+
 test('generic assessment can fall back to exam material when no topic is known', () => {
   const resources = recommendAcademicPreparation({
     subjectId: '34670',
