@@ -226,6 +226,11 @@ const readOnlyRepositoryContextDefaults = Object.freeze({
   maxManifestBytes: 64 * 1024
 });
 
+const readOnlyReviewRepositoryContextLimits = Object.freeze({
+  maxFileBytes: 16 * 1024,
+  maxTotalBytes: 384 * 1024
+});
+
 function utf8BoundedSlice(value, start, maxBytes) {
   if (!Number.isInteger(start) || start < 0 || !Number.isInteger(maxBytes) || maxBytes < 1) throw new Error('repository_context_excerpt_bounds_invalid');
   let normalizedStart = Math.min(start, value.length);
@@ -4458,6 +4463,7 @@ export function buildWorkerPrompt(task) {
   const websiteRules = cleanTask?.websiteBuild ? [
     'This is a structured website build. Treat the supplied businessBrief as the complete authoritative source of business facts.',
     'Treat websiteBuild.websiteBlueprint as a deterministic requirements contract, not art direction and never as evidence of new business facts. Satisfy its bound structural/CTA/navigation/accessibility/SEO/provenance requirements without overriding businessBrief, scope, content restrictions, or governance.',
+    'Treat the approved websitePlan.design direction, typography and color strategy as a real implementation requirement. A website-build should materially express that art direction through hierarchy, composition, spacing, responsive behavior and the planned visual motif; do not collapse it into a generic template merely to minimize the diff.',
     'Do not invent or imply testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands used, service areas, opening hours, addresses, contact details, legal claims, or any other factual business claim that is not explicitly present in businessBrief.',
     'Do not convert websitePlan.missingInputs into guessed content. Omit unsupported facts or use neutral non-factual wording instead.',
     'Honor every businessBrief.contentRestrictions item and use only the supplied verified asset paths for business-specific imagery or logos.'
@@ -5139,6 +5145,34 @@ export class CodexSdkWorker extends CodingWorker {
 
 const readOnlySkillIds = new Set(['code.inspect', 'code.diagnose', 'code.review', 'website.plan']);
 
+function websiteVisualArchetypeForBrief(businessBrief = {}) {
+  const services = Array.isArray(businessBrief?.services)
+    ? businessBrief.services.map((service) => [service?.name, service?.description].filter(Boolean).join(' ')).join(' ')
+    : '';
+  const haystack = normalizeWebsiteBlueprintCategory([
+    businessBrief?.category,
+    businessBrief?.brand?.tone,
+    businessBrief?.brand?.notes,
+    services
+  ].filter(Boolean).join(' '));
+  const barberSignals = ['barber', 'barberia', 'barbershop', 'grooming', 'masculin', 'caballero', 'hombre', 'beard', 'barba', 'afeitado', 'fade'];
+  if (barberSignals.some((signal) => haystack.includes(signal))) return 'barbershop-grooming';
+  const hairSignals = ['peluquer', 'hair salon', 'hairdresser', 'cabello', 'mechas', 'balayage', 'coloracion', 'colorista', 'peinado', 'extension'];
+  if (hairSignals.some((signal) => haystack.includes(signal))) return 'hair-salon-editorial';
+  const beautySignals = ['salon de belleza', 'beauty', 'estetica', 'wellness', 'spa', 'facial', 'nail', 'unas', 'brow', 'lash'];
+  if (beautySignals.some((signal) => haystack.includes(signal))) return 'beauty-wellness';
+  return null;
+}
+
+function websiteVisualPlanningInstruction(businessBrief) {
+  const archetype = websiteVisualArchetypeForBrief(businessBrief);
+  if (!archetype) return null;
+  const shared = 'Visual quality is part of the functional acceptance bar for this niche: choose one coherent art-direction concept before choosing components; make the first viewport distinctive; keep the primary conversion action obvious on mobile; prefer real supplied work, people and space imagery; when verified imagery is missing, use typography, layout, texture and clearly decorative abstract art rather than stock-looking or AI-looking people. Do not copy another brand, and do not default to generic local-business card grids, floating gradient blobs, excessive glassmorphism, or interchangeable template sections. Use brand colors as inputs, not as an excuse to force a cliché. Motion must be restrained, purposeful and safe under prefers-reduced-motion.';
+  if (archetype === 'hair-salon-editorial') return shared + ' Hair-salon editorial direction: think fashion/editorial rather than spa-template. Build hierarchy with an expressive display face paired with a highly readable text face, confident scale contrast, generous whitespace, asymmetric or magazine-like composition, strong crops when real imagery exists, and a lookbook/story rhythm that lets hair texture, color and movement become the visual subject. Avoid automatic blush-pink/beige femininity unless the supplied brand supports it. The result should feel current, image-led and personal, not delicate by default. If the brief contains verified team, review, price or expertise facts, surface them as high-trust editorial proof; otherwise omit them.';
+  if (archetype === 'barbershop-grooming') return shared + ' Barbershop/grooming direction: build around craft, character, culture and atmosphere. Prefer bold or condensed display typography, disciplined grotesk body type, high-contrast composition, decisive grid lines and tactile cues that can evoke materials such as paper, metal, timber or ink only as abstract styling. Dark palettes are optional, not mandatory. Avoid lazy barber clichés such as moustaches, poles, skulls, fake heritage badges, faux-vintage leather or black-and-gold unless the supplied brand actually supports them. Real cuts, barbers and the space should dominate when supplied. Booking, service clarity, barber choice, prices/durations and local proof should be visually immediate when those facts exist.';
+  return shared + ' Beauty/wellness direction: use calm but distinctive spatial rhythm, refined typography, controlled whitespace, soft transitions and a sensory focus on treatment, material and environment. Avoid generic pastel spa gradients, stock faces and over-soft low-contrast interfaces. Trust, treatment clarity and booking must remain stronger than decoration.';
+}
+
 export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }) {
   const clean = sanitizeCodingTask({ skill, goal, context });
   const repositoryContextInstruction = clean?.context?.repositoryContext
@@ -5162,10 +5196,13 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
       : 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
-    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements while allowing creative/art-direction choices from the approved websitePlan. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; or if it uses business-specific assets outside the verified asset evidence.'
+    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements and materially implements the approved websitePlan design direction, typography, hierarchy, composition and visual motif. Treat a generic-template implementation that drops the core approved art direction as a material quality defect, while still allowing reasonable implementation choices. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; if it uses business-specific assets outside the verified asset evidence; or if it materially abandons the approved visual concept.'
     : null;
   const websiteInstruction = skill === 'website.plan'
     ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
+    : null;
+  const websiteVisualInstruction = skill === 'website.plan'
+    ? websiteVisualPlanningInstruction(clean?.context?.businessBrief)
     : null;
   return [
     'You are a read-only analysis worker in a controlled engineering workflow.',
@@ -5183,6 +5220,7 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
     reviewInstruction,
     websiteReviewInstruction,
     websiteInstruction,
+    websiteVisualInstruction,
     'Keep evidence concise, factual, and grounded in files you actually inspected. Do not invent findings.',
     '', 'Structured skill request:', JSON.stringify(clean, null, 2)
   ].filter(Boolean).join('\n');
@@ -5437,7 +5475,8 @@ export class CodexReadOnlySkillExecutor {
       project,
       scope: normalizedScope,
       timeoutMs,
-      processRunner: this.contextProcessRunner
+      processRunner: this.contextProcessRunner,
+      ...(skill === 'code.review' ? { limits: readOnlyReviewRepositoryContextLimits } : {})
     });
     if (skill !== 'code.review' || !context) return context;
     const reviewDiff = await collectReadOnlyReviewDiff({
@@ -5460,7 +5499,8 @@ export class CodexReadOnlySkillExecutor {
       project,
       scope,
       timeoutMs,
-      processRunner: this.contextProcessRunner
+      processRunner: this.contextProcessRunner,
+      ...(expected.reviewDiff ? { limits: readOnlyReviewRepositoryContextLimits } : {})
     });
     if (expected.reviewDiff) {
       const reviewDiff = await collectReadOnlyReviewDiff({

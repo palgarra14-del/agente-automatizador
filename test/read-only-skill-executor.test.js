@@ -597,6 +597,47 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(invalid.error, /websitePlan\.pages\[0\]\.slug is invalid/);
 });
 
+test('beauty niche planner applies distinct visual art direction for hair salons, barbershops and wellness', () => {
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const promptFor = (businessBrief) => buildReadOnlySkillPrompt({
+    skill: 'website.plan',
+    goal: 'Create a visually exceptional conversion-focused website',
+    contract,
+    context: {
+      businessBrief,
+      websiteBlueprint: { version: 1, profileId: 'beauty-salon' }
+    }
+  });
+
+  const hair = promptFor({
+    category: 'Peluquería femenina',
+    services: [{ name: 'Mechas y balayage' }],
+    brand: { tone: 'elegante y actual' }
+  });
+  assert.match(hair, /Hair-salon editorial direction/);
+  assert.match(hair, /fashion\/editorial rather than spa-template/);
+  assert.match(hair, /Avoid automatic blush-pink\/beige femininity/);
+  assert.match(hair, /typography, layout, texture and clearly decorative abstract art/);
+
+  const barber = promptFor({
+    category: 'Barbería urbana',
+    services: [{ name: 'Corte y barba' }],
+    brand: { tone: 'directo y premium' }
+  });
+  assert.match(barber, /Barbershop\/grooming direction/);
+  assert.match(barber, /craft, character, culture and atmosphere/);
+  assert.match(barber, /Dark palettes are optional, not mandatory/);
+  assert.match(barber, /Avoid lazy barber clichés/);
+
+  const wellness = promptFor({
+    category: 'Salón de belleza y estética',
+    services: [{ name: 'Tratamiento facial' }],
+    brand: { tone: 'sereno y profesional' }
+  });
+  assert.match(wellness, /Beauty\/wellness direction/);
+  assert.match(wellness, /Avoid generic pastel spa gradients/);
+});
+
 test('website change critic independently checks the diff against authoritative business facts', () => {
   const contract = defaultToolSkillRegistry.getSkill('code.review').contract;
   const prompt = buildReadOnlySkillPrompt({
