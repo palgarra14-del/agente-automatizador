@@ -103,3 +103,39 @@ print(json.dumps(r))
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('static design audit requires a real synthetic conversion path and accepts exact tel CTA', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-conversion-'));
+  try {
+    writeFileSync(join(dir, 'brief.txt'), JSON.stringify({
+      syntheticContact: { phone: '+34000000000', email: 'demo@example.invalid' }
+    }));
+    writeFileSync(join(dir, 'design-intent.json'), JSON.stringify({
+      concept: 'Taller abierto',
+      intendedEmotion: 'confianza',
+      primaryMessage: 'servicio claro',
+      primaryAction: 'llamar',
+      signatureVisualDevice: 'retícula material',
+      typographyStrategy: 'jerarquía fuerte',
+      compositionStrategy: 'ritmo editorial',
+      mobileStrategy: 'cta visible',
+      antiTemplateRisks: 'evitar tarjetas genéricas'
+    }));
+    writeFileSync(join(dir, 'index.html'), `<!doctype html><html lang="es"><head>
+      <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Demo local</title><meta name="description" content="Demo de entrenamiento local.">
+      </head><body><main><h1>Demo local</h1><p>Una propuesta clara y profesional para un negocio local.</p>
+      <a href="tel:+34000000000">Llamar</a></main></body></html>`);
+    const result = python(`
+from pathlib import Path
+r=m.static_quality_audit(Path(sys.argv[1]))
+print(json.dumps(r))
+`, [dir]);
+    assert.equal(result.pass, true, JSON.stringify(result));
+    assert.equal(result.metrics.actionablePhoneCta, true);
+    assert.equal(result.metrics.actionableEmailCta, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

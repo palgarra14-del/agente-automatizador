@@ -20,6 +20,7 @@ CATEGORY_FLOOR = 8.8
 STREAK_NEEDED = 6
 BUILD_LIMIT_SECONDS = 600
 MAX_FIX_PASSES = 2
+SYNTHETIC_CONTACT = {"phone": "+34000000000", "email": "demo@example.invalid"}
 LOCAL_QA = (REPO / "scripts/design-lab/local-qa.mjs") if (REPO / "scripts/design-lab/local-qa.mjs").exists() else (STATE / "local-qa.mjs")
 SCORE_WEIGHTS = {"identity":0.15,"hierarchy":0.15,"typography":0.12,"composition":0.15,"authenticity":0.10,"conversion":0.13,"mobile":0.10,"polish":0.10}
 
@@ -339,7 +340,8 @@ def codex_base(cwd):
 
 def build_site(run_dir, brief):
     playbook = PLAYBOOK.read_text(encoding="utf-8")
-    (run_dir/"brief.txt").write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+    brief_payload={**brief,"syntheticContact":SYNTHETIC_CONTACT}
+    (run_dir/"brief.txt").write_text(json.dumps(brief_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir/"playbook.md").write_text(playbook, encoding="utf-8")
     lessons=recent_transferable_lessons()
     (run_dir/"recent-lessons.md").write_text("# Recent transferable lessons\n" + ("\n".join(f"- {lesson}" for lesson in lessons) if lessons else "- None yet."), encoding="utf-8")
@@ -350,7 +352,7 @@ def build_site(run_dir, brief):
     (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes. Build the best professional result you can inside this directory.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -391,6 +393,11 @@ def static_quality_audit(run_dir):
     import re
     html_path = run_dir/"index.html"
     html = html_path.read_text(encoding="utf-8", errors="ignore") if html_path.exists() else ""
+    brief_path = run_dir/"brief.txt"
+    brief_data={}
+    if brief_path.exists():
+        try: brief_data=json.loads(brief_path.read_text(encoding="utf-8"))
+        except Exception: brief_data={}
     intent_path = run_dir/"design-intent.json"
     intent = None
     if intent_path.exists():
@@ -424,6 +431,20 @@ def static_quality_audit(run_dir):
     h1_count = html.lower().count("<h1")
     if h1_count != 1:
         defects.append(f"h1_count:{h1_count}")
+    synthetic_contact=brief_data.get("syntheticContact",{}) if isinstance(brief_data,dict) else {}
+    expected_phone="".join(ch for ch in str(synthetic_contact.get("phone","")) if ch.isdigit())
+    expected_email=str(synthetic_contact.get("email","")).strip().lower()
+    hrefs=re.findall(r"href\s*=\s*[\"']([^\"']+)",html,flags=re.I)
+    phone_ok=bool(expected_phone) and any(
+      href.lower().startswith("tel:") and "".join(ch for ch in href if ch.isdigit()) == expected_phone
+      for href in hrefs
+    )
+    email_ok=bool(expected_email) and any(
+      href.lower().startswith("mailto:") and href[7:].split("?",1)[0].strip().lower() == expected_email
+      for href in hrefs
+    )
+    if not (phone_ok or email_ok):
+        defects.append("missing_actionable_conversion_path")
     external=[]
     external.extend(match.group(1) for match in re.finditer(r"src\s*=\s*[\"'](https?://[^\"']+)", html, flags=re.I))
     external.extend(match.group(1) for match in re.finditer(r"<link[^>]+href\s*=\s*[\"'](https?://[^\"']+)", html, flags=re.I))
@@ -494,7 +515,9 @@ def static_quality_audit(run_dir):
         "jsBytes": js_bytes,
         "imageCount": len(image_files),
         "largestImageBytes": largest_image,
-        "siteFileCount": len(relevant_files)
+        "siteFileCount": len(relevant_files),
+        "actionablePhoneCta": phone_ok,
+        "actionableEmailCta": email_ok
       }
     }
 
