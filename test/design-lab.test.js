@@ -139,3 +139,50 @@ print(json.dumps(r))
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('static design audit enforces supplied service content instead of generic filler', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-services-'));
+  try {
+    writeFileSync(join(dir, 'brief.txt'), JSON.stringify({
+      syntheticContact: { phone: '+34000000000', email: 'demo@example.invalid' },
+      services: [
+        { name: 'Reforma integral', description: 'Renovación completa.' },
+        { name: 'Cocinas', description: 'Renovación de cocina.' }
+      ]
+    }));
+    writeFileSync(join(dir, 'design-intent.json'), JSON.stringify({
+      concept: 'Planos abiertos',
+      intendedEmotion: 'confianza',
+      primaryMessage: 'reforma clara',
+      primaryAction: 'llamar',
+      signatureVisualDevice: 'líneas de plano',
+      typographyStrategy: 'contraste editorial',
+      compositionStrategy: 'retícula arquitectónica',
+      mobileStrategy: 'jerarquía compacta',
+      antiTemplateRisks: 'evitar tarjetas genéricas'
+    }));
+    const shell = (body) => `<!doctype html><html lang="es"><head>
+      <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Forma Reforma</title><meta name="description" content="Reformas con contacto directo.">
+      </head><body><main><h1>Forma Reforma</h1>${body}<a href="tel:+34000000000">Llamar</a></main></body></html>`;
+    writeFileSync(join(dir, 'index.html'), shell('<p>Reforma integral para transformar tu vivienda.</p>'));
+    const missing = python(`
+from pathlib import Path
+print(json.dumps(m.static_quality_audit(Path(sys.argv[1]))))
+`, [dir]);
+    assert.equal(missing.pass, false);
+    assert.ok(missing.defects.includes('missing_supplied_service:Cocinas'));
+
+    writeFileSync(join(dir, 'index.html'), shell('<h2>Reforma integral</h2><p>Renovación completa.</p><h2>Cocinas</h2><p>Renovación de cocina.</p>'));
+    const complete = python(`
+from pathlib import Path
+print(json.dumps(m.static_quality_audit(Path(sys.argv[1]))))
+`, [dir]);
+    assert.equal(complete.pass, true, JSON.stringify(complete));
+    assert.equal(complete.metrics.suppliedServiceCount, 2);
+    assert.equal(complete.metrics.missingSuppliedServiceCount, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

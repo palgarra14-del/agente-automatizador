@@ -96,6 +96,97 @@ HOLDOUT_BRIEFS = [
   }
 ]
 
+BRIEF_CONTENT = {
+  "salon-color-premium": {
+    "audience": "Personas que buscan un salón actual para cuidar su imagen y trabajar color, corte y salud visual del cabello.",
+    "services": [
+      {"name":"Color personalizado","description":"Servicio de color planteado según estilo, tono deseado y mantenimiento esperado."},
+      {"name":"Corte y forma","description":"Corte pensado para acompañar textura, movimiento y forma del cabello."},
+      {"name":"Cuidado capilar","description":"Sesión orientada al cuidado y mantenimiento del cabello dentro de la visita al salón."}
+    ]
+  },
+  "barberia-contemporanea": {
+    "audience": "Clientes que buscan barbería contemporánea, trato cuidado y una imagen personal precisa.",
+    "services": [
+      {"name":"Corte","description":"Corte de cabello con atención a forma, acabado y mantenimiento."},
+      {"name":"Barba","description":"Arreglo y definición de barba como servicio independiente."},
+      {"name":"Corte + barba","description":"Servicio combinado para trabajar cabello y barba en una misma visita."}
+    ]
+  },
+  "reformas-interiores": {
+    "audience": "Propietarios de viviendas y pequeños negocios que necesitan renovar espacios con un interlocutor claro.",
+    "services": [
+      {"name":"Reforma integral","description":"Renovación coordinada de una vivienda o local como proyecto completo."},
+      {"name":"Cocinas","description":"Renovación de distribución, acabados e instalaciones de cocina dentro del alcance acordado."},
+      {"name":"Baños","description":"Reforma de baño con coordinación de acabados e instalaciones previstas."}
+    ]
+  },
+  "pintura-decoracion": {
+    "audience": "Personas que quieren renovar interiores mediante color, preparación y acabados decorativos.",
+    "services": [
+      {"name":"Pintura interior","description":"Pintura de paredes y techos para renovar espacios interiores."},
+      {"name":"Preparación de superficies","description":"Preparación previa de soportes para conseguir un acabado cuidado."},
+      {"name":"Acabados decorativos","description":"Aplicación de acabados visuales para aportar carácter a una estancia."}
+    ]
+  },
+  "fontaneria-premium": {
+    "audience": "Hogares y pequeños negocios que necesitan un servicio de fontanería claro y profesional sin promesas de urgencia 24h.",
+    "services": [
+      {"name":"Reparaciones","description":"Diagnóstico y reparación de incidencias habituales de fontanería."},
+      {"name":"Instalaciones","description":"Trabajos de instalación y sustitución de elementos de fontanería."},
+      {"name":"Cocinas y baños","description":"Intervenciones de fontanería ligadas a cocinas y baños."}
+    ]
+  },
+  "estudio-arquitectura": {
+    "audience": "Personas que buscan diseñar o transformar una vivienda con una dirección arquitectónica e interior coherente.",
+    "services": [
+      {"name":"Arquitectura residencial","description":"Desarrollo de proyectos de vivienda desde la definición espacial hasta su documentación."},
+      {"name":"Interiorismo","description":"Diseño de interiores centrado en distribución, materialidad y uso del espacio."},
+      {"name":"Reforma de vivienda","description":"Proyecto de transformación de vivienda existente con visión conjunta de arquitectura e interior."}
+    ]
+  },
+  "cafeteria-especialidad": {
+    "audience": "Personas que valoran una cafetería local contemporánea y una experiencia de visita cuidada.",
+    "services": [
+      {"name":"Café de especialidad","description":"Preparación de café como eje principal de la propuesta del local."},
+      {"name":"Desayunos","description":"Opciones de desayuno para acompañar la visita a la cafetería."},
+      {"name":"Pausa de tarde","description":"Propuesta de café y acompañamiento para una visita tranquila durante la tarde."}
+    ]
+  },
+  "clinica-dental": {
+    "audience": "Personas que buscan atención dental local con comunicación clara y trato sereno.",
+    "services": [
+      {"name":"Primera consulta","description":"Primera cita para conocer la situación del paciente y orientar los siguientes pasos sin prometer resultados."},
+      {"name":"Higiene dental","description":"Servicio de higiene dental dentro de la atención habitual de la clínica."},
+      {"name":"Cuidado dental general","description":"Atención odontológica general según valoración profesional."}
+    ]
+  },
+  "holdout-fisioterapia": {
+    "audience": "Personas que buscan acompañamiento profesional para mejorar función y movimiento dentro de un centro local.",
+    "services": [
+      {"name":"Valoración funcional","description":"Primera valoración para comprender necesidades de movimiento y orientar el trabajo."},
+      {"name":"Sesión individual","description":"Atención individual adaptada a la valoración realizada por el profesional."},
+      {"name":"Ejercicio terapéutico","description":"Trabajo de ejercicio pautado cuando forma parte del enfoque profesional del centro."}
+    ]
+  },
+  "holdout-carpinteria": {
+    "audience": "Personas que necesitan piezas y soluciones de carpintería adaptadas a su espacio.",
+    "services": [
+      {"name":"Mobiliario a medida","description":"Diseño y fabricación de piezas ajustadas a necesidades y dimensiones concretas."},
+      {"name":"Armarios y almacenaje","description":"Soluciones de almacenaje desarrolladas para aprovechar el espacio disponible."},
+      {"name":"Carpintería interior","description":"Elementos de carpintería para completar y personalizar espacios interiores."}
+    ]
+  },
+  "holdout-academia": {
+    "audience": "Jóvenes y adultos que buscan aprender idiomas en un entorno local y cercano.",
+    "services": [
+      {"name":"Clases para adultos","description":"Formación de idiomas dirigida a alumnado adulto según su punto de partida."},
+      {"name":"Clases para jóvenes","description":"Formación adaptada a alumnado joven dentro de la programación de la academia."},
+      {"name":"Conversación","description":"Sesiones orientadas a practicar comprensión y expresión oral."}
+    ]
+  }
+}
+
 BRIEF_FOCUS = {
   "salon-color-premium": ["identity","typography","composition","mobile"],
   "barberia-contemporanea": ["identity","typography","composition","polish"],
@@ -340,7 +431,7 @@ def codex_base(cwd):
 
 def build_site(run_dir, brief):
     playbook = PLAYBOOK.read_text(encoding="utf-8")
-    brief_payload={**brief,"syntheticContact":SYNTHETIC_CONTACT}
+    brief_payload={**brief,**BRIEF_CONTENT.get(brief["slug"],{}),"syntheticContact":SYNTHETIC_CONTACT}
     (run_dir/"brief.txt").write_text(json.dumps(brief_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_dir/"playbook.md").write_text(playbook, encoding="utf-8")
     lessons=recent_transferable_lessons()
@@ -352,7 +443,7 @@ def build_site(run_dir, brief):
     (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt is the complete synthetic source of truth for this benchmark. Use its supplied audience and services concretely instead of generic filler copy. It also contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Do not add services, techniques, proof, credentials or claims that are not in brief.txt. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes. Build the best professional result you can inside this directory.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -445,6 +536,16 @@ def static_quality_audit(run_dir):
     )
     if not (phone_ok or email_ok):
         defects.append("missing_actionable_conversion_path")
+    supplied_services=brief_data.get("services",[]) if isinstance(brief_data,dict) else []
+    missing_services=[]
+    text_only=re.sub(r"<[^>]+>"," ",html)
+    normalized_text=" ".join(text_only.lower().split())
+    for service in supplied_services:
+        name=str(service.get("name","")).strip()
+        if name and " ".join(name.lower().split()) not in normalized_text:
+            missing_services.append(name)
+    for name in missing_services:
+        defects.append(f"missing_supplied_service:{name}")
     external=[]
     external.extend(match.group(1) for match in re.finditer(r"src\s*=\s*[\"'](https?://[^\"']+)", html, flags=re.I))
     external.extend(match.group(1) for match in re.finditer(r"<link[^>]+href\s*=\s*[\"'](https?://[^\"']+)", html, flags=re.I))
@@ -517,7 +618,9 @@ def static_quality_audit(run_dir):
         "largestImageBytes": largest_image,
         "siteFileCount": len(relevant_files),
         "actionablePhoneCta": phone_ok,
-        "actionableEmailCta": email_ok
+        "actionableEmailCta": email_ok,
+        "suppliedServiceCount": len(supplied_services),
+        "missingSuppliedServiceCount": len(missing_services)
       }
     }
 
@@ -605,7 +708,7 @@ Brief: {brief['brief']}
 Score 0-10 with agency-level standards. A 9.0 means genuinely excellent and sale-ready; 9.5 means exceptional. Do not inflate.
 Rubric: identity/distinctiveness; focal hierarchy; typography; composition/rhythm; authenticity/honesty of visual assets; conversion clarity; mobile composition; final polish.
 Penalize template smell: repetitive cards, arbitrary rounded boxes, generic gradients/blobs, decorative glass, too many pills, weak typography, identical section rhythm, CTA clutter, pointless motion, generic stock aesthetic, or desktop merely squeezed into mobile.
-Read design-intent.json first, then inspect index.html/CSS/JS as needed. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
+Read brief.txt and design-intent.json first, then inspect index.html/CSS/JS as needed. brief.txt is the factual source of truth: reward concrete use of supplied audience/services and penalize generic filler or unsupported specifics. Make the rendered screenshots primary evidence. Judge whether the implemented website materially expresses the declared concept, emotion, focal hierarchy, signature visual device and mobile strategy; penalize intent that exists only on paper.
 Read qa-{label}.json. Deterministic QA is authoritative for runtime/accessibility/responsive defects. Static observations are heuristic signals, not automatic aesthetic failures. If static observations report repeated_design_concept, scrutinize identity/distinctiveness especially hard and penalize reuse that is not clearly justified by the current business.
 If deterministic QA pass is false, verdict must be IMPROVE regardless of visual score. Explicitly include its defects in fixBrief.
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
@@ -626,7 +729,7 @@ def fix_site(run_dir, brief, review, pass_no):
     critique=run_dir/f"critique-pass-{pass_no}.json"
     critique.write_text(json.dumps(review,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt=f"""You are the implementation designer correcting your synthetic website after a severe visual review.
-Read design-intent.json, critique-pass-{pass_no}.json, the latest qa-*.json and the current site files. Implement the most important fixes, not cosmetic busywork. Preserve the core concept when it is strong; refine design-intent.json only when the review shows the concept itself is weak or incoherent.
+Read brief.txt, design-intent.json, critique-pass-{pass_no}.json, the latest qa-*.json and the current site files. Implement the most important fixes, not cosmetic busywork. Use supplied services/audience to replace generic filler, and never invent missing business facts. Preserve the core concept when it is strong; refine design-intent.json only when the review shows the concept itself is weak or incoherent.
 Treat deterministic QA defects as mandatory fixes before aesthetic refinements. Treat static template-smell observations as prompts for judgment, not mechanical rules.
 Preserve factual honesty and the business brief. Do not browse or add remote dependencies.
 Prioritize the lowest scoring categories and the review fixBrief. Make the design more authored, coherent and professional, while preserving conversion and accessibility.
