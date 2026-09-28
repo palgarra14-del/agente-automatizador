@@ -16,7 +16,7 @@ function focusNumbers(signal) {
 }
 
 function materialNumber(title) {
-  const match = fold(title).match(/(?:tema|ejer(?:cicios?)?|practica|seminario|sesion|s)\s*[-_. ]?(\d{1,2})/);
+  const match = fold(title).match(/(?:tema|ejer(?:cicios?)?|pr(?:actica)?|seminario|sesion|s)\s*[-_. ]?(\d{1,2})/);
   return match ? Number(match[1]) : null;
 }
 
@@ -40,20 +40,26 @@ function scoreMaterial(material, signal) {
   const reasons = [];
   const focus = focusNumbers(signal);
   const number = materialNumber(title);
+  const signalText = fold([signal?.title, signal?.body].filter(Boolean).join(' '));
 
   const matchesFocus = Boolean(focus.length && number !== null && focus.includes(number));
   if (focus.length && number !== null) {
     if (matchesFocus) {
       score += 420;
       reasons.push('mismo tema');
-      if (new RegExp('^(?:tema\\s*' + number + '|ejer\\s*' + number + '|s\\s*' + number + '\\b)', 'i').test(lower)) {
+      if (new RegExp('^(?:tema\\s*' + number + '|ejer\\s*' + number + '|pr(?:actica)?\\s*' + number + '|s\\s*' + number + '\\b)', 'i').test(lower)) {
         score += 100;
+      }
+      if (/\bpractica\s*[-_. ]?\d{1,2}\b/.test(signalText) &&
+          new RegExp('^pr(?:actica)?\\s*[-_. ]?' + number + '\\b', 'i').test(lower)) {
+        score += 220;
+        reasons.unshift('misma práctica');
       }
     } else {
       score -= 220;
     }
   }
-  if (/problema|ejercicio|\bejer\w*/.test(lower)) {
+  if (/problema|ejercicio|\bejer\w*|\bpr(?:actica)?\s*[-_. ]?\d+/.test(lower)) {
     score += 100;
     reasons.push('práctica');
   }

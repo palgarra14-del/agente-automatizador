@@ -83,3 +83,29 @@ test('deadline tasks keep precedence over study filler', () => {
   assert.equal(result.tasks[0].kind, 'assignment');
   assert.equal(result.tasks.length, 3);
 });
+
+test('assignment tasks attach matching compact practical material from the same course', () => {
+  const source = snapshot();
+  source.assignments = [{
+    id: 'a-pr1',
+    subjectId: 'E',
+    title: 'Previo Práctica 1',
+    dueAt: '2026-10-05T09:00:00Z',
+    status: 'open',
+    url: 'https://campus.example/a-pr1'
+  }];
+  source.materials.push(
+    { id: 'pr1', subjectId: 'E', title: 'Pr1eda2627', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/pr1' },
+    { id: 'pr2', subjectId: 'E', title: 'Pr2eda2627', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/pr2' },
+    { id: 'other-pr1', subjectId: 'A', title: 'Práctica 1', publishedAt: '2026-09-28T10:53:45.589Z', url: 'https://campus.example/other-pr1' }
+  );
+  const result = planUniversityStudyDay({
+    snapshot: source,
+    changes: changes(),
+    today: '2026-09-28',
+    targetTasks: 3
+  });
+  const assignment = result.tasks.find((item) => item.id === 'assignment:a-pr1');
+  assert.ok(assignment);
+  assert.deepEqual(assignment.resources.map((item) => item.id), ['pr1']);
+});

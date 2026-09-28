@@ -1,4 +1,5 @@
 import { planUniversityDay } from './university.js';
+import { recommendAcademicPreparation } from './university-preparation.js';
 
 function dayNumber(value) {
   const parsed = Date.parse(value + 'T00:00:00Z');
@@ -80,7 +81,15 @@ export function planUniversityStudyDay({
   }
   dayNumber(today);
 
-  const mandatory = planUniversityDay(snapshot, changes, { today, maxTasks: targetTasks });
+  const mandatory = planUniversityDay(snapshot, changes, { today, maxTasks: targetTasks }).map((task) => {
+    if (task.kind !== 'assignment') return task;
+    const resources = recommendAcademicPreparation({
+      subjectId: task.subjectId,
+      title: task.title,
+      kind: 'coursework'
+    }, snapshot.materials, { limit: 2 });
+    return resources.length ? { ...task, resources } : task;
+  });
   if (mandatory.length >= targetTasks) {
     return {
       tasks: mandatory.slice(0, targetTasks),
