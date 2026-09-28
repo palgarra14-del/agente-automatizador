@@ -88,11 +88,11 @@ export function extractAcademicDates(value, capturedAt) {
     if (from) superseded.add(from);
     if (to) dates.add(to);
   }
-  for (const match of text.matchAll(/\b(\d{1,2})-(\d{1,2})\b/g)) {
+  for (const match of text.matchAll(/\b(\d{1,2})-(\d{1,2})(?:-(\d{4}))?\b/g)) {
     const day = Number(match[1]);
     const month = Number(match[2]) - 1;
     if (month < 0 || month > 11) continue;
-    const date = inferredDate(day, month, null, capturedAt);
+    const date = inferredDate(day, month, match[3] ? Number(match[3]) : null, capturedAt);
     if (date && !superseded.has(date)) dates.add(date);
   }
   return [...dates].sort();

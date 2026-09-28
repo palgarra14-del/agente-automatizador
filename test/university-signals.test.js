@@ -15,6 +15,21 @@ test('extracts named and numeric academic dates without confusing the academic y
   assert.deepEqual(dates, ['2026-10-02', '2026-10-07', '2026-12-15']);
 });
 
+test('numeric academic dates preserve explicit years and reject invalid leap days', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  assert.deepEqual(extractAcademicDates(
+    'Fechas: 2-10-2025, 2-10-2027, 29-2-2028, 29-2-2027.', capturedAt
+  ), ['2025-10-02', '2027-10-02', '2028-02-29']);
+
+  const state = mergeAcademicSignals(null, [{
+    id: 'uv-mail:old-assessment',
+    subject: 'Test Tema 1',
+    body: 'El test fue el 2-10-2025.',
+    course: { subjectId: '34670', shortName: 'EDA' }
+  }], { capturedAt });
+  assert.deepEqual(state.signals, []);
+});
+
 test('assessment email becomes a durable high-priority academic signal', () => {
   const signal = alertToAcademicSignal({
     id: 'uv-mail:772',
