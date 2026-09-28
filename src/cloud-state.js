@@ -118,6 +118,78 @@ function sanitizeRemoteOnlyEvidence(value) {
   for (const child of Object.values(value)) sanitizeRemoteOnlyEvidence(child);
 }
 
+const CLOUD_STATE_COMPACTION_TRIGGER_RATIO = 0.8;
+const CLOUD_STATE_COMPACTION_TARGET_RATIO = 0.6;
+const CLOUD_STATE_TERMINAL_WORKFLOW_FLOOR = 8;
+const CLOUD_STATE_TERMINAL_WORKFLOW_STATUSES = new Set(['completed', 'failed', 'blocked']);
+
+function serializedBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function referencedWorkflowIds(state, workflowIds) {
+  const referenced = new Set();
+  const seen = new WeakSet();
+  const visit = (value) => {
+    if (typeof value === 'string') {
+      if (workflowIds.has(value)) referenced.add(value);
+      return;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  for (const [key, value] of Object.entries(state)) {
+    if (key === 'workflows') continue;
+    if (key.startsWith('autopilot') && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [autopilotKey, child] of Object.entries(value)) {
+        if (autopilotKey !== 'history') visit(child);
+      }
+      continue;
+    }
+    visit(value);
+  }
+  return referenced;
+}
+
+export function compactCloudStateHistory(state, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  const bytesBefore = serializedBytes(state);
+  const workflows = state?.workflows;
+  if (!workflows || typeof workflows !== 'object' || Array.isArray(workflows) ||
+      bytesBefore <= Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TRIGGER_RATIO)) {
+    return { prunedWorkflowIds: [], bytesBefore, bytesAfter: bytesBefore };
+  }
+
+  const workflowIds = new Set(Object.keys(workflows));
+  const referenced = referencedWorkflowIds(state, workflowIds);
+  const candidates = Object.entries(workflows)
+    .filter(([id, workflow]) =>
+      !referenced.has(id) &&
+      workflow &&
+      CLOUD_STATE_TERMINAL_WORKFLOW_STATUSES.has(workflow.status)
+    )
+    .sort(([idA, a], [idB, b]) => {
+      const timeA = Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0;
+      const timeB = Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0;
+      return timeA - timeB || idA.localeCompare(idB);
+    });
+
+  const prunableCount = Math.max(0, candidates.length - CLOUD_STATE_TERMINAL_WORKFLOW_FLOOR);
+  const targetBytes = Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TARGET_RATIO);
+  const prunedWorkflowIds = [];
+  for (let index = 0; index < prunableCount && serializedBytes(state) > targetBytes; index += 1) {
+    const [id] = candidates[index];
+    delete workflows[id];
+    prunedWorkflowIds.push(id);
+  }
+
+  return { prunedWorkflowIds, bytesBefore, bytesAfter: serializedBytes(state) };
+}
+
 function normalizeAllowedProjectIds(value = ['self']) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new Error('cloud_state_allowed_projects_invalid');
   const normalized = [...new Set(value.map((projectId) => String(projectId ?? '').trim()))].sort();
@@ -1888,6 +1960,7 @@ export class GitHubStateStore extends JsonStore {
       }
       const output = await mutator(data);
       sanitizeRemoteOnlyEvidence(data);
+      compactCloudStateHistory(data, { maxBytes: this.maxBytes });
       if (beforeCommit) await beforeCommit();
       const intendedStateHash = stateHash(data);
       try {

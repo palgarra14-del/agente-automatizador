@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { URL } from 'node:url';
-import { GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
+import { compactCloudStateHistory, GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
 
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 
@@ -916,6 +916,62 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
     { allowedProjectIds: ['website-pilot'] }
   ));
   assert.throws(() => validateCloudState({ runs: {}, approvals: {}, events: [], apiToken: 'secret' }), /sensitive_key/);
+});
+
+test('cloud state compaction prunes only old unreferenced terminal workflows under pressure', () => {
+  const workflows = {};
+  for (let index = 0; index < 20; index += 1) {
+    const id = `workflow-old-${String(index).padStart(2, '0')}`;
+    workflows[id] = {
+      id,
+      status: 'failed',
+      updatedAt: new Date(Date.UTC(2026, 8, 1, 0, index)).toISOString(),
+      evidence: 'x'.repeat(2_500)
+    };
+  }
+  workflows['workflow-requested'] = {
+    id: 'workflow-requested',
+    status: 'blocked',
+    updatedAt: '2026-09-01T01:00:00.000Z',
+    evidence: 'x'.repeat(2_500)
+  };
+  workflows['workflow-active'] = {
+    id: 'workflow-active',
+    status: 'failed',
+    updatedAt: '2026-09-01T01:01:00.000Z',
+    evidence: 'x'.repeat(2_500)
+  };
+  workflows['workflow-running'] = {
+    id: 'workflow-running',
+    status: 'running',
+    updatedAt: '2026-09-01T01:02:00.000Z',
+    evidence: 'x'.repeat(2_500)
+  };
+
+  const state = {
+    runs: {},
+    approvals: {},
+    events: [],
+    requests: { request: { workflowId: 'workflow-requested' } },
+    autopilotSelfImprovement: {
+      activeWorkflowId: 'workflow-active',
+      history: [{ workflowId: 'workflow-old-00', status: 'failed' }]
+    },
+    workflows
+  };
+  const result = compactCloudStateHistory(state, { maxBytes: 50_000 });
+
+  assert.ok(result.prunedWorkflowIds.length > 0);
+  assert.ok(result.bytesAfter < result.bytesBefore);
+  assert.ok(state.workflows['workflow-requested']);
+  assert.ok(state.workflows['workflow-active']);
+  assert.ok(state.workflows['workflow-running']);
+  assert.equal(result.prunedWorkflowIds.includes('workflow-requested'), false);
+  assert.equal(result.prunedWorkflowIds.includes('workflow-active'), false);
+  assert.equal(result.prunedWorkflowIds.includes('workflow-running'), false);
+  assert.equal(Object.keys(state.workflows).filter((id) => id.startsWith('workflow-old-')).length, 8);
+  assert.equal(state.workflows['workflow-old-00'], undefined);
+  assert.ok(state.workflows['workflow-old-19']);
 });
 
 test('generation claim namespace root cannot be used as a state tag', () => {
