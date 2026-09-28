@@ -177,6 +177,37 @@ print(json.dumps({"good":m.conversion_ergonomics_from_qa(good,brief),"bad":m.con
   assert.ok(result.bad.defects.includes('conversion_target_too_small_desktop'));
 });
 
+test('typography ergonomics rejects unreadable body copy but allows editorial microcopy', () => {
+  const good = {
+    mobile: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 140, fontSizePx: 16, lineHeightRatio: 1.5, measureEm: 31 },
+      { tag: 'figcaption', textLength: 58, fontSizePx: 12, lineHeightRatio: 1.25, measureEm: 24 }
+    ] } },
+    desktop: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 180, fontSizePx: 16, lineHeightRatio: 1.55, measureEm: 62 }
+    ] } }
+  };
+  const bad = {
+    mobile: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 150, fontSizePx: 11.5, lineHeightRatio: 1.08, measureEm: 52 }
+    ] } },
+    desktop: { designMetrics: { textSamples: [
+      { tag: 'p', textLength: 180, fontSizePx: 13, lineHeightRatio: 1.45, measureEm: 92 }
+    ] } }
+  };
+  const result = python(`
+good=json.loads(sys.argv[1]); bad=json.loads(sys.argv[2])
+print(json.dumps({"good":m.typography_ergonomics_from_qa(good),"bad":m.typography_ergonomics_from_qa(bad)}))
+`, [JSON.stringify(good), JSON.stringify(bad)]);
+  assert.equal(result.good.pass, true, JSON.stringify(result.good));
+  assert.equal(result.good.viewports.mobile.severeSmallCount, 0);
+  assert.ok(result.good.observations.some(item => item.startsWith('secondary_copy_small_mobile')));
+  assert.equal(result.bad.pass, false);
+  assert.ok(result.bad.defects.includes('substantial_copy_too_small_mobile'));
+  assert.ok(result.bad.defects.includes('substantial_copy_line_height_too_dense_mobile'));
+  assert.ok(result.bad.observations.some(item => item.startsWith('reading_measure_too_wide_')));
+});
+
 test('static design audit rejects template-breaking technical defects', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-audit-'));
   try {
