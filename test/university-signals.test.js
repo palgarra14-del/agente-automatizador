@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { buildAcademicReminders } from '../src/university-reminders.js';
 import {
   alertToAcademicSignal,
   extractAcademicDates,
@@ -13,6 +14,29 @@ test('extracts named and numeric academic dates without confusing the academic y
     '2026-09-27T16:00:00Z'
   );
   assert.deepEqual(dates, ['2026-10-02', '2026-10-07', '2026-12-15']);
+});
+
+test('Valencian elided month dates produce timely assessment reminders', () => {
+  for (const apostrophe of ["'", '’']) {
+    const signal = alertToAcademicSignal({
+      id: 'uv-mail:valencian-assessment',
+      subject: 'Test Tema 1',
+      body: `El test serà el 2 d${apostrophe}octubre de 2026.`,
+      course: { subjectId: '34670', shortName: 'EDA' }
+    }, { capturedAt: '2026-09-27T16:00:00Z' });
+    assert.deepEqual(signal.dates, ['2026-10-02']);
+    const reminders = buildAcademicReminders({ today: '2026-09-30', signals: [signal] });
+    assert.equal(reminders.length, 1);
+    assert.equal(reminders[0].date, '2026-10-02');
+    assert.equal(reminders[0].daysRemaining, 2);
+  }
+});
+
+test('Valencian elided dates preserve explicit years and reject impossible days', () => {
+  assert.deepEqual(extractAcademicDates(
+    "2 d'octubre de 2025; 3 d’abril de 2027; 31 d'abril de 2027; 32 d’agost de 2027.",
+    '2026-09-27T16:00:00Z'
+  ), ['2025-10-02', '2027-04-03']);
 });
 
 test('numeric academic dates preserve explicit years and reject invalid leap days', () => {
