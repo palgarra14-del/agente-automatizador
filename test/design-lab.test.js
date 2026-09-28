@@ -208,6 +208,30 @@ print(json.dumps({"good":m.typography_ergonomics_from_qa(good),"bad":m.typograph
   assert.ok(result.bad.observations.some(item => item.startsWith('reading_measure_too_wide_')));
 });
 
+test('section rhythm flags repeated structure but tolerates deliberate variety', () => {
+  const repeatedBlocks = Array.from({ length: 5 }, (_, index) => ({
+    tag: 'section', heightVh: 0.8 + index * 0.01, display: 'grid', flexDirection: 'row',
+    gridColumnCount: 2, directChildCount: 2, headingXVw: 0.08, textAlign: 'start'
+  }));
+  const variedBlocks = [
+    { tag: 'section', heightVh: 0.55, display: 'block', flexDirection: 'row', gridColumnCount: null, directChildCount: 3, headingXVw: 0.08, textAlign: 'start' },
+    { tag: 'section', heightVh: 1.35, display: 'grid', flexDirection: 'row', gridColumnCount: 2, directChildCount: 2, headingXVw: 0.62, textAlign: 'end' },
+    { tag: 'section', heightVh: 0.72, display: 'flex', flexDirection: 'column', gridColumnCount: null, directChildCount: 4, headingXVw: 0.35, textAlign: 'center' },
+    { tag: 'section', heightVh: 1.05, display: 'grid', flexDirection: 'row', gridColumnCount: 3, directChildCount: 5, headingXVw: 0.12, textAlign: 'start' },
+    { tag: 'section', heightVh: 0.45, display: 'block', flexDirection: 'row', gridColumnCount: null, directChildCount: 1, headingXVw: null, textAlign: 'start' }
+  ];
+  const repeated = { mobile: { designMetrics: { visualBlocks: repeatedBlocks } }, desktop: { designMetrics: { visualBlocks: repeatedBlocks } } };
+  const varied = { mobile: { designMetrics: { visualBlocks: variedBlocks } }, desktop: { designMetrics: { visualBlocks: variedBlocks } } };
+  const result = python(`
+repeated=json.loads(sys.argv[1]); varied=json.loads(sys.argv[2])
+print(json.dumps({"repeated":m.section_rhythm_from_qa(repeated),"varied":m.section_rhythm_from_qa(varied)}))
+`, [JSON.stringify(repeated), JSON.stringify(varied)]);
+  assert.ok(result.repeated.observations.some(item => item.startsWith('repeated_section_structure_')));
+  assert.ok(result.repeated.observations.some(item => item.startsWith('flat_section_rhythm_')));
+  assert.equal(result.varied.observations.length, 0, JSON.stringify(result.varied));
+  assert.ok(result.varied.viewports.desktop.uniqueStructures >= 4);
+});
+
 test('static design audit rejects template-breaking technical defects', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-audit-'));
   try {

@@ -635,6 +635,13 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
       .map((element) => {
         const rect = element.getBoundingClientRect();
         const style = styleFor(element);
+        const directChildren = [...(element.children ?? [])].filter(isRendered);
+        const heading = queryAll('h2, h3').find((candidate) => element.contains(candidate) && isRendered(candidate)) ?? null;
+        const headingRect = heading?.getBoundingClientRect?.() ?? null;
+        const gridTemplate = String(style.gridTemplateColumns ?? '').trim();
+        const gridColumnCount = String(style.display ?? '').includes('grid') && gridTemplate && gridTemplate !== 'none'
+          ? gridTemplate.split(' ').filter(Boolean).length
+          : null;
         return {
           tag: String(element.tagName ?? '').toLowerCase(),
           topVh: metric(rect.top / viewportHeight),
@@ -642,6 +649,11 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
           widthVw: metric(rect.width / viewportWidth),
           textAlign: String(style.textAlign ?? '').toLowerCase(),
           display: String(style.display ?? '').toLowerCase(),
+          flexDirection: String(style.flexDirection ?? '').toLowerCase(),
+          gridColumnCount,
+          directChildCount: Math.min(directChildren.length, 20),
+          headingXVw: headingRect ? metric(headingRect.left / viewportWidth) : null,
+          headingWidthVw: headingRect ? metric(headingRect.width / viewportWidth) : null,
           background: String(style.backgroundColor ?? '').toLowerCase().slice(0, 80)
         };
       });
