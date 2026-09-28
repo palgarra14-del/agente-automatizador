@@ -27,7 +27,8 @@ function matchingAssignment(title, assignments) {
   const matches = assignments.filter((assignment) => {
     const candidate = fold(assignment?.title);
     if (!candidate || candidate.length < 5) return false;
-    return candidate === target || candidate.includes(target) || target.includes(candidate);
+    // Match complete folded words so Tema 1 cannot identify Tema 10.
+    return (` ${candidate} `).includes(` ${target} `) || (` ${target} `).includes(` ${candidate} `);
   });
   return matches.length === 1 ? matches[0] : null;
 }

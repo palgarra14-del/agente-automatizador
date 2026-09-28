@@ -138,3 +138,26 @@ test('code-less deadlines fail closed when multiple assignments match regardless
     }
   }
 });
+
+test('code-less deadlines do not confuse numbered assignment title prefixes', () => {
+  for (const [notificationTitle, assignmentTitle] of [
+    ['Ejercicios Tema 10', 'Ejercicios Tema 1'],
+    ['Ejercicios Tema 1', 'Ejercicios Tema 10']
+  ]) {
+    const page = { text: [
+      'Notificaciones',
+      `Vence el lunes, 28 de septiembre de 2026, 11:30: ${notificationTitle}`,
+      'Vence el lunes, 28 de septiembre de 2026, 11:30: Práctica de árboles'
+    ].join('\n') };
+    const parsed = parseUvNotifications(page, courses, {
+      today: '2026-09-27',
+      assignments: [
+        { subjectId: '34670', title: assignmentTitle },
+        { subjectId: '34156', title: 'Práctica de árboles' }
+      ]
+    });
+    assert.deepEqual(parsed.map((item) => item.subjectId), ['34156']);
+    assert.match(parsed[0].title, /Práctica de árboles$/);
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+  }
+});
