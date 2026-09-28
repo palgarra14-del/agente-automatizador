@@ -79,7 +79,12 @@ export function buildAcademicReminders({
     });
   }
 
-  return reminders.sort((a, b) =>
+  const seen = new Set();
+  return reminders.filter((reminder) => {
+    if (seen.has(reminder.id)) return false;
+    seen.add(reminder.id);
+    return true;
+  }).sort((a, b) =>
     a.date.localeCompare(b.date) ||
     String(a.subjectId ?? '').localeCompare(String(b.subjectId ?? '')) ||
     a.id.localeCompare(b.id)

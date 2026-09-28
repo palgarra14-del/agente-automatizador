@@ -96,6 +96,24 @@ test('repeated signal dates remind once while distinct dates and signals remain 
   ]);
 });
 
+test('repeated source records remind once while distinct obligations remain separate', () => {
+  const signal = { id: 'shared-id', kind: 'assessment', dates: ['2026-10-01', '2026-10-02'] };
+  const assignment = { id: 'shared-id', status: 'open', dueAt: '2026-10-01T09:30:00Z' };
+  const reminders = buildAcademicReminders({
+    today: '2026-09-30',
+    signals: [signal, { ...signal, dates: [...signal.dates] }, { ...signal, id: 'other-signal' }],
+    assignments: [assignment, { ...assignment }, { ...assignment, id: 'other-assignment' }]
+  });
+  assert.deepEqual(reminders.map((item) => item.id), [
+    'reminder:assignment:other-assignment:2026-10-01:tomorrow',
+    'reminder:assignment:shared-id:2026-10-01:tomorrow',
+    'reminder:signal:other-signal:2026-10-01:assessment-soon',
+    'reminder:signal:shared-id:2026-10-01:assessment-soon',
+    'reminder:signal:other-signal:2026-10-02:assessment-soon',
+    'reminder:signal:shared-id:2026-10-02:assessment-soon'
+  ]);
+});
+
 test('coursework and schedule changes remind only the day before', () => {
   const reminders = buildAcademicReminders({
     today: '2026-09-30',
