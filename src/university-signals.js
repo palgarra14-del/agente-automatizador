@@ -177,6 +177,7 @@ export function mergeAcademicSignals(previousState, alerts, { capturedAt } = {})
   for (const alert of alerts) {
     const signal = alertToAcademicSignal(alert, { capturedAt });
     if (signal.activeUntil >= currentDay) map.set(signal.id, signal);
+    else map.delete(signal.id);
   }
   const signals = [...map.values()].sort((a, b) =>
     b.importance - a.importance ||

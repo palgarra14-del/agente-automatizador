@@ -117,6 +117,31 @@ test('merge keeps future obligations while expiring stale undated mail', () => {
   assert.deepEqual(state.signals.map((item) => item.id), ['future']);
 });
 
+test('refreshed expired evidence removes a cached obligation while retaining other future work', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  const alert = {
+    id: 'uv-mail:refreshed',
+    subject: 'Test Tema 1',
+    body: 'El test será el 2-10-2026.',
+    course: { subjectId: '34670', shortName: 'EDA' }
+  };
+  const previous = mergeAcademicSignals(null, [
+    alert,
+    { ...alert, id: 'uv-mail:other' }
+  ], { capturedAt });
+  assert.equal(previous.signals.length, 2);
+
+  const state = mergeAcademicSignals(previous, [{
+    ...alert,
+    body: 'El test fue el 23-9-2026.'
+  }], { capturedAt });
+
+  assert.deepEqual(state.signals, previous.signals.filter((signal) => signal.id === 'uv-mail:other'));
+  assert.deepEqual(selectAttentionAcademicSignals(state, { capturedAt }).map((signal) => signal.id), [
+    'uv-mail:other'
+  ]);
+});
+
 test('attention view hides distant obligations until they approach', () => {
   const state = {
     version: 4,
