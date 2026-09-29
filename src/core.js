@@ -5223,7 +5223,7 @@ export class CodexSdkWorker extends CodingWorker {
     let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      await assertWorkerProjectControlSurface(workspace);
+      await this.controlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const execution = await runCostAwareCodexTurn({
         CodexClient: this.CodexClient,
