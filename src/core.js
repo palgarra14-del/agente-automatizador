@@ -4539,7 +4539,7 @@ function multiModelRoleForTask(task = {}) {
 
 function multiModelRoleForReadOnlySkill(skill) {
   if (skill === 'code.review') return 'independent_review';
-  if (skill === 'website.plan') return 'research_and_audit';
+  if (skill === 'website.plan') return 'creative_direction';
   if (skill === 'code.inspect') return 'research_and_audit';
   return null;
 }
@@ -5278,6 +5278,7 @@ export class MultiModelCodingWorker extends CodingWorker {
   async execute(task, { workspace, timeoutMs }) {
     const role = multiModelRoleForTask(task);
     try {
+      await assertWorkerProjectControlSurface(workspace);
       const routed = await this.gateway.edit({
         role,
         prompt: buildWorkerPrompt(task)
