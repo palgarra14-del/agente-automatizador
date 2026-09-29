@@ -9,6 +9,7 @@ const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
 const DEFAULT_LINEAGE_VALIDATION_PACE_MS = 500;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
 const GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+const GITHUB_NETWORK_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
 const STATUS_PAGE_SIZE = 100;
 const EPOCH_STATUS_MAX_PAGES = 8;
@@ -315,6 +316,11 @@ export class GitHubStateStore extends JsonStore {
         }, deadlineAt);
       } catch (error) {
         if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
+        const networkRetryDelayMs = method === 'GET' ? GITHUB_NETWORK_READ_RETRY_DELAYS_MS[attempt] : undefined;
+        if (networkRetryDelayMs !== undefined) {
+          await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          continue;
+        }
         throw new Error('cloud_state_github_request_failed', { cause: error });
       }
       if (allow404 && response.status === 404) return null;
