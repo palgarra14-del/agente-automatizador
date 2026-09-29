@@ -40,6 +40,14 @@ PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 FREE_COST_CLASSES = {"free_quota", "free_hosted", "local_zero_external"}
 
+PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
+    0.0, float(os.environ.get("MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS", "300"))
+)
+CANDIDATE_FAILURE_COOLDOWN_SECONDS = max(
+    0.0, float(os.environ.get("MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS", "90"))
+)
+_RUNTIME_FAILURES = {"providers": {}, "candidates": {}}
+
 def cost_allowed(spec):
     cost_class = spec.get("costClass")
     if cost_class in FREE_COST_CLASSES:
@@ -423,6 +431,60 @@ def empirical_stats(role, candidate):
     }
 
 
+def _runtime_cooldown(candidate):
+    spec = CANDIDATES[candidate]
+    current = time.monotonic()
+    checks = (
+        ("candidate", "candidates", candidate),
+        ("provider", "providers", spec["provider"]),
+    )
+    for scope, bucket_name, key in checks:
+        bucket = _RUNTIME_FAILURES[bucket_name]
+        entry = bucket.get(key)
+        if not isinstance(entry, dict):
+            continue
+        if float(entry.get("until", 0.0)) > current:
+            return scope, entry
+        bucket.pop(key, None)
+    return None
+
+
+def _remember_unavailability(candidate, exc):
+    reason = str(exc)
+    lowered = reason.lower()
+    provider_markers = (
+        "not_authenticated", "please sign in", "sign in", "unauthorized",
+        "authentication", "forbidden", "quota", "rate limit", "rate_limit",
+        "billing", "payment", "plan required", "upgrade required",
+        "service_unavailable", "service unavailable", "connection refused",
+        "credits exhausted", "credit exhausted",
+    )
+    provider_wide = any(marker in lowered for marker in provider_markers)
+    ttl = (
+        PROVIDER_FAILURE_COOLDOWN_SECONDS
+        if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+    )
+    if ttl <= 0:
+        return None
+    spec = CANDIDATES[candidate]
+    bucket_name = "providers" if provider_wide else "candidates"
+    key = spec["provider"] if provider_wide else candidate
+    _RUNTIME_FAILURES[bucket_name][key] = {
+        "until": time.monotonic() + ttl,
+        "reason": reason[-400:],
+    }
+    return "provider" if provider_wide else "candidate"
+
+
+def _cooldown_error(candidate):
+    blocked = _runtime_cooldown(candidate)
+    if not blocked:
+        return None
+    scope, entry = blocked
+    reason = str(entry.get("reason") or "unavailable")
+    return f"{candidate}:runtime_cooldown:{scope}:{reason}"
+
+
 def provider_available(provider, model=None):
     if provider == "antigravity":
         return antigravity_authenticated()
@@ -443,6 +505,7 @@ def candidate_available(candidate, disabled_providers=None):
     return (
         cost_allowed(spec)
         and spec["provider"] not in disabled
+        and _runtime_cooldown(candidate) is None
         and provider_available(spec["provider"], spec.get("model"))
     )
 
@@ -568,6 +631,10 @@ def run_role_structured(
         if require_premium and item["provider"] == "ollama":
             continue
         candidate = item["candidate"]
+        cooldown_error = _cooldown_error(candidate)
+        if cooldown_error:
+            errors.append(cooldown_error)
+            continue
         try:
             result = run_structured_candidate(
                 candidate,
@@ -582,6 +649,7 @@ def run_role_structured(
             result["fallbackErrors"] = errors
             return result
         except ProviderUnavailable as exc:
+            _remember_unavailability(candidate, exc)
             errors.append(candidate + ":" + str(exc))
     raise ProviderUnavailable(";".join(errors) or "no_role_candidate_available")
 
@@ -626,6 +694,10 @@ def run_edit_role(role, prompt, *, cwd, timeout=600, disabled_providers=None):
         require_edit=True,
     ):
         candidate = item["candidate"]
+        cooldown_error = _cooldown_error(candidate)
+        if cooldown_error:
+            errors.append(cooldown_error)
+            continue
         try:
             result = run_edit_candidate(
                 candidate,
@@ -638,6 +710,7 @@ def run_edit_role(role, prompt, *, cwd, timeout=600, disabled_providers=None):
             result["fallbackErrors"] = errors
             return result
         except ProviderUnavailable as exc:
+            _remember_unavailability(candidate, exc)
             errors.append(candidate + ":" + str(exc))
     raise ProviderUnavailable(";".join(errors) or "no_edit_candidate_available")
 
@@ -705,6 +778,10 @@ def _run_preferred_structured(
             ordered.append(candidate)
     errors=[]
     for candidate in ordered:
+        cooldown_error=_cooldown_error(candidate)
+        if cooldown_error:
+            errors.append(cooldown_error)
+            continue
         try:
             result=run_structured_candidate(
                 candidate,prompt,schema,cwd=cwd,timeout=timeout,
@@ -713,6 +790,7 @@ def _run_preferred_structured(
             result["fallbackErrors"]=errors
             return result
         except ProviderUnavailable as exc:
+            _remember_unavailability(candidate, exc)
             errors.append(candidate+":"+str(exc))
     raise ProviderUnavailable(";".join(errors) or "no_preferred_candidate_available")
 
@@ -805,6 +883,10 @@ def policy_snapshot():
         "costPolicy": COST_POLICY,
         "paidModelsExplicitlyEnabled": PAID_MODELS_EXPLICITLY_ENABLED,
         "freeCostClasses": sorted(FREE_COST_CLASSES),
+        "runtimeFailureCooldownSeconds": {
+            "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
+            "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,
+        },
         "candidates": CANDIDATES,
         "roles": {
             role: [

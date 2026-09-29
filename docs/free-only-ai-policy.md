@@ -48,5 +48,6 @@ When a provider fails:
 3. continue to the next free/local candidate;
 4. never upgrade a plan, buy credits, or add billing information;
 5. preserve enough telemetry to compare quality, latency, and reliability later.
+6. temporarily suppress a provider after provider-wide quota/auth/billing/service failures, while keeping model-specific failures isolated to that candidate.
 
 Quality routing remains role-specific. Free-only mode is a cost constraint, not a reason to collapse all work onto one model.
