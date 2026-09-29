@@ -14,7 +14,7 @@ test('cloud worker reacts to owner control-plane events with a scheduled fallbac
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);
   assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+lane:\n\s+description: Trusted cloud lane for bounded continuation\n\s+required: false\n\s+type: string/);
-  assert.match(workflow, /cron: '17 \* \* \* \*'/);
+  for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.match(workflow, /push:\n\s+branches: \[main\][\s\S]*paths:[\s\S]*'\.github\/workflows\/agent-cloud\.yml'[\s\S]*'src\/\*\*'[\s\S]*'config\/\*\*'[\s\S]*'scripts\/\*\*'/);
   assert.match(workflow, /github\.event_name == 'push'/);
@@ -125,6 +125,7 @@ test('routing job receives event data but no secrets or write credentials', () =
   const route = workflow.slice(routeStart, cloudStart);
   assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
   assert.match(route, /AGENT_CLOUD_EVENT_ACTION: \$\{\{ github\.event\.action \}\}/);
+  assert.match(route, /AGENT_CLOUD_SCHEDULE: \$\{\{ github\.event\.schedule \}\}/);
   assert.match(route, /AGENT_CLOUD_ISSUE_BODY: \$\{\{ github\.event\.issue\.body \}\}/);
   assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
@@ -291,7 +292,7 @@ test('cloud supervisor headroom does not widen autonomous work budgets', () => {
 });
 
 test('scheduled self-maintenance wakes hourly while active work still chains immediately', () => {
-  assert.match(workflow, /cron: '17 \* \* \* \*'/);
+  for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
   assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
   assert.match(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
 });
