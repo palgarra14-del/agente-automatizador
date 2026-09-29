@@ -24,6 +24,45 @@ function store(fetchImpl, sleep, { now = () => Date.now() } = {}) {
     now
   });
 }
+test('cloud-state retries transient GET network failures but preserves fail-closed mutations', async () => {
+  let readCalls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    readCalls += 1;
+    if (readCalls === 1) throw new TypeError('fetch failed');
+    return response(200, { object: { sha: SHA } });
+  }, async (ms) => waits.push(ms));
+
+  assert.equal(await subject.refSha('tags/test'), SHA);
+  assert.equal(readCalls, 2);
+  assert.deepEqual(waits, [1_000]);
+
+  let writeCalls = 0;
+  const writer = store(async () => {
+    writeCalls += 1;
+    throw new TypeError('fetch failed');
+  }, async () => { throw new Error('mutation_must_not_sleep'); });
+
+  await assert.rejects(
+    () => writer.request('/git/refs', { method: 'POST', body: { ref: 'refs/tags/test', sha: SHA } }),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(writeCalls, 1);
+});
+
+test('cloud-state exhausts bounded GET network retries before failing closed', async () => {
+  let calls = 0;
+  const waits = [];
+  const subject = store(async () => {
+    calls += 1;
+    throw new TypeError('fetch failed');
+  }, async (ms) => waits.push(ms));
+
+  await assert.rejects(() => subject.refSha('tags/test'), /cloud_state_github_request_failed/);
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [1_000, 3_000]);
+});
+
 test('cloud-state retries a GET when GitHub reports a secondary rate limit', async () => {
   let calls = 0;
   const waits = [];
