@@ -506,7 +506,7 @@ test('cloud CLI wires durable continuity only into cloud inbox actions', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.match(cli, /import \{ DurableCloudWorkflowEngine \} from '\.\/cloud-workflow-engine\.js';/);
   assert.match(cli, /const activeWorkflows = cloudAction\n\s+\? new DurableCloudWorkflowEngine\(\{ store: activeStore, projects, \.\.\.workflowModelExecutors \}\)\n\s+: workflows;/);
-  assert.match(cli, /const workflows = new WorkflowEngine\(\{ store, projects \}\);/);
+  assert.match(cli, /const workflows = new WorkflowEngine\(\{ store, projects, \.\.\.workflowModelExecutors \}\);/);
   assert.match(pkg.scripts.typecheck, /node --check src\/cloud-workflow-engine\.js/);
 });
 
