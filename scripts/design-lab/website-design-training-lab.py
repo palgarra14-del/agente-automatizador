@@ -855,11 +855,6 @@ Brief: {brief['brief']}
         metadata={key:routed.get(key) for key in ("candidate","provider","model","routingScore","fallbackErrors","elapsedSeconds")}
         (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
         out.write_text(json.dumps(routed.get("result",{}),ensure_ascii=False,indent=2),encoding="utf-8")
-        record_model_outcome(
-          "implementation",routed["candidate"],success=success,
-          elapsed_seconds=elapsed,run_id=run_dir.name,
-          note="initial_build"
-        )
         return elapsed, 0 if success else 2
     except ProviderUnavailable as exc:
         elapsed=time.monotonic()-started
@@ -1240,11 +1235,6 @@ Business: {brief['business']} | {brief['category']}
         metadata["role"]=role
         (run_dir/f"model-route-fix-{pass_no}.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
         trace_path.write_text(json.dumps(routed.get("result",{}),ensure_ascii=False,indent=2),encoding="utf-8")
-        record_model_outcome(
-          role,routed["candidate"],success=True,
-          elapsed_seconds=routed.get("elapsedSeconds"),qa_pass=qa.get("pass"),
-          run_id=run_dir.name,note=f"fix_pass_{pass_no}"
-        )
         return 0
     except ProviderUnavailable as exc:
         trace_path.write_text(str(exc),encoding="utf-8")
@@ -1361,6 +1351,18 @@ def main():
         review=review_site(run_dir,brief,desktop,tablet,mobile,"initial",qa)
         initial_score=calibrated_score(review)
         initial_model_score=review["totalScore"]
+        build_route={}
+        try:
+            build_route=json.loads((run_dir/"model-route-build.json").read_text(encoding="utf-8"))
+        except Exception:
+            build_route={}
+        if build_route.get("candidate"):
+            record_model_outcome(
+              "implementation",build_route["candidate"],success=True,
+              elapsed_seconds=build_route.get("elapsedSeconds"),
+              qa_pass=qa.get("pass") is True,score_after=initial_score,
+              run_id=run_id,note="initial_rendered_build"
+            )
         snapshot_site(run_dir,"initial")
         candidates=[{"label":"initial","review":review,"qa":qa,"snapshot":STATE/"site-snapshots"/run_id/"initial","elapsedSeconds":round(time.monotonic()-cycle_started,2)}]
         final_review=review
@@ -1370,6 +1372,7 @@ def main():
             if calibrated_score(final_review)>=THRESHOLD and min_cat>=CATEGORY_FLOOR and qa.get("pass") is True:
                 break
             fix_passes=pass_no
+            score_before_fix=calibrated_score(final_review)
             rc=fix_site(run_dir,brief,final_review,pass_no)
             if rc!=0:
                 fix_trace=(run_dir/f"fix-{pass_no}-trace.txt").read_text(encoding="utf-8", errors="ignore") if (run_dir/f"fix-{pass_no}-trace.txt").exists() else ""
@@ -1380,6 +1383,19 @@ def main():
             desktop,tablet,mobile=serve_and_capture(run_dir,f"fix{pass_no}")
             qa=deterministic_qa(run_dir,f"fix{pass_no}")
             final_review=review_site(run_dir,brief,desktop,tablet,mobile,f"fix{pass_no}",qa)
+            fix_route={}
+            try:
+                fix_route=json.loads((run_dir/f"model-route-fix-{pass_no}.json").read_text(encoding="utf-8"))
+            except Exception:
+                fix_route={}
+            if fix_route.get("candidate") and fix_route.get("role") in {"visual_fix","code_fix"}:
+                record_model_outcome(
+                  fix_route["role"],fix_route["candidate"],success=True,
+                  elapsed_seconds=fix_route.get("elapsedSeconds"),
+                  qa_pass=qa.get("pass") is True,
+                  score_before=score_before_fix,score_after=calibrated_score(final_review),
+                  run_id=run_id,note=f"reviewed_fix_pass_{pass_no}"
+                )
             snapshot=snapshot_site(run_dir,f"fix{pass_no}")
             candidates.append({"label":f"fix{pass_no}","review":final_review,"qa":qa,"snapshot":snapshot,"elapsedSeconds":round(time.monotonic()-cycle_started,2)})
         best=max(candidates,key=lambda candidate: pass_quality(candidate["review"],candidate["qa"]))
@@ -1433,6 +1449,22 @@ def main():
           "reviewRouting":final_review.get("_routing",{}),
           "buildRouting":json.loads((run_dir/"model-route-build.json").read_text(encoding="utf-8")) if (run_dir/"model-route-build.json").exists() else {}
         }
+        council_path=run_dir/"design-council.json"
+        if council_path.exists():
+            try:
+                council_data=json.loads(council_path.read_text(encoding="utf-8"))
+                synthesis=council_data.get("synthesis",{})
+                candidate=synthesis.get("candidate")
+                if candidate:
+                    record_model_outcome(
+                      "council_synthesis",candidate,success=True,
+                      elapsed_seconds=synthesis.get("elapsedSeconds"),
+                      qa_pass=qa.get("pass") is True,
+                      score_after=record["finalScore"],selected=True,
+                      run_id=run_id,note="selected_final_design"
+                    )
+            except Exception:
+                pass
         with HISTORY.open("a",encoding="utf-8") as f:
             f.write(json.dumps(record,ensure_ascii=False)+"\n")
         (run_dir/"result.json").write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding="utf-8")
