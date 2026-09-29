@@ -100,8 +100,11 @@ export class AutonomousGapIntelligence {
   analyze({ history = [], recentProposalPaths = [], memory = [] } = {}) {
     const recent = Array.isArray(history) ? history.slice(-12) : [];
     const failures = recent.filter((entry) => entry?.status !== 'completed');
-    const classes = failures.map((entry) => failureClass(entry?.error)).filter(Boolean);
-    const classCounts = countBy(classes);
+    const classifiedFailures = failures.map((entry) => {
+      const detail = [entry?.error, entry?.failureDetail].filter(Boolean).join(' | ');
+      return { kind: failureClass(detail), detail: clip(entry?.failureDetail ?? entry?.error, 260) };
+    }).filter((entry) => entry.kind);
+    const classCounts = countBy(classifiedFailures.map((entry) => entry.kind));
     const completed = recent.filter((entry) => entry?.status === 'completed');
     const pathCounts = countBy(completed.flatMap((entry) => Array.isArray(entry?.changedPaths) ? entry.changedPaths : []));
     const repeatedPaths = [...pathCounts.entries()]
@@ -111,11 +114,12 @@ export class AutonomousGapIntelligence {
 
     const signals = [];
     for (const [kind, count] of [...classCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+      const latestDetail = [...classifiedFailures].reverse().find((entry) => entry.kind === kind)?.detail ?? null;
       signals.push({
         kind: `reliability:${kind}`,
         score: 70 + Math.min(24, count * 6),
         actionable: true,
-        evidence: `${count} recent non-successful cycle(s) classified as ${kind}`
+        evidence: `${count} recent non-successful cycle(s) classified as ${kind}${latestDetail ? `; latest root-cause detail: ${latestDetail}` : ''}`
       });
     }
 
