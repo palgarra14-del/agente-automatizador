@@ -1,13 +1,16 @@
 import { createHash } from 'node:crypto';
 
 const PROFILE = 'autonomous-maintenance';
-const STATE_KEY = 'autopilotSelfImprovement';
+const SELF_STATE_KEY = 'autopilotSelfImprovement';
+const PROJECT_STATE_KEY = 'autopilotProjectImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
-const COOLDOWN_MS = 30 * 60 * 1000;
+const SELF_COOLDOWN_MS = 30 * 60 * 1000;
+const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const MAX_STARTS_PER_24H = 24;
+const DEFAULT_MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
+const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
   allowedPaths: Object.freeze(['src', 'test/autonomous']),
@@ -33,6 +36,57 @@ export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
 export const AUTONOMOUS_MAINTENANCE_GOAL =
   "Inspect authoritative main and implement exactly one bounded, high-impact improvement that makes the commercial operating system more effective: LeadFinder -> Callflow -> conversion-focused demo/site production -> follow-up -> conversion -> feedback into lead quality and automation. Prioritize measurable improvements to qualified-lead throughput, contactability, CRM outcome/follow-up quality, demo turnaround, conversion instrumentation, cross-project learning, repeated-work automation, or 24/7 reliability that directly enables those outcomes. If a decision-relevant data gap is visible, prefer bounded instrumentation or feedback-loop support over guessing. Avoid speculative refactoring, cosmetic engineering, or technical polish without a clear commercial, throughput, data-quality, conversion, or reliability benefit. Treat the autonomy controller, workflow core, Cloud State, CLI, issue queue, capability/specialist registries, workflows, config, scripts, dependencies, deployment, authentication, secrets and external communications as immutable roots of trust. Never edit existing baseline tests; add any new regression only under test/autonomous/. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
 
+
+export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
+  self: Object.freeze({
+    stateKey: SELF_STATE_KEY,
+    cooldownMs: SELF_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: AUTONOMOUS_MAINTENANCE_GOAL,
+    scope: AUTONOMOUS_MAINTENANCE_SCOPE,
+    allowSensitiveImplementation: true
+  }),
+  leadfinder: Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative LeadFinder main and implement exactly one bounded improvement that increases qualified lead throughput, contact-data quality, niche targeting, deduplication, prioritization, observability or reliable handoff into Callflow. Prefer measurable fixes and regression coverage over speculative refactors. Work only on safe application/docs paths, never secrets, workflow control, dependencies, deployment configuration or production data. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['src', 'docs']),
+      forbiddenPaths: Object.freeze(['.github', '.env.example', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'next.config.ts', 'tsconfig.json', 'vitest.config.ts'])
+    }),
+    allowSensitiveImplementation: false
+  }),
+  callflow: Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative Callflow main and implement exactly one bounded improvement that increases sales-call throughput, lead prioritization, outcome capture, follow-up discipline, operator usability or feedback quality back to LeadFinder. Prefer deterministic UX/data-quality fixes with tests. Do not touch Apps Script, API/config secrets, deployment configuration, package metadata or external communications. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['app.js', 'prospect.js', 'prospect-utils.js', 'callflow-navigation.js', 'index.html', 'styles.css', 'closing.css', 'tests']),
+      forbiddenPaths: Object.freeze(['.github', 'google-apps-script', 'api', 'config.js', '.clasp.json', '.claspignore', 'package.json', 'scripts'])
+    }),
+    allowSensitiveImplementation: false
+  }),
+  'website-pilot': Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative Website Pilot main and implement exactly one bounded improvement that makes the existing demo/site portfolio more professional, responsive, accessible, conversion-oriented, distinctive or faster to reuse for qualified local-business leads. Preserve factual honesty and existing routes. Prefer fixes supported by tests or rendered evidence. Do not touch dependency, deployment or secret-bearing control files. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['index.html', 'assets', 'barberia', 'galeria', 'servicios', 'test', 'docs', '404.html', 'robots.txt', 'sitemap.xml']),
+      forbiddenPaths: Object.freeze(['.github', '.vercel', 'vercel.json', 'package.json', 'scripts', 'aviso-legal', 'privacidad', 'cookies'])
+    }),
+    allowSensitiveImplementation: false
+  })
+});
+
+export function autonomousProjectPolicy(projectId) {
+  const policy = AUTONOMOUS_PROJECT_POLICIES[projectId];
+  if (!policy) throw new Error(`autonomous_project_policy_missing:${projectId}`);
+  return policy;
+}
+
 function emptyAutopilot() {
   return {
     version: 1,
@@ -46,19 +100,19 @@ function emptyAutopilot() {
   };
 }
 
-function normalizeAutopilot(value) {
+function normalizeAutopilot(value, maxStartsPer24h = MAX_STARTS_PER_24H) {
   const state = value && typeof value === 'object' && !Array.isArray(value) ? value : emptyAutopilot();
   return {
     ...emptyAutopilot(),
     ...state,
-    starts: Array.isArray(state.starts) ? state.starts.filter((item) => Number.isFinite(Date.parse(item))).slice(-MAX_STARTS_PER_24H * 4) : [],
+    starts: Array.isArray(state.starts) ? state.starts.filter((item) => Number.isFinite(Date.parse(item))).slice(-maxStartsPer24h * 4) : [],
     history: Array.isArray(state.history) ? state.history.slice(-HISTORY_LIMIT) : []
   };
 }
 
-function policyFingerprint(workflowId, baseRevision, stepId) {
+function policyFingerprint(workflowId, baseRevision, stepId, projectId = 'self') {
   return createHash('sha256')
-    .update(`autonomous-maintenance-policy-v1|${workflowId}|${baseRevision}|${stepId}`)
+    .update(`autonomous-maintenance-policy-v2|${projectId}|${workflowId}|${baseRevision}|${stepId}`)
     .digest('hex');
 }
 
@@ -66,9 +120,9 @@ function pathWithin(root, path) {
   return path === root || path.startsWith(`${root}/`);
 }
 
-function pathAllowedForAutopilot(path) {
-  const allowed = AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths.some((root) => pathWithin(root, path));
-  const forbidden = AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths.some((root) => pathWithin(root, path));
+function pathAllowedForAutopilot(path, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
+  const allowed = scope.allowedPaths.some((root) => pathWithin(root, path));
+  const forbidden = scope.forbiddenPaths.some((root) => pathWithin(root, path));
   return allowed && !forbidden;
 }
 
@@ -91,7 +145,7 @@ function pristineWorkflowForDeadlineRefresh(plan) {
   );
 }
 
-export function autonomousSensitiveImplementationAllowed(step) {
+function sensitiveImplementationAllowedForScope(step, scope) {
   if (!step ||
       step.id !== 'implementation' ||
       step.status !== 'awaiting_approval' ||
@@ -109,9 +163,13 @@ export function autonomousSensitiveImplementationAllowed(step) {
     !path.includes('..') &&
     !path.includes('\\') &&
     !path.startsWith('/') &&
-    pathAllowedForAutopilot(path)
+    pathAllowedForAutopilot(path, scope)
   )) return false;
   return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
+}
+
+export function autonomousSensitiveImplementationAllowed(step) {
+  return sensitiveImplementationAllowedForScope(step, AUTONOMOUS_MAINTENANCE_SCOPE);
 }
 
 function billingUnavailableError(error) {
@@ -146,8 +204,8 @@ function resultSummary(plan) {
   };
 }
 
-export class AutonomousSelfImprovement {
-  constructor({ store, workflowEngine, operatorRevision, workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
+export class AutonomousProjectImprovement {
+  constructor({ store, workflowEngine, operatorRevision, projectId = 'self', workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
     if (!store || !workflowEngine) throw new Error('autonomous_self_improvement_dependencies_required');
     if (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision)) {
       throw new Error('autonomous_self_improvement_revision_invalid');
@@ -155,25 +213,33 @@ export class AutonomousSelfImprovement {
     if (!Number.isInteger(workflowTimeoutMs) || workflowTimeoutMs < 1_000) {
       throw new Error('autonomous_self_improvement_timeout_invalid');
     }
+    const policy = autonomousProjectPolicy(projectId);
     this.store = store;
     this.workflowEngine = workflowEngine;
     this.operatorRevision = operatorRevision.toLowerCase();
+    this.projectId = projectId;
+    this.stateKey = policy.stateKey;
+    this.cooldownMs = policy.cooldownMs;
+    this.maxStartsPer24h = policy.maxStartsPer24h;
+    this.goal = policy.goal;
+    this.scope = policy.scope;
+    this.allowSensitiveImplementation = policy.allowSensitiveImplementation === true;
     this.workflowTimeoutMs = workflowTimeoutMs;
     this.now = now;
   }
 
   async readState() {
     const root = await this.store.load();
-    return normalizeAutopilot(root[STATE_KEY]);
+    return normalizeAutopilot(root[this.stateKey], this.maxStartsPer24h);
   }
 
   async writeState(mutator) {
     return this.store.mutate((root) => {
-      const current = normalizeAutopilot(root[STATE_KEY]);
+      const current = normalizeAutopilot(root[this.stateKey], this.maxStartsPer24h);
       const next = mutator(current) ?? current;
       next.version = 1;
       next.updatedAt = new Date(this.now()).toISOString();
-      root[STATE_KEY] = next;
+      root[this.stateKey] = next;
       return next;
     });
   }
@@ -192,7 +258,7 @@ export class AutonomousSelfImprovement {
         Date.parse(entry.completedAt) >= cutoff
       )
       .flatMap((entry) => Array.isArray(entry.changedPaths) ? entry.changedPaths : [])
-      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path))
+      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path, this.scope))
     )].sort();
   }
 
@@ -200,7 +266,7 @@ export class AutonomousSelfImprovement {
     const lastStart = starts.at(-1);
     if (!lastStart) return false;
     const lastStartAt = Date.parse(lastStart);
-    if (!Number.isFinite(lastStartAt) || this.now() - lastStartAt >= COOLDOWN_MS) return false;
+    if (!Number.isFinite(lastStartAt) || this.now() - lastStartAt >= this.cooldownMs) return false;
     const latest = state.history.at(-1);
     const completedAt = Date.parse(latest?.completedAt ?? '');
     const completedLatestStart =
@@ -208,12 +274,13 @@ export class AutonomousSelfImprovement {
       completedAt >= lastStartAt &&
       typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision);
+    if (completedLatestStart && latest.status === 'completed') return false;
     if (completedLatestStart && latest.baseRevision.toLowerCase() !== this.operatorRevision) return false;
     return true;
   }
 
   revisionAdvanceBypassesDailyCap(state, starts = this.recentStarts(state)) {
-    if (starts.length < MAX_STARTS_PER_24H) return false;
+    if (starts.length < this.maxStartsPer24h) return false;
     const latest = state.history.at(-1);
     const lastStartAt = Date.parse(starts.at(-1) ?? '');
     const completedAt = Date.parse(latest?.completedAt ?? '');
@@ -239,7 +306,7 @@ export class AutonomousSelfImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return false;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
+    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
     if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
@@ -269,21 +336,21 @@ export class AutonomousSelfImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return null;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
+    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
-      projectId: 'self',
+      projectId: this.projectId,
       budgets: { timeoutMs: this.workflowTimeoutMs },
       goal: recentProposalPaths.length
-        ? `${AUTONOMOUS_MAINTENANCE_GOAL} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
-        : AUTONOMOUS_MAINTENANCE_GOAL,
+        ? `${this.goal} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
+        : this.goal,
       scope: {
-        allowedPaths: [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths],
+        allowedPaths: [...this.scope.allowedPaths],
         forbiddenPaths: [...new Set([
-          ...AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths,
+          ...this.scope.forbiddenPaths,
           ...recentProposalPaths
         ])]
       }
@@ -321,11 +388,11 @@ export class AutonomousSelfImprovement {
           ...current,
           activeWorkflowId: null,
           activeBaseRevision: null,
-          suspendedUntil: new Date(this.now() + COOLDOWN_MS).toISOString()
+          suspendedUntil: new Date(this.now() + this.cooldownMs).toISOString()
         }));
         return { status: 'missing_workflow', workflowId };
       }
-      if (plan.profile !== PROFILE || plan.projectId !== 'self') {
+      if (plan.profile !== PROFILE || plan.projectId !== this.projectId) {
         await this.writeState((current) => ({
           ...current,
           activeWorkflowId: null,
@@ -347,7 +414,7 @@ export class AutonomousSelfImprovement {
         }
         const step = awaiting[0];
         const releaseReady = step.id === 'release-readiness';
-        const boundedSensitiveImplementation = autonomousSensitiveImplementationAllowed(step);
+        const boundedSensitiveImplementation = this.allowSensitiveImplementation && sensitiveImplementationAllowedForScope(step, this.scope);
         if (!releaseReady && !boundedSensitiveImplementation) {
           if (typeof this.workflowEngine.cancel === 'function') {
             const cancelled = await this.workflowEngine.cancel(workflowId, {
@@ -360,7 +427,7 @@ export class AutonomousSelfImprovement {
           return { status: 'human_gate_required', workflowId, stepId: step.id };
         }
         plan = await this.workflowEngine.approve(workflowId, step.id, {
-          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id),
+          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id, this.projectId),
           deadlineCapAt: tickDeadlineAt
         });
         if (TERMINAL.has(plan.status)) {
@@ -384,5 +451,11 @@ export class AutonomousSelfImprovement {
 
     const current = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
     return { ...resultSummary(current), status: current?.status ?? 'transition_budget_exhausted' };
+  }
+}
+
+export class AutonomousSelfImprovement extends AutonomousProjectImprovement {
+  constructor(options = {}) {
+    super({ ...options, projectId: 'self' });
   }
 }

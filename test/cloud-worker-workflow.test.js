@@ -179,7 +179,7 @@ test('cloud worker fuses scheduled repair with admission recovery and keeps clou
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
   assert.match(prepare, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(prepare, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ secrets\.AGENT_GITHUB_TOKEN != '' && 'true' \|\| 'false' \}\}/);
+  assert.match(prepare, /\$\{AGENT_CROSS_REPO_READY:-false\}/);
   assert.match(prepare, /inbox cloud-prepare --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(prepare, /hasExecutionWork === true/);
   assert.match(prepare, /AGENT_CLOUD_LANE" != "self[\s\S]*cross_repo_credential_missing/);
@@ -209,6 +209,15 @@ test('cloud worker fuses scheduled repair with admission recovery and keeps clou
   assert.match(cli, /executionEnabled: !\['cloud-control-once', 'cloud-prepare'\]\.includes\(action\)/);
 });
 
+test('every cloud lane gets an autonomous project improvement worker', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /AutonomousProjectImprovement/);
+  assert.match(cli, /cloudLane\.projectIds\.length === 1/);
+  assert.match(cli, /projectId: autonomousProjectId/);
+  assert.match(cli, /projects\.get\(autonomousProjectId\)\.budgets\.maxRuntimeMinutes/);
+  assert.doesNotMatch(cli, /cloudLane\.id === 'self'/);
+});
+
 test('cloud-once emits queue and autonomous results separately for auditability', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   assert.match(cli, /let autonomousResult = null/);
@@ -228,13 +237,17 @@ test('production cloud execution uses the bounded drain while retaining cloud-on
   assert.match(cli, /action === 'cloud-once'/);
 });
 
-test('autonomous cloud work is session-only and cannot spend a paid OpenAI API key', () => {
+test('autonomous cloud work keeps model billing disabled and confines cross-repo auth to the orchestrator boundary', () => {
   assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 5);
-  assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 0);
-  assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
+  assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 1);
+  assert.match(workflow, /CONFIGURED_AGENT_GITHUB_TOKEN: \$\{\{ secrets\.AGENT_GITHUB_TOKEN \}\}/);
+  assert.match(workflow, /env -u GITHUB_TOKEN -u GH_TOKEN gh auth token/);
+  assert.match(workflow, /::add-mask::\$TOKEN/);
+  assert.match(workflow, /AGENT_GITHUB_TOKEN=\$TOKEN/);
+  assert.match(workflow, /AGENT_CROSS_REPO_READY=true/);
   assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
   assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
   assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 5);
