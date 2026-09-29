@@ -13,8 +13,10 @@ COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() 
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
 COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
 OPENCODE_FREE_TIMEOUT=min(60,max(10,int(os.environ.get("OPENCODE_FREE_TIMEOUT","35"))))
+OPENCODE_MODELS_TTL=float(os.environ.get("OPENCODE_MODELS_TTL","60"))
 ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
 _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
+_OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
 
 class ProviderUnavailable(RuntimeError):
     pass
@@ -171,22 +173,35 @@ def opencode_model_is_free(model):
         value.startswith("opencode/") and value.endswith("-free")
     )
 
-def opencode_ready(model=None):
-    if not OPENCODE_FREE_ENABLED:
-        return False
+def _opencode_models_snapshot():
+    now=time.monotonic()
+    age=now-_OPENCODE_MODELS_CACHE["checkedAt"]
+    if age < OPENCODE_MODELS_TTL:
+        return _OPENCODE_MODELS_CACHE["ready"], set(_OPENCODE_MODELS_CACHE["models"])
     if not Path(OPENCODE).is_file():
-        return False
+        _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
+        return False,set()
     try:
         proc=_run([OPENCODE,"models"],timeout=20)
     except ProviderUnavailable:
+        _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
+        return False,set()
+    ready=proc.returncode==0
+    models={
+        line.strip() for line in proc.stdout.splitlines() if line.strip()
+    } if ready else set()
+    _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=ready,models=models)
+    return ready,set(models)
+
+def opencode_ready(model=None):
+    if not OPENCODE_FREE_ENABLED:
         return False
-    if proc.returncode!=0:
+    ready,models=_opencode_models_snapshot()
+    if not ready:
         return False
     if model is None:
         return True
-    return opencode_model_is_free(model) and str(model) in {
-        line.strip() for line in proc.stdout.splitlines() if line.strip()
-    }
+    return opencode_model_is_free(model) and str(model) in models
 
 def _opencode_service_connection():
     service_file=Path.home()/".config/opencode/service.json"
