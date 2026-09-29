@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { URL } from 'node:url';
-import { GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
+import { GitHubStateStore, compactCloudStateForWrite, validateCloudState } from '../src/cloud-state.js';
 
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 
@@ -2050,3 +2050,109 @@ test('remote envelope integrity mismatch fails closed with matching epoch author
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /integrity_mismatch/);
 });
 
+
+
+test('cloud state compaction removes stale terminal workflows but preserves active and live-request workflows', () => {
+  const workflows = {};
+  for (let index = 0; index < 18; index += 1) {
+    workflows[`workflow-${String(index).padStart(2, '0')}`] = {
+      id: `workflow-${String(index).padStart(2, '0')}`,
+      projectId: 'self',
+      status: 'completed',
+      createdAt: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 60_000).toISOString(),
+      updatedAt: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 60_000).toISOString(),
+      result: { evidence: 'x'.repeat(2_000) }
+    };
+  }
+  workflows['workflow-active'] = {
+    id: 'workflow-active',
+    projectId: 'self',
+    status: 'running',
+    createdAt: '2026-09-29T20:00:00Z',
+    updatedAt: '2026-09-29T20:00:00Z',
+    result: { evidence: 'a'.repeat(2_000) }
+  };
+  workflows['workflow-live-request'] = {
+    id: 'workflow-live-request',
+    projectId: 'self',
+    status: 'blocked',
+    createdAt: '2026-09-19T20:00:00Z',
+    updatedAt: '2026-09-19T20:00:00Z',
+    result: { evidence: 'b'.repeat(2_000) }
+  };
+  const state = {
+    runs: {},
+    approvals: {},
+    events: [],
+    workflows,
+    requests: {
+      'owner/repo#1': {
+        projectId: 'self',
+        workflowId: 'workflow-live-request',
+        status: 'running'
+      }
+    },
+    autopilotSelfImprovement: {
+      activeWorkflowId: 'workflow-active'
+    }
+  };
+
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+
+  assert.equal(result.compacted, true);
+  assert.ok(result.removedWorkflows.length > 0);
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-active'), true);
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-live-request'), true);
+  assert.ok(Buffer.byteLength(JSON.stringify(state), 'utf8') <= 32 * 1024);
+  validateCloudState(state, { maxBytes: 32 * 1024, allowedProjectIds: ['self'] });
+});
+
+test('cloud state compaction keeps small state byte-identical', () => {
+  const state = {
+    runs: {},
+    approvals: {},
+    events: [{ id: 'event-1', value: 'small' }],
+    workflows: {
+      'workflow-recent': {
+        id: 'workflow-recent',
+        projectId: 'self',
+        status: 'completed',
+        createdAt: '2026-09-29T20:00:00Z',
+        updatedAt: '2026-09-29T20:00:00Z'
+      }
+    }
+  };
+  const before = JSON.stringify(state);
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+  assert.equal(result.compacted, false);
+  assert.equal(JSON.stringify(state), before);
+});
+
+test('cloud state compaction can trim old events only after terminal workflow cleanup is insufficient', () => {
+  const state = {
+    runs: {},
+    approvals: {},
+    workflows: {
+      'workflow-active': {
+        id: 'workflow-active',
+        projectId: 'self',
+        status: 'running',
+        createdAt: '2026-09-29T20:00:00Z',
+        updatedAt: '2026-09-29T20:00:00Z',
+        result: { evidence: 'x'.repeat(12_000) }
+      }
+    },
+    autopilotSelfImprovement: { activeWorkflowId: 'workflow-active' },
+    events: Array.from({ length: 180 }, (_, index) => ({
+      id: `event-${index}`,
+      timestamp: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 1_000).toISOString(),
+      details: 'y'.repeat(100)
+    }))
+  };
+
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-active'), true);
+  assert.ok(result.removedEvents > 0);
+  assert.equal(state.events.length, 100);
+});

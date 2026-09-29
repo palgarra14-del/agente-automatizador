@@ -119,6 +119,97 @@ function sanitizeRemoteOnlyEvidence(value) {
   for (const child of Object.values(value)) sanitizeRemoteOnlyEvidence(child);
 }
 
+const TERMINAL_WORKFLOW_STATUSES = new Set(['completed', 'failed', 'blocked']);
+const TERMINAL_REQUEST_STATUSES = new Set(['completed', 'failed', 'blocked', 'rejected']);
+const CLOUD_STATE_COMPACTION_TRIGGER_RATIO = 0.80;
+const CLOUD_STATE_COMPACTION_TARGET_RATIO = 0.68;
+const CLOUD_STATE_MIN_RECENT_TERMINAL_WORKFLOWS = 8;
+const CLOUD_STATE_MIN_RECENT_EVENTS = 100;
+
+function serializedStateBytes(state) {
+  return Buffer.byteLength(JSON.stringify(state), 'utf8');
+}
+
+function workflowUpdatedEpoch(workflow) {
+  for (const value of [workflow?.updatedAt, workflow?.createdAt]) {
+    const epoch = Date.parse(value ?? '');
+    if (Number.isFinite(epoch)) return epoch;
+  }
+  return 0;
+}
+
+function protectedWorkflowIds(state) {
+  const protectedIds = new Set();
+  for (const autopilot of [state.autopilotSelfImprovement, state.autopilotProjectImprovement]) {
+    const workflowId = autopilot?.activeWorkflowId;
+    if (typeof workflowId === 'string' && workflowId) protectedIds.add(workflowId);
+  }
+  for (const record of Object.values(state.requests ?? {})) {
+    if (!record || TERMINAL_REQUEST_STATUSES.has(record.status)) continue;
+    if (typeof record.workflowId === 'string' && record.workflowId) protectedIds.add(record.workflowId);
+  }
+  return protectedIds;
+}
+
+export function compactCloudStateForWrite(state, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('cloud_state_invalid');
+  if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
+  const beforeBytes = serializedStateBytes(state);
+  const triggerBytes = Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TRIGGER_RATIO);
+  const targetBytes = Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TARGET_RATIO);
+  if (beforeBytes <= triggerBytes) {
+    return { compacted: false, beforeBytes, afterBytes: beforeBytes, removedWorkflows: [], removedEvents: 0 };
+  }
+
+  const protectedIds = protectedWorkflowIds(state);
+  const terminal = Object.entries(state.workflows ?? {})
+    .filter(([workflowId, workflow]) =>
+      !protectedIds.has(workflowId) &&
+      TERMINAL_WORKFLOW_STATUSES.has(workflow?.status)
+    )
+    .sort((left, right) =>
+      workflowUpdatedEpoch(left[1]) - workflowUpdatedEpoch(right[1]) ||
+      left[0].localeCompare(right[0])
+    );
+
+  const removedWorkflows = [];
+  const workflows = state.workflows ?? null;
+  const removableWithoutTouchingRecent = Math.max(
+    0,
+    terminal.length - CLOUD_STATE_MIN_RECENT_TERMINAL_WORKFLOWS
+  );
+  for (let index = 0; index < removableWithoutTouchingRecent && serializedStateBytes(state) > targetBytes; index += 1) {
+    const [workflowId] = terminal[index];
+    delete workflows[workflowId];
+    removedWorkflows.push(workflowId);
+  }
+
+  if (serializedStateBytes(state) > maxBytes) {
+    const remainingTerminal = terminal.slice(removableWithoutTouchingRecent, Math.max(removableWithoutTouchingRecent, terminal.length - 2));
+    for (const [workflowId] of remainingTerminal) {
+      if (serializedStateBytes(state) <= targetBytes) break;
+      if (!Object.hasOwn(workflows ?? {}, workflowId)) continue;
+      delete workflows[workflowId];
+      removedWorkflows.push(workflowId);
+    }
+  }
+
+  let removedEvents = 0;
+  if (serializedStateBytes(state) > maxBytes && Array.isArray(state.events) && state.events.length > CLOUD_STATE_MIN_RECENT_EVENTS) {
+    const removeCount = state.events.length - CLOUD_STATE_MIN_RECENT_EVENTS;
+    state.events.splice(0, removeCount);
+    removedEvents = removeCount;
+  }
+
+  return {
+    compacted: removedWorkflows.length > 0 || removedEvents > 0,
+    beforeBytes,
+    afterBytes: serializedStateBytes(state),
+    removedWorkflows,
+    removedEvents
+  };
+}
+
 function normalizeAllowedProjectIds(value = ['self']) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new Error('cloud_state_allowed_projects_invalid');
   const normalized = [...new Set(value.map((projectId) => String(projectId ?? '').trim()))].sort();
@@ -1901,6 +1992,7 @@ export class GitHubStateStore extends JsonStore {
       }
       const output = await mutator(data);
       sanitizeRemoteOnlyEvidence(data);
+      compactCloudStateForWrite(data, { maxBytes: this.maxBytes });
       if (beforeCommit) await beforeCommit();
       const intendedStateHash = stateHash(data);
       try {
