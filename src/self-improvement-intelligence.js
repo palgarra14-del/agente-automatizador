@@ -13,6 +13,7 @@ const FAILURE_CLASSES = Object.freeze([
   ['runtime-timeout', /(timeout|deadline|timed out)/i],
   ['workspace', /(workspace|clone|bootstrap|install)/i],
   ['model-availability', /(billing|quota|credit|auth|api[_-]?key|provider.*unavailable|model.*unavailable)/i],
+  ['model-execution', /(skill_executor|model[_ -]?call|gateway|executor_attempt_budget|codex_home|path aliases)/i],
   ['verification', /(test|lint|build|verification|typecheck|ci_failed)/i],
   ['human-gate', /(human_gate|approval|required)/i]
 ]);
