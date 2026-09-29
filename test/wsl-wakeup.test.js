@@ -89,7 +89,7 @@ test('WSL guardian supervises the three configured local Actions runners without
   ]);
   const guardian = renderWslGuardianScript();
   for (const directory of WSL_MANAGED_RUNNER_DIRECTORIES) {
-    assert.match(guardian, new RegExp(`runner_watch "\\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
+    assert.match(guardian, new RegExp(`runner_watch "\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
   }
   assert.match(guardian, /runner_listener_active/);
   assert.match(guardian, /\/proc\/\[0-9\]\*/);
