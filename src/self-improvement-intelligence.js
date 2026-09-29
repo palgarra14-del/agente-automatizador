@@ -102,7 +102,11 @@ export class AutonomousGapIntelligence {
     const failures = recent.filter((entry) => entry?.status !== 'completed');
     const classifiedFailures = failures.map((entry) => {
       const detail = [entry?.error, entry?.failureDetail].filter(Boolean).join(' | ');
-      return { kind: failureClass(detail), detail: clip(entry?.failureDetail ?? entry?.error, 260) };
+      return {
+        kind: failureClass(detail),
+        rootCause: entry?.failureDetail ? clip(entry.failureDetail, 260) : null,
+        detail: clip(entry?.failureDetail ?? entry?.error, 260)
+      };
     }).filter((entry) => entry.kind);
     const classCounts = countBy(classifiedFailures.map((entry) => entry.kind));
     const completed = recent.filter((entry) => entry?.status === 'completed');
@@ -114,7 +118,11 @@ export class AutonomousGapIntelligence {
 
     const signals = [];
     for (const [kind, count] of [...classCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
-      const latestDetail = [...classifiedFailures].reverse().find((entry) => entry.kind === kind)?.detail ?? null;
+      const relevantFailures = [...classifiedFailures].reverse().filter((entry) => entry.kind === kind);
+      const latestDetail =
+        relevantFailures.find((entry) => entry.rootCause)?.rootCause ??
+        relevantFailures[0]?.detail ??
+        null;
       signals.push({
         kind: `reliability:${kind}`,
         score: 70 + Math.min(24, count * 6),
