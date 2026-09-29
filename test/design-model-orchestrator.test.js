@@ -195,7 +195,7 @@ m.antigravity_authenticated=lambda: True
 captured={}
 def fake_run(args,cwd=None,timeout=30,check=False,input_text=None):
     captured["args"]=args
-    return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
+    return subprocess.CompletedProcess(args,0,stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"{\\\"ok\\\":true}","structured_output":{"ok":True}}}),stderr='')
 m._run=fake_run
 value=m.antigravity_structured(
   "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
@@ -220,7 +220,7 @@ m.antigravity_authenticated=lambda: True
 captured={}
 def fake_run(args,cwd=None,timeout=30,check=False,input_text=None):
     captured["args"]=args
-    return subprocess.CompletedProcess(args,0,stdout='{}',stderr='')
+    return subprocess.CompletedProcess(args,0,stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"edited"}}),stderr='')
 m._run=fake_run
 m.antigravity_edit("build",tempfile.mkdtemp(),model="claude-sonnet-4-6",agent="web-builder",effort="high")
 print(json.dumps({"args":captured["args"]}))
