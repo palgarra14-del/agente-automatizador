@@ -10,9 +10,9 @@ CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node
 class ProviderUnavailable(RuntimeError):
     pass
 
-def _run(args, cwd=None, timeout=30):
+def _run(args, cwd=None, timeout=30, input_text=None):
     try:
-        return subprocess.run(args,cwd=cwd,text=True,capture_output=True,timeout=timeout,check=False)
+        return subprocess.run(args,cwd=cwd,text=True,input=input_text,capture_output=True,timeout=timeout,check=False)
     except (OSError,subprocess.TimeoutExpired) as exc:
         raise ProviderUnavailable(str(exc)) from exc
 
