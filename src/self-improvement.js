@@ -10,6 +10,9 @@ const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
+const STATE_KEY = SELF_STATE_KEY;
+const COOLDOWN_MS = SELF_COOLDOWN_MS;
+const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
   allowedPaths: Object.freeze(['src', 'test/autonomous']),
@@ -99,19 +102,19 @@ function emptyAutopilot() {
   };
 }
 
-function normalizeAutopilot(value) {
+function normalizeAutopilot(value, maxStartsPer24h = MAX_STARTS_PER_24H) {
   const state = value && typeof value === 'object' && !Array.isArray(value) ? value : emptyAutopilot();
   return {
     ...emptyAutopilot(),
     ...state,
-    starts: Array.isArray(state.starts) ? state.starts.filter((item) => Number.isFinite(Date.parse(item))).slice(-MAX_STARTS_PER_24H * 4) : [],
+    starts: Array.isArray(state.starts) ? state.starts.filter((item) => Number.isFinite(Date.parse(item))).slice(-maxStartsPer24h * 4) : [],
     history: Array.isArray(state.history) ? state.history.slice(-HISTORY_LIMIT) : []
   };
 }
 
-function policyFingerprint(workflowId, baseRevision, stepId) {
+function policyFingerprint(workflowId, baseRevision, stepId, projectId = 'self') {
   return createHash('sha256')
-    .update(`autonomous-maintenance-policy-v1|${workflowId}|${baseRevision}|${stepId}`)
+    .update(`autonomous-maintenance-policy-v2|${projectId}|${workflowId}|${baseRevision}|${stepId}`)
     .digest('hex');
 }
 
@@ -119,9 +122,9 @@ function pathWithin(root, path) {
   return path === root || path.startsWith(`${root}/`);
 }
 
-function pathAllowedForAutopilot(path) {
-  const allowed = AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths.some((root) => pathWithin(root, path));
-  const forbidden = AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths.some((root) => pathWithin(root, path));
+function pathAllowedForAutopilot(path, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
+  const allowed = scope.allowedPaths.some((root) => pathWithin(root, path));
+  const forbidden = scope.forbiddenPaths.some((root) => pathWithin(root, path));
   return allowed && !forbidden;
 }
 
@@ -144,7 +147,7 @@ function pristineWorkflowForDeadlineRefresh(plan) {
   );
 }
 
-export function autonomousSensitiveImplementationAllowed(step) {
+function sensitiveImplementationAllowedForScope(step, scope) {
   if (!step ||
       step.id !== 'implementation' ||
       step.status !== 'awaiting_approval' ||
@@ -162,9 +165,13 @@ export function autonomousSensitiveImplementationAllowed(step) {
     !path.includes('..') &&
     !path.includes('\\') &&
     !path.startsWith('/') &&
-    pathAllowedForAutopilot(path)
+    pathAllowedForAutopilot(path, scope)
   )) return false;
   return /^[a-f0-9]{64}$/i.test(step.evidence?.changeSetFingerprint ?? '');
+}
+
+export function autonomousSensitiveImplementationAllowed(step) {
+  return sensitiveImplementationAllowedForScope(step, AUTONOMOUS_MAINTENANCE_SCOPE);
 }
 
 function billingUnavailableError(error) {
@@ -199,8 +206,8 @@ function resultSummary(plan) {
   };
 }
 
-export class AutonomousSelfImprovement {
-  constructor({ store, workflowEngine, operatorRevision, workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
+export class AutonomousProjectImprovement {
+  constructor({ store, workflowEngine, operatorRevision, projectId = 'self', workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
     if (!store || !workflowEngine) throw new Error('autonomous_self_improvement_dependencies_required');
     if (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision)) {
       throw new Error('autonomous_self_improvement_revision_invalid');
@@ -208,25 +215,33 @@ export class AutonomousSelfImprovement {
     if (!Number.isInteger(workflowTimeoutMs) || workflowTimeoutMs < 1_000) {
       throw new Error('autonomous_self_improvement_timeout_invalid');
     }
+    const policy = autonomousProjectPolicy(projectId);
     this.store = store;
     this.workflowEngine = workflowEngine;
     this.operatorRevision = operatorRevision.toLowerCase();
+    this.projectId = projectId;
+    this.stateKey = policy.stateKey;
+    this.cooldownMs = policy.cooldownMs;
+    this.maxStartsPer24h = policy.maxStartsPer24h;
+    this.goal = policy.goal;
+    this.scope = policy.scope;
+    this.allowSensitiveImplementation = policy.allowSensitiveImplementation === true;
     this.workflowTimeoutMs = workflowTimeoutMs;
     this.now = now;
   }
 
   async readState() {
     const root = await this.store.load();
-    return normalizeAutopilot(root[STATE_KEY]);
+    return normalizeAutopilot(root[this.stateKey], this.maxStartsPer24h);
   }
 
   async writeState(mutator) {
     return this.store.mutate((root) => {
-      const current = normalizeAutopilot(root[STATE_KEY]);
+      const current = normalizeAutopilot(root[this.stateKey], this.maxStartsPer24h);
       const next = mutator(current) ?? current;
       next.version = 1;
       next.updatedAt = new Date(this.now()).toISOString();
-      root[STATE_KEY] = next;
+      root[this.stateKey] = next;
       return next;
     });
   }
@@ -245,7 +260,7 @@ export class AutonomousSelfImprovement {
         Date.parse(entry.completedAt) >= cutoff
       )
       .flatMap((entry) => Array.isArray(entry.changedPaths) ? entry.changedPaths : [])
-      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path))
+      .filter((path) => typeof path === 'string' && pathAllowedForAutopilot(path, this.scope))
     )].sort();
   }
 
@@ -253,7 +268,7 @@ export class AutonomousSelfImprovement {
     const lastStart = starts.at(-1);
     if (!lastStart) return false;
     const lastStartAt = Date.parse(lastStart);
-    if (!Number.isFinite(lastStartAt) || this.now() - lastStartAt >= COOLDOWN_MS) return false;
+    if (!Number.isFinite(lastStartAt) || this.now() - lastStartAt >= this.cooldownMs) return false;
     const latest = state.history.at(-1);
     const completedAt = Date.parse(latest?.completedAt ?? '');
     const completedLatestStart =
@@ -292,7 +307,7 @@ export class AutonomousSelfImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return false;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
+    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
     if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
@@ -322,21 +337,21 @@ export class AutonomousSelfImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return null;
     const starts = this.recentStarts(state);
-    if (starts.length >= MAX_STARTS_PER_24H && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
+    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
-      projectId: 'self',
+      projectId: this.projectId,
       budgets: { timeoutMs: this.workflowTimeoutMs },
       goal: recentProposalPaths.length
-        ? `${AUTONOMOUS_MAINTENANCE_GOAL} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
-        : AUTONOMOUS_MAINTENANCE_GOAL,
+        ? `${this.goal} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
+        : this.goal,
       scope: {
-        allowedPaths: [...AUTONOMOUS_MAINTENANCE_SCOPE.allowedPaths],
+        allowedPaths: [...this.scope.allowedPaths],
         forbiddenPaths: [...new Set([
-          ...AUTONOMOUS_MAINTENANCE_SCOPE.forbiddenPaths,
+          ...this.scope.forbiddenPaths,
           ...recentProposalPaths
         ])]
       }
@@ -374,11 +389,11 @@ export class AutonomousSelfImprovement {
           ...current,
           activeWorkflowId: null,
           activeBaseRevision: null,
-          suspendedUntil: new Date(this.now() + COOLDOWN_MS).toISOString()
+          suspendedUntil: new Date(this.now() + this.cooldownMs).toISOString()
         }));
         return { status: 'missing_workflow', workflowId };
       }
-      if (plan.profile !== PROFILE || plan.projectId !== 'self') {
+      if (plan.profile !== PROFILE || plan.projectId !== this.projectId) {
         await this.writeState((current) => ({
           ...current,
           activeWorkflowId: null,
@@ -400,7 +415,7 @@ export class AutonomousSelfImprovement {
         }
         const step = awaiting[0];
         const releaseReady = step.id === 'release-readiness';
-        const boundedSensitiveImplementation = autonomousSensitiveImplementationAllowed(step);
+        const boundedSensitiveImplementation = this.allowSensitiveImplementation && sensitiveImplementationAllowedForScope(step, this.scope);
         if (!releaseReady && !boundedSensitiveImplementation) {
           if (typeof this.workflowEngine.cancel === 'function') {
             const cancelled = await this.workflowEngine.cancel(workflowId, {
@@ -413,7 +428,7 @@ export class AutonomousSelfImprovement {
           return { status: 'human_gate_required', workflowId, stepId: step.id };
         }
         plan = await this.workflowEngine.approve(workflowId, step.id, {
-          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id),
+          externalApprovalFingerprint: policyFingerprint(workflowId, baseRevision, step.id, this.projectId),
           deadlineCapAt: tickDeadlineAt
         });
         if (TERMINAL.has(plan.status)) {
@@ -437,5 +452,11 @@ export class AutonomousSelfImprovement {
 
     const current = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
     return { ...resultSummary(current), status: current?.status ?? 'transition_budget_exhausted' };
+  }
+}
+
+export class AutonomousSelfImprovement extends AutonomousProjectImprovement {
+  constructor(options = {}) {
+    super({ ...options, projectId: 'self' });
   }
 }
