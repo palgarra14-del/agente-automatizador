@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
@@ -31,7 +31,11 @@ if (command === 'doctor') {
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
-const workflows = new WorkflowEngine({ store, projects });
+const workflowModelExecutors = {
+  skillExecutor: new MultiModelReadOnlySkillExecutor(),
+  codingWorker: new MultiModelCodingWorker()
+};
+const workflows = new WorkflowEngine({ store, projects, ...workflowModelExecutors });
 
 async function loadWorkflowInput(profile) {
   const briefPath = take('--brief');
@@ -136,7 +140,7 @@ try {
         })
         : store;
       const activeWorkflows = cloudAction
-        ? new DurableCloudWorkflowEngine({ store: activeStore, projects })
+        ? new DurableCloudWorkflowEngine({ store: activeStore, projects, ...workflowModelExecutors })
         : workflows;
       const queue = new SupervisedIssueQueue({
         store: activeStore,
