@@ -19,6 +19,8 @@ from model_router import (
     codex_edit,
     codex_ready,
     codex_structured,
+    copilot_ready,
+    copilot_structured,
     ollama_ready,
     ollama_structured,
     opencode_ready,
@@ -122,6 +124,15 @@ CANDIDATES = {
         "agent": None,
         "effort": "medium",
         "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
+    "copilot-free-auto": {
+        "provider": "copilot",
+        "model": os.environ.get("COPILOT_FREE_MODEL", "auto"),
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_quota",
         "visual": False,
         "editing": False,
     },
@@ -247,6 +258,7 @@ ROLE_POLICY = {
         ("codex-luna", 0.93),
         ("ag-gemini-3.1-pro", 0.83),
         ("oc-nemotron-lightning", 0.82),
+        ("copilot-free-auto", 0.81),
         ("oc-ling-3-flash", 0.79),
         ("ollama-qwen-3b", 0.68),
         ("codex-5.6-terra", 0.88),
@@ -264,12 +276,14 @@ ROLE_POLICY = {
         ("ollama-qwen-3b", 0.92),
         ("ag-gemini-3.8-flash", 0.90),
         ("oc-nemotron-lightning", 0.88),
+        ("copilot-free-auto", 0.875),
         ("oc-ling-3-flash", 0.87),
         ("ag-gpt-oss-120b", 0.86),
     ],
     "blocker_diagnosis": [
         ("ag-gemini-3.8-flash", 0.94),
         ("oc-nemotron-lightning", 0.90),
+        ("copilot-free-auto", 0.89),
         ("ollama-qwen-3b", 0.88),
         ("oc-ling-3-flash", 0.86),
         ("ag-gemini-3.1-pro", 0.84),
@@ -407,6 +421,8 @@ def provider_available(provider, model=None):
         return ollama_ready()
     if provider == "opencode":
         return opencode_ready(model)
+    if provider == "copilot":
+        return copilot_ready()
     return False
 
 
@@ -497,6 +513,10 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
         if images:
             raise ProviderUnavailable("opencode_candidate_has_no_visual_input")
         value = opencode_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
+    elif provider == "copilot":
+        if images:
+            raise ProviderUnavailable("copilot_candidate_has_no_visual_input")
+        value = copilot_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
     else:
         raise ProviderUnavailable("unsupported_provider:" + provider)
     return {

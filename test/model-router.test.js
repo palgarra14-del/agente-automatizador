@@ -129,6 +129,54 @@ except m.ProviderUnavailable as e:
   assert.match(result.error,/not_free/);
 });
 
+test('Copilot Free provider is opt-in and disabled by default', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.COPILOT_FREE_ENABLED=False
+print(json.dumps({"ready":m.copilot_ready()}))
+`);
+  assert.equal(result.ready,false);
+});
+
+test('Copilot Free structured calls are bounded and read-only', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+fd,path=tempfile.mkstemp(); os.close(fd)
+m.COPILOT=path
+m.COPILOT_FREE_ENABLED=True
+m.COPILOT_MAX_AI_CREDITS=1
+captured={}
+def fake_run(args,**kwargs):
+    captured["args"]=args
+    return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
+m._run=fake_run
+value=m.copilot_structured(
+  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  cwd=tempfile.mkdtemp(),model="auto"
+)
+print(json.dumps({"value":value,"args":captured["args"]}))
+os.unlink(path)
+`);
+  assert.equal(result.value.ok,true);
+  assert.ok(result.args.includes('--max-ai-credits'));
+  assert.ok(result.args.includes('1'));
+  assert.ok(result.args.includes('--mode'));
+  assert.ok(result.args.includes('plan'));
+  assert.ok(result.args.includes('--disable-builtin-mcps'));
+  assert.ok(result.args.includes('--no-ask-user'));
+  assert.ok(result.args.includes('--available-tools'));
+  assert.ok(result.args.includes('read'));
+  assert.ok(result.args.includes('grep'));
+  assert.ok(result.args.includes('glob'));
+  assert.ok(result.args.includes('ls'));
+  assert.ok(!result.args.includes('edit'));
+  assert.ok(!result.args.includes('shell'));
+});
+
 test('doctor can use free/local semantic diagnosis for an unknown failure', () => {
   const result=python(`
 import importlib.util,json,sys,os
