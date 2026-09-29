@@ -4,6 +4,18 @@ from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from model_router import ProviderUnavailable, antigravity_authenticated
+from model_orchestrator import (
+    record_outcome as record_model_outcome,
+    route_fix_role,
+    run_design_council,
+    run_edit_role,
+    run_role_structured,
+)
+
 HOME = Path.home()
 REPO = Path(os.environ.get("AGENT_REPO", "/home/pablo/projects/agente-automatizador")).resolve()
 STATE = Path(os.environ.get("DESIGN_LAB_STATE_DIR", str(HOME/".local/state/engineering-orchestrator/design-lab"))).resolve()
@@ -566,14 +578,26 @@ def identity_continuity_from_qa(qa):
         }
     return {"observations":observations,"viewports":viewports}
 
+def official_evidence(entry):
+    return entry.get("officialTrainingEvidence", True) is True
+
 def training_history():
-    return [entry for entry in completed_history() if entry.get("phase","training") == "training"]
+    return [
+      entry for entry in completed_history()
+      if entry.get("phase","training") == "training" and official_evidence(entry)
+    ]
 
 def holdout_history():
-    return [entry for entry in completed_history() if entry.get("phase") == "holdout"]
+    return [
+      entry for entry in completed_history()
+      if entry.get("phase") == "holdout" and official_evidence(entry)
+    ]
 
 def record_passes(entry):
+    authority=entry.get("reviewAuthority","legacy_codex_visual")
     return bool(
+      official_evidence(entry) and
+      authority in {"legacy_codex_visual","codex_visual","validated_antigravity_visual"} and
       isinstance(entry.get("finalScore"),(int,float)) and
       entry.get("finalScore",0) >= THRESHOLD and
       entry.get("minCategory",0) >= CATEGORY_FLOOR and
@@ -641,19 +665,23 @@ def recent_transferable_lessons(limit=12):
     return lessons[-limit:]
 
 def choose_brief():
-    entries=training_history()
-    if not entries:
+    official=training_history()
+    all_training=[
+      entry for entry in completed_history()
+      if entry.get("phase","training") == "training"
+    ]
+    if not all_training:
         return BRIEFS[0]
-    weakest=weakest_dimension(entries)
-    recent_slugs={entry.get("briefSlug") for entry in entries[-2:]}
+    weakest=weakest_dimension(official or all_training)
+    recent_slugs={entry.get("briefSlug") for entry in all_training[-2:]}
     candidates=[brief for brief in BRIEFS if weakest in BRIEF_FOCUS.get(brief["slug"],[]) and brief["slug"] not in recent_slugs]
     if not candidates:
         candidates=[brief for brief in BRIEFS if brief["slug"] not in recent_slugs] or BRIEFS
     candidates=sorted(candidates,key=lambda brief: brief["slug"])
-    return candidates[len(entries) % len(candidates)]
+    return candidates[len(all_training) % len(candidates)]
 
 def last_failed_holdout_at(entries):
-    failed=[entry for entry in entries if entry.get("phase")=="holdout" and not record_passes(entry) and entry.get("completedAt")]
+    failed=[entry for entry in entries if entry.get("phase")=="holdout" and official_evidence(entry) and not record_passes(entry) and entry.get("completedAt")]
     return max((entry["completedAt"] for entry in failed), default=None)
 
 def training_mastery_candidate(entries):
@@ -661,6 +689,7 @@ def training_mastery_candidate(entries):
     training=[
       entry for entry in entries
       if entry.get("phase","training")=="training" and
+      official_evidence(entry) and
       (cutoff is None or str(entry.get("completedAt","")) > cutoff)
     ]
     recent=training[-STREAK_NEEDED:]
@@ -774,10 +803,30 @@ def build_site(run_dir, brief):
                 training_context["offlineAdvisory"]=offline
         except Exception:
             pass
+    disabled_providers={"codex"} if active_usage_cooldown() else set()
+    council=None
+    try:
+        council=run_design_council(
+          brief_payload,
+          training_context,
+          cwd=run_dir,
+          disabled_providers=disabled_providers,
+          timeout=240
+        )
+        (run_dir/"design-council.json").write_text(
+          json.dumps(council,ensure_ascii=False,indent=2),encoding="utf-8"
+        )
+        training_context["designCouncil"]={
+          "primary":council.get("primary",{}).get("value"),
+          "challenger":council.get("challenger",{}).get("value"),
+          "synthesis":council.get("synthesis",{}).get("value")
+        }
+    except Exception as exc:
+        (run_dir/"design-council-error.txt").write_text(str(exc),encoding="utf-8")
     (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. If training-context.json contains offlineAdvisory, treat it strictly as an unvalidated experiment hypothesis produced without screenshot access: use it only when it fits this brief, and let the real visual reviewer/QA confirm or reject it. Never treat offlineAdvisory as a score, fact, mastery evidence or mandatory rule. For training priority, prefer trainingFocusDimensionAverages, weakestDimension and trainingFocusRecurringIssues; raw dimensionAverages/topRecurringIssues are retained for audit and may contain older penalties caused only by non-operational synthetic contact details. Do not spend design effort trying to make syntheticContact "real". Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. If design-council.json exists, treat its synthesized direction as the approved art direction: implement it faithfully while preserving the brief, accessibility and deterministic QA constraints. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. If training-context.json contains offlineAdvisory, treat it strictly as an unvalidated experiment hypothesis produced without screenshot access: use it only when it fits this brief, and let the real visual reviewer/QA confirm or reject it. Never treat offlineAdvisory as a score, fact, mastery evidence or mandatory rule. For training priority, prefer trainingFocusDimensionAverages, weakestDimension and trainingFocusRecurringIssues; raw dimensionAverages/topRecurringIssues are retained for audit and may contain older penalties caused only by non-operational synthetic contact details. Do not spend design effort trying to make syntheticContact "real". Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes, and the product goal is a sale-ready reviewed result within 10 minutes end-to-end. Make high-leverage design decisions early, avoid over-engineering, and leave enough quality in the first implementation that review needs at most focused correction.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -792,10 +841,30 @@ Category: {brief['category']}
 Brief: {brief['brief']}
 """
     out = run_dir/"build-output.txt"
-    start=time.monotonic()
-    with out.open("w", encoding="utf-8") as f:
-        proc=run(codex_base(run_dir)+["-o", str(run_dir/"build-last.txt"), "-"], cwd=run_dir, timeout=BUILD_LIMIT_SECONDS, check=False, stdout=f, stderr=subprocess.STDOUT, input=prompt)
-    return time.monotonic()-start, proc.returncode
+    started=time.monotonic()
+    try:
+        routed=run_edit_role(
+          "implementation",
+          prompt,
+          cwd=run_dir,
+          timeout=BUILD_LIMIT_SECONDS,
+          disabled_providers=disabled_providers
+        )
+        elapsed=routed.get("elapsedSeconds",time.monotonic()-started)
+        success=(run_dir/"index.html").exists()
+        metadata={key:routed.get(key) for key in ("candidate","provider","model","routingScore","fallbackErrors","elapsedSeconds")}
+        (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+        out.write_text(json.dumps(routed.get("result",{}),ensure_ascii=False,indent=2),encoding="utf-8")
+        record_model_outcome(
+          "implementation",routed["candidate"],success=success,
+          elapsed_seconds=elapsed,run_id=run_dir.name,
+          note="initial_build"
+        )
+        return elapsed, 0 if success else 2
+    except ProviderUnavailable as exc:
+        elapsed=time.monotonic()-started
+        out.write_text(str(exc),encoding="utf-8")
+        return elapsed, 70
 
 def serve_and_capture(run_dir, suffix):
     server_log=(run_dir/f"server-{suffix}.log").open("w",encoding="utf-8")
@@ -1069,17 +1138,79 @@ If deterministic QA pass is false, verdict must be IMPROVE regardless of visual 
 transferableLessons must contain only concise principles that would improve future websites in other businesses too; do not repeat business-specific colors, copy, names or one-off content. Use [] when no general lesson is justified.
 Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every category >= {CATEGORY_FLOOR}, and deterministic QA passes.
 """
+    prompt += f"""\nRendered visual evidence files (inspect all three before judging):
+- desktop: {desktop}
+- tablet: {tablet}
+- mobile: {mobile}
+If your runtime cannot inspect these files, do not guess: return IMPROVE and include visual_evidence_unavailable in issues.
+"""
+    disabled_providers={"codex"} if active_usage_cooldown() else set()
+    advisory=None
+    if antigravity_authenticated():
+        try:
+            advisory=run_role_structured(
+              "visual_review",prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
+              images=[desktop,tablet,mobile],
+              disabled_providers={"codex","ollama"},
+              require_premium=True
+            )
+            (run_dir/f"review-{label}-advisory.json").write_text(
+              json.dumps(advisory,ensure_ascii=False,indent=2),encoding="utf-8"
+            )
+        except Exception as exc:
+            (run_dir/f"review-{label}-advisory-error.txt").write_text(str(exc),encoding="utf-8")
+
+    # Codex remains the calibrated official visual scorer when available.
+    # During its quota cooldown, Antigravity may guide improvement but the
+    # result is explicitly experimental and cannot contribute to mastery.
+    if "codex" not in disabled_providers:
+        official_prompt=prompt
+        if advisory:
+            official_prompt += "\nIndependent cross-family critic (advisory, verify it yourself):\n" + json.dumps(advisory.get("value"),ensure_ascii=False)
+        try:
+            routed=run_role_structured(
+              "visual_review",official_prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
+              images=[desktop,tablet,mobile],
+              disabled_providers={"antigravity","ollama"},
+              require_premium=True
+            )
+            review=routed["value"]
+            authority="codex_visual"
+        except ProviderUnavailable as exc:
+            trace=str(exc)
+            if "usage limit" in trace.lower() or "try again at" in trace.lower():
+                register_usage_cooldown(trace)
+                disabled_providers={"codex"}
+            elif advisory is None:
+                raise RuntimeError(f"review_failed:{label}:{trace}")
+            if advisory is None:
+                raise RuntimeError("codex_usage_limit")
+            routed=advisory
+            review=routed["value"]
+            authority="experimental_antigravity_visual"
+    else:
+        if advisory is None:
+            routed=run_role_structured(
+              "visual_review",prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
+              images=[desktop,tablet,mobile],
+              disabled_providers={"codex","ollama"},
+              require_premium=True
+            )
+        else:
+            routed=advisory
+        review=routed["value"]
+        authority="experimental_antigravity_visual"
+
+    review["_reviewAuthority"]=authority
+    review["_routing"]={key:routed.get(key) for key in ("candidate","provider","model","routingScore","fallbackErrors","elapsedSeconds")}
+    output.write_text(json.dumps(review,ensure_ascii=False,indent=2),encoding="utf-8")
+    record_model_outcome(
+      "visual_review",routed["candidate"],success=True,
+      elapsed_seconds=routed.get("elapsedSeconds"),qa_pass=qa.get("pass") is True,
+      run_id=run_dir.name,note=authority
+    )
+    return review
     cmd=codex_base(run_dir)+["--output-schema",str(schema),"-o",str(output),"--image",str(desktop),str(tablet),str(mobile),"-"]
-    with (run_dir/f"review-{label}-trace.txt").open("w",encoding="utf-8") as f:
-        proc=run(cmd,cwd=run_dir,timeout=240,check=False,stdout=f,stderr=subprocess.STDOUT,input=prompt)
-    if proc.returncode!=0 or not output.exists():
-        trace_path = run_dir/f"review-{label}-trace.txt"
-        trace = trace_path.read_text(encoding="utf-8", errors="ignore") if trace_path.exists() else ""
-        if "usage limit" in trace.lower() or "try again at" in trace.lower():
-            register_usage_cooldown(trace)
-            raise RuntimeError("codex_usage_limit")
-        raise RuntimeError(f"review_failed:{label}:{proc.returncode}")
-    return json.loads(output.read_text(encoding="utf-8"))
 
 def fix_site(run_dir, brief, review, pass_no):
     critique=run_dir/f"critique-pass-{pass_no}.json"
@@ -1092,11 +1223,36 @@ Prioritize the lowest scoring categories and the review fixBrief. Make the desig
 Do not just explain changes; edit the site. Avoid regressions at desktop, tablet and mobile.
 Business: {brief['business']} | {brief['category']}
 """
-    with (run_dir/f"fix-{pass_no}-trace.txt").open("w",encoding="utf-8") as f:
-        proc=run(codex_base(run_dir)+["-o",str(run_dir/f"fix-{pass_no}-last.txt"),"-"],cwd=run_dir,timeout=360,check=False,stdout=f,stderr=subprocess.STDOUT,input=prompt)
-    return proc.returncode
+    qa={}
+    qa_files=sorted(run_dir.glob("qa-*.json"),key=lambda path:path.stat().st_mtime)
+    if qa_files:
+        try: qa=json.loads(qa_files[-1].read_text(encoding="utf-8"))
+        except Exception: qa={}
+    role=route_fix_role(review,qa)
+    disabled_providers={"codex"} if active_usage_cooldown() else set()
+    trace_path=run_dir/f"fix-{pass_no}-trace.txt"
+    try:
+        routed=run_edit_role(
+          role,prompt,cwd=run_dir,timeout=360,
+          disabled_providers=disabled_providers
+        )
+        metadata={key:routed.get(key) for key in ("candidate","provider","model","routingScore","fallbackErrors","elapsedSeconds")}
+        metadata["role"]=role
+        (run_dir/f"model-route-fix-{pass_no}.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+        trace_path.write_text(json.dumps(routed.get("result",{}),ensure_ascii=False,indent=2),encoding="utf-8")
+        record_model_outcome(
+          role,routed["candidate"],success=True,
+          elapsed_seconds=routed.get("elapsedSeconds"),qa_pass=qa.get("pass"),
+          run_id=run_dir.name,note=f"fix_pass_{pass_no}"
+        )
+        return 0
+    except ProviderUnavailable as exc:
+        trace_path.write_text(str(exc),encoding="utf-8")
+        return 70
 
 def coach_playbook(run_dir, brief, final_review):
+    if active_usage_cooldown():
+        return
     report={
       "brief":brief,
       "finalReview":final_review,
@@ -1155,9 +1311,13 @@ def main():
     quota_not_before=active_usage_cooldown()
     if quota_not_before:
         maybe_run_offline_learning()
-        print("design_lab_status=waiting_quota_reset")
-        print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
-        return
+        if antigravity_authenticated():
+            print("design_lab_status=codex_quota_using_antigravity")
+            print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
+        else:
+            print("design_lab_status=waiting_quota_reset")
+            print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
+            return
     not_before=os.environ.get("DESIGN_LAB_NOT_BEFORE")
     if not_before:
         try: quota_not_before=datetime.fromisoformat(not_before).timestamp()
@@ -1266,7 +1426,11 @@ def main():
           "qaDefects":qa.get("defects",[])[:12],
           "templateSignals":qa.get("static",{}).get("observations",[])[:8],
           "topIssues":final_review["issues"][:5],
-          "transferableLessons":final_review.get("transferableLessons",[])[:4]
+          "transferableLessons":final_review.get("transferableLessons",[])[:4],
+          "reviewAuthority":final_review.get("_reviewAuthority","legacy_codex_visual"),
+          "officialTrainingEvidence":final_review.get("_reviewAuthority","legacy_codex_visual") in {"legacy_codex_visual","codex_visual","validated_antigravity_visual"},
+          "reviewRouting":final_review.get("_routing",{}),
+          "buildRouting":json.loads((run_dir/"model-route-build.json").read_text(encoding="utf-8")) if (run_dir/"model-route-build.json").exists() else {}
         }
         with HISTORY.open("a",encoding="utf-8") as f:
             f.write(json.dumps(record,ensure_ascii=False)+"\n")
