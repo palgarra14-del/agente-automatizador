@@ -9,6 +9,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from model_router import ProviderUnavailable, antigravity_authenticated
 from model_orchestrator import (
+    candidate_family,
     record_outcome as record_model_outcome,
     route_fix_role,
     run_design_council,
@@ -845,7 +846,7 @@ Brief: {brief['brief']}
     started=time.monotonic()
     try:
         routed=run_edit_role(
-          "implementation",
+          "frontend_implementation",
           prompt,
           cwd=run_dir,
           timeout=BUILD_LIMIT_SECONDS,
@@ -1141,6 +1142,15 @@ Return only the schema JSON. PASS only if totalScore >= {THRESHOLD}, every categ
 If your runtime cannot inspect these files, do not guess: return IMPROVE and include visual_evidence_unavailable in issues.
 """
     disabled_providers={"codex"} if active_usage_cooldown() else set()
+    builder_family=None
+    build_route_path=run_dir/"model-route-build.json"
+    if build_route_path.exists():
+        try:
+            build_route=json.loads(build_route_path.read_text(encoding="utf-8"))
+            if build_route.get("candidate"):
+                builder_family=candidate_family(build_route["candidate"])
+        except Exception:
+            builder_family=None
     advisory=None
     if antigravity_authenticated():
         try:
@@ -1148,6 +1158,7 @@ If your runtime cannot inspect these files, do not guess: return IMPROVE and inc
               "visual_review",prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
               images=[desktop,tablet,mobile],
               disabled_providers={"codex","ollama"},
+              excluded_families={builder_family} if builder_family else None,
               require_premium=True
             )
             (run_dir/f"review-{label}-advisory.json").write_text(
@@ -1359,7 +1370,7 @@ def main():
             build_route={}
         if build_route.get("candidate"):
             record_model_outcome(
-              "implementation",build_route["candidate"],success=True,
+              "frontend_implementation",build_route["candidate"],success=True,
               elapsed_seconds=build_route.get("elapsedSeconds"),
               qa_pass=qa.get("pass") is True,score_after=initial_score,
               run_id=run_id,note="initial_rendered_build"
