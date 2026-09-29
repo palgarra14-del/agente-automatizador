@@ -8,6 +8,10 @@ OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 OPENCODE=os.environ.get("OPENCODE_BIN","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
+COPILOT=os.environ.get("COPILOT_BIN","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
+COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
+COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
+COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
 ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
 _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
 
@@ -214,6 +218,39 @@ def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
         raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(_opencode_text(proc.stdout),schema)
 
+def copilot_ready():
+    return COPILOT_FREE_ENABLED and Path(COPILOT).is_file()
+
+def copilot_structured(prompt,schema,cwd=None,timeout=180,model=None):
+    if not copilot_ready():
+        raise ProviderUnavailable("copilot_free_unavailable")
+    workdir=Path(cwd or os.getcwd()).resolve()
+    workdir.mkdir(parents=True,exist_ok=True)
+    schema_hint=json.dumps(schema,ensure_ascii=False,separators=(",",":"))
+    task=(
+        "Return ONLY valid JSON matching this JSON schema. "
+        "Do not use markdown fences. SCHEMA="+schema_hint+"\nTASK:\n"+str(prompt)
+    )
+    selected=str(model or COPILOT_FREE_MODEL)
+    cmd=[
+        COPILOT,
+        "-p",task,
+        "-s",
+        "--output-format","text",
+        "--model",selected,
+        "--mode","plan",
+        "--max-ai-credits",str(COPILOT_MAX_AI_CREDITS),
+        "--allow-all-tools",
+        "--available-tools","read","grep","glob","ls",
+        "--disable-builtin-mcps",
+        "--no-ask-user",
+        "-C",str(workdir),
+    ]
+    proc=_run(cmd,cwd=workdir,timeout=timeout)
+    if proc.returncode!=0:
+        raise ProviderUnavailable("copilot_free_failed:"+((proc.stderr or proc.stdout)[-1200:]))
+    return extract_structured(proc.stdout,schema)
+
 def codex_ready():
     return Path(CODEX).is_file()
 
@@ -330,6 +367,8 @@ def generate_structured(prompt,schema,cwd=None,providers=None,timeout=180):
                 value=ollama_structured(prompt,schema,cwd=cwd,timeout=timeout)
             elif provider=="opencode":
                 value=opencode_structured(prompt,schema,cwd=cwd,timeout=timeout,model=os.environ.get("OPENCODE_FREE_MODEL","opencode/ling-3.0-flash-fin-free"))
+            elif provider=="copilot":
+                value=copilot_structured(prompt,schema,cwd=cwd,timeout=timeout,model=COPILOT_FREE_MODEL)
             else:
                 errors.append(f"{provider}:unknown_provider")
                 continue
