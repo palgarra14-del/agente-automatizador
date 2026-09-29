@@ -186,6 +186,16 @@ ROLE_POLICY = {
 
 VISUAL_ROLES = {"creative_direction", "concept_challenger", "visual_review", "visual_fix", "final_audit"}
 EDIT_ROLES = {"implementation", "visual_fix", "code_fix"}
+ROLE_AGENTS = {
+    "creative_direction": "web-art-director",
+    "concept_challenger": "web-concept-challenger",
+    "council_synthesis": "web-final-auditor",
+    "implementation": "web-builder",
+    "visual_review": "web-visual-critic",
+    "visual_fix": "web-builder",
+    "code_fix": "web-builder",
+    "final_audit": "web-final-auditor",
+}
 
 
 def now():
@@ -350,7 +360,7 @@ def _candidate_by_name(name):
     return CANDIDATES[name]
 
 
-def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240, images=None):
+def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240, images=None, agent_override=None):
     spec = _candidate_by_name(candidate)
     provider = spec["provider"]
     started = time.monotonic()
@@ -361,7 +371,7 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
             cwd=cwd,
             timeout=timeout,
             model=spec["model"],
-            agent=spec.get("agent"),
+            agent=agent_override or spec.get("agent"),
             effort=spec.get("effort", "medium"),
             mode="plan",
         )
@@ -419,6 +429,7 @@ def run_role_structured(
                 cwd=cwd,
                 timeout=timeout,
                 images=images,
+                agent_override=ROLE_AGENTS.get(role),
             )
             result["routingScore"] = item["routingScore"]
             result["fallbackErrors"] = errors
@@ -428,7 +439,7 @@ def run_role_structured(
     raise ProviderUnavailable(";".join(errors) or "no_role_candidate_available")
 
 
-def run_edit_candidate(candidate, prompt, *, cwd, timeout=600):
+def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=None):
     spec = _candidate_by_name(candidate)
     started = time.monotonic()
     if spec["provider"] == "antigravity":
@@ -437,7 +448,7 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600):
             cwd=cwd,
             timeout=timeout,
             model=spec["model"],
-            agent=spec.get("agent"),
+            agent=agent_override or spec.get("agent"),
             effort=spec.get("effort", "medium"),
         )
     elif spec["provider"] == "codex":
@@ -468,7 +479,13 @@ def run_edit_role(role, prompt, *, cwd, timeout=600, disabled_providers=None):
     ):
         candidate = item["candidate"]
         try:
-            result = run_edit_candidate(candidate, prompt, cwd=cwd, timeout=timeout)
+            result = run_edit_candidate(
+                candidate,
+                prompt,
+                cwd=cwd,
+                timeout=timeout,
+                agent_override=ROLE_AGENTS.get(role),
+            )
             result["routingScore"] = item["routingScore"]
             result["fallbackErrors"] = errors
             return result
@@ -560,10 +577,12 @@ EVIDENCE:
 """ + json.dumps(common, ensure_ascii=False)
 
     primary = run_structured_candidate(
-        primary_candidate, primary_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout
+        primary_candidate, primary_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout,
+        agent_override="web-art-director",
     )
     challenger = run_structured_candidate(
-        challenger_candidate, challenger_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout
+        challenger_candidate, challenger_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout,
+        agent_override="web-concept-challenger",
     )
 
     synthesis_candidate = _first_available(
@@ -610,6 +629,7 @@ INPUT:
             SYNTHESIS_SCHEMA,
             cwd=cwd,
             timeout=timeout,
+            agent_override="web-final-auditor",
         )
 
     return {
