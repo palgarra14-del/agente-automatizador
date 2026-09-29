@@ -1590,12 +1590,13 @@ test('active epoch lineage validation does not depend on GraphQL history blobs',
   assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'two');
 });
 
-test('active epoch lineage validation paces exact REST history reads without weakening validation', async () => {
+test('truncated batched history falls back to paced exact REST reads without weakening validation', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
-  await publishMarker(store, 'one');
+  const first = await publishMarker(store, 'one');
   await publishMarker(store, 'two');
   await publishMarker(store, 'three');
+  fake.markHistoryTruncated(first);
 
   const sleeps = [];
   const fresh = storeFor(fake, {
@@ -1605,6 +1606,40 @@ test('active epoch lineage validation paces exact REST history reads without wea
   });
   assert.equal((await fresh.load()).marker, 'three');
   assert.deepEqual(sleeps, [25, 25]);
+});
+
+test('cold active-epoch validation batches hundreds of exact envelopes into bounded requests', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  let parentSha = fake.mainSha;
+  let lastSha = null;
+  for (let generation = 1; generation <= 215; generation += 1) {
+    const commitSha = fake.makeStateCommit({
+      parentSha,
+      generation,
+      state: blankState(`g${generation}`),
+      lineageBaseSha: fake.mainSha,
+      lineageBaseGeneration: 0
+    });
+    installAuthority(fake, store, registration, generation, commitSha, parentSha);
+    parentSha = commitSha;
+    lastSha = commitSha;
+  }
+  for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, lastSha);
+  fake.resetRequestCount();
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:batched-history:1',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const loaded = await fresh.load();
+
+  assert.equal(loaded.marker, 'g215');
+  assert.deepEqual(sleeps, []);
+  assert.ok(fake.requestCount() < 30, `expected batched active-epoch validation, received ${fake.requestCount()} requests`);
 });
 
 test('production default paces lineage validation at 500 ms', () => {
