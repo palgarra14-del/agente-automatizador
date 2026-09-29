@@ -39,6 +39,19 @@ test('gap intelligence prioritizes repeated GitHub state failures over speculati
   assert.ok(capabilityGap.skills.includes('visual.review'));
 });
 
+test('executor attempt exhaustion is classified as model execution debt', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('self') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'skill_executor_attempt_budget_exhausted', changedPaths: [] },
+      { status: 'failed', error: 'skill_executor_attempt_budget_exhausted', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'reliability:model-execution');
+  assert.match(analysis.directive, /model-execution/);
+});
+
 test('unavailable desired capabilities stay visible but cannot become the implementable primary by themselves', () => {
   const intelligence = new AutonomousGapIntelligence({ project: project('website-pilot') });
   const analysis = intelligence.analyze({ history: [] });
