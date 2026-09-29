@@ -249,10 +249,19 @@ function nextBillingBackoffMs(state) {
 function resultSummary(plan) {
   const implementation = plan?.steps?.find((step) => step.id === 'implementation');
   const publication = plan?.steps?.find((step) => step.id === 'publication');
+  const failedStep = plan?.steps?.find((step) =>
+    step.id === plan?.result?.stepId || step.status === 'failed'
+  );
+  const rawFailureDetail =
+    failedStep?.evidence?.error ??
+    failedStep?.evidence?.workerEvidence?.output ??
+    failedStep?.error ??
+    null;
   return {
     workflowId: plan?.id ?? null,
     status: plan?.status ?? null,
     error: plan?.result?.error ?? null,
+    failureDetail: rawFailureDetail ? String(rawFailureDetail).replace(/\s+/g, ' ').trim().slice(0, 500) : null,
     changedPaths: Array.isArray(implementation?.evidence?.changeSet?.paths)
       ? [...implementation.evidence.changeSet.paths].sort()
       : [],
