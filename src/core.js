@@ -5869,6 +5869,78 @@ export class CodexReadOnlySkillExecutor {
   }
 }
 
+
+export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor {
+  constructor({
+    gateway = new MultiModelGatewayClient(),
+    allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
+    ...options
+  } = {}) {
+    super(options);
+    this.gateway = gateway;
+    this.allowSessionFallback = allowSessionFallback;
+  }
+
+  async execute(request, { workspace, timeoutMs }) {
+    if (request.skill === 'code.diagnose' || (request.skill === 'code.inspect' && request.context?.deterministicInspection)) {
+      return super.execute(request, { workspace, timeoutMs });
+    }
+    const role = multiModelRoleForReadOnlySkill(request.skill);
+    if (!role) return super.execute(request, { workspace, timeoutMs });
+    try {
+      const routed = await this.gateway.structured({
+        role,
+        prompt: buildReadOnlySkillPrompt(request),
+        schema: multiModelSchemaForContract(request.contract),
+        excludedFamilies: request.context?.modelRouting?.excludedFamilies ?? []
+      }, { workspace, timeoutMs });
+      const output = JSON.stringify(routed.value ?? {});
+      if (Buffer.byteLength(output) > this.maxOutputBytes) throw new Error('skill_output_too_large');
+      return {
+        status: 'completed',
+        ok: true,
+        codexThreadId: null,
+        usage: null,
+        authMode: `free-multimodel:${routed.modelRouting.provider}`,
+        paidApiUsed: false,
+        outputBytes: Buffer.byteLength(output),
+        result: routed.value,
+        executionMode: 'free-multimodel',
+        modelRouting: routed.modelRouting
+      };
+    } catch (error) {
+      if (this.allowSessionFallback) {
+        const fallback = await super.execute(request, { workspace, timeoutMs });
+        return {
+          ...fallback,
+          modelRouting: {
+            mode: 'session-fallback',
+            candidate: 'codex-session',
+            family: 'openai',
+            provider: 'codex',
+            model: null,
+            gatewayError: clip(error.message, 1_000)
+          }
+        };
+      }
+      return {
+        status: 'failed',
+        ok: false,
+        timedOut: /timeout/i.test(String(error.message ?? '')),
+        authMode: 'free-multimodel',
+        paidApiUsed: false,
+        outputBytes: 0,
+        error: clip(error.message, 1_000),
+        executionMode: 'free-multimodel',
+        modelRouting: {
+          mode: 'free-multimodel',
+          error: clip(error.message, 1_000)
+        }
+      };
+    }
+  }
+}
+
 function managedGitCommitEnvironment(identity) {
   const name = String(identity?.name ?? '').trim();
   const email = String(identity?.email ?? '').trim();
