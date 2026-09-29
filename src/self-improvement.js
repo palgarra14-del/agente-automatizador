@@ -1,3 +1,4 @@
+import { AutonomousGapIntelligence } from './self-improvement-intelligence.js';
 import { createHash } from 'node:crypto';
 
 const PROFILE = 'autonomous-maintenance';
@@ -95,6 +96,7 @@ function emptyAutopilot() {
     sequence: 0,
     starts: [],
     history: [],
+    lastIntelligence: null,
     suspendedUntil: null,
     updatedAt: null
   };
@@ -205,7 +207,7 @@ function resultSummary(plan) {
 }
 
 export class AutonomousProjectImprovement {
-  constructor({ store, workflowEngine, operatorRevision, projectId = 'self', workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
+  constructor({ store, workflowEngine, operatorRevision, projectId = 'self', project = null, intelligence = undefined, workflowTimeoutMs = 300_000, now = () => Date.now() } = {}) {
     if (!store || !workflowEngine) throw new Error('autonomous_self_improvement_dependencies_required');
     if (typeof operatorRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(operatorRevision)) {
       throw new Error('autonomous_self_improvement_revision_invalid');
@@ -226,6 +228,9 @@ export class AutonomousProjectImprovement {
     this.allowSensitiveImplementation = policy.allowSensitiveImplementation === true;
     this.workflowTimeoutMs = workflowTimeoutMs;
     this.now = now;
+    this.intelligence = intelligence === undefined && project
+      ? new AutonomousGapIntelligence({ project })
+      : intelligence ?? null;
   }
 
   async readState() {
@@ -340,13 +345,22 @@ export class AutonomousProjectImprovement {
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
+    const gapAnalysis = this.intelligence?.analyze({
+      history: state.history,
+      recentProposalPaths
+    }) ?? null;
+    const goal = [
+      this.goal,
+      gapAnalysis?.directive ?? '',
+      recentProposalPaths.length && !gapAnalysis
+        ? `Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
+        : ''
+    ].filter(Boolean).join(' ');
     const workflow = await this.workflowEngine.create({
       profile: PROFILE,
       projectId: this.projectId,
       budgets: { timeoutMs: this.workflowTimeoutMs },
-      goal: recentProposalPaths.length
-        ? `${this.goal} Do not revisit these files already proposed by autonomous PRs in the last 24 hours: ${recentProposalPaths.join(', ')}.`
-        : this.goal,
+      goal,
       scope: {
         allowedPaths: [...this.scope.allowedPaths],
         forbiddenPaths: [...new Set([
@@ -362,6 +376,12 @@ export class AutonomousProjectImprovement {
       activeBaseRevision: this.operatorRevision,
       sequence: current.sequence + 1,
       starts: [...this.recentStarts(current), startedAt],
+      lastIntelligence: gapAnalysis ? {
+        version: gapAnalysis.version,
+        projectId: gapAnalysis.projectId,
+        primary: gapAnalysis.primary,
+        signals: gapAnalysis.signals
+      } : null,
       suspendedUntil: null
     }));
     return workflow.id;
