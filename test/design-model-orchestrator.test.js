@@ -63,6 +63,32 @@ print(json.dumps({
   assert.equal(result.implementation, 'ag-sonnet-4.6');
 });
 
+test('free-only policy also blocks direct paid candidate execution', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.COST_POLICY="free_only"
+m.codex_ready=lambda: True
+blocked={}
+for mode in ("structured","edit"):
+    try:
+        if mode=="structured":
+            m.run_structured_candidate("codex-astra","x",{"type":"object"},cwd=tempfile.mkdtemp())
+        else:
+            m.run_edit_candidate("codex-astra","x",cwd=tempfile.mkdtemp())
+        blocked[mode]=False
+    except m.ProviderUnavailable as e:
+        blocked[mode]="candidate_blocked_by_cost_policy" in str(e)
+print(json.dumps(blocked))
+`);
+  assert.equal(result.structured, true);
+  assert.equal(result.edit, true);
+});
+
 test('empirical outcomes can overturn initial model priors', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile
