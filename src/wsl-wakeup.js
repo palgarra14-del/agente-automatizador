@@ -63,12 +63,54 @@ async function writeGuardianAtomically(file, content, mode = 0o700) {
   }
 }
 
+export const WSL_MANAGED_RUNNER_DIRECTORIES = Object.freeze([
+  'actions-runner-agente',
+  'actions-runner-agente-2',
+  'actions-runner-agente-3'
+]);
+
 export function renderWslGuardianScript() {
   return [
     '#!/bin/sh',
     guardianMarker,
     'set -eu',
     `/usr/bin/systemctl --user start ${INBOX_SERVICE_NAME}`,
+    '',
+    'runner_listener_active() {',
+    '  runner="$1"',
+    '  for process in /proc/[0-9]*; do',
+    '    [ -r "$process/cmdline" ] || continue',
+    '    cwd="$(/usr/bin/readlink "$process/cwd" 2>/dev/null || true)"',
+    '    [ "$cwd" = "$runner" ] || continue',
+    '    command="$(/usr/bin/tr "\\000" " " < "$process/cmdline" 2>/dev/null || true)"',
+    '    case "$command" in *Runner.Listener*) return 0 ;; esac',
+    '  done',
+    '  return 1',
+    '}',
+    '',
+    'runner_watch() {',
+    '  runner="$1"',
+    '  listener="$runner/bin/Runner.Listener"',
+    '  launcher="$runner/run.sh"',
+    '  [ -d "$runner" ] || return 0',
+    '  [ ! -L "$runner" ] || return 0',
+    '  [ -f "$runner/.runner" ] || return 0',
+    '  [ ! -L "$runner/.runner" ] || return 0',
+    '  [ -x "$listener" ] || return 0',
+    '  [ ! -L "$listener" ] || return 0',
+    '  [ -x "$launcher" ] || return 0',
+    '  [ ! -L "$launcher" ] || return 0',
+    '  while :; do',
+    '    if runner_listener_active "$runner"; then',
+    '      /usr/bin/sleep 10',
+    '      continue',
+    '    fi',
+    '    (cd "$runner" && exec "$launcher") || true',
+    '    /usr/bin/sleep 5',
+    '  done',
+    '}',
+    '',
+    ...WSL_MANAGED_RUNNER_DIRECTORIES.map((directory) => `runner_watch "$HOME/${directory}" &`),
     'exec /usr/bin/sleep infinity',
     ''
   ].join('\n');
