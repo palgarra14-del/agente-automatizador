@@ -1847,9 +1847,12 @@ test('incremental lineage validation fails closed if the new commit parent is ta
 test('validated lineage cache is bound to both generation and SHA', async () => {
   const fake = fakeGitHub();
   const writer = storeFor(fake);
-  await publishMarker(writer, 'one');
+  const first = await publishMarker(writer, 'one');
   await publishMarker(writer, 'two');
   const third = await publishMarker(writer, 'three');
+  // Force the exact REST fallback so pacing remains an observable proof that
+  // the deliberately wrong generation:SHA cache key was not trusted.
+  fake.markHistoryTruncated(first);
 
   const sleeps = [];
   const fresh = storeFor(fake, {
