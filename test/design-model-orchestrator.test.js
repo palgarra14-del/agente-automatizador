@@ -147,3 +147,34 @@ print(json.dumps({
   assert.equal(result.experimental, false);
   assert.equal(result.official, true);
 });
+
+
+test('Codex structured routing passes prompt, model, effort and images', () => {
+  const result = python(`
+import importlib.util,json,tempfile,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("r",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.codex_ready=lambda: True
+captured={}
+def fake_run(args,cwd=None,timeout=30,input_text=None):
+    captured["args"]=args
+    captured["input"]=input_text
+    out=args[args.index("-o")+1]
+    Path(out).write_text('{"ok":true}')
+    return subprocess.CompletedProcess(args,0,stdout='',stderr='')
+m._run=fake_run
+root=Path(tempfile.mkdtemp())
+image=root/"shot.png"; image.write_bytes(b"x")
+value=m.codex_structured(
+  "judge",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  cwd=root,model="gpt-6-astra",effort="high",images=[image]
+)
+print(json.dumps({"value":value,"args":captured["args"],"input":captured["input"]}))
+`);
+  assert.equal(result.value.ok, true);
+  assert.equal(result.input, 'judge');
+  assert.ok(result.args.includes('gpt-6-astra'));
+  assert.ok(result.args.some(x => String(x).includes('model_reasoning_effort')));
+  assert.ok(result.args.includes('--image'));
+});
