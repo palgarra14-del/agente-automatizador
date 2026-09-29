@@ -83,7 +83,11 @@ test('coding worker gives website work to frontend routing and app work to long-
       };
     }
   };
-  const worker = new MultiModelCodingWorker({ gateway, allowSessionFallback: false });
+  const worker = new MultiModelCodingWorker({
+    gateway,
+    allowSessionFallback: false,
+    controlSurface: async () => {}
+  });
 
   const website = await worker.execute({
     objective: 'Improve the page.',
@@ -131,7 +135,8 @@ test('independent review excludes the implementation family from multimodel rout
   };
   const executor = new MultiModelReadOnlySkillExecutor({
     gateway,
-    allowSessionFallback: false
+    allowSessionFallback: false,
+    controlSurface: async () => {}
   });
 
   const result = await executor.execute({
@@ -157,6 +162,58 @@ test('independent review excludes the implementation family from multimodel rout
   assert.deepEqual(observed.schema.required, ['reviewEvidence']);
   assert.equal(result.modelRouting.family, 'anthropic');
   assert.equal(result.paidApiUsed, false);
+});
+
+test('website planning uses the creative lead rather than the generic research route', async () => {
+  let observed = null;
+  const gateway = {
+    async structured(request) {
+      observed = request;
+      return {
+        value: {
+          websitePlan: {
+            summary: 'A',
+            pages: [{ slug: '/', title: 'Home', purpose: 'Convert', sections: ['Hero'] }],
+            design: { direction: 'Editorial', tone: 'Confident', colors: ['#111111'], typography: 'Display plus sans' },
+            conversion: { primaryCta: 'Reserva', secondaryCta: null },
+            seo: { primaryLocation: null, keywords: [] },
+            implementation: { priorities: ['Hero'], constraints: [] },
+            missingInputs: []
+          }
+        },
+        modelRouting: {
+          mode: 'free-multimodel',
+          candidate: 'ag-sonnet-4.6',
+          family: 'anthropic',
+          provider: 'antigravity',
+          model: 'claude-sonnet-4-6'
+        }
+      };
+    }
+  };
+  const executor = new MultiModelReadOnlySkillExecutor({
+    gateway,
+    allowSessionFallback: false,
+    controlSurface: async () => {}
+  });
+
+  const result = await executor.execute({
+    skill: 'website.plan',
+    goal: 'Plan the website.',
+    contract: { version: 1, inputs: ['project'], outputs: ['websitePlan'] },
+    context: {}
+  }, { workspace: '/tmp/site', timeoutMs: 120_000 });
+
+  assert.equal(observed.role, 'creative_direction');
+  assert.equal(result.modelRouting.candidate, 'ag-sonnet-4.6');
+});
+
+test('CLI wires the free multimodel executors into local and durable workflow engines', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /new MultiModelReadOnlySkillExecutor\(\)/);
+  assert.match(cli, /new MultiModelCodingWorker\(\)/);
+  assert.match(cli, /new WorkflowEngine\(\{ store, projects, \.\.\.workflowModelExecutors \}\)/);
+  assert.match(cli, /new DurableCloudWorkflowEngine\(\{ store: activeStore, projects, \.\.\.workflowModelExecutors \}\)/);
 });
 
 test('python workflow gateway is a hard free-only boundary', () => {
