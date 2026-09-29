@@ -163,6 +163,7 @@ try {
           workflowEngine: activeWorkflows,
           operatorRevision: loadedRevision,
           projectId: autonomousProjectId,
+          project: projects.get(autonomousProjectId),
           workflowTimeoutMs: projects.get(autonomousProjectId).budgets.maxRuntimeMinutes * 60_000
         })
         : null;
