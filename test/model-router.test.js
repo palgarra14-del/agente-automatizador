@@ -62,6 +62,25 @@ print(json.dumps(seen))
   assert.ok(!result.args.includes('--effort'));
 });
 
+test('Antigravity authentication caches a recent positive readiness check', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+fd,path=tempfile.mkstemp(); os.close(fd); m.AGY=path
+calls={"count":0}
+def fake_run(args,**kwargs):
+    calls["count"]+=1
+    return subprocess.CompletedProcess(args,0,stdout="claude-sonnet-4-6",stderr="")
+m._run=fake_run
+print(json.dumps({"first":m.antigravity_authenticated(),"second":m.antigravity_authenticated(),"calls":calls["count"]}))
+os.unlink(path)
+`);
+  assert.equal(result.first,true);
+  assert.equal(result.second,true);
+  assert.equal(result.calls,1);
+});
+
 test('model router falls back from unavailable Antigravity to local Ollama', () => {
   const result=python(`
 import importlib.util,json

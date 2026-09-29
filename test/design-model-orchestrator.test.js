@@ -77,6 +77,31 @@ print(json.dumps({
   assert.equal(result.code, 'code_fix');
 });
 
+test('design council falls back to another specialist when a preferred model returns invalid output', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.candidate_available=lambda candidate,disabled_providers=None: True
+calls=[]
+def fake_run(candidate,*args,**kwargs):
+    calls.append(candidate)
+    if candidate=="ag-sonnet-4.6":
+        raise m.ProviderUnavailable("structured_output_invalid")
+    return {"candidate":candidate,"provider":"antigravity","model":candidate,"elapsedSeconds":0.1,"value":{"concept":"ok"}}
+m.run_structured_candidate=fake_run
+value=m.run_design_council({"business":"x"},{"summary":"y"},cwd=tempfile.mkdtemp())
+print(json.dumps({"primary":value["primary"]["candidate"],"challenger":value["challenger"]["candidate"],"synthesis":value["synthesis"]["candidate"],"errors":value["primary"]["fallbackErrors"],"calls":calls}))
+`);
+  assert.equal(result.primary,'ag-gemini-3.1-pro');
+  assert.equal(result.challenger,'ag-gpt-oss-120b');
+  assert.equal(result.synthesis,'ag-opus-4.6');
+  assert.match(result.errors[0],/ag-sonnet-4.6/);
+});
+
 test('Antigravity structured calls pin model and agent while omitting incompatible effort', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile,subprocess
