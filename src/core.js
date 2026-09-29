@@ -5217,7 +5217,7 @@ export class CodexSdkWorker extends CodingWorker {
     let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      await assertWorkerProjectControlSurface(workspace);
+      await this.controlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const execution = await runCostAwareCodexTurn({
         CodexClient: this.CodexClient,
@@ -5269,10 +5269,11 @@ export class MultiModelCodingWorker extends CodingWorker {
   constructor({
     gateway = new MultiModelGatewayClient(),
     fallback = new CodexSdkWorker(),
-    allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1'
+    allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
+    controlSurface = assertWorkerProjectControlSurface
   } = {}) {
     super();
-    Object.assign(this, { gateway, fallback, allowSessionFallback });
+    Object.assign(this, { gateway, fallback, allowSessionFallback, controlSurface });
   }
 
   async execute(task, { workspace, timeoutMs }) {
@@ -5875,11 +5876,13 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
   constructor({
     gateway = new MultiModelGatewayClient(),
     allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
+    controlSurface = assertWorkerProjectControlSurface,
     ...options
   } = {}) {
     super(options);
     this.gateway = gateway;
     this.allowSessionFallback = allowSessionFallback;
+    this.controlSurface = controlSurface;
   }
 
   async execute(request, { workspace, timeoutMs }) {
@@ -5889,6 +5892,7 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
     const role = multiModelRoleForReadOnlySkill(request.skill);
     if (!role) return super.execute(request, { workspace, timeoutMs });
     try {
+      await this.controlSurface(workspace);
       const routed = await this.gateway.structured({
         role,
         prompt: buildReadOnlySkillPrompt(request),
