@@ -62,8 +62,13 @@ export function buildAcademicReminders({
     }
   }
 
+  // A duplicate with a non-open or unknown status makes the obligation ambiguous.
+  const nonOpenAssignmentIds = new Set(assignments
+    .filter((assignment) => assignment?.status !== 'open')
+    .map((assignment) => assignment?.id));
   for (const assignment of assignments) {
     if (typeof assignment?.id !== 'string' || !assignment.id.trim()) continue;
+    if (nonOpenAssignmentIds.has(assignment.id)) continue;
     if (assignment?.status !== 'open' || !assignment?.dueAt) continue;
     const date = madridDay(assignment.dueAt);
     if (!date || daysUntil(today, date) !== 1) continue;

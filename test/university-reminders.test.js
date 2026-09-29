@@ -178,6 +178,23 @@ test('assignment reminders fail closed for normalized or ambiguous deadlines', (
   }
 });
 
+test('conflicting assignment statuses suppress reminders regardless of record order', () => {
+  const open = { id: 'conflicting', status: 'open', dueAt: '2026-10-01T09:30:00Z' };
+  const other = { ...open, id: 'other' };
+  for (const status of ['done', 'submitted', undefined, null, '']) {
+    const conflicting = { ...open, status };
+    for (const records of [[open, conflicting], [conflicting, open]]) {
+      const reminders = buildAcademicReminders({
+        today: '2026-09-30',
+        assignments: [...records, other, { ...other }]
+      });
+      assert.deepEqual(reminders.map((item) => item.id), [
+        'reminder:assignment:other:2026-10-01:tomorrow'
+      ], `conflicting status: ${String(status)}`);
+    }
+  }
+});
+
 test('valid assignment deadlines retain leap-day and Madrid midnight timing', () => {
   for (const [today, dueAt, expectedDate] of [
     ['2028-02-28', '2028-02-29T09:30:00Z', '2028-02-29'],
