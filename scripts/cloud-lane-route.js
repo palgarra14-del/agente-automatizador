@@ -6,6 +6,12 @@ const REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const DEFAULT_CONFIG_PATH = resolve('config/issue-queue.json');
 const VALID_LANE_ID = /^[a-z0-9-]{1,80}$/;
 const VALID_PROJECT_ID = /^[a-z0-9-]{1,80}$/;
+const SCHEDULE_LANES = Object.freeze({
+  '2 * * * *': 'self',
+  '17 * * * *': 'website-pilot',
+  '32 * * * *': 'leadfinder',
+  '47 * * * *': 'callflow'
+});
 
 function trustedRouting(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config) || !Array.isArray(config.cloudLanes) || config.cloudLanes.length < 1 || config.cloudLanes.length > 20) {
@@ -28,7 +34,7 @@ function trustedRouting(config) {
   return { lanes: [...laneIds], projectToLane };
 }
 
-export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', requestedLane = '', config } = {}) {
+export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', requestedLane = '', schedule = '', config } = {}) {
   const { lanes, projectToLane } = trustedRouting(config);
   if (eventName === 'workflow_dispatch' && requestedLane) {
     if (!VALID_LANE_ID.test(requestedLane) || !lanes.includes(requestedLane)) {
@@ -36,7 +42,12 @@ export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', r
     }
     return [requestedLane];
   }
-  if (eventName === 'schedule' || eventName === 'workflow_dispatch') return lanes;
+  if (eventName === 'schedule') {
+    const lane = SCHEDULE_LANES[schedule];
+    if (!lane || !lanes.includes(lane)) throw new Error('cloud_lane_route_schedule_invalid');
+    return [lane];
+  }
+  if (eventName === 'workflow_dispatch') return lanes;
   if (eventName === 'push') {
     const selfLane = projectToLane.get('self');
     return selfLane ? [selfLane] : lanes;
@@ -70,6 +81,7 @@ function main() {
     eventAction: process.env.AGENT_CLOUD_EVENT_ACTION ?? '',
     issueBody: process.env.AGENT_CLOUD_ISSUE_BODY ?? '',
     requestedLane: process.env.AGENT_CLOUD_REQUESTED_LANE ?? '',
+    schedule: process.env.AGENT_CLOUD_SCHEDULE ?? '',
     config
   });
   process.stdout.write(JSON.stringify(lanes));

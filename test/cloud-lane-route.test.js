@@ -20,9 +20,12 @@ ${JSON.stringify({
   scope: { allowedPaths: ['src'] }
 })}`;
 
-test('trusted main pushes wake self only while scheduled and manual recovery cover every lane', () => {
+test('trusted main pushes wake self while scheduled watchdogs are staggered and manual recovery can cover every lane', () => {
   assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), ['self']);
-  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', config }), ['self', 'website-pilot', 'leadfinder', 'callflow']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '2 * * * *', config }), ['self']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '17 * * * *', config }), ['website-pilot']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '32 * * * *', config }), ['leadfinder']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '47 * * * *', config }), ['callflow']);
   assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'leadfinder', 'callflow']);
 });
 
