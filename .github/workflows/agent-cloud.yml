@@ -170,13 +170,30 @@ jobs:
       - name: Install frozen dependencies
         run: npm ci --ignore-scripts
 
+      - name: Resolve orchestrator-only cross-repo credential
+        shell: bash
+        env:
+          CONFIGURED_AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          TOKEN="$CONFIGURED_AGENT_GITHUB_TOKEN"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token 2>/dev/null || true)"
+          fi
+          if [[ -n "$TOKEN" && ! "$TOKEN" =~ [[:space:]] ]]; then
+            echo "::add-mask::$TOKEN"
+            echo "AGENT_GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+            echo "AGENT_CROSS_REPO_READY=true" >> "$GITHUB_ENV"
+          else
+            echo "AGENT_CROSS_REPO_READY=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Prepare cloud control and executable-work preflight
         id: preflight
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-          CROSS_REPO_CREDENTIAL_CONFIGURED: ${{ secrets.AGENT_GITHUB_TOKEN != '' && 'true' || 'false' }}
+          CROSS_REPO_CREDENTIAL_CONFIGURED: ${{ env.AGENT_CROSS_REPO_READY }}
         run: |
           RESULT_FILE="$RUNNER_TEMP/cloud-prepare-$AGENT_CLOUD_LANE.json"
           node src/cli.js inbox cloud-prepare --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
@@ -204,7 +221,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           CODEX_API_KEY: ''
           OPENAI_API_KEY: ''
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
