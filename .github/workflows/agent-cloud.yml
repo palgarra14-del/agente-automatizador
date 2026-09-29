@@ -225,7 +225,7 @@ jobs:
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: |
           RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
-          node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          timeout --signal=TERM --kill-after=30s 30m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
           cat "$RESULT_FILE"
           CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
           AUTONOMOUS_FAILED="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.stopReason === "autonomous_failure" ? "true" : "false");' "$RESULT_FILE")"
