@@ -595,6 +595,152 @@ export class GitHubStateStore extends JsonStore {
     return this.validateEnvelope(envelope);
   }
 
+
+  async readHistoryPage(oid, { first, after = null } = {}) {
+    const target = assertSha(oid);
+    if (!Number.isInteger(first) || first < 1 || first > 100) throw new Error('cloud_state_history_page_invalid');
+    if (after !== null && (typeof after !== 'string' || after.length < 1 || after.length > 500)) {
+      throw new Error('cloud_state_history_cursor_invalid');
+    }
+    const query = `query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
+      repository(owner: $owner, name: $name) {
+        object(oid: $oid) {
+          ... on Commit {
+            history(first: $first, after: $after, path: $path) {
+              nodes {
+                oid
+                parents(first: 2) {
+                  totalCount
+                  nodes { oid }
+                }
+                file(path: $path) {
+                  object {
+                    ... on Blob {
+                      oid
+                      byteSize
+                      isBinary
+                      isTruncated
+                      text
+                    }
+                  }
+                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      oid: target,
+      path: this.statePath,
+      first,
+      after
+    };
+    let response;
+    try {
+      response = await this.fetchWithDeadline('https://api.github.com/graphql', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query, variables })
+      });
+    } catch {
+      return null;
+    }
+    if (!response?.ok) return null;
+    let payload;
+    try { payload = await response.json(); } catch { return null; }
+    if (Array.isArray(payload?.errors) && payload.errors.length > 0) return null;
+    const history = payload?.data?.repository?.object?.history;
+    if (!history || !Array.isArray(history.nodes) || !history.pageInfo ||
+        typeof history.pageInfo.hasNextPage !== 'boolean') return null;
+    if (history.pageInfo.hasNextPage &&
+        (typeof history.pageInfo.endCursor !== 'string' || !history.pageInfo.endCursor)) return null;
+    return history;
+  }
+
+  async validateActiveEpochHistoryBatched(registration, authority, authorities, rootEvidence) {
+    if (!authority || !Array.isArray(authorities) || authorities.length < 1) return false;
+    const stepCount = authority.generation - registration.startGeneration + 1;
+    if (!Number.isSafeInteger(stepCount) || stepCount < 1 || stepCount > EPOCH_SIZE) {
+      throw new Error('cloud_state_history_page_limit');
+    }
+    const firstRegistration = rootEvidence.registrations[0];
+    if (!firstRegistration) throw new Error('cloud_state_epoch_registration_missing');
+    const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
+    let expectedGeneration = authority.generation;
+    let expectedSha = authority.stateSha;
+    let after = null;
+    let validated = 0;
+
+    while (validated < stepCount) {
+      const first = Math.min(100, stepCount - validated);
+      const history = await this.readHistoryPage(authority.stateSha, { first, after });
+      if (!history) return false;
+      if (history.nodes.length < 1 || history.nodes.length > first) return false;
+
+      for (const node of history.nodes) {
+        if (validated >= stepCount) break;
+        if (!node || typeof node.oid !== 'string' || node.oid.toLowerCase() !== expectedSha) {
+          // Path-filtered history may legitimately omit a commit. The exact REST
+          // validator below remains authoritative in that case.
+          return false;
+        }
+        const parents = node.parents;
+        if (!parents || !Number.isInteger(parents.totalCount) || !Array.isArray(parents.nodes)) return false;
+        if (parents.totalCount !== 1 || parents.nodes.length !== 1) {
+          throw new Error('cloud_state_history_fork');
+        }
+        const parentSha = assertSha(parents.nodes[0]?.oid, 'cloud_state_parent_invalid');
+        const authorityRecord = authorityByGeneration.get(expectedGeneration);
+        if (!authorityRecord ||
+            authorityRecord.stateSha !== expectedSha ||
+            authorityRecord.parentSha !== parentSha) {
+          throw new Error('cloud_state_epoch_authority_mismatch');
+        }
+
+        const blob = node.file?.object;
+        if (!blob || blob.isBinary !== false || blob.isTruncated !== false ||
+            !Number.isInteger(blob.byteSize) || typeof blob.text !== 'string') {
+          // GitHub can truncate large GraphQL blobs. Never trust partial evidence:
+          // fall back to exact per-SHA REST reads.
+          return false;
+        }
+        const envelope = this.parseHistoryBlob(blob);
+        if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
+          throw new Error('cloud_state_generation_discontinuity');
+        }
+        if (assertSha(envelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== firstRegistration.anchorSha ||
+            envelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
+          throw new Error('cloud_state_lineage_anchor_mismatch');
+        }
+
+        validated += 1;
+        if (expectedGeneration === registration.startGeneration) {
+          if (parentSha !== registration.anchorSha) throw new Error('cloud_state_history_invalid');
+          if (validated !== stepCount) throw new Error('cloud_state_history_incomplete');
+          return true;
+        }
+        expectedGeneration -= 1;
+        expectedSha = parentSha;
+      }
+
+      if (validated >= stepCount) break;
+      if (!history.pageInfo.hasNextPage) return false;
+      after = history.pageInfo.endCursor;
+    }
+    return validated === stepCount;
+  }
+
   async readEnvelopeAt(commitSha) {
     const sha = assertSha(commitSha);
     const encodedPath = this.statePath.split('/').map(encodeURIComponent).join('/');
@@ -1518,6 +1664,11 @@ export class GitHubStateStore extends JsonStore {
     const stepCount = authority.generation - registration.startGeneration + 1;
     if (!Number.isSafeInteger(stepCount) || stepCount < 1 || stepCount > EPOCH_SIZE) {
       throw new Error('cloud_state_history_page_limit');
+    }
+
+    if (await this.validateActiveEpochHistoryBatched(registration, authority, authorities, rootEvidence)) {
+      this.validatedLineageHeads.add(authorityValidationKey);
+      return;
     }
 
     let done = false;
