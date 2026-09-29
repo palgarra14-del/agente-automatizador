@@ -6,6 +6,8 @@ This document is the policy source for the autonomous website design lab. The ob
 
 Published model strengths are initial priors only. The lab records success, QA pass/fail, visual score movement, elapsed time, and role-specific outcomes. As samples accumulate, empirical performance can override the initial ordering.
 
+Cost policy is applied before quality ranking. Under the default `free_only` policy, subscription/paid candidates remain dormant even when they appear in the quality priors below. See [Free-only AI operating policy](./free-only-ai-policy.md).
+
 No local/offline model may award official visual scores or declare design mastery. Mastery remains tied to deterministic QA plus a validated premium visual reviewer. Experimental reviewers may guide fixes but are recorded separately until calibrated.
 
 ## Current specialist priors
@@ -61,11 +63,14 @@ A model's empirical routing score uses a conservative blend of the prior plus re
 
 ## Cost and quota policy
 
-- Prefer free Antigravity capacity when it meets the quality bar.
-- Use subscription-backed Codex for high-value engineering rather than spending API money automatically.
+The authoritative operating rules are in [Free-only AI operating policy](./free-only-ai-policy.md).
+
+- The default is zero incremental cost: free quota, explicitly free hosted models, and local inference only.
+- Subscription-backed Codex and any future paid candidate are blocked while `MODEL_COST_POLICY=free_only`.
+- Even `MODEL_COST_POLICY=allow_all` is insufficient by itself; paid candidates also require `PAID_MODELS_EXPLICITLY_ENABLED=1`.
+- OpenCode Free and Copilot Free remain opt-in until a live MSI probe succeeds.
 - Qwen local is zero-external-cost continuity, not a premium visual judge.
-- An OpenAI API key, if explicitly enabled later, must have a user-defined spend ceiling before the orchestrator may use it.
-- Never silently convert a quota outage into unbounded paid API usage.
+- Never turn quota exhaustion, policy denial, or plan-required errors into automatic billing, upgrades, or credit purchases.
 
 ## Safety and factual honesty
 
