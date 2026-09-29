@@ -24,6 +24,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 m.provider_available=lambda provider,model=None: True
 m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
 m.COST_POLICY="allow_all"
+m.PAID_MODELS_EXPLICITLY_ENABLED=True
 print(json.dumps({
   "creative":m.rank_candidates("creative_direction")[0]["candidate"],
   "implementation":m.rank_candidates("implementation")[0]["candidate"],
@@ -61,6 +62,27 @@ print(json.dumps({
   assert.equal(result.opencode, true);
   assert.equal(result.copilot, true);
   assert.equal(result.implementation, 'ag-sonnet-4.6');
+});
+
+test('allow_all does not unlock paid models without explicit second gate', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="allow_all"
+m.PAID_MODELS_EXPLICITLY_ENABLED=False
+locked=m.candidate_available("codex-astra")
+m.PAID_MODELS_EXPLICITLY_ENABLED=True
+unlocked=m.candidate_available("codex-astra")
+print(json.dumps({"locked":locked,"unlocked":unlocked}))
+`);
+  assert.equal(result.locked, false);
+  assert.equal(result.unlocked, true);
 });
 
 test('free-only policy also blocks direct paid candidate execution', () => {
