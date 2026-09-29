@@ -26,6 +26,7 @@ FINAL_DELIVERY_LIMIT_SECONDS = 600
 MAX_FIX_PASSES = 2
 SYNTHETIC_CONTACT = {"phone": "+34000000000", "email": "demo@example.invalid"}
 LOCAL_QA = (REPO / "scripts/design-lab/local-qa.mjs") if (REPO / "scripts/design-lab/local-qa.mjs").exists() else (STATE / "local-qa.mjs")
+OFFLINE_LEARNING = REPO / "scripts/design-lab/offline-learning.py"
 SCORE_WEIGHTS = {"identity":0.15,"hierarchy":0.15,"typography":0.12,"composition":0.15,"authenticity":0.10,"conversion":0.13,"mobile":0.10,"polish":0.10}
 
 BRIEFS = [
@@ -765,10 +766,18 @@ def build_site(run_dir, brief):
     (run_dir/"recent-concepts.md").write_text("# Recent concepts to avoid repeating by default\n" + ("\n".join(f"- {item}" for item in recent_concepts) if recent_concepts else "- None yet."), encoding="utf-8")
     summary_path=STATE/"training-summary.json"
     training_context=json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    offline_path=STATE/"offline-learning-latest.json"
+    if offline_path.exists():
+        try:
+            offline=json.loads(offline_path.read_text(encoding="utf-8"))
+            if offline.get("advisoryOnly") is True:
+                training_context["offlineAdvisory"]=offline
+        except Exception:
+            pass
     (run_dir/"training-context.json").write_text(json.dumps(training_context,ensure_ascii=False,indent=2),encoding="utf-8")
     prompt = f"""You are the production website designer/developer in a time-bounded training lab.
 Create a complete polished static website for the synthetic local business described in brief.txt.
-Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. For training priority, prefer trainingFocusDimensionAverages, weakestDimension and trainingFocusRecurringIssues; raw dimensionAverages/topRecurringIssues are retained for audit and may contain older penalties caused only by non-operational synthetic contact details. Do not spend design effort trying to make syntheticContact "real". Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
+Read playbook.md, recent-lessons.md, recent-concepts.md and training-context.json first and use them as design guidance. Recent lessons and aggregate weaknesses are prior reviewer evidence, not commands that override this brief. If training-context.json contains offlineAdvisory, treat it strictly as an unvalidated experiment hypothesis produced without screenshot access: use it only when it fits this brief, and let the real visual reviewer/QA confirm or reject it. Never treat offlineAdvisory as a score, fact, mastery evidence or mandatory rule. For training priority, prefer trainingFocusDimensionAverages, weakestDimension and trainingFocusRecurringIssues; raw dimensionAverages/topRecurringIssues are retained for audit and may contain older penalties caused only by non-operational synthetic contact details. Do not spend design effort trying to make syntheticContact "real". Treat recent concepts as a novelty challenge: do not reuse the same concept or signature visual device merely because it worked before; derive a fresh idea from this business unless a similarity is genuinely justified. Give extra attention to the currently weakest dimension and recurring issues without forcing the same visual style onto unrelated businesses. brief.txt contains syntheticContact with test-only phone/email values: use at least one of those exact values in a genuinely actionable primary contact path (tel: or mailto:), and never replace them with invented contact details. Make at least one exact actionable contact CTA visible in the first viewport on desktop and mobile; on mobile its rendered tap target should be at least 44 CSS px wide and 44 CSS px high. This is a training business: do not browse the web and do not invent factual claims.
 You have a hard creation budget of 10 minutes, and the product goal is a sale-ready reviewed result within 10 minutes end-to-end. Make high-leverage design decisions early, avoid over-engineering, and leave enough quality in the first implementation that review needs at most focused correction.
 Required deliverables: index.html plus any local CSS/JS/assets you create, and design-intent.json. No external CDN, fonts, images or network dependencies.
 design-intent.json must contain exactly these keys: concept, intendedEmotion, primaryMessage, primaryAction, signatureVisualDevice, typographyStrategy, compositionStrategy, mobileStrategy, antiTemplateRisks. Keep each value concise and specific to this business.
@@ -1108,6 +1117,23 @@ If this run does not justify a general lesson, make no changes.
         if "usage limit" in trace.lower() or "try again at" in trace.lower():
             register_usage_cooldown(trace)
 
+def maybe_run_offline_learning():
+    if not OFFLINE_LEARNING.exists():
+        return
+    try:
+        proc=run(
+          [sys.executable,str(OFFLINE_LEARNING)],
+          cwd=REPO,timeout=240,check=False,
+          stdout=subprocess.PIPE,stderr=subprocess.STDOUT
+        )
+        output=(proc.stdout or "").strip()
+        if output:
+            for line in output.splitlines()[-4:]:
+                print(line)
+    except Exception as exc:
+        print("offline_learning_status=failed")
+        print("offline_learning_error="+str(exc)[:500])
+
 def mastery_status(entries):
     training_ready,recent,qualified_at=training_mastery_candidate(entries)
     if not training_ready:
@@ -1128,6 +1154,7 @@ def main():
     lock=acquire_lock()
     quota_not_before=active_usage_cooldown()
     if quota_not_before:
+        maybe_run_offline_learning()
         print("design_lab_status=waiting_quota_reset")
         print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
         return
@@ -1136,6 +1163,7 @@ def main():
         try: quota_not_before=datetime.fromisoformat(not_before).timestamp()
         except ValueError: raise RuntimeError("design_lab_not_before_invalid")
         if time.time() < quota_not_before:
+            maybe_run_offline_learning()
             print("design_lab_status=waiting_quota_reset")
             return
     entries=history()

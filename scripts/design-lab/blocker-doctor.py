@@ -3,6 +3,11 @@ import json, os, shutil, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
+SCRIPT_DIR=Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0,str(SCRIPT_DIR))
+from model_router import ProviderUnavailable, generate_structured
+
 HOME=Path.home()
 REPO=Path(os.environ.get("AGENT_REPO","/home/pablo/projects/agente-automatizador")).resolve()
 STATE=Path(os.environ.get("DESIGN_LAB_STATE_DIR",str(HOME/".local/state/engineering-orchestrator/design-lab"))).resolve()
@@ -193,33 +198,54 @@ def deterministic_diagnosis(bundle):
 def model_diagnosis(bundle, deterministic):
     if deterministic.get("confidence",0)>=0.8 and deterministic.get("category") not in {"unknown_failure"}:
         return None
+    STATE.mkdir(parents=True,exist_ok=True)
+    prompt="""You are a read-only incident diagnostician for an autonomous website-design training service.
+Use ONLY the incident evidence supplied below. Explain the most likely root cause without guessing.
+Choose safeAction ONLY from the schema allowlist. A separate repair layer executes it; you cannot run commands or edit files.
+Use none when evidence is insufficient. Never recommend deleting user data, resetting a dirty repository, bypassing security checks, disabling tests, changing credentials, or weakening approval gates.
+Return only the required JSON.
+
+INCIDENT EVIDENCE:
+"""+json.dumps(bundle,ensure_ascii=False)[:48000]
+    try:
+        routed=generate_structured(prompt,MODEL_SCHEMA,cwd=STATE,providers=("antigravity","ollama"),timeout=180)
+        value=routed["value"]
+        if value.get("safeAction") not in SAFE_ACTIONS:
+            value["safeAction"]="none"
+        if float(value.get("confidence",0) or 0) < 0.75:
+            value["safeAction"]="none"
+        value["source"]="model:"+routed["provider"]
+        return value
+    except (ProviderUnavailable,ValueError,TypeError):
+        pass
+
+    # Premium fallback remains available when its quota is healthy.
     if not Path(CODEX).exists():
         return None
-    STATE.mkdir(parents=True,exist_ok=True)
     incident=STATE/"doctor-incident.json"
     schema=STATE/"doctor-schema.json"
     output=STATE/"doctor-model.json"
     incident.write_text(json.dumps(bundle,ensure_ascii=False,indent=2),encoding="utf-8")
     schema.write_text(json.dumps(MODEL_SCHEMA,ensure_ascii=False,indent=2),encoding="utf-8")
-    prompt="""You are a read-only incident diagnostician for an autonomous website-design training service.
+    codex_prompt="""You are a read-only incident diagnostician for an autonomous website-design training service.
 Read doctor-incident.json. Explain the most likely root cause using only supplied evidence. Do not invent missing facts.
-Choose safeAction ONLY from the schema. That safeAction is executed by a separate allowlisted repair layer; you cannot run commands or edit files.
-Use none when the evidence does not justify an allowlisted repair. Never recommend deleting user data, resetting a dirty repository, bypassing security checks, disabling tests, changing credentials, or weakening approval gates.
+Choose safeAction ONLY from the schema. Use none when the evidence does not justify an allowlisted repair.
+Never recommend deleting user data, resetting a dirty repository, bypassing security checks, disabling tests, changing credentials, or weakening approval gates.
 Return only the schema JSON."""
     proc=run([
       CODEX,"exec","--sandbox","read-only","--config",'approval_policy="never"',
       "--cd",str(STATE),"--skip-git-repo-check","--ephemeral","--color","never",
       "--output-schema",str(schema),"-o",str(output),"-"
-    ],timeout=180,cwd=STATE,input_text=prompt)
+    ],timeout=180,cwd=STATE,input_text=codex_prompt)
     if proc.returncode!=0 or not output.exists():
         return None
     try:
         value=json.loads(output.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if value.get("safeAction") not in SAFE_ACTIONS:
+    if value.get("safeAction") not in SAFE_ACTIONS or float(value.get("confidence",0) or 0)<0.75:
         value["safeAction"]="none"
-    value["source"]="model"
+    value["source"]="model:codex"
     return value
 
 def kill_orphan_http():
