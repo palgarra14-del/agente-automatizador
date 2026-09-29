@@ -5,13 +5,14 @@ from pathlib import Path
 AGY=os.environ.get("ANTIGRAVITY_CLI","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
+CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 
 class ProviderUnavailable(RuntimeError):
     pass
 
-def _run(args, cwd=None, timeout=30):
+def _run(args, cwd=None, timeout=30, input_text=None):
     try:
-        return subprocess.run(args,cwd=cwd,text=True,capture_output=True,timeout=timeout,check=False)
+        return subprocess.run(args,cwd=cwd,text=True,input=input_text,capture_output=True,timeout=timeout,check=False)
     except (OSError,subprocess.TimeoutExpired) as exc:
         raise ProviderUnavailable(str(exc)) from exc
 
@@ -108,7 +109,7 @@ def antigravity_authenticated():
     combined=(proc.stdout+"\n"+proc.stderr).lower()
     return proc.returncode==0 and "please sign in" not in combined and "sign in" not in combined
 
-def antigravity_structured(prompt,schema,cwd=None,timeout=180):
+def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=None,effort="medium",mode="plan"):
     if not antigravity_authenticated():
         raise ProviderUnavailable("antigravity_not_authenticated")
     workdir=Path(cwd or os.getcwd()).resolve()
@@ -118,13 +119,18 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180):
         with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="agy-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
-        proc=_run([
+        cmd=[
           AGY,"-p",prompt,
           "--output-format","json",
           "--json-schema",schema_file,
           "--print-timeout",f"{int(timeout)}s",
-          "--sandbox","--mode","plan","--effort","medium"
-        ],cwd=workdir,timeout=timeout+15)
+          "--sandbox"
+        ]
+        if mode: cmd += ["--mode",str(mode)]
+        if effort: cmd += ["--effort",str(effort)]
+        if model: cmd += ["--model",str(model)]
+        if agent: cmd += ["--agent",str(agent)]
+        proc=_run(cmd,cwd=workdir,timeout=timeout+15)
         if proc.returncode!=0:
             raise ProviderUnavailable("antigravity_failed:"+((proc.stderr or proc.stdout)[-800:]))
         return extract_structured(proc.stdout,schema)
@@ -132,6 +138,81 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180):
         if schema_file:
             try: Path(schema_file).unlink()
             except OSError: pass
+
+def codex_ready():
+    return Path(CODEX).is_file()
+
+def _codex_base(workdir, model=None):
+    cmd=[
+      CODEX,"exec","--sandbox","read-only","--config",'approval_policy="never"',
+      "--cd",str(workdir),"--skip-git-repo-check","--ephemeral","--color","never"
+    ]
+    if model: cmd += ["--model",str(model)]
+    return cmd
+
+def codex_structured(prompt,schema,cwd=None,timeout=180,model=None,effort=None,images=None):
+    if not codex_ready():
+        raise ProviderUnavailable("codex_unavailable")
+    workdir=Path(cwd or os.getcwd()).resolve()
+    workdir.mkdir(parents=True,exist_ok=True)
+    schema_file=None
+    output_file=None
+    try:
+        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="codex-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
+            json.dump(schema,f,ensure_ascii=False)
+            schema_file=f.name
+        fd,output_file=tempfile.mkstemp(suffix=".json",prefix="codex-output-",dir=workdir)
+        os.close(fd)
+        cmd=_codex_base(workdir,model=model)
+        if effort:
+            cmd += ["--config",f'model_reasoning_effort="{effort}"']
+        cmd += ["--output-schema",schema_file,"-o",output_file]
+        if images:
+            cmd += ["--image",*[str(Path(path).resolve()) for path in images]]
+        cmd += ["-"]
+        proc=_run(cmd,cwd=workdir,timeout=timeout,input_text=prompt)
+        if proc.returncode!=0:
+            raise ProviderUnavailable("codex_failed:"+((proc.stderr or proc.stdout)[-800:]))
+        return extract_structured(Path(output_file).read_text(encoding="utf-8",errors="ignore"),schema)
+    finally:
+        for filename in (schema_file,output_file):
+            if filename:
+                try: Path(filename).unlink()
+                except OSError: pass
+
+def antigravity_edit(prompt,cwd,timeout=600,model=None,agent=None,effort="medium"):
+    if not antigravity_authenticated():
+        raise ProviderUnavailable("antigravity_not_authenticated")
+    workdir=Path(cwd).resolve()
+    cmd=[
+      AGY,"-p",prompt,
+      "--output-format","json",
+      "--print-timeout",f"{int(timeout)}s",
+      "--sandbox","--mode","accept-edits"
+    ]
+    if effort: cmd += ["--effort",str(effort)]
+    if model: cmd += ["--model",str(model)]
+    if agent: cmd += ["--agent",str(agent)]
+    proc=_run(cmd,cwd=workdir,timeout=timeout+15)
+    if proc.returncode!=0:
+        raise ProviderUnavailable("antigravity_edit_failed:"+((proc.stderr or proc.stdout)[-1200:]))
+    return {"stdout":proc.stdout[-6000:],"stderr":proc.stderr[-2000:],"returncode":proc.returncode}
+
+def codex_edit(prompt,cwd,timeout=600,model=None,effort=None):
+    if not codex_ready():
+        raise ProviderUnavailable("codex_unavailable")
+    workdir=Path(cwd).resolve()
+    cmd=[
+      CODEX,"exec","--sandbox","workspace-write","--config",'approval_policy="never"',
+      "--cd",str(workdir),"--skip-git-repo-check","--ephemeral","--color","never"
+    ]
+    if model: cmd += ["--model",str(model)]
+    if effort: cmd += ["--config",f'model_reasoning_effort="{effort}"']
+    cmd += ["-"]
+    proc=_run(cmd,cwd=workdir,timeout=timeout,input_text=prompt)
+    if proc.returncode!=0:
+        raise ProviderUnavailable("codex_edit_failed:"+((proc.stderr or proc.stdout)[-1200:]))
+    return {"stdout":proc.stdout[-6000:],"stderr":proc.stderr[-2000:],"returncode":proc.returncode}
 
 def ollama_ready():
     try:
