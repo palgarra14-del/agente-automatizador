@@ -116,6 +116,29 @@ def extract_structured(text,schema):
                     errors.append(str(exc))
     raise ProviderUnavailable("structured_output_invalid:"+(";".join(errors[-3:]) if errors else "missing"))
 
+def _antigravity_stream_input(prompt):
+    return json.dumps({
+        "event":"user",
+        "message":{"content":str(prompt)}
+    },ensure_ascii=False)+"\n"
+
+def _antigravity_stream_result(stdout):
+    terminal=None
+    for line in str(stdout or "").splitlines():
+        try:
+            event=json.loads(line)
+        except Exception:
+            continue
+        if event.get("event")=="result" and isinstance(event.get("result"),dict):
+            terminal=event["result"]
+    if terminal is None:
+        raise ProviderUnavailable("antigravity_stream_result_missing")
+    status=str(terminal.get("status") or "").upper()
+    if status!="SUCCESS":
+        detail=terminal.get("error") or terminal.get("response") or status or "unknown"
+        raise ProviderUnavailable("antigravity_failed:"+str(detail)[-800:])
+    return terminal
+
 def antigravity_authenticated():
     now=time.monotonic()
     if (
@@ -146,8 +169,9 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
         cmd=[
-          AGY,"-p",prompt,
-          "--output-format","json",
+          AGY,
+          "--input-format","stream-json",
+          "--output-format","stream-json",
           "--json-schema",schema_file,
           "--print-timeout",f"{int(timeout)}s",
           "--sandbox"
@@ -158,10 +182,18 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
         if effort and not model: cmd += ["--effort",str(effort)]
         if model: cmd += ["--model",str(model)]
         if agent: cmd += ["--agent",str(agent)]
-        proc=_run(cmd,cwd=workdir,timeout=timeout+15)
+        proc=_run(
+            cmd,cwd=workdir,timeout=timeout+15,
+            input_text=_antigravity_stream_input(prompt)
+        )
         if proc.returncode!=0:
             raise ProviderUnavailable("antigravity_failed:"+((proc.stderr or proc.stdout)[-800:]))
-        return extract_structured(proc.stdout,schema)
+        terminal=_antigravity_stream_result(proc.stdout)
+        structured=terminal.get("structured_output")
+        if isinstance(structured,dict):
+            validate_schema(structured,schema)
+            return structured
+        return extract_structured(terminal.get("response",""),schema)
     finally:
         if schema_file:
             try: Path(schema_file).unlink()
@@ -342,18 +374,24 @@ def antigravity_edit(prompt,cwd,timeout=600,model=None,agent=None,effort="medium
         raise ProviderUnavailable("antigravity_not_authenticated")
     workdir=Path(cwd).resolve()
     cmd=[
-      AGY,"-p",prompt,
-      "--output-format","json",
+      AGY,
+      "--input-format","stream-json",
+      "--output-format","stream-json",
       "--print-timeout",f"{int(timeout)}s",
       "--sandbox","--mode","accept-edits"
     ]
     if effort and not model: cmd += ["--effort",str(effort)]
     if model: cmd += ["--model",str(model)]
     if agent: cmd += ["--agent",str(agent)]
-    proc=_run(cmd,cwd=workdir,timeout=timeout+15)
+    proc=_run(
+        cmd,cwd=workdir,timeout=timeout+15,
+        input_text=_antigravity_stream_input(prompt)
+    )
     if proc.returncode!=0:
         raise ProviderUnavailable("antigravity_edit_failed:"+((proc.stderr or proc.stdout)[-1200:]))
-    return {"stdout":proc.stdout[-6000:],"stderr":proc.stderr[-2000:],"returncode":proc.returncode}
+    terminal=_antigravity_stream_result(proc.stdout)
+    response=str(terminal.get("response") or "")
+    return {"stdout":response[-6000:],"stderr":proc.stderr[-2000:],"returncode":proc.returncode}
 
 def codex_edit(prompt,cwd,timeout=600,model=None,effort=None):
     if not codex_ready():
