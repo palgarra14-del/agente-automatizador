@@ -5205,11 +5205,10 @@ export class CodexSdkWorker extends CodingWorker {
     CodexClient = Codex,
     environment = workerEnvironment,
     codexHomeFactory = prepareIsolatedCodexHome,
-    platform = process.platform,
-    controlSurface = assertWorkerProjectControlSurface
+    platform = process.platform
   } = {}) {
     super();
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform, controlSurface });
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform });
   }
 
   async execute(task, { workspace, timeoutMs }) {
@@ -5223,7 +5222,7 @@ export class CodexSdkWorker extends CodingWorker {
     let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      await this.controlSurface(workspace);
+      await assertWorkerProjectControlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const execution = await runCostAwareCodexTurn({
         CodexClient: this.CodexClient,
