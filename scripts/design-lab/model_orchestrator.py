@@ -489,8 +489,16 @@ def _candidate_by_name(name):
     return CANDIDATES[name]
 
 
+def _require_cost_allowed(candidate, spec):
+    if not cost_allowed(spec):
+        raise ProviderUnavailable(
+            "candidate_blocked_by_cost_policy:" + str(candidate) + ":" + COST_POLICY
+        )
+
+
 def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240, images=None, agent_override=None):
     spec = _candidate_by_name(candidate)
+    _require_cost_allowed(candidate, spec)
     provider = spec["provider"]
     started = time.monotonic()
     if provider == "antigravity":
@@ -578,6 +586,7 @@ def run_role_structured(
 
 def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=None):
     spec = _candidate_by_name(candidate)
+    _require_cost_allowed(candidate, spec)
     started = time.monotonic()
     if spec["provider"] == "antigravity":
         result = antigravity_edit(
