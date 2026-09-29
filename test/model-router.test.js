@@ -39,6 +39,29 @@ except m.ProviderUnavailable as e:
   assert.match(result.error,/above_maximum/);
 });
 
+test('Antigravity explicit model selection omits incompatible effort flag', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.antigravity_authenticated=lambda: True
+seen={}
+class P:
+    returncode=0
+    stdout='{"ok":true}'
+    stderr=''
+def fake_run(args,**kwargs):
+    seen["args"]=args
+    return P()
+m._run=fake_run
+schema={"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}
+m.antigravity_structured("x",schema,cwd="/tmp",model="gemini-3.1-pro-high",effort="medium")
+print(json.dumps(seen))
+`);
+  assert.ok(result.args.includes('--model'));
+  assert.ok(!result.args.includes('--effort'));
+});
+
 test('model router falls back from unavailable Antigravity to local Ollama', () => {
   const result=python(`
 import importlib.util,json

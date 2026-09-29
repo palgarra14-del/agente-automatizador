@@ -77,7 +77,7 @@ print(json.dumps({
   assert.equal(result.code, 'code_fix');
 });
 
-test('Antigravity structured calls pin model agent effort and plan mode', () => {
+test('Antigravity structured calls pin model and agent while omitting incompatible effort', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile,subprocess
 from pathlib import Path
@@ -99,7 +99,7 @@ print(json.dumps({"value":value,"args":captured["args"]}))
   assert.equal(result.value.ok, true);
   assert.ok(result.args.includes('claude-sonnet-4-6'));
   assert.ok(result.args.includes('web-art-director'));
-  assert.ok(result.args.includes('high'));
+  assert.ok(!result.args.includes('--effort'));
   assert.ok(result.args.includes('plan'));
 });
 
