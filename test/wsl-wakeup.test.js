@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  WSL_MANAGED_RUNNER_DIRECTORIES,
   WSL_WAKEUP_RUN_VALUE,
   renderWslGuardianScript,
   syncWslWakeup,
@@ -77,6 +79,34 @@ test('WSL wakeup command is bounded, hidden, explicit-user, and guardian keeps W
   assert.match(guardian, /systemctl --user start engineering-orchestrator-inbox\.service/);
   assert.match(guardian, /exec \/usr\/bin\/sleep infinity/);
   assert.doesNotMatch(guardian, /token|secret|password/i);
+});
+
+test('WSL guardian supervises the three configured local Actions runners without embedding credentials', () => {
+  assert.deepEqual(WSL_MANAGED_RUNNER_DIRECTORIES, [
+    'actions-runner-agente',
+    'actions-runner-agente-2',
+    'actions-runner-agente-3'
+  ]);
+  const guardian = renderWslGuardianScript();
+  for (const directory of WSL_MANAGED_RUNNER_DIRECTORIES) {
+    assert.match(guardian, new RegExp(`runner_watch "\\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
+  }
+  assert.match(guardian, /runner_listener_active/);
+  assert.match(guardian, /\/proc\/\[0-9\]\*/);
+  assert.match(guardian, /readlink "\$process\/cwd"/);
+  assert.match(guardian, /Runner\.Listener/);
+  assert.match(guardian, /run\.sh/);
+  assert.match(guardian, /\[ ! -L "\$runner" \]/);
+  assert.match(guardian, /\[ ! -L "\$runner\/\.runner" \]/);
+  assert.match(guardian, /\[ ! -L "\$listener" \]/);
+  assert.match(guardian, /\[ ! -L "\$launcher" \]/);
+  assert.match(guardian, /sleep 10/);
+  assert.match(guardian, /sleep 5/);
+  assert.doesNotMatch(guardian, /token|secret|password|credential/i);
+  if (process.platform !== 'win32') {
+    const syntax = spawnSync('/bin/sh', ['-n'], { input: guardian, encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
 });
 
 test('WSL wakeup sync is idempotent and status is ownership-bound', async () => {
