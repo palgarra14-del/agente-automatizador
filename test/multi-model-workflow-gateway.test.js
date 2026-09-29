@@ -1,0 +1,169 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import {
+  MultiModelCodingWorker,
+  MultiModelGatewayClient,
+  MultiModelReadOnlySkillExecutor
+} from '../src/core.js';
+
+test('multi-model gateway hardens child environment to free-only and strips orchestrator credentials', async () => {
+  let observed = null;
+  const client = new MultiModelGatewayClient({
+    environment: {
+      HOME: '/home/test',
+      PATH: '/usr/bin:/bin',
+      GITHUB_TOKEN: 'ghs_should_never_cross_boundary_1234567890',
+      AGENT_GITHUB_TOKEN: 'ghs_agent_should_never_cross_boundary_1234567890',
+      OPENAI_API_KEY: 'sk-should-never-cross-boundary-1234567890',
+      CODEX_API_KEY: 'codex-should-never-cross-boundary-1234567890',
+      OLLAMA_MODEL: 'qwen2.5-coder:3b'
+    },
+    gatewayPath: '/repo/scripts/model-gateway.py',
+    processRunner: async (command, args, options) => {
+      observed = { command, args, options };
+      return {
+        ok: true,
+        exitCode: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          candidate: 'ag-gemini-3.8-flash',
+          family: 'google',
+          provider: 'antigravity',
+          model: 'gemini-3.8-flash-high',
+          routingScore: 1,
+          fallbackErrors: [],
+          result: { stdout: 'done' }
+        }),
+        stderr: '',
+        timedOut: false
+      };
+    }
+  });
+
+  const result = await client.edit({
+    role: 'long_horizon_implementation',
+    prompt: 'Implement one bounded change.'
+  }, {
+    workspace: '/tmp/workspace',
+    timeoutMs: 120_000
+  });
+
+  assert.equal(result.modelRouting.candidate, 'ag-gemini-3.8-flash');
+  assert.equal(observed.command, 'python3');
+  assert.deepEqual(observed.args, ['/repo/scripts/model-gateway.py']);
+  assert.equal(observed.options.cwd, '/tmp/workspace');
+  assert.equal(observed.options.restrictEnvironment, true);
+  assert.equal(observed.options.env.MODEL_COST_POLICY, 'free_only');
+  assert.equal(observed.options.env.PAID_MODELS_EXPLICITLY_ENABLED, '0');
+  assert.equal(observed.options.env.OPENAI_API_KEY, '');
+  assert.equal(observed.options.env.CODEX_API_KEY, '');
+  assert.equal(Object.hasOwn(observed.options.env, 'GITHUB_TOKEN'), false);
+  assert.equal(Object.hasOwn(observed.options.env, 'AGENT_GITHUB_TOKEN'), false);
+  assert.equal(observed.options.env.OLLAMA_MODEL, 'qwen2.5-coder:3b');
+  const request = JSON.parse(observed.options.input);
+  assert.equal(request.action, 'edit');
+  assert.equal(request.role, 'long_horizon_implementation');
+});
+
+test('coding worker gives website work to frontend routing and app work to long-horizon routing', async () => {
+  const calls = [];
+  const gateway = {
+    async edit(request) {
+      calls.push(request);
+      return {
+        result: { stdout: 'ok' },
+        modelRouting: {
+          mode: 'free-multimodel',
+          candidate: request.role === 'frontend_implementation' ? 'ag-sonnet-4.6' : 'ag-gemini-3.8-flash',
+          family: request.role === 'frontend_implementation' ? 'anthropic' : 'google',
+          provider: 'antigravity',
+          model: 'fixture'
+        }
+      };
+    }
+  };
+  const worker = new MultiModelCodingWorker({ gateway, allowSessionFallback: false });
+
+  const website = await worker.execute({
+    objective: 'Improve the page.',
+    projectId: 'website-pilot',
+    workflow: { profile: 'autonomous-maintenance' },
+    scope: {}
+  }, { workspace: '/tmp/site', timeoutMs: 120_000 });
+  const callflow = await worker.execute({
+    objective: 'Improve the CRM.',
+    projectId: 'callflow',
+    workflow: { profile: 'autonomous-maintenance' },
+    scope: {}
+  }, { workspace: '/tmp/callflow', timeoutMs: 120_000 });
+
+  assert.equal(calls[0].role, 'frontend_implementation');
+  assert.equal(calls[1].role, 'long_horizon_implementation');
+  assert.equal(website.modelRouting.candidate, 'ag-sonnet-4.6');
+  assert.equal(callflow.modelRouting.candidate, 'ag-gemini-3.8-flash');
+  assert.equal(website.paidApiUsed, false);
+  assert.equal(callflow.paidApiUsed, false);
+});
+
+test('independent review excludes the implementation family from multimodel routing', async () => {
+  let observed = null;
+  const gateway = {
+    async structured(request) {
+      observed = request;
+      return {
+        value: {
+          reviewEvidence: {
+            verdict: 'PASS',
+            summary: 'No material issue found.',
+            findings: []
+          }
+        },
+        modelRouting: {
+          mode: 'free-multimodel',
+          candidate: 'ag-opus-4.6',
+          family: 'anthropic',
+          provider: 'antigravity',
+          model: 'claude-opus-4-6-thinking'
+        }
+      };
+    }
+  };
+  const executor = new MultiModelReadOnlySkillExecutor({
+    gateway,
+    allowSessionFallback: false
+  });
+
+  const result = await executor.execute({
+    skill: 'code.review',
+    goal: 'Review the bounded implementation.',
+    contract: {
+      version: 2,
+      inputs: ['project'],
+      outputs: ['reviewEvidence']
+    },
+    context: {
+      modelRouting: {
+        excludedFamilies: ['google']
+      }
+    }
+  }, {
+    workspace: '/tmp/review',
+    timeoutMs: 120_000
+  });
+
+  assert.equal(observed.role, 'independent_review');
+  assert.deepEqual(observed.excludedFamilies, ['google']);
+  assert.deepEqual(observed.schema.required, ['reviewEvidence']);
+  assert.equal(result.modelRouting.family, 'anthropic');
+  assert.equal(result.paidApiUsed, false);
+});
+
+test('python workflow gateway is a hard free-only boundary', () => {
+  const gateway = readFileSync(new URL('../scripts/model-gateway.py', import.meta.url), 'utf8');
+  assert.match(gateway, /MODEL_COST_POLICY.*free_only/);
+  assert.match(gateway, /PAID_MODELS_EXPLICITLY_ENABLED.*0/);
+  assert.match(gateway, /CODEX_API_KEY.*""/);
+  assert.match(gateway, /OPENAI_API_KEY.*""/);
+  assert.match(gateway, /use_role_agent=False/);
+});
