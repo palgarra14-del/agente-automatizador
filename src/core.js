@@ -5279,7 +5279,7 @@ export class MultiModelCodingWorker extends CodingWorker {
   async execute(task, { workspace, timeoutMs }) {
     const role = multiModelRoleForTask(task);
     try {
-      await assertWorkerProjectControlSurface(workspace);
+      await this.controlSurface(workspace);
       const routed = await this.gateway.edit({
         role,
         prompt: buildWorkerPrompt(task)
