@@ -12,15 +12,19 @@ COPILOT=os.environ.get("COPILOT_BIN","/home/pablo/.nvm/versions/node/v22.23.2/bi
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
 COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
+OPENCODE_FREE_TIMEOUT=min(60,max(10,int(os.environ.get("OPENCODE_FREE_TIMEOUT","35"))))
 ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
 _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
 
 class ProviderUnavailable(RuntimeError):
     pass
 
-def _run(args, cwd=None, timeout=30, input_text=None):
+def _run(args, cwd=None, timeout=30, input_text=None, env=None):
     try:
-        return subprocess.run(args,cwd=cwd,text=True,input=input_text,capture_output=True,timeout=timeout,check=False)
+        return subprocess.run(
+            args,cwd=cwd,text=True,input=input_text,capture_output=True,
+            timeout=timeout,check=False,env=env,
+        )
     except (OSError,subprocess.TimeoutExpired) as exc:
         raise ProviderUnavailable(str(exc)) from exc
 
@@ -184,6 +188,28 @@ def opencode_ready(model=None):
         line.strip() for line in proc.stdout.splitlines() if line.strip()
     }
 
+def _opencode_service_connection():
+    service_file=Path.home()/".config/opencode/service.json"
+    if not service_file.is_file():
+        raise ProviderUnavailable("opencode_service_config_missing")
+    try:
+        config=json.loads(service_file.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError) as exc:
+        raise ProviderUnavailable("opencode_service_config_invalid") from exc
+    password=str(config.get("password") or "").strip()
+    if not password:
+        raise ProviderUnavailable("opencode_service_password_missing")
+    proc=_run([OPENCODE,"service","status"],timeout=10)
+    if proc.returncode!=0:
+        raise ProviderUnavailable("opencode_service_unavailable")
+    server=(proc.stdout or "").strip().splitlines()
+    if not server:
+        raise ProviderUnavailable("opencode_service_url_missing")
+    url=server[-1].strip()
+    if not url.startswith("http://127.0.0.1:"):
+        raise ProviderUnavailable("opencode_service_not_localhost")
+    return url,password
+
 def _opencode_text(stdout):
     texts=[]
     for line in str(stdout or "").splitlines():
@@ -210,10 +236,13 @@ def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
         "Return ONLY valid JSON matching this JSON schema. "
         "Do not use markdown fences. SCHEMA="+schema_hint+"\nTASK:\n"+str(prompt)
     )
+    server,password=_opencode_service_connection()
+    env=os.environ.copy()
+    env["OPENCODE_PASSWORD"]=password
     proc=_run([
-        OPENCODE,"run","--standalone","--auto",
+        OPENCODE,"run","--server",server,"--auto",
         "--model",str(model),"--format","json",task
-    ],cwd=workdir,timeout=timeout)
+    ],cwd=workdir,timeout=min(timeout,OPENCODE_FREE_TIMEOUT),env=env)
     if proc.returncode!=0:
         raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(_opencode_text(proc.stdout),schema)
@@ -366,7 +395,7 @@ def generate_structured(prompt,schema,cwd=None,providers=None,timeout=180):
             elif provider=="ollama":
                 value=ollama_structured(prompt,schema,cwd=cwd,timeout=timeout)
             elif provider=="opencode":
-                value=opencode_structured(prompt,schema,cwd=cwd,timeout=timeout,model=os.environ.get("OPENCODE_FREE_MODEL","opencode/ling-3.0-flash-fin-free"))
+                value=opencode_structured(prompt,schema,cwd=cwd,timeout=timeout,model=os.environ.get("OPENCODE_FREE_MODEL","opencode/mimo-v2.6-flash-free"))
             elif provider=="copilot":
                 value=copilot_structured(prompt,schema,cwd=cwd,timeout=timeout,model=COPILOT_FREE_MODEL)
             else:

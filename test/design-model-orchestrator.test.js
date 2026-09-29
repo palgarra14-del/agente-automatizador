@@ -51,7 +51,7 @@ m.COST_POLICY="free_only"
 print(json.dumps({
   "codex":m.candidate_available("codex-astra"),
   "antigravity":m.candidate_available("ag-sonnet-4.6"),
-  "opencode":m.candidate_available("oc-ling-3-flash"),
+  "opencode":m.candidate_available("oc-mimo-2.6-flash"),
   "copilot":m.candidate_available("copilot-free-auto"),
   "implementation":m.rank_candidates("implementation")[0]["candidate"]
 }))
