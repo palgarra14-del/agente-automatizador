@@ -124,12 +124,12 @@ export class AutonomousGapIntelligence {
       });
     }
 
-    if (!signals.length) {
+    if (!signals.some((signal) => signal.actionable)) {
       signals.push({
         kind: 'continuous-improvement:opportunity',
         score: 20,
         actionable: true,
-        evidence: 'no dominant recent failure class; inspect current business flow for the highest-evidence bounded improvement'
+        evidence: 'no implementable recent failure signal dominates; inspect the current business flow for the highest-evidence bounded improvement'
       });
     }
 
