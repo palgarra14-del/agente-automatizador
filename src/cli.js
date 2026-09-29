@@ -32,8 +32,8 @@ const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
 const workflowModelExecutors = {
-  skillExecutor: new MultiModelReadOnlySkillExecutor(),
-  codingWorker: new MultiModelCodingWorker()
+  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: false }),
+  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: false })
 };
 const workflows = new WorkflowEngine({ store, projects, ...workflowModelExecutors });
 
