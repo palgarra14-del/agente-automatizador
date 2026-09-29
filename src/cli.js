@@ -9,7 +9,7 @@ import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCh
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
-import { AutonomousSelfImprovement } from './self-improvement.js';
+import { AutonomousProjectImprovement } from './self-improvement.js';
 import { runCloudDrain } from './cloud-drain.js';
 
 const args = process.argv.slice(2);
@@ -150,12 +150,16 @@ try {
         excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds,
         executionEnabled: !['cloud-control-once', 'cloud-prepare'].includes(action)
       });
-      const autonomousSelfImprovement = cloudAction && cloudLane.id === 'self'
-        ? new AutonomousSelfImprovement({
+      const autonomousProjectId = cloudAction && cloudLane.projectIds.length === 1
+        ? cloudLane.projectIds[0]
+        : null;
+      const autonomousSelfImprovement = autonomousProjectId
+        ? new AutonomousProjectImprovement({
           store: activeStore,
           workflowEngine: activeWorkflows,
           operatorRevision: loadedRevision,
-          workflowTimeoutMs: projects.get('self').budgets.maxRuntimeMinutes * 60_000
+          projectId: autonomousProjectId,
+          workflowTimeoutMs: projects.get(autonomousProjectId).budgets.maxRuntimeMinutes * 60_000
         })
         : null;
       const view = (record) => record ? {
