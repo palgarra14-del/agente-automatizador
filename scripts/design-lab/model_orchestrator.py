@@ -714,11 +714,24 @@ def provider_available(provider, model=None):
     return False
 
 
-def candidate_available(candidate, disabled_providers=None):
+def candidate_family(candidate):
+    return MODEL_FAMILY.get(candidate, CANDIDATES[candidate]["provider"])
+
+
+def candidate_available(
+    candidate,
+    disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     spec = CANDIDATES[candidate]
     disabled = set(disabled_providers or ())
+    excluded_family_set = set(excluded_families or ())
+    excluded_candidate_set = set(excluded_candidates or ())
     return (
-        cost_allowed(spec)
+        candidate not in excluded_candidate_set
+        and candidate_family(candidate) not in excluded_family_set
+        and cost_allowed(spec)
         and spec["provider"] not in disabled
         and _runtime_cooldown(candidate) is None
         and provider_available(spec["provider"], spec.get("model"))
@@ -735,7 +748,15 @@ def routing_score(role, candidate, prior):
     return round(score + exploration, 5), stats
 
 
-def rank_candidates(role, *, disabled_providers=None, require_visual=False, require_edit=False):
+def rank_candidates(
+    role,
+    *,
+    disabled_providers=None,
+    require_visual=False,
+    require_edit=False,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     if role not in ROLE_POLICY:
         raise ValueError("unknown_role")
     ranked = []
@@ -745,11 +766,17 @@ def rank_candidates(role, *, disabled_providers=None, require_visual=False, requ
             continue
         if require_edit and not spec.get("editing"):
             continue
-        if not candidate_available(candidate, disabled_providers=disabled_providers):
+        if not candidate_available(
+            candidate,
+            disabled_providers=disabled_providers,
+            excluded_families=excluded_families,
+            excluded_candidates=excluded_candidates,
+        ):
             continue
         score, stats = routing_score(role, candidate, prior)
         ranked.append({
             "candidate": candidate,
+            "family": candidate_family(candidate),
             "routingScore": score,
             "prior": prior,
             "stats": stats,
@@ -834,6 +861,8 @@ def run_role_structured(
     timeout=240,
     images=None,
     disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
     require_premium=False,
 ):
     require_visual = bool(images) or role in VISUAL_ROLES
@@ -842,6 +871,8 @@ def run_role_structured(
         role,
         disabled_providers=disabled_providers,
         require_visual=require_visual,
+        excluded_families=excluded_families,
+        excluded_candidates=excluded_candidates,
     ):
         if require_premium and item["provider"] == "ollama":
             continue
@@ -901,12 +932,23 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
     }
 
 
-def run_edit_role(role, prompt, *, cwd, timeout=600, disabled_providers=None):
+def run_edit_role(
+    role,
+    prompt,
+    *,
+    cwd,
+    timeout=600,
+    disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     errors = []
     for item in rank_candidates(
         role,
         disabled_providers=disabled_providers,
         require_edit=True,
+        excluded_families=excluded_families,
+        excluded_candidates=excluded_candidates,
     ):
         candidate = item["candidate"]
         cooldown_error = _cooldown_error(candidate)
@@ -978,16 +1020,27 @@ def _first_available(preferred, role, disabled_providers=None):
 
 def _run_preferred_structured(
     preferred, role, prompt, schema, *, cwd, timeout, disabled_providers=None,
-    agent_override=None, exclude_candidates=None,
+    agent_override=None, exclude_candidates=None, exclude_families=None,
 ):
     excluded=set(exclude_candidates or ())
+    excluded_family_set=set(exclude_families or ())
     ordered=[]
     for candidate in preferred:
         if candidate in excluded or candidate in ordered:
             continue
-        if candidate_available(candidate, disabled_providers=disabled_providers):
+        if candidate_available(
+            candidate,
+            disabled_providers=disabled_providers,
+            excluded_families=excluded_family_set,
+            excluded_candidates=excluded,
+        ):
             ordered.append(candidate)
-    for item in rank_candidates(role, disabled_providers=disabled_providers):
+    for item in rank_candidates(
+        role,
+        disabled_providers=disabled_providers,
+        excluded_families=excluded_family_set,
+        excluded_candidates=excluded,
+    ):
         candidate=item["candidate"]
         if candidate not in excluded and candidate not in ordered:
             ordered.append(candidate)
@@ -1046,6 +1099,7 @@ EVIDENCE:
         cwd=cwd, timeout=timeout, disabled_providers=disabled_providers,
         agent_override="web-concept-challenger",
         exclude_candidates={primary["candidate"]},
+        exclude_families={candidate_family(primary["candidate"])},
     )
 
     synthesis_prompt = """You are the chief design director arbitrating two independent website directions.
@@ -1102,7 +1156,14 @@ def policy_snapshot():
             "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
             "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,
         },
-        "candidates": CANDIDATES,
+        "candidates": {
+            candidate: {
+                **spec,
+                "family": candidate_family(candidate),
+                "specialization": SPECIALIZATION_POLICY.get(candidate),
+            }
+            for candidate, spec in CANDIDATES.items()
+        },
         "roles": {
             role: [
                 {
