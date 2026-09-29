@@ -54,14 +54,22 @@ print(json.dumps({
   "antigravity":m.candidate_available("ag-sonnet-4.6"),
   "opencode":m.candidate_available("oc-mimo-2.6-flash"),
   "copilot":m.candidate_available("copilot-free-auto"),
-  "implementation":m.rank_candidates("implementation")[0]["candidate"]
+  "implementation":m.rank_candidates("implementation")[0]["candidate"],
+  "frontend":m.rank_candidates("frontend_implementation")[0]["candidate"],
+  "orchestration":m.rank_candidates("autonomous_orchestration")[0]["candidate"],
+  "refactor":m.rank_candidates("deep_refactor")[0]["candidate"],
+  "bulk":m.rank_candidates("structured_bulk")[0]["candidate"]
 }))
 `);
   assert.equal(result.codex, false);
   assert.equal(result.antigravity, true);
   assert.equal(result.opencode, true);
   assert.equal(result.copilot, true);
-  assert.equal(result.implementation, 'ag-sonnet-4.6');
+  assert.equal(result.implementation, 'ag-gemini-3.8-flash');
+  assert.equal(result.frontend, 'ag-sonnet-4.6');
+  assert.equal(result.orchestration, 'ag-gemini-3.8-flash');
+  assert.equal(result.refactor, 'ag-opus-4.6');
+  assert.equal(result.bulk, 'ollama-qwen-3b');
 });
 
 test('allow_all does not unlock paid models without explicit second gate', () => {
@@ -160,7 +168,7 @@ base=str(Path(${JSON.stringify(orchestrator)}).parent)
 sys.path.insert(0,base)
 spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.candidate_available=lambda candidate,disabled_providers=None: True
+m.candidate_available=lambda candidate,disabled_providers=None,excluded_families=None,excluded_candidates=None: True
 calls=[]
 def fake_run(candidate,*args,**kwargs):
     calls.append(candidate)

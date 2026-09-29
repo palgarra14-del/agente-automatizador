@@ -220,106 +220,362 @@ CANDIDATES = {
     },
 }
 
+
+MODEL_FAMILY = {
+    "ag-sonnet-4.6": "anthropic",
+    "ag-opus-4.6": "anthropic",
+    "ag-gemini-3.1-pro": "google",
+    "ag-gemini-3.8-flash": "google",
+    "ag-gemini-3.7-flash": "google",
+    "ag-gemini-3.6-flash": "google",
+    "ag-gpt-oss-120b": "openai-oss",
+    "oc-longcat-2.5": "longcat",
+    "oc-mimo-2.6-flash": "xiaomi",
+    "oc-space-bunny": "opencode-stealth",
+    "copilot-free-auto": "copilot-auto",
+    "codex-astra": "openai",
+    "codex-sol": "openai",
+    "codex-luna": "openai",
+    "codex-5.6-sol": "openai",
+    "codex-5.6-terra": "openai",
+    "codex-5.6-luna": "openai",
+    "ollama-qwen-3b": "qwen-local",
+}
+
 # Initial priors are hypotheses. Outcome evidence is allowed to overturn them.
 ROLE_POLICY = {
+    # Brand and visual direction: Sonnet is the default creative lead; Gemini Pro
+    # deliberately challenges it from a different model family.
     "creative_direction": [
-        ("ag-sonnet-4.6", 0.96),
-        ("ag-gemini-3.1-pro", 0.92),
-        ("ag-opus-4.6", 0.89),
-        ("codex-astra", 0.85),
+        ("ag-sonnet-4.6", 0.98),
+        ("ag-gemini-3.1-pro", 0.94),
+        ("ag-opus-4.6", 0.92),
+        ("ag-gemini-3.8-flash", 0.90),
+        ("codex-astra", 0.88),
     ],
     "concept_challenger": [
-        ("ag-gemini-3.1-pro", 0.96),
-        ("ag-sonnet-4.6", 0.91),
-        ("ag-gpt-oss-120b", 0.78),
-        ("oc-longcat-2.5", 0.76),
-        ("codex-astra", 0.84),
+        ("ag-gemini-3.1-pro", 0.98),
+        ("ag-gpt-oss-120b", 0.93),
+        ("ag-opus-4.6", 0.91),
+        ("ag-gemini-3.8-flash", 0.90),
+        ("ag-sonnet-4.6", 0.87),
+        ("codex-astra", 0.90),
     ],
     "council_synthesis": [
-        ("ag-opus-4.6", 0.98),
-        ("codex-astra", 0.95),
-        ("ag-gemini-3.1-pro", 0.91),
-        ("ag-sonnet-4.6", 0.89),
-    ],
-    "implementation": [
-        ("codex-astra", 0.99),
-        ("codex-sol", 0.96),
-        ("ag-sonnet-4.6", 0.94),
-        ("ag-gemini-3.1-pro", 0.89),
-        ("ag-gemini-3.8-flash", 0.82),
-        ("codex-5.6-sol", 0.88),
-        ("codex-5.6-terra", 0.84),
-        ("ag-gemini-3.7-flash", 0.78),
-        ("ag-gemini-3.6-flash", 0.74),
-    ],
-    "visual_review": [
         ("ag-opus-4.6", 0.99),
-        ("codex-astra", 0.97),
+        ("codex-astra", 0.985),
+        ("ag-gemini-3.1-pro", 0.95),
+        ("ag-sonnet-4.6", 0.92),
+        ("ag-gemini-3.8-flash", 0.90),
+    ],
+
+    # Generic implementation favors long-horizon autonomous engineering. The
+    # website lab uses the more specific frontend_implementation role below.
+    "implementation": [
+        ("codex-astra", 0.995),
+        ("codex-sol", 0.985),
+        ("ag-gemini-3.8-flash", 0.975),
+        ("ag-sonnet-4.6", 0.965),
+        ("ag-opus-4.6", 0.93),
+        ("ag-gemini-3.1-pro", 0.92),
+        ("codex-5.6-sol", 0.90),
+        ("codex-5.6-terra", 0.87),
+        ("ag-gemini-3.7-flash", 0.85),
+        ("ag-gemini-3.6-flash", 0.80),
+    ],
+    "frontend_implementation": [
+        ("codex-astra", 0.995),
+        ("codex-sol", 0.985),
+        ("ag-sonnet-4.6", 0.98),
+        ("ag-gemini-3.8-flash", 0.97),
+        ("ag-opus-4.6", 0.94),
+        ("ag-gemini-3.1-pro", 0.92),
+        ("codex-5.6-sol", 0.89),
+        ("codex-5.6-terra", 0.86),
+    ],
+    "long_horizon_implementation": [
+        ("codex-astra", 0.995),
+        ("ag-gemini-3.8-flash", 0.99),
+        ("codex-sol", 0.985),
+        ("ag-opus-4.6", 0.97),
         ("ag-sonnet-4.6", 0.96),
         ("ag-gemini-3.1-pro", 0.92),
     ],
+    "deep_refactor": [
+        ("codex-astra", 0.995),
+        ("ag-opus-4.6", 0.99),
+        ("codex-sol", 0.985),
+        ("ag-sonnet-4.6", 0.97),
+        ("ag-gemini-3.8-flash", 0.96),
+        ("ag-gemini-3.1-pro", 0.91),
+    ],
+
+    "visual_review": [
+        ("ag-opus-4.6", 0.995),
+        ("codex-astra", 0.99),
+        ("ag-gemini-3.1-pro", 0.965),
+        ("ag-sonnet-4.6", 0.95),
+        ("ag-gemini-3.8-flash", 0.93),
+    ],
+    "independent_review": [
+        ("ag-opus-4.6", 0.995),
+        ("codex-astra", 0.99),
+        ("ag-gemini-3.1-pro", 0.97),
+        ("ag-gpt-oss-120b", 0.945),
+        ("ag-sonnet-4.6", 0.93),
+        ("ag-gemini-3.8-flash", 0.92),
+        ("oc-mimo-2.6-flash", 0.90),
+    ],
     "visual_fix": [
-        ("ag-sonnet-4.6", 0.98),
-        ("codex-astra", 0.95),
-        ("ag-gemini-3.1-pro", 0.90),
-        ("ag-gemini-3.8-flash", 0.86),
+        ("ag-sonnet-4.6", 0.99),
+        ("codex-astra", 0.975),
+        ("ag-gemini-3.8-flash", 0.96),
+        ("ag-gemini-3.1-pro", 0.93),
+        ("ag-opus-4.6", 0.91),
     ],
     "code_fix": [
-        ("codex-astra", 0.99),
-        ("codex-sol", 0.96),
-        ("ag-sonnet-4.6", 0.91),
-        ("ag-gemini-3.8-flash", 0.84),
+        ("codex-astra", 0.995),
+        ("codex-sol", 0.985),
+        ("ag-sonnet-4.6", 0.975),
+        ("ag-gemini-3.8-flash", 0.97),
+        ("ag-opus-4.6", 0.95),
+        ("ag-gpt-oss-120b", 0.91),
         ("codex-5.6-sol", 0.90),
         ("codex-5.6-terra", 0.87),
     ],
+
+    # Fast/high-volume work should not consume the deepest reviewers.
     "quick_qa": [
-        ("ag-gemini-3.8-flash", 0.97),
-        ("codex-luna", 0.93),
-        ("ag-gemini-3.1-pro", 0.83),
-        ("oc-space-bunny", 0.82),
-        ("copilot-free-auto", 0.81),
-        ("oc-mimo-2.6-flash", 0.80),
-        ("ollama-qwen-3b", 0.68),
-        ("codex-5.6-terra", 0.88),
-        ("codex-5.6-luna", 0.86),
-        ("ag-gemini-3.7-flash", 0.84),
-        ("ag-gemini-3.6-flash", 0.80),
+        ("ag-gemini-3.8-flash", 0.98),
+        ("oc-mimo-2.6-flash", 0.94),
+        ("copilot-free-auto", 0.92),
+        ("oc-space-bunny", 0.90),
+        ("ag-gpt-oss-120b", 0.89),
+        ("ollama-qwen-3b", 0.86),
+        ("oc-longcat-2.5", 0.84),
+        ("codex-luna", 0.95),
+        ("codex-5.6-luna", 0.88),
+        ("ag-gemini-3.7-flash", 0.87),
+        ("ag-gemini-3.6-flash", 0.82),
+    ],
+    "structured_bulk": [
+        ("ollama-qwen-3b", 0.97),
+        ("oc-mimo-2.6-flash", 0.96),
+        ("copilot-free-auto", 0.92),
+        ("oc-space-bunny", 0.89),
+        ("oc-longcat-2.5", 0.87),
+        ("ag-gemini-3.8-flash", 0.86),
+        ("codex-luna", 0.95),
     ],
     "final_audit": [
-        ("ag-opus-4.6", 0.99),
-        ("codex-astra", 0.98),
-        ("ag-sonnet-4.6", 0.91),
-        ("ag-gemini-3.1-pro", 0.90),
+        ("ag-opus-4.6", 0.995),
+        ("codex-astra", 0.99),
+        ("ag-gemini-3.1-pro", 0.965),
+        ("ag-sonnet-4.6", 0.94),
+        ("ag-gemini-3.8-flash", 0.93),
+        ("ag-gpt-oss-120b", 0.90),
+    ],
+    "research_and_audit": [
+        ("ag-gemini-3.8-flash", 0.99),
+        ("ag-gemini-3.1-pro", 0.97),
+        ("ag-opus-4.6", 0.95),
+        ("ag-sonnet-4.6", 0.93),
+        ("ag-gpt-oss-120b", 0.90),
+        ("oc-mimo-2.6-flash", 0.88),
+        ("codex-astra", 0.985),
+    ],
+    "autonomous_orchestration": [
+        ("ag-gemini-3.8-flash", 0.99),
+        ("ag-opus-4.6", 0.97),
+        ("ag-sonnet-4.6", 0.95),
+        ("ag-gemini-3.1-pro", 0.94),
+        ("ag-gpt-oss-120b", 0.90),
+        ("oc-mimo-2.6-flash", 0.88),
+        ("codex-astra", 0.995),
+        ("codex-sol", 0.985),
     ],
     "offline_analysis": [
-        ("ollama-qwen-3b", 0.92),
-        ("ag-gemini-3.8-flash", 0.90),
-        ("oc-mimo-2.6-flash", 0.88),
-        ("copilot-free-auto", 0.875),
-        ("oc-longcat-2.5", 0.87),
-        ("ag-gpt-oss-120b", 0.86),
+        ("ollama-qwen-3b", 0.99),
+        ("oc-mimo-2.6-flash", 0.90),
+        ("ag-gpt-oss-120b", 0.88),
+        ("ag-gemini-3.8-flash", 0.86),
+        ("copilot-free-auto", 0.84),
+        ("oc-longcat-2.5", 0.82),
     ],
     "blocker_diagnosis": [
-        ("ag-gemini-3.8-flash", 0.94),
-        ("oc-space-bunny", 0.90),
-        ("copilot-free-auto", 0.89),
-        ("ollama-qwen-3b", 0.88),
-        ("oc-longcat-2.5", 0.86),
-        ("ag-gemini-3.1-pro", 0.84),
+        ("ag-gemini-3.8-flash", 0.98),
+        ("ag-gemini-3.1-pro", 0.95),
+        ("ag-gpt-oss-120b", 0.93),
+        ("oc-mimo-2.6-flash", 0.91),
+        ("copilot-free-auto", 0.88),
+        ("oc-space-bunny", 0.86),
+        ("ollama-qwen-3b", 0.84),
+        ("oc-longcat-2.5", 0.82),
     ],
 }
 
-VISUAL_ROLES = {"creative_direction", "concept_challenger", "visual_review", "visual_fix", "final_audit"}
-EDIT_ROLES = {"implementation", "visual_fix", "code_fix"}
+VISUAL_ROLES = {
+    "creative_direction", "concept_challenger", "visual_review",
+    "visual_fix", "final_audit"
+}
+EDIT_ROLES = {
+    "implementation", "frontend_implementation", "long_horizon_implementation",
+    "deep_refactor", "visual_fix", "code_fix"
+}
 ROLE_AGENTS = {
     "creative_direction": "web-art-director",
     "concept_challenger": "web-concept-challenger",
     "council_synthesis": "web-final-auditor",
     "implementation": "web-builder",
+    "frontend_implementation": "web-builder",
+    "long_horizon_implementation": "web-builder",
+    "deep_refactor": "web-builder",
     "visual_review": "web-visual-critic",
+    "independent_review": "web-final-auditor",
     "visual_fix": "web-builder",
     "code_fix": "web-builder",
     "final_audit": "web-final-auditor",
+}
+
+SPECIALIZATION_POLICY = {
+    "ag-sonnet-4.6": {
+        "primary": ["creative_direction", "frontend_implementation", "visual_fix", "code_fix"],
+        "secondary": ["independent_review", "council_synthesis"],
+        "avoid": ["structured_bulk", "offline_analysis"],
+        "rationale": "Design-aware coding, instruction following and focused production work.",
+    },
+    "ag-opus-4.6": {
+        "primary": ["council_synthesis", "deep_refactor", "visual_review", "final_audit", "independent_review"],
+        "secondary": ["autonomous_orchestration", "code_fix"],
+        "avoid": ["quick_qa", "structured_bulk"],
+        "rationale": "Deep reasoning, large-codebase refactors, multi-agent arbitration and final review.",
+    },
+    "ag-gemini-3.1-pro": {
+        "primary": ["concept_challenger", "research_and_audit", "independent_review"],
+        "secondary": ["creative_direction", "visual_review", "blocker_diagnosis"],
+        "avoid": ["structured_bulk"],
+        "rationale": "Complex multimodal reasoning and a strong independent challenge to the primary concept.",
+    },
+    "ag-gemini-3.8-flash": {
+        "primary": ["autonomous_orchestration", "long_horizon_implementation", "research_and_audit", "blocker_diagnosis", "quick_qa"],
+        "secondary": ["implementation", "frontend_implementation", "code_fix", "visual_fix"],
+        "avoid": [],
+        "rationale": "Long-horizon software engineering, autonomous tool use and resilient multi-step execution.",
+    },
+    "ag-gemini-3.7-flash": {
+        "primary": [],
+        "secondary": ["implementation", "quick_qa"],
+        "avoid": ["final_audit"],
+        "rationale": "Previous-generation fallback for coding and agentic workflows.",
+    },
+    "ag-gemini-3.6-flash": {
+        "primary": [],
+        "secondary": ["quick_qa"],
+        "avoid": ["deep_refactor", "final_audit"],
+        "rationale": "Balanced fallback for general agentic work.",
+    },
+    "ag-gpt-oss-120b": {
+        "primary": ["independent_review", "blocker_diagnosis"],
+        "secondary": ["concept_challenger", "research_and_audit", "code_fix"],
+        "avoid": ["visual_review", "visual_fix"],
+        "rationale": "Text-only structured reasoning, tool use and schema-constrained analysis.",
+    },
+    "oc-mimo-2.6-flash": {
+        "primary": ["structured_bulk", "quick_qa"],
+        "secondary": ["blocker_diagnosis", "independent_review", "research_and_audit"],
+        "avoid": ["visual_review", "visual_fix"],
+        "rationale": "High-frequency structured work, large context and coding-oriented text analysis.",
+    },
+    "oc-space-bunny": {
+        "primary": [],
+        "secondary": ["quick_qa", "blocker_diagnosis"],
+        "avoid": ["final_audit", "deep_refactor"],
+        "rationale": "Opaque free model; keep it as empirical low-stakes fallback rather than authority.",
+    },
+    "oc-longcat-2.5": {
+        "primary": [],
+        "secondary": ["structured_bulk", "quick_qa", "blocker_diagnosis"],
+        "avoid": ["final_audit"],
+        "rationale": "Free hosted fallback whose authority should be earned from local outcomes.",
+    },
+    "copilot-free-auto": {
+        "primary": [],
+        "secondary": ["quick_qa", "structured_bulk", "blocker_diagnosis"],
+        "avoid": ["final_audit"],
+        "rationale": "Availability-aware fallback for straightforward tasks; selected underlying model is opaque.",
+    },
+    "ollama-qwen-3b": {
+        "primary": ["offline_analysis", "structured_bulk"],
+        "secondary": ["quick_qa", "blocker_diagnosis"],
+        "avoid": ["deep_refactor", "final_audit", "visual_review"],
+        "rationale": "Private local triage, classification and simple code checks with zero external inference.",
+    },
+    "codex-astra": {
+        "primary": ["implementation", "frontend_implementation", "long_horizon_implementation", "deep_refactor", "final_audit"],
+        "secondary": ["code_fix", "research_and_audit", "autonomous_orchestration"],
+        "avoid": ["structured_bulk"],
+        "rationale": "Highest-capability end-to-end software and professional work when explicitly enabled.",
+    },
+    "codex-sol": {
+        "primary": ["implementation", "frontend_implementation", "long_horizon_implementation", "code_fix"],
+        "secondary": ["deep_refactor", "autonomous_orchestration"],
+        "avoid": ["structured_bulk"],
+        "rationale": "Demanding coding and agentic workflows with a stronger efficiency balance than Astra.",
+    },
+    "codex-luna": {
+        "primary": ["quick_qa", "structured_bulk"],
+        "secondary": ["blocker_diagnosis"],
+        "avoid": ["final_audit", "deep_refactor"],
+        "rationale": "Efficient focused and repeatable work when explicitly enabled.",
+    },
+}
+for _legacy in ("codex-5.6-sol", "codex-5.6-terra", "codex-5.6-luna"):
+    SPECIALIZATION_POLICY.setdefault(_legacy, {
+        "primary": [],
+        "secondary": ["implementation", "quick_qa"],
+        "avoid": ["final_audit"],
+        "rationale": "Compatibility fallback behind the current GPT-6 family.",
+    })
+
+WORKFLOW_SPECIALIZATION = {
+    "website_build": {
+        "brief_research": "research_and_audit",
+        "art_direction": "creative_direction",
+        "concept_challenge": "concept_challenger",
+        "design_arbitration": "council_synthesis",
+        "frontend_build": "frontend_implementation",
+        "runtime_correction": "code_fix",
+        "visual_correction": "visual_fix",
+        "visual_review": "visual_review",
+        "final_gate": "final_audit",
+    },
+    "callflow_improvement": {
+        "private_triage": "offline_analysis",
+        "issue_diagnosis": "blocker_diagnosis",
+        "ui_change": "frontend_implementation",
+        "core_change": "long_horizon_implementation",
+        "bulk_regression_triage": "structured_bulk",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
+    "leadfinder_improvement": {
+        "lead_research": "research_and_audit",
+        "bulk_normalization": "structured_bulk",
+        "ranking_diagnosis": "blocker_diagnosis",
+        "core_change": "long_horizon_implementation",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
+    "self_improvement": {
+        "local_triage": "offline_analysis",
+        "blocker_diagnosis": "blocker_diagnosis",
+        "plan_and_delegate": "autonomous_orchestration",
+        "bounded_change": "long_horizon_implementation",
+        "large_refactor": "deep_refactor",
+        "fast_validation": "quick_qa",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
 }
 
 
@@ -499,11 +755,24 @@ def provider_available(provider, model=None):
     return False
 
 
-def candidate_available(candidate, disabled_providers=None):
+def candidate_family(candidate):
+    return MODEL_FAMILY.get(candidate, CANDIDATES[candidate]["provider"])
+
+
+def candidate_available(
+    candidate,
+    disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     spec = CANDIDATES[candidate]
     disabled = set(disabled_providers or ())
+    excluded_family_set = set(excluded_families or ())
+    excluded_candidate_set = set(excluded_candidates or ())
     return (
-        cost_allowed(spec)
+        candidate not in excluded_candidate_set
+        and candidate_family(candidate) not in excluded_family_set
+        and cost_allowed(spec)
         and spec["provider"] not in disabled
         and _runtime_cooldown(candidate) is None
         and provider_available(spec["provider"], spec.get("model"))
@@ -520,7 +789,15 @@ def routing_score(role, candidate, prior):
     return round(score + exploration, 5), stats
 
 
-def rank_candidates(role, *, disabled_providers=None, require_visual=False, require_edit=False):
+def rank_candidates(
+    role,
+    *,
+    disabled_providers=None,
+    require_visual=False,
+    require_edit=False,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     if role not in ROLE_POLICY:
         raise ValueError("unknown_role")
     ranked = []
@@ -530,11 +807,17 @@ def rank_candidates(role, *, disabled_providers=None, require_visual=False, requ
             continue
         if require_edit and not spec.get("editing"):
             continue
-        if not candidate_available(candidate, disabled_providers=disabled_providers):
+        if not candidate_available(
+            candidate,
+            disabled_providers=disabled_providers,
+            excluded_families=excluded_families,
+            excluded_candidates=excluded_candidates,
+        ):
             continue
         score, stats = routing_score(role, candidate, prior)
         ranked.append({
             "candidate": candidate,
+            "family": candidate_family(candidate),
             "routingScore": score,
             "prior": prior,
             "stats": stats,
@@ -619,6 +902,8 @@ def run_role_structured(
     timeout=240,
     images=None,
     disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
     require_premium=False,
 ):
     require_visual = bool(images) or role in VISUAL_ROLES
@@ -627,6 +912,8 @@ def run_role_structured(
         role,
         disabled_providers=disabled_providers,
         require_visual=require_visual,
+        excluded_families=excluded_families,
+        excluded_candidates=excluded_candidates,
     ):
         if require_premium and item["provider"] == "ollama":
             continue
@@ -686,12 +973,23 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
     }
 
 
-def run_edit_role(role, prompt, *, cwd, timeout=600, disabled_providers=None):
+def run_edit_role(
+    role,
+    prompt,
+    *,
+    cwd,
+    timeout=600,
+    disabled_providers=None,
+    excluded_families=None,
+    excluded_candidates=None,
+):
     errors = []
     for item in rank_candidates(
         role,
         disabled_providers=disabled_providers,
         require_edit=True,
+        excluded_families=excluded_families,
+        excluded_candidates=excluded_candidates,
     ):
         candidate = item["candidate"]
         cooldown_error = _cooldown_error(candidate)
@@ -763,16 +1061,27 @@ def _first_available(preferred, role, disabled_providers=None):
 
 def _run_preferred_structured(
     preferred, role, prompt, schema, *, cwd, timeout, disabled_providers=None,
-    agent_override=None, exclude_candidates=None,
+    agent_override=None, exclude_candidates=None, exclude_families=None,
 ):
     excluded=set(exclude_candidates or ())
+    excluded_family_set=set(exclude_families or ())
     ordered=[]
     for candidate in preferred:
         if candidate in excluded or candidate in ordered:
             continue
-        if candidate_available(candidate, disabled_providers=disabled_providers):
+        if candidate_available(
+            candidate,
+            disabled_providers=disabled_providers,
+            excluded_families=excluded_family_set,
+            excluded_candidates=excluded,
+        ):
             ordered.append(candidate)
-    for item in rank_candidates(role, disabled_providers=disabled_providers):
+    for item in rank_candidates(
+        role,
+        disabled_providers=disabled_providers,
+        excluded_families=excluded_family_set,
+        excluded_candidates=excluded,
+    ):
         candidate=item["candidate"]
         if candidate not in excluded and candidate not in ordered:
             ordered.append(candidate)
@@ -831,6 +1140,7 @@ EVIDENCE:
         cwd=cwd, timeout=timeout, disabled_providers=disabled_providers,
         agent_override="web-concept-challenger",
         exclude_candidates={primary["candidate"]},
+        exclude_families={candidate_family(primary["candidate"])},
     )
 
     synthesis_prompt = """You are the chief design director arbitrating two independent website directions.
@@ -887,7 +1197,15 @@ def policy_snapshot():
             "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
             "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,
         },
-        "candidates": CANDIDATES,
+        "candidates": {
+            candidate: {
+                **spec,
+                "family": candidate_family(candidate),
+                "specialization": SPECIALIZATION_POLICY.get(candidate),
+            }
+            for candidate, spec in CANDIDATES.items()
+        },
+        "workflows": WORKFLOW_SPECIALIZATION,
         "roles": {
             role: [
                 {
