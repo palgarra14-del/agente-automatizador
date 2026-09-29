@@ -129,6 +129,53 @@ except m.ProviderUnavailable as e:
   assert.match(result.error,/not_free/);
 });
 
+test('OpenCode persistent service credentials stay out of command arguments', () => {
+  const result=python(`
+import importlib.util,json,tempfile,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.opencode_ready=lambda *a,**k: True
+m._opencode_service=lambda: ("http://127.0.0.1:49374","test-secret")
+captured={}
+def fake_run(args,**kwargs):
+    captured["args"]=args
+    captured["envPassword"]=(kwargs.get("env") or {}).get("OPENCODE_PASSWORD")
+    return subprocess.CompletedProcess(args,0,stdout='{"type":"text","text":"{\\\"ok\\\":true}"}',stderr='')
+m._run=fake_run
+value=m.opencode_structured(
+  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  cwd=tempfile.mkdtemp(),model="opencode/ling-3.0-flash-fin-free"
+)
+print(json.dumps({"value":value,"args":captured["args"],"passwordPassed":captured["envPassword"]=="test-secret"}))
+`);
+  assert.equal(result.value.ok,true);
+  assert.ok(result.args.includes('--server'));
+  assert.ok(result.args.includes('http://127.0.0.1:49374'));
+  assert.ok(!result.args.includes('--standalone'));
+  assert.ok(!result.args.includes('test-secret'));
+  assert.equal(result.passwordPassed,true);
+});
+
+test('OpenCode service loader reads local password and URL without printing the secret', () => {
+  const result=python(`
+import importlib.util,json,tempfile,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=Path(tempfile.mkdtemp())
+cfg=root/"service.json"
+cfg.write_text('{"password":"test-secret"}')
+m.OPENCODE_SERVICE_JSON=cfg
+def fake_run(args,**kwargs):
+    return subprocess.CompletedProcess(args,0,stdout="http://127.0.0.1:49374\\n",stderr="")
+m._run=fake_run
+url,password=m._opencode_service()
+print(json.dumps({"url":url,"passwordLoaded":password=="test-secret"}))
+`);
+  assert.equal(result.url,'http://127.0.0.1:49374');
+  assert.equal(result.passwordLoaded,true);
+});
+
 test('Copilot Free provider is opt-in and disabled by default', () => {
   const result=python(`
 import importlib.util,json
