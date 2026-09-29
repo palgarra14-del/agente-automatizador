@@ -52,12 +52,14 @@ print(json.dumps({
   "codex":m.candidate_available("codex-astra"),
   "antigravity":m.candidate_available("ag-sonnet-4.6"),
   "opencode":m.candidate_available("oc-ling-3-flash"),
+  "copilot":m.candidate_available("copilot-free-auto"),
   "implementation":m.rank_candidates("implementation")[0]["candidate"]
 }))
 `);
   assert.equal(result.codex, false);
   assert.equal(result.antigravity, true);
   assert.equal(result.opencode, true);
+  assert.equal(result.copilot, true);
   assert.equal(result.implementation, 'ag-sonnet-4.6');
 });
 
