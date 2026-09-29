@@ -175,8 +175,9 @@ def opencode_model_is_free(model):
 
 def _opencode_models_snapshot():
     now=time.monotonic()
-    age=now-_OPENCODE_MODELS_CACHE["checkedAt"]
-    if age < OPENCODE_MODELS_TTL:
+    checked_at=float(_OPENCODE_MODELS_CACHE["checkedAt"])
+    age=now-checked_at
+    if checked_at > 0.0 and age < OPENCODE_MODELS_TTL:
         return _OPENCODE_MODELS_CACHE["ready"], set(_OPENCODE_MODELS_CACHE["models"])
     if not Path(OPENCODE).is_file():
         _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
