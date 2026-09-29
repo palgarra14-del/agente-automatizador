@@ -11,6 +11,28 @@ function python(source) {
   return JSON.parse(run.stdout);
 }
 
+test('OpenCode model cache probes on first call even just after boot', () => {
+  const result = python(`
+import importlib.util,json,subprocess
+spec=importlib.util.spec_from_file_location("r",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.OPENCODE_FREE_ENABLED=True
+m.OPENCODE="/bin/true"
+m.OPENCODE_MODELS_TTL=60
+m.time.monotonic=lambda: 10.0
+m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+calls=[]
+def fake_run(args,cwd=None,timeout=30,input_text=None,env=None):
+    calls.append(args)
+    return subprocess.CompletedProcess(args,0,stdout="opencode/space-bunny-free\\n",stderr="")
+m._run=fake_run
+ready=m.opencode_ready("opencode/space-bunny-free")
+print(json.dumps({"ready":ready,"calls":len(calls)}))
+`);
+  assert.equal(result.ready, true);
+  assert.equal(result.calls, 1);
+});
+
 test('OpenCode model discovery is cached across candidate checks', () => {
   const result = python(`
 import importlib.util,json,subprocess
