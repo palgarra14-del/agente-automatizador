@@ -210,8 +210,8 @@ test('website planning uses the creative lead rather than the generic research r
 
 test('CLI wires the free multimodel executors into local and durable workflow engines', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
-  assert.match(cli, /new MultiModelReadOnlySkillExecutor\(\)/);
-  assert.match(cli, /new MultiModelCodingWorker\(\)/);
+  assert.match(cli, /new MultiModelReadOnlySkillExecutor\(\{ allowSessionFallback: false \}\)/);
+  assert.match(cli, /new MultiModelCodingWorker\(\{ allowSessionFallback: false \}\)/);
   assert.match(cli, /new WorkflowEngine\(\{ store, projects, \.\.\.workflowModelExecutors \}\)/);
   assert.match(cli, /new DurableCloudWorkflowEngine\(\{ store: activeStore, projects, \.\.\.workflowModelExecutors \}\)/);
 });
