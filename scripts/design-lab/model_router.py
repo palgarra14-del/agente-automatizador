@@ -8,6 +8,7 @@ OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 OPENCODE=os.environ.get("OPENCODE_BIN","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
+OPENCODE_SERVICE_JSON=Path(os.environ.get("OPENCODE_SERVICE_JSON",str(Path.home()/".config/opencode/service.json"))).expanduser()
 COPILOT=os.environ.get("COPILOT_BIN","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
@@ -18,9 +19,9 @@ _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
 class ProviderUnavailable(RuntimeError):
     pass
 
-def _run(args, cwd=None, timeout=30, input_text=None):
+def _run(args, cwd=None, timeout=30, input_text=None, env=None):
     try:
-        return subprocess.run(args,cwd=cwd,text=True,input=input_text,capture_output=True,timeout=timeout,check=False)
+        return subprocess.run(args,cwd=cwd,text=True,input=input_text,capture_output=True,timeout=timeout,check=False,env=env)
     except (OSError,subprocess.TimeoutExpired) as exc:
         raise ProviderUnavailable(str(exc)) from exc
 
@@ -184,6 +185,25 @@ def opencode_ready(model=None):
         line.strip() for line in proc.stdout.splitlines() if line.strip()
     }
 
+def _opencode_service():
+    try:
+        proc=_run([OPENCODE,"service","status"],timeout=8)
+    except ProviderUnavailable as exc:
+        raise ProviderUnavailable("opencode_service_status_failed:"+str(exc)) from exc
+    if proc.returncode!=0:
+        raise ProviderUnavailable("opencode_service_unavailable:"+((proc.stderr or proc.stdout)[-500:]))
+    url=next((line.strip() for line in proc.stdout.splitlines() if line.strip().startswith(("http://","https://"))),None)
+    if not url:
+        raise ProviderUnavailable("opencode_service_url_missing")
+    try:
+        payload=json.loads(OPENCODE_SERVICE_JSON.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError) as exc:
+        raise ProviderUnavailable("opencode_service_credentials_unavailable") from exc
+    password=payload.get("password")
+    if not isinstance(password,str) or not password:
+        raise ProviderUnavailable("opencode_service_password_missing")
+    return url,password
+
 def _opencode_text(stdout):
     texts=[]
     for line in str(stdout or "").splitlines():
@@ -210,10 +230,13 @@ def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
         "Return ONLY valid JSON matching this JSON schema. "
         "Do not use markdown fences. SCHEMA="+schema_hint+"\nTASK:\n"+str(prompt)
     )
+    server_url,password=_opencode_service()
+    env=os.environ.copy()
+    env["OPENCODE_PASSWORD"]=password
     proc=_run([
-        OPENCODE,"run","--standalone","--auto",
+        OPENCODE,"run","--server",server_url,"--auto",
         "--model",str(model),"--format","json",task
-    ],cwd=workdir,timeout=timeout)
+    ],cwd=workdir,timeout=timeout,env=env)
     if proc.returncode!=0:
         raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(_opencode_text(proc.stdout),schema)
