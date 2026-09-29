@@ -4,14 +4,12 @@ const PROFILE = 'autonomous-maintenance';
 const SELF_STATE_KEY = 'autopilotSelfImprovement';
 const PROJECT_STATE_KEY = 'autopilotProjectImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
-const SELF_COOLDOWN_MS = 30 * 60 * 1000;
-const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
+const SELF_COOLDOWN_MS = 0;
+const PROJECT_COOLDOWN_MS = 0;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
-const STATE_KEY = SELF_STATE_KEY;
-const COOLDOWN_MS = SELF_COOLDOWN_MS;
 const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
@@ -281,7 +279,7 @@ export class AutonomousProjectImprovement {
   }
 
   revisionAdvanceBypassesDailyCap(state, starts = this.recentStarts(state)) {
-    if (starts.length < MAX_STARTS_PER_24H) return false;
+    if (starts.length < this.maxStartsPer24h) return false;
     const latest = state.history.at(-1);
     const lastStartAt = Date.parse(starts.at(-1) ?? '');
     const completedAt = Date.parse(latest?.completedAt ?? '');
