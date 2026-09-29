@@ -179,7 +179,7 @@ test('cloud worker fuses scheduled repair with admission recovery and keeps clou
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
   assert.match(prepare, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(prepare, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ env\.AGENT_CROSS_REPO_READY \}\}/);
+  assert.match(prepare, /\$\{AGENT_CROSS_REPO_READY:-false\}/);
   assert.match(prepare, /inbox cloud-prepare --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(prepare, /hasExecutionWork === true/);
   assert.match(prepare, /AGENT_CLOUD_LANE" != "self[\s\S]*cross_repo_credential_missing/);
