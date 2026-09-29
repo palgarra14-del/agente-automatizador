@@ -164,6 +164,31 @@ test('mixed mail drops practical-group dates unless that subgroup is known to be
   assert.deepEqual(own.dates, ['2026-10-07', '2026-12-15']);
 });
 
+test('mixed practical-group sentences fail closed regardless of group order', () => {
+  for (const body of [
+    'El grupo B-P2 entrega el 1-10 y el grupo B-P3 entrega el 2-10.',
+    'El grupo B-P3 entrega el 2-10 y el grupo B-P2 entrega el 1-10.',
+    'El grupo P2 entrega el 1-10 y el subgrupo P3 entrega el 2-10.'
+  ]) {
+    const signal = alertToAcademicSignal({
+      id: 'uv-mail:mixed-groups',
+      subject: 'Entregas de prácticas',
+      body: body + ' El grupo B-P2 entrega el 3-10.',
+      course: { theoryGroup: 'B-T', practicalGroups: ['B-P2'] }
+    }, { capturedAt: '2026-09-27T16:00:00Z' });
+    assert.deepEqual(signal.dates, ['2026-10-03'], body);
+    assert.deepEqual(buildAcademicReminders({ today: '2026-10-01', signals: [signal] }), [], body);
+    assert.equal(buildAcademicReminders({ today: '2026-10-02', signals: [signal] }).length, 1, body);
+  }
+  const own = alertToAcademicSignal({
+    id: 'uv-mail:own-groups',
+    subject: 'Entregas de prácticas',
+    body: 'El grupo B-P2 entrega el 1-10 y el subgrupo P2 entrega el 2-10.',
+    course: { theoryGroup: 'B-T', practicalGroups: ['B-P2'] }
+  }, { capturedAt: '2026-09-27T16:00:00Z' });
+  assert.deepEqual(own.dates, ['2026-10-01', '2026-10-02']);
+});
+
 test('merge keeps future obligations while expiring stale undated mail', () => {
   const state = mergeAcademicSignals({
     version: 4,
