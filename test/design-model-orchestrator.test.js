@@ -21,8 +21,9 @@ base=str(Path(${JSON.stringify(orchestrator)}).parent)
 sys.path.insert(0,base)
 spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.provider_available=lambda provider: True
+m.provider_available=lambda provider,model=None: True
 m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="allow_all"
 print(json.dumps({
   "creative":m.rank_candidates("creative_direction")[0]["candidate"],
   "implementation":m.rank_candidates("implementation")[0]["candidate"],
@@ -36,6 +37,30 @@ print(json.dumps({
   assert.equal(result.quick, 'ag-gemini-3.8-flash');
 });
 
+test('free-only cost policy blocks subscription candidates even when providers are available', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="free_only"
+print(json.dumps({
+  "codex":m.candidate_available("codex-astra"),
+  "antigravity":m.candidate_available("ag-sonnet-4.6"),
+  "opencode":m.candidate_available("oc-ling-3-flash"),
+  "implementation":m.rank_candidates("implementation")[0]["candidate"]
+}))
+`);
+  assert.equal(result.codex, false);
+  assert.equal(result.antigravity, true);
+  assert.equal(result.opencode, true);
+  assert.equal(result.implementation, 'ag-sonnet-4.6');
+});
+
 test('empirical outcomes can overturn initial model priors', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile
@@ -44,7 +69,7 @@ base=str(Path(${JSON.stringify(orchestrator)}).parent)
 sys.path.insert(0,base)
 spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.provider_available=lambda provider: True
+m.provider_available=lambda provider,model=None: True
 m.STATE=Path(tempfile.mkdtemp())
 m.PERFORMANCE=m.STATE/"perf.jsonl"
 before=m.rank_candidates("creative_direction")[0]["candidate"]

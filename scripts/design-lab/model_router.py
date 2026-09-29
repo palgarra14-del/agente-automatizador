@@ -6,6 +6,8 @@ AGY=os.environ.get("ANTIGRAVITY_CLI","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
+OPENCODE=os.environ.get("OPENCODE_BIN","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
+OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
 _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
 
@@ -155,6 +157,63 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
             try: Path(schema_file).unlink()
             except OSError: pass
 
+def opencode_model_is_free(model):
+    value=str(model or "")
+    return value.startswith("ollama/") or (
+        value.startswith("opencode/") and value.endswith("-free")
+    )
+
+def opencode_ready(model=None):
+    if not OPENCODE_FREE_ENABLED:
+        return False
+    if not Path(OPENCODE).is_file():
+        return False
+    try:
+        proc=_run([OPENCODE,"models"],timeout=20)
+    except ProviderUnavailable:
+        return False
+    if proc.returncode!=0:
+        return False
+    if model is None:
+        return True
+    return opencode_model_is_free(model) and str(model) in {
+        line.strip() for line in proc.stdout.splitlines() if line.strip()
+    }
+
+def _opencode_text(stdout):
+    texts=[]
+    for line in str(stdout or "").splitlines():
+        try:
+            event=json.loads(line)
+        except Exception:
+            continue
+        for value in _walk_dicts(event):
+            for key in ("text","content","output","response"):
+                item=value.get(key)
+                if isinstance(item,str) and item.strip():
+                    texts.append(item)
+    return "\n".join(texts) or str(stdout or "")
+
+def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
+    if not model or not opencode_model_is_free(model):
+        raise ProviderUnavailable("opencode_model_not_free")
+    if not opencode_ready(model):
+        raise ProviderUnavailable("opencode_model_unavailable")
+    workdir=Path(cwd or os.getcwd()).resolve()
+    workdir.mkdir(parents=True,exist_ok=True)
+    schema_hint=json.dumps(schema,ensure_ascii=False,separators=(",",":"))
+    task=(
+        "Return ONLY valid JSON matching this JSON schema. "
+        "Do not use markdown fences. SCHEMA="+schema_hint+"\nTASK:\n"+str(prompt)
+    )
+    proc=_run([
+        OPENCODE,"run","--standalone","--auto",
+        "--model",str(model),"--format","json",task
+    ],cwd=workdir,timeout=timeout)
+    if proc.returncode!=0:
+        raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
+    return extract_structured(_opencode_text(proc.stdout),schema)
+
 def codex_ready():
     return Path(CODEX).is_file()
 
@@ -269,6 +328,8 @@ def generate_structured(prompt,schema,cwd=None,providers=None,timeout=180):
                 value=antigravity_structured(prompt,schema,cwd=cwd,timeout=timeout)
             elif provider=="ollama":
                 value=ollama_structured(prompt,schema,cwd=cwd,timeout=timeout)
+            elif provider=="opencode":
+                value=opencode_structured(prompt,schema,cwd=cwd,timeout=timeout,model=os.environ.get("OPENCODE_FREE_MODEL","opencode/ling-3.0-flash-fin-free"))
             else:
                 errors.append(f"{provider}:unknown_provider")
                 continue
