@@ -537,6 +537,47 @@ for _legacy in ("codex-5.6-sol", "codex-5.6-terra", "codex-5.6-luna"):
         "rationale": "Compatibility fallback behind the current GPT-6 family.",
     })
 
+WORKFLOW_SPECIALIZATION = {
+    "website_build": {
+        "brief_research": "research_and_audit",
+        "art_direction": "creative_direction",
+        "concept_challenge": "concept_challenger",
+        "design_arbitration": "council_synthesis",
+        "frontend_build": "frontend_implementation",
+        "runtime_correction": "code_fix",
+        "visual_correction": "visual_fix",
+        "visual_review": "visual_review",
+        "final_gate": "final_audit",
+    },
+    "callflow_improvement": {
+        "private_triage": "offline_analysis",
+        "issue_diagnosis": "blocker_diagnosis",
+        "ui_change": "frontend_implementation",
+        "core_change": "long_horizon_implementation",
+        "bulk_regression_triage": "structured_bulk",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
+    "leadfinder_improvement": {
+        "lead_research": "research_and_audit",
+        "bulk_normalization": "structured_bulk",
+        "ranking_diagnosis": "blocker_diagnosis",
+        "core_change": "long_horizon_implementation",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
+    "self_improvement": {
+        "local_triage": "offline_analysis",
+        "blocker_diagnosis": "blocker_diagnosis",
+        "plan_and_delegate": "autonomous_orchestration",
+        "bounded_change": "long_horizon_implementation",
+        "large_refactor": "deep_refactor",
+        "fast_validation": "quick_qa",
+        "independent_review": "independent_review",
+        "final_gate": "final_audit",
+    },
+}
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -1164,6 +1205,7 @@ def policy_snapshot():
             }
             for candidate, spec in CANDIDATES.items()
         },
+        "workflows": WORKFLOW_SPECIALIZATION,
         "roles": {
             role: [
                 {
