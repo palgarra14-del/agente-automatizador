@@ -195,6 +195,23 @@ test('conflicting assignment statuses suppress reminders regardless of record or
   }
 });
 
+test('conflicting assignment deadlines suppress reminders regardless of record order', () => {
+  const open = { id: 'conflicting', status: 'open', dueAt: '2026-10-01T09:30:00Z' };
+  const other = { ...open, id: 'other' };
+  for (const dueAt of ['2026-10-02T09:30:00Z', '2026-10-01T10:30:00Z', undefined, null, '', 'invalid', '2026-10-01T09:30:00']) {
+    const conflicting = { ...open, dueAt };
+    for (const records of [[open, conflicting], [conflicting, open]]) {
+      const reminders = buildAcademicReminders({
+        today: '2026-09-30',
+        assignments: [...records, other, { ...other, dueAt: '2026-10-01T09:30:00.000Z' }]
+      });
+      assert.deepEqual(reminders.map((item) => item.id), [
+        'reminder:assignment:other:2026-10-01:tomorrow'
+      ], `conflicting deadline: ${String(dueAt)}`);
+    }
+  }
+});
+
 test('valid assignment deadlines retain leap-day and Madrid midnight timing', () => {
   for (const [today, dueAt, expectedDate] of [
     ['2028-02-28', '2028-02-29T09:30:00Z', '2028-02-29'],
