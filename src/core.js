@@ -2333,6 +2333,11 @@ export class WorkflowEngine {
       ...(retryFeedback ? { retryFeedback } : {}),
       ...(repositoryContext ? { repositoryContext } : {}),
       ...(deterministicInspection ? { deterministicInspection } : {}),
+      ...(runningStep.skill === 'code.review' && reviewedImplementation?.evidence?.workerEvidence?.modelRouting?.family ? {
+        modelRouting: {
+          excludedFamilies: [reviewedImplementation.evidence.workerEvidence.modelRouting.family]
+        }
+      } : {}),
       ...(runningStep.skill === 'website.plan' ? {
         businessBrief: runningPlan.input.businessBrief,
         businessBriefFingerprint: runningPlan.inputFingerprint,
@@ -2417,6 +2422,7 @@ export class WorkflowEngine {
         codexThreadId: execution.codexThreadId ?? null,
         authMode: execution.authMode ?? (execution.executionMode === 'deterministic' ? 'deterministic' : null),
         paidApiUsed: Boolean(execution.paidApiUsed),
+        modelRouting: execution.modelRouting ? safeJson(execution.modelRouting) : null,
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         workspaceAfterFingerprint: after?.changeSet?.changeSetFingerprint ?? null,
         protectedIgnoredBeforeFingerprint: before.protectedIgnored.fingerprint,
@@ -2630,6 +2636,7 @@ export class WorkflowEngine {
     const context = this.completedContext(runningPlan);
     const worker = await this.codingWorker.execute({
       objective: runningPlan.goal,
+      projectId: project.id,
       workflow: { id: runningPlan.id, profile: runningPlan.profile, stepId: next.id },
       scope: runningPlan.scope,
       inspectionEvidence: context['inspect-project'] ?? null,
@@ -2697,6 +2704,7 @@ export class WorkflowEngine {
           authMode: worker.authMode ?? null,
           paidApiUsed: Boolean(worker.paidApiUsed),
           timedOut: Boolean(worker.timedOut),
+          modelRouting: worker.modelRouting ? safeJson(worker.modelRouting) : null,
           output: clip(worker.output, 1_000)
         },
         changeSet: changeSet ? safeJson(changeSet) : null,
@@ -4504,6 +4512,117 @@ function workerEnvironment(environment = process.env) {
   return Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]]));
 }
 
+function multiModelGatewayEnvironment(environment = process.env) {
+  const allowed = [
+    'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME',
+    'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
+    'OLLAMA_URL', 'OLLAMA_MODEL',
+    'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
+    'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
+    'MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS', 'MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS'
+  ];
+  return {
+    ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
+    MODEL_COST_POLICY: 'free_only',
+    PAID_MODELS_EXPLICITLY_ENABLED: '0',
+    OPENCODE_FREE_ENABLED: '1',
+    COPILOT_FREE_ENABLED: '1',
+    CODEX_API_KEY: '',
+    OPENAI_API_KEY: ''
+  };
+}
+
+function multiModelRoleForTask(task = {}) {
+  if (task?.workflow?.profile === 'website-build' || task?.projectId === 'website-pilot') return 'frontend_implementation';
+  return 'long_horizon_implementation';
+}
+
+function multiModelRoleForReadOnlySkill(skill) {
+  if (skill === 'code.review') return 'independent_review';
+  if (skill === 'website.plan') return 'creative_direction';
+  if (skill === 'code.inspect') return 'research_and_audit';
+  return null;
+}
+
+function multiModelSchemaForContract(contract = {}) {
+  const outputs = Array.isArray(contract.outputs) ? contract.outputs : [];
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [...outputs],
+    properties: Object.fromEntries(outputs.map((name) => [name, { type: 'object' }]))
+  };
+}
+
+export class MultiModelGatewayClient {
+  constructor({
+    processRunner = runProcess,
+    pythonBinary = 'python3',
+    gatewayPath = resolve('scripts/model-gateway.py'),
+    environment = process.env
+  } = {}) {
+    Object.assign(this, { processRunner, pythonBinary, gatewayPath: resolve(gatewayPath), environment });
+  }
+
+  async request(payload, { workspace, timeoutMs }) {
+    const timeoutSeconds = Math.max(10, Math.min(900, Math.floor(timeoutMs / 1000)));
+    const request = {
+      ...payload,
+      timeoutSeconds
+    };
+    const run = await this.processRunner(this.pythonBinary, [this.gatewayPath], {
+      cwd: workspace,
+      env: multiModelGatewayEnvironment(this.environment),
+      restrictEnvironment: true,
+      timeoutMs: timeoutMs + 20_000,
+      outputLimit: 64 * 1024,
+      input: JSON.stringify(request)
+    });
+    let parsed = null;
+    try { parsed = JSON.parse(String(run.stdout ?? '').trim()); } catch { /* handled below */ }
+    if (!run.ok || parsed?.ok !== true) {
+      const detail = parsed?.error || run.stderr || run.stdout || 'multi_model_gateway_failed';
+      throw new Error(clip(detail, 1_600));
+    }
+    if (parsed.candidate && parsed.provider && parsed.model) {
+      return {
+        ...parsed,
+        modelRouting: {
+          mode: 'free-multimodel',
+          candidate: parsed.candidate,
+          family: parsed.family ?? null,
+          provider: parsed.provider,
+          model: parsed.model,
+          routingScore: parsed.routingScore ?? null,
+          fallbackErrors: Array.isArray(parsed.fallbackErrors) ? parsed.fallbackErrors.slice(-8) : []
+        }
+      };
+    }
+    throw new Error('multi_model_gateway_result_invalid');
+  }
+
+  async structured({ role, prompt, schema, excludedFamilies = [], excludedCandidates = [] }, options) {
+    return this.request({
+      action: 'structured',
+      role,
+      prompt,
+      schema,
+      excludedFamilies,
+      excludedCandidates
+    }, options);
+  }
+
+  async edit({ role, prompt, excludedFamilies = [], excludedCandidates = [] }, options) {
+    return this.request({
+      action: 'edit',
+      role,
+      prompt,
+      excludedFamilies,
+      excludedCandidates
+    }, options);
+  }
+}
+
 export function codexApiKeyFromEnvironment(environment = {}) {
   const value = environment.CODEX_API_KEY || environment.OPENAI_API_KEY || null;
   if (value === null) return null;
@@ -5082,9 +5201,15 @@ export function codexTurnFailureDiagnostics(items = []) {
 }
 
 export class CodexSdkWorker extends CodingWorker {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
+  constructor({
+    CodexClient = Codex,
+    environment = workerEnvironment,
+    codexHomeFactory = prepareIsolatedCodexHome,
+    platform = process.platform,
+    controlSurface = assertWorkerProjectControlSurface
+  } = {}) {
     super();
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform });
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform, controlSurface });
   }
 
   async execute(task, { workspace, timeoutMs }) {
@@ -5098,7 +5223,7 @@ export class CodexSdkWorker extends CodingWorker {
     let isolatedHome = null;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      await assertWorkerProjectControlSurface(workspace);
+      await this.controlSurface(workspace);
       isolatedHome = await this.codexHomeFactory(sourceEnvironment);
       const execution = await runCostAwareCodexTurn({
         CodexClient: this.CodexClient,
@@ -5141,6 +5266,70 @@ export class CodexSdkWorker extends CodingWorker {
     } finally {
       clearTimeout(timer);
       await isolatedHome?.cleanup();
+    }
+  }
+}
+
+
+export class MultiModelCodingWorker extends CodingWorker {
+  constructor({
+    gateway = new MultiModelGatewayClient(),
+    fallback = new CodexSdkWorker(),
+    allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
+    controlSurface = assertWorkerProjectControlSurface
+  } = {}) {
+    super();
+    Object.assign(this, { gateway, fallback, allowSessionFallback, controlSurface });
+  }
+
+  async execute(task, { workspace, timeoutMs }) {
+    const role = multiModelRoleForTask(task);
+    try {
+      await this.controlSurface(workspace);
+      const routed = await this.gateway.edit({
+        role,
+        prompt: buildWorkerPrompt(task)
+      }, { workspace, timeoutMs });
+      const output = JSON.stringify(routed.result ?? {});
+      return {
+        status: 'completed',
+        summary: `Free multi-model gateway completed the coding task via ${routed.modelRouting.candidate}`,
+        codexThreadId: null,
+        usage: null,
+        authMode: `free-multimodel:${routed.modelRouting.provider}`,
+        paidApiUsed: false,
+        timedOut: false,
+        diagnostics: [],
+        modelRouting: routed.modelRouting,
+        output: clip(output),
+        outputBytes: Buffer.byteLength(output)
+      };
+    } catch (error) {
+      if (!this.allowSessionFallback) {
+        const output = clip(error.message, 1_600);
+        return {
+          status: 'failed',
+          summary: 'Free multi-model gateway could not complete the coding task',
+          timedOut: /timeout/i.test(output),
+          authMode: 'free-multimodel',
+          paidApiUsed: false,
+          modelRouting: { mode: 'free-multimodel', error: output },
+          output,
+          outputBytes: Buffer.byteLength(output)
+        };
+      }
+      const fallback = await this.fallback.execute(task, { workspace, timeoutMs });
+      return {
+        ...fallback,
+        modelRouting: {
+          mode: 'session-fallback',
+          candidate: 'codex-session',
+          family: 'openai',
+          provider: 'codex',
+          model: null,
+          gatewayError: clip(error.message, 1_000)
+        }
+      };
     }
   }
 }
@@ -5684,6 +5873,81 @@ export class CodexReadOnlySkillExecutor {
     } finally {
       if (timer) clearTimeout(timer);
       await isolatedHome?.cleanup();
+    }
+  }
+}
+
+
+export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor {
+  constructor({
+    gateway = new MultiModelGatewayClient(),
+    allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
+    controlSurface = assertWorkerProjectControlSurface,
+    ...options
+  } = {}) {
+    super(options);
+    this.gateway = gateway;
+    this.allowSessionFallback = allowSessionFallback;
+    this.controlSurface = controlSurface;
+  }
+
+  async execute(request, { workspace, timeoutMs }) {
+    if (request.skill === 'code.diagnose' || (request.skill === 'code.inspect' && request.context?.deterministicInspection)) {
+      return super.execute(request, { workspace, timeoutMs });
+    }
+    const role = multiModelRoleForReadOnlySkill(request.skill);
+    if (!role) return super.execute(request, { workspace, timeoutMs });
+    try {
+      await this.controlSurface(workspace);
+      const routed = await this.gateway.structured({
+        role,
+        prompt: buildReadOnlySkillPrompt(request),
+        schema: multiModelSchemaForContract(request.contract),
+        excludedFamilies: request.context?.modelRouting?.excludedFamilies ?? []
+      }, { workspace, timeoutMs });
+      const output = JSON.stringify(routed.value ?? {});
+      if (Buffer.byteLength(output) > this.maxOutputBytes) throw new Error('skill_output_too_large');
+      return {
+        status: 'completed',
+        ok: true,
+        codexThreadId: null,
+        usage: null,
+        authMode: `free-multimodel:${routed.modelRouting.provider}`,
+        paidApiUsed: false,
+        outputBytes: Buffer.byteLength(output),
+        result: routed.value,
+        executionMode: 'free-multimodel',
+        modelRouting: routed.modelRouting
+      };
+    } catch (error) {
+      if (this.allowSessionFallback) {
+        const fallback = await super.execute(request, { workspace, timeoutMs });
+        return {
+          ...fallback,
+          modelRouting: {
+            mode: 'session-fallback',
+            candidate: 'codex-session',
+            family: 'openai',
+            provider: 'codex',
+            model: null,
+            gatewayError: clip(error.message, 1_000)
+          }
+        };
+      }
+      return {
+        status: 'failed',
+        ok: false,
+        timedOut: /timeout/i.test(String(error.message ?? '')),
+        authMode: 'free-multimodel',
+        paidApiUsed: false,
+        outputBytes: 0,
+        error: clip(error.message, 1_000),
+        executionMode: 'free-multimodel',
+        modelRouting: {
+          mode: 'free-multimodel',
+          error: clip(error.message, 1_000)
+        }
+      };
     }
   }
 }
