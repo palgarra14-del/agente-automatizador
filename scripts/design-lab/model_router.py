@@ -127,7 +127,9 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
           "--sandbox"
         ]
         if mode: cmd += ["--mode",str(mode)]
-        if effort: cmd += ["--effort",str(effort)]
+        # Explicit Antigravity model ids already encode their reasoning tier
+        # (for example Gemini "...-high") or reject --effort entirely (Claude).
+        if effort and not model: cmd += ["--effort",str(effort)]
         if model: cmd += ["--model",str(model)]
         if agent: cmd += ["--agent",str(agent)]
         proc=_run(cmd,cwd=workdir,timeout=timeout+15)
@@ -190,7 +192,7 @@ def antigravity_edit(prompt,cwd,timeout=600,model=None,agent=None,effort="medium
       "--print-timeout",f"{int(timeout)}s",
       "--sandbox","--mode","accept-edits"
     ]
-    if effort: cmd += ["--effort",str(effort)]
+    if effort and not model: cmd += ["--effort",str(effort)]
     if model: cmd += ["--model",str(model)]
     if agent: cmd += ["--agent",str(agent)]
     proc=_run(cmd,cwd=workdir,timeout=timeout+15)

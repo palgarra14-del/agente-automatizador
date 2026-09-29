@@ -43,7 +43,7 @@ CANDIDATES = {
     },
     "ag-opus-4.6": {
         "provider": "antigravity",
-        "model": "claude-opus-4-6",
+        "model": "claude-opus-4-6-thinking",
         "agent": None,
         "effort": "high",
         "costClass": "free_quota",
@@ -88,7 +88,7 @@ CANDIDATES = {
     },
     "ag-gpt-oss-120b": {
         "provider": "antigravity",
-        "model": "gpt-oss-120b",
+        "model": "gpt-oss-120b-medium",
         "agent": None,
         "effort": "medium",
         "costClass": "free_quota",
