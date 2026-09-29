@@ -168,7 +168,7 @@ base=str(Path(${JSON.stringify(orchestrator)}).parent)
 sys.path.insert(0,base)
 spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.candidate_available=lambda candidate,disabled_providers=None: True
+m.candidate_available=lambda candidate,disabled_providers=None,excluded_families=None,excluded_candidates=None: True
 calls=[]
 def fake_run(candidate,*args,**kwargs):
     calls.append(candidate)
