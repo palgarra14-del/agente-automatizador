@@ -1982,7 +1982,7 @@ function historicalFingerprintMismatch(error) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new MultiModelReadOnlySkillExecutor(), codingWorker = new MultiModelCodingWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
     const resolvedPublicationBridge = publicationBridge ?? new WorkflowPublicationBridge({ localGit });
     Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, commandRunner, now });
@@ -5201,9 +5201,15 @@ export function codexTurnFailureDiagnostics(items = []) {
 }
 
 export class CodexSdkWorker extends CodingWorker {
-  constructor({ CodexClient = Codex, environment = workerEnvironment, codexHomeFactory = prepareIsolatedCodexHome, platform = process.platform } = {}) {
+  constructor({
+    CodexClient = Codex,
+    environment = workerEnvironment,
+    codexHomeFactory = prepareIsolatedCodexHome,
+    platform = process.platform,
+    controlSurface = assertWorkerProjectControlSurface
+  } = {}) {
     super();
-    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform });
+    Object.assign(this, { CodexClient, environment, codexHomeFactory, platform, controlSurface });
   }
 
   async execute(task, { workspace, timeoutMs }) {
