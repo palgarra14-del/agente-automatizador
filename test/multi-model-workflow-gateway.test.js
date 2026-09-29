@@ -222,5 +222,7 @@ test('python workflow gateway is a hard free-only boundary', () => {
   assert.match(gateway, /PAID_MODELS_EXPLICITLY_ENABLED.*0/);
   assert.match(gateway, /CODEX_API_KEY.*""/);
   assert.match(gateway, /OPENAI_API_KEY.*""/);
+  assert.match(gateway, /MAX_STDIN_BYTES = 1536 \* 1024/);
+  assert.match(gateway, /gateway_prompt", 1_200_000/);
   assert.match(gateway, /use_role_agent=False/);
 });
