@@ -14,6 +14,7 @@ const FAILURE_CLASSES = Object.freeze([
   ['workspace', /(workspace|clone|bootstrap|install)/i],
   ['model-availability', /(billing|quota|credit|auth|api[_-]?key|provider.*unavailable|model.*unavailable)/i],
   ['model-execution', /(skill_executor|model[_ -]?call|gateway|executor_attempt_budget|codex_home|path aliases)/i],
+  ['implementation-noop', /(implementation_no_changes|implementation.*no changes|no changes.*implementation)/i],
   ['verification', /(test|lint|build|verification|typecheck|ci_failed)/i],
   ['human-gate', /(human_gate|approval|required)/i]
 ]);
