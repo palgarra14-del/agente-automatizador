@@ -322,7 +322,7 @@ export class GitHubStateStore extends JsonStore {
             await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
           } catch (retryError) {
             if (retryError?.message === 'workflow_deadline_cap_exceeded') {
-              throw new Error('cloud_state_github_request_failed', { cause: error });
+              throw new Error('cloud_state_github_request_failed', { cause: retryError });
             }
             throw retryError;
           }
