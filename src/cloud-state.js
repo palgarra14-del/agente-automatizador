@@ -318,7 +318,14 @@ export class GitHubStateStore extends JsonStore {
         if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
         const networkRetryDelayMs = method === 'GET' ? GITHUB_NETWORK_READ_RETRY_DELAYS_MS[attempt] : undefined;
         if (networkRetryDelayMs !== undefined) {
-          await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          try {
+            await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          } catch (retryError) {
+            if (retryError?.message === 'workflow_deadline_cap_exceeded') {
+              throw new Error('cloud_state_github_request_failed', { cause: error });
+            }
+            throw retryError;
+          }
           continue;
         }
         throw new Error('cloud_state_github_request_failed', { cause: error });
