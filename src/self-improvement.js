@@ -11,6 +11,7 @@ const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
+const GAP_MEMORY_LIMIT = 12;
 const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
@@ -97,6 +98,7 @@ function emptyAutopilot() {
     starts: [],
     history: [],
     lastIntelligence: null,
+    gapMemory: [],
     suspendedUntil: null,
     updatedAt: null
   };
@@ -108,8 +110,62 @@ function normalizeAutopilot(value, maxStartsPer24h = MAX_STARTS_PER_24H) {
     ...emptyAutopilot(),
     ...state,
     starts: Array.isArray(state.starts) ? state.starts.filter((item) => Number.isFinite(Date.parse(item))).slice(-maxStartsPer24h * 4) : [],
-    history: Array.isArray(state.history) ? state.history.slice(-HISTORY_LIMIT) : []
+    history: Array.isArray(state.history) ? state.history.slice(-HISTORY_LIMIT) : [],
+    gapMemory: Array.isArray(state.gapMemory)
+      ? state.gapMemory.filter((entry) => entry && typeof entry.kind === 'string').slice(-GAP_MEMORY_LIMIT)
+      : []
   };
+}
+
+function rememberGapAnalysis(memory, analysis, timestamp) {
+  const byKind = new Map((Array.isArray(memory) ? memory : []).map((entry) => [entry.kind, { ...entry }]));
+  for (const signal of analysis?.signals ?? []) {
+    if (!signal?.kind) continue;
+    const current = byKind.get(signal.kind) ?? {
+      kind: signal.kind,
+      seenCount: 0,
+      selectedCount: 0,
+      successCount: 0,
+      failureCount: 0,
+      blockedCount: 0,
+      lastOutcome: null
+    };
+    current.seenCount += 1;
+    current.lastSeenAt = timestamp;
+    current.lastScore = signal.score ?? null;
+    if (signal.kind === analysis.primary) {
+      current.selectedCount += 1;
+      current.lastSelectedAt = timestamp;
+    }
+    byKind.set(signal.kind, current);
+  }
+  return [...byKind.values()]
+    .sort((a, b) => Date.parse(a.lastSeenAt ?? 0) - Date.parse(b.lastSeenAt ?? 0) || a.kind.localeCompare(b.kind))
+    .slice(-GAP_MEMORY_LIMIT);
+}
+
+function rememberGapOutcome(memory, primaryKind, status, timestamp, error = null) {
+  if (!primaryKind) return memory;
+  const byKind = new Map((Array.isArray(memory) ? memory : []).map((entry) => [entry.kind, { ...entry }]));
+  const current = byKind.get(primaryKind) ?? {
+    kind: primaryKind,
+    seenCount: 0,
+    selectedCount: 0,
+    successCount: 0,
+    failureCount: 0,
+    blockedCount: 0,
+    lastOutcome: null
+  };
+  current.lastOutcome = status;
+  current.lastCompletedAt = timestamp;
+  current.lastError = error ? String(error).slice(0, 240) : null;
+  if (status === 'completed') current.successCount += 1;
+  else if (status === 'blocked') current.blockedCount += 1;
+  else current.failureCount += 1;
+  byKind.set(primaryKind, current);
+  return [...byKind.values()]
+    .sort((a, b) => Date.parse(a.lastSeenAt ?? a.lastCompletedAt ?? 0) - Date.parse(b.lastSeenAt ?? b.lastCompletedAt ?? 0) || a.kind.localeCompare(b.kind))
+    .slice(-GAP_MEMORY_LIMIT);
 }
 
 function policyFingerprint(workflowId, baseRevision, stepId, projectId = 'self') {
@@ -193,10 +249,19 @@ function nextBillingBackoffMs(state) {
 function resultSummary(plan) {
   const implementation = plan?.steps?.find((step) => step.id === 'implementation');
   const publication = plan?.steps?.find((step) => step.id === 'publication');
+  const failedStep = plan?.steps?.find((step) =>
+    step.id === plan?.result?.stepId || step.status === 'failed'
+  );
+  const rawFailureDetail =
+    failedStep?.evidence?.error ??
+    failedStep?.evidence?.workerEvidence?.output ??
+    failedStep?.error ??
+    null;
   return {
     workflowId: plan?.id ?? null,
     status: plan?.status ?? null,
     error: plan?.result?.error ?? null,
+    failureDetail: rawFailureDetail ? String(rawFailureDetail).replace(/\s+/g, ' ').trim().slice(0, 500) : null,
     changedPaths: Array.isArray(implementation?.evidence?.changeSet?.paths)
       ? [...implementation.evidence.changeSet.paths].sort()
       : [],
@@ -319,6 +384,7 @@ export class AutonomousProjectImprovement {
   async settle(plan, { baseRevision }) {
     const summary = resultSummary(plan);
     const billingUnavailable = billingUnavailableError(summary.error);
+    const completedAt = new Date(this.now()).toISOString();
     return this.writeState((state) => ({
       ...state,
       activeWorkflowId: null,
@@ -326,8 +392,15 @@ export class AutonomousProjectImprovement {
       history: [...state.history, {
         ...summary,
         baseRevision,
-        completedAt: new Date(this.now()).toISOString()
+        completedAt
       }].slice(-HISTORY_LIMIT),
+      gapMemory: rememberGapOutcome(
+        state.gapMemory,
+        state.lastIntelligence?.primary ?? null,
+        summary.status,
+        completedAt,
+        summary.error
+      ),
       suspendedUntil: billingUnavailable
         ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
         : null
@@ -347,7 +420,8 @@ export class AutonomousProjectImprovement {
     const recentProposalPaths = this.recentProposalPaths(state);
     const gapAnalysis = this.intelligence?.analyze({
       history: state.history,
-      recentProposalPaths
+      recentProposalPaths,
+      memory: state.gapMemory
     }) ?? null;
     const goal = [
       this.goal,
@@ -382,6 +456,9 @@ export class AutonomousProjectImprovement {
         primary: gapAnalysis.primary,
         signals: gapAnalysis.signals
       } : null,
+      gapMemory: gapAnalysis
+        ? rememberGapAnalysis(current.gapMemory, gapAnalysis, startedAt)
+        : current.gapMemory,
       suspendedUntil: null
     }));
     return workflow.id;

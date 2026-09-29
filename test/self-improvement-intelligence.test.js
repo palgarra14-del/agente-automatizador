@@ -39,6 +39,25 @@ test('gap intelligence prioritizes repeated GitHub state failures over speculati
   assert.ok(capabilityGap.skills.includes('visual.review'));
 });
 
+test('executor attempt exhaustion is classified as model execution debt', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('self') });
+  const analysis = intelligence.analyze({
+    history: [
+      {
+        status: 'failed',
+        error: 'skill_executor_attempt_budget_exhausted',
+        failureDetail: 'Refusing to create helper binaries under temporary codex_home',
+        changedPaths: []
+      },
+      { status: 'failed', error: 'skill_executor_attempt_budget_exhausted', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'reliability:model-execution');
+  assert.match(analysis.directive, /model-execution/);
+  assert.match(analysis.directive, /codex_home/);
+});
+
 test('unavailable desired capabilities stay visible but cannot become the implementable primary by themselves', () => {
   const intelligence = new AutonomousGapIntelligence({ project: project('website-pilot') });
   const analysis = intelligence.analyze({ history: [] });
@@ -67,6 +86,33 @@ test('gap intelligence detects low success rate and local-minimum repetition fro
   assert.match(analysis.directive, /app\.js, prospect\.js/);
 });
 
+test('learning memory reduces immediate repetition of a just-resolved gap', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('self') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'verification_failed', changedPaths: [] },
+      { status: 'failed', error: 'workspace_clone_failed', changedPaths: [] }
+    ],
+    memory: [
+      {
+        kind: 'reliability:verification',
+        seenCount: 4,
+        selectedCount: 2,
+        successCount: 1,
+        failureCount: 1,
+        blockedCount: 0,
+        lastOutcome: 'completed'
+      }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'reliability:workspace');
+  const verification = analysis.signals.find((signal) => signal.kind === 'reliability:verification');
+  assert.ok(verification);
+  assert.equal(verification.learning.lastOutcome, 'completed');
+  assert.ok(verification.learning.outcomeAdjustment < 0);
+});
+
 test('autonomous workflow creation injects the current gap directive into the next bounded goal', async () => {
   const store = fakeStore();
   let created = null;
@@ -77,9 +123,10 @@ test('autonomous workflow creation injects the current gap directive into the ne
     }
   };
   const intelligence = {
-    analyze({ history, recentProposalPaths }) {
+    analyze({ history, recentProposalPaths, memory }) {
       assert.deepEqual(history, []);
       assert.deepEqual(recentProposalPaths, []);
+      assert.deepEqual(memory, []);
       return {
         version: 1,
         projectId: 'self',
@@ -104,4 +151,127 @@ test('autonomous workflow creation injects the current gap directive into the ne
   assert.match(created.goal, /Autonomous gap intelligence priority: reliability:github-state/);
   assert.equal(store.state.autopilotSelfImprovement.lastIntelligence.primary, 'reliability:github-state');
   assert.equal(store.state.autopilotSelfImprovement.lastIntelligence.signals.length, 1);
+  assert.equal(store.state.autopilotSelfImprovement.gapMemory.length, 1);
+  assert.equal(store.state.autopilotSelfImprovement.gapMemory[0].kind, 'reliability:github-state');
+  assert.equal(store.state.autopilotSelfImprovement.gapMemory[0].selectedCount, 1);
+});
+
+test('failed autonomous outcomes preserve bounded root-cause evidence for the next intelligence cycle', async () => {
+  const now = Date.parse('2026-09-30T00:20:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-failed-learning',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-09-30T00:15:00.000Z'],
+      history: [],
+      lastIntelligence: {
+        version: 1,
+        projectId: 'self',
+        primary: 'reliability:model-execution',
+        signals: []
+      },
+      gapMemory: [],
+      suspendedUntil: null,
+      updatedAt: '2026-09-30T00:15:00.000Z'
+    }
+  });
+  const workflowEngine = {
+    async get() {
+      return {
+        id: 'workflow-failed-learning',
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'failed',
+        result: { error: 'skill_executor_attempt_budget_exhausted', stepId: 'inspect-project' },
+        steps: [{
+          id: 'inspect-project',
+          status: 'failed',
+          error: 'skill_executor_attempt_budget_exhausted',
+          evidence: { error: 'gateway timed out while resolving provider '.repeat(30) }
+        }]
+      };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine,
+    operatorRevision: REV,
+    projectId: 'self',
+    intelligence: null,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'failed');
+  const history = store.state.autopilotSelfImprovement.history.at(-1);
+  assert.equal(history.error, 'skill_executor_attempt_budget_exhausted');
+  assert.ok(history.failureDetail.length <= 500);
+  assert.match(history.failureDetail, /gateway timed out/);
+});
+
+test('completed autonomous outcomes are learned by the selected gap before the next cycle', async () => {
+  const now = Date.parse('2026-09-30T00:10:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-learning',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-09-30T00:00:00.000Z'],
+      history: [],
+      lastIntelligence: {
+        version: 1,
+        projectId: 'self',
+        primary: 'reliability:github-state',
+        signals: []
+      },
+      gapMemory: [{
+        kind: 'reliability:github-state',
+        seenCount: 2,
+        selectedCount: 1,
+        successCount: 0,
+        failureCount: 0,
+        blockedCount: 0,
+        lastOutcome: null,
+        lastSeenAt: '2026-09-30T00:00:00.000Z'
+      }],
+      suspendedUntil: null,
+      updatedAt: '2026-09-30T00:00:00.000Z'
+    }
+  });
+  const workflowEngine = {
+    async get() {
+      return {
+        id: 'workflow-learning',
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'completed',
+        result: null,
+        steps: [
+          { id: 'implementation', evidence: { changeSet: { paths: ['src/example.js'] } } },
+          { id: 'publication', evidence: null }
+        ]
+      };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine,
+    operatorRevision: REV,
+    projectId: 'self',
+    intelligence: null,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'completed');
+  const learned = store.state.autopilotSelfImprovement.gapMemory.find((entry) => entry.kind === 'reliability:github-state');
+  assert.equal(learned.lastOutcome, 'completed');
+  assert.equal(learned.successCount, 1);
+  assert.equal(learned.failureCount, 0);
+  assert.equal(learned.lastCompletedAt, '2026-09-30T00:10:00.000Z');
 });

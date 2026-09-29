@@ -13,6 +13,7 @@ const FAILURE_CLASSES = Object.freeze([
   ['runtime-timeout', /(timeout|deadline|timed out)/i],
   ['workspace', /(workspace|clone|bootstrap|install)/i],
   ['model-availability', /(billing|quota|credit|auth|api[_-]?key|provider.*unavailable|model.*unavailable)/i],
+  ['model-execution', /(skill_executor|model[_ -]?call|gateway|executor_attempt_budget|codex_home|path aliases)/i],
   ['verification', /(test|lint|build|verification|typecheck|ci_failed)/i],
   ['human-gate', /(human_gate|approval|required)/i]
 ]);
@@ -31,6 +32,37 @@ function countBy(values) {
 function clip(value, max = 900) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function normalizedMemory(memory) {
+  return Array.isArray(memory)
+    ? memory.filter((entry) => entry && typeof entry.kind === 'string').slice(-12)
+    : [];
+}
+
+function applyLearningMemory(signals, memory) {
+  const byKind = new Map(normalizedMemory(memory).map((entry) => [entry.kind, entry]));
+  return signals.map((signal) => {
+    const prior = byKind.get(signal.kind);
+    if (!prior) return signal;
+    const seenCount = Number.isInteger(prior.seenCount) ? prior.seenCount : 0;
+    const recurrenceBoost = Math.min(18, seenCount * 2);
+    let outcomeAdjustment = 0;
+    if (prior.lastOutcome === 'completed') outcomeAdjustment = -18;
+    else if (prior.lastOutcome === 'failed') outcomeAdjustment = -10;
+    else if (prior.lastOutcome === 'blocked') outcomeAdjustment = -16;
+    const score = Math.max(1, signal.score + recurrenceBoost + outcomeAdjustment);
+    return {
+      ...signal,
+      score,
+      learning: {
+        seenCount,
+        lastOutcome: prior.lastOutcome ?? null,
+        recurrenceBoost,
+        outcomeAdjustment
+      }
+    };
+  });
 }
 
 function unavailableDesiredSkills(project, capabilityRegistry) {
@@ -65,11 +97,18 @@ export class AutonomousGapIntelligence {
     this.specialistRegistry = specialistRegistry;
   }
 
-  analyze({ history = [], recentProposalPaths = [] } = {}) {
+  analyze({ history = [], recentProposalPaths = [], memory = [] } = {}) {
     const recent = Array.isArray(history) ? history.slice(-12) : [];
     const failures = recent.filter((entry) => entry?.status !== 'completed');
-    const classes = failures.map((entry) => failureClass(entry?.error)).filter(Boolean);
-    const classCounts = countBy(classes);
+    const classifiedFailures = failures.map((entry) => {
+      const detail = [entry?.error, entry?.failureDetail].filter(Boolean).join(' | ');
+      return {
+        kind: failureClass(detail),
+        rootCause: entry?.failureDetail ? clip(entry.failureDetail, 260) : null,
+        detail: clip(entry?.failureDetail ?? entry?.error, 260)
+      };
+    }).filter((entry) => entry.kind);
+    const classCounts = countBy(classifiedFailures.map((entry) => entry.kind));
     const completed = recent.filter((entry) => entry?.status === 'completed');
     const pathCounts = countBy(completed.flatMap((entry) => Array.isArray(entry?.changedPaths) ? entry.changedPaths : []));
     const repeatedPaths = [...pathCounts.entries()]
@@ -79,11 +118,16 @@ export class AutonomousGapIntelligence {
 
     const signals = [];
     for (const [kind, count] of [...classCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+      const relevantFailures = [...classifiedFailures].reverse().filter((entry) => entry.kind === kind);
+      const latestDetail =
+        relevantFailures.find((entry) => entry.rootCause)?.rootCause ??
+        relevantFailures[0]?.detail ??
+        null;
       signals.push({
         kind: `reliability:${kind}`,
         score: 70 + Math.min(24, count * 6),
         actionable: true,
-        evidence: `${count} recent non-successful cycle(s) classified as ${kind}`
+        evidence: `${count} recent non-successful cycle(s) classified as ${kind}${latestDetail ? `; latest root-cause detail: ${latestDetail}` : ''}`
       });
     }
 
@@ -133,9 +177,10 @@ export class AutonomousGapIntelligence {
       });
     }
 
-    signals.sort((a, b) => b.score - a.score || a.kind.localeCompare(b.kind));
-    const primary = signals.find((signal) => signal.actionable) ?? signals[0];
-    const secondary = signals.filter((signal) => signal !== primary).slice(0, 3);
+    const learnedSignals = applyLearningMemory(signals, memory);
+    learnedSignals.sort((a, b) => b.score - a.score || a.kind.localeCompare(b.kind));
+    const primary = learnedSignals.find((signal) => signal.actionable) ?? learnedSignals[0];
+    const secondary = learnedSignals.filter((signal) => signal !== primary).slice(0, 3);
     const avoid = [...new Set(recentProposalPaths)].slice(0, 12);
 
     const directive = [
@@ -151,7 +196,7 @@ export class AutonomousGapIntelligence {
       version: 1,
       projectId: this.project.id,
       primary: primary.kind,
-      signals: signals.slice(0, 6),
+      signals: learnedSignals.slice(0, 6),
       directive: clip(directive, 3_500)
     };
   }
