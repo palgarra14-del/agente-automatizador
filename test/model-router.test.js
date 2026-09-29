@@ -48,7 +48,7 @@ m.antigravity_authenticated=lambda: True
 seen={}
 class P:
     returncode=0
-    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"{\\\"ok\\\":true}","structured_output":{"ok":True}}})
+    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"","structured_output":{"ok":True}}})
     stderr=''
 def fake_run(args,**kwargs):
     seen["args"]=args
