@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 
 const PROFILE = 'autonomous-maintenance';
-const STATE_KEY = 'autopilotSelfImprovement';
+const SELF_STATE_KEY = 'autopilotSelfImprovement';
+const PROJECT_STATE_KEY = 'autopilotProjectImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
-const COOLDOWN_MS = 30 * 60 * 1000;
+const SELF_COOLDOWN_MS = 30 * 60 * 1000;
+const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const MAX_STARTS_PER_24H = 24;
+const DEFAULT_MAX_STARTS_PER_24H = 24;
 const HISTORY_LIMIT = 20;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
@@ -32,6 +34,57 @@ export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
 
 export const AUTONOMOUS_MAINTENANCE_GOAL =
   "Inspect authoritative main and implement exactly one bounded, high-impact improvement that makes the commercial operating system more effective: LeadFinder -> Callflow -> conversion-focused demo/site production -> follow-up -> conversion -> feedback into lead quality and automation. Prioritize measurable improvements to qualified-lead throughput, contactability, CRM outcome/follow-up quality, demo turnaround, conversion instrumentation, cross-project learning, repeated-work automation, or 24/7 reliability that directly enables those outcomes. If a decision-relevant data gap is visible, prefer bounded instrumentation or feedback-loop support over guessing. Avoid speculative refactoring, cosmetic engineering, or technical polish without a clear commercial, throughput, data-quality, conversion, or reliability benefit. Treat the autonomy controller, workflow core, Cloud State, CLI, issue queue, capability/specialist registries, workflows, config, scripts, dependencies, deployment, authentication, secrets and external communications as immutable roots of trust. Never edit existing baseline tests; add any new regression only under test/autonomous/. Preserve all merge/production safety boundaries and stop after one coherent improvement.";
+
+
+export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
+  self: Object.freeze({
+    stateKey: SELF_STATE_KEY,
+    cooldownMs: SELF_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: AUTONOMOUS_MAINTENANCE_GOAL,
+    scope: AUTONOMOUS_MAINTENANCE_SCOPE,
+    allowSensitiveImplementation: true
+  }),
+  leadfinder: Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative LeadFinder main and implement exactly one bounded improvement that increases qualified lead throughput, contact-data quality, niche targeting, deduplication, prioritization, observability or reliable handoff into Callflow. Prefer measurable fixes and regression coverage over speculative refactors. Work only on safe application/docs paths, never secrets, workflow control, dependencies, deployment configuration or production data. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['src', 'docs']),
+      forbiddenPaths: Object.freeze(['.github', '.env.example', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'next.config.ts', 'tsconfig.json', 'vitest.config.ts'])
+    }),
+    allowSensitiveImplementation: false
+  }),
+  callflow: Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative Callflow main and implement exactly one bounded improvement that increases sales-call throughput, lead prioritization, outcome capture, follow-up discipline, operator usability or feedback quality back to LeadFinder. Prefer deterministic UX/data-quality fixes with tests. Do not touch Apps Script, API/config secrets, deployment configuration, package metadata or external communications. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['app.js', 'prospect.js', 'prospect-utils.js', 'callflow-navigation.js', 'index.html', 'styles.css', 'closing.css', 'tests']),
+      forbiddenPaths: Object.freeze(['.github', 'google-apps-script', 'api', 'config.js', '.clasp.json', '.claspignore', 'package.json', 'scripts'])
+    }),
+    allowSensitiveImplementation: false
+  }),
+  'website-pilot': Object.freeze({
+    stateKey: PROJECT_STATE_KEY,
+    cooldownMs: PROJECT_COOLDOWN_MS,
+    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    goal: "Inspect authoritative Website Pilot main and implement exactly one bounded improvement that makes the existing demo/site portfolio more professional, responsive, accessible, conversion-oriented, distinctive or faster to reuse for qualified local-business leads. Preserve factual honesty and existing routes. Prefer fixes supported by tests or rendered evidence. Do not touch dependency, deployment or secret-bearing control files. Publish reviewable work only; never merge or deploy production.",
+    scope: Object.freeze({
+      allowedPaths: Object.freeze(['index.html', 'assets', 'barberia', 'galeria', 'servicios', 'test', 'docs', '404.html', 'robots.txt', 'sitemap.xml']),
+      forbiddenPaths: Object.freeze(['.github', '.vercel', 'vercel.json', 'package.json', 'scripts', 'aviso-legal', 'privacidad', 'cookies'])
+    }),
+    allowSensitiveImplementation: false
+  })
+});
+
+export function autonomousProjectPolicy(projectId) {
+  const policy = AUTONOMOUS_PROJECT_POLICIES[projectId];
+  if (!policy) throw new Error(`autonomous_project_policy_missing:${projectId}`);
+  return policy;
+}
 
 function emptyAutopilot() {
   return {
