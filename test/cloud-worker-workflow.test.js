@@ -287,6 +287,8 @@ test('autonomous self-maintenance failures cannot masquerade as a successful clo
 test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
   assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
+  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 30m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
 });
 
