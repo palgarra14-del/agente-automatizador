@@ -791,7 +791,7 @@ def build_site(run_dir, brief):
     (run_dir/"playbook.md").write_text(playbook, encoding="utf-8")
     lessons=recent_transferable_lessons()
     (run_dir/"recent-lessons.md").write_text("# Recent transferable lessons\n" + ("\n".join(f"- {lesson}" for lesson in lessons) if lessons else "- None yet."), encoding="utf-8")
-    recent_concepts=[f"{entry.get('briefSlug','unknown')}: {entry.get('conceptIdentity','')}" for entry in training_history()[-6:] if entry.get('conceptIdentity')]
+    recent_designs=[entry for entry in completed_history() if entry.get("phase","training")=="training"][-8:]\n    recent_concepts=[f"{entry.get('briefSlug','unknown')}: {entry.get('conceptIdentity','')}" for entry in recent_designs if entry.get('conceptIdentity')]
     (run_dir/"recent-concepts.md").write_text("# Recent concepts to avoid repeating by default\n" + ("\n".join(f"- {item}" for item in recent_concepts) if recent_concepts else "- None yet."), encoding="utf-8")
     summary_path=STATE/"training-summary.json"
     training_context=json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
@@ -1297,6 +1297,7 @@ def mastery_status(entries):
     holdouts=[
       entry for entry in entries
       if entry.get("phase")=="holdout" and
+      official_evidence(entry) and
       qualified_at and str(entry.get("completedAt","")) > qualified_at
     ]
     if any(not record_passes(entry) for entry in holdouts):
