@@ -35,14 +35,16 @@ STATE = Path(os.environ.get(
 PERFORMANCE = STATE / "model-performance.jsonl"
 
 COST_POLICY = os.environ.get("MODEL_COST_POLICY", "free_only").strip().lower()
+PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
+    "PAID_MODELS_EXPLICITLY_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 FREE_COST_CLASSES = {"free_quota", "free_hosted", "local_zero_external"}
 
 def cost_allowed(spec):
-    if COST_POLICY == "allow_all":
+    cost_class = spec.get("costClass")
+    if cost_class in FREE_COST_CLASSES:
         return True
-    if COST_POLICY == "free_only":
-        return spec.get("costClass") in FREE_COST_CLASSES
-    return False
+    return COST_POLICY == "allow_all" and PAID_MODELS_EXPLICITLY_ENABLED
 
 # cost_class is relative operational cost, not a price quote.
 CANDIDATES = {
@@ -801,6 +803,7 @@ def policy_snapshot():
     return {
         "generatedAt": now(),
         "costPolicy": COST_POLICY,
+        "paidModelsExplicitlyEnabled": PAID_MODELS_EXPLICITLY_ENABLED,
         "freeCostClasses": sorted(FREE_COST_CLASSES),
         "candidates": CANDIDATES,
         "roles": {
