@@ -601,6 +601,35 @@ def _first_available(preferred, role, disabled_providers=None):
     return choice["candidate"] if choice else None
 
 
+def _run_preferred_structured(
+    preferred, role, prompt, schema, *, cwd, timeout, disabled_providers=None,
+    agent_override=None, exclude_candidates=None,
+):
+    excluded=set(exclude_candidates or ())
+    ordered=[]
+    for candidate in preferred:
+        if candidate in excluded or candidate in ordered:
+            continue
+        if candidate_available(candidate, disabled_providers=disabled_providers):
+            ordered.append(candidate)
+    for item in rank_candidates(role, disabled_providers=disabled_providers):
+        candidate=item["candidate"]
+        if candidate not in excluded and candidate not in ordered:
+            ordered.append(candidate)
+    errors=[]
+    for candidate in ordered:
+        try:
+            result=run_structured_candidate(
+                candidate,prompt,schema,cwd=cwd,timeout=timeout,
+                agent_override=agent_override,
+            )
+            result["fallbackErrors"]=errors
+            return result
+        except ProviderUnavailable as exc:
+            errors.append(candidate+":"+str(exc))
+    raise ProviderUnavailable(";".join(errors) or "no_preferred_candidate_available")
+
+
 def run_design_council(brief, context, *, cwd, disabled_providers=None, timeout=240):
     """Generate two deliberately independent concepts and synthesize them.
 
@@ -610,18 +639,6 @@ def run_design_council(brief, context, *, cwd, disabled_providers=None, timeout=
         "brief": brief,
         "trainingContext": context,
     }
-    primary_candidate = _first_available(
-        ["ag-sonnet-4.6", "ag-gemini-3.1-pro", "codex-astra"],
-        "creative_direction",
-        disabled_providers,
-    )
-    challenger_candidate = _first_available(
-        ["ag-gemini-3.1-pro", "ag-sonnet-4.6", "ag-gpt-oss-120b"],
-        "concept_challenger",
-        disabled_providers,
-    )
-    if primary_candidate is None or challenger_candidate is None:
-        raise ProviderUnavailable("design_council_needs_two_candidates")
 
     primary_prompt = """Act as a senior digital art director for a premium SME website.
 Create ONE authored, specific art direction from the supplied evidence. Avoid generic component recipes.
@@ -637,42 +654,21 @@ Return only the required JSON.
 EVIDENCE:
 """ + json.dumps(common, ensure_ascii=False)
 
-    primary = run_structured_candidate(
-        primary_candidate, primary_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout,
+    primary = _run_preferred_structured(
+        ["ag-sonnet-4.6", "ag-gemini-3.1-pro", "codex-astra"],
+        "creative_direction", primary_prompt, PROPOSAL_SCHEMA,
+        cwd=cwd, timeout=timeout, disabled_providers=disabled_providers,
         agent_override="web-art-director",
     )
-    challenger = run_structured_candidate(
-        challenger_candidate, challenger_prompt, PROPOSAL_SCHEMA, cwd=cwd, timeout=timeout,
+    challenger = _run_preferred_structured(
+        ["ag-gemini-3.1-pro", "ag-gpt-oss-120b", "ag-opus-4.6", "codex-astra"],
+        "concept_challenger", challenger_prompt, PROPOSAL_SCHEMA,
+        cwd=cwd, timeout=timeout, disabled_providers=disabled_providers,
         agent_override="web-concept-challenger",
+        exclude_candidates={primary["candidate"]},
     )
 
-    synthesis_candidate = _first_available(
-        ["ag-opus-4.6", "codex-astra", "ag-gemini-3.1-pro", "ag-sonnet-4.6"],
-        "council_synthesis",
-        disabled_providers,
-    )
-    if synthesis_candidate is None:
-        # Preserve the strongest primary proposal rather than blocking production.
-        synthesis = {
-            "candidate": primary_candidate,
-            "provider": primary["provider"],
-            "model": primary["model"],
-            "elapsedSeconds": 0.0,
-            "value": {
-                "chosenDirection": primary["value"],
-                "why": "Council synthesis unavailable; preserve the primary authored direction.",
-                "discardedIdeas": [],
-                "implementationMandates": [
-                    "Implement the chosen direction faithfully.",
-                    "Preserve factual honesty and conversion clarity.",
-                    "Verify desktop, tablet and mobile as separate compositions.",
-                ],
-                "reviewRisks": [],
-                "originalityCheck": "No synthesis model was available; reviewer must scrutinize originality.",
-            },
-        }
-    else:
-        synthesis_prompt = """You are the chief design director arbitrating two independent website directions.
+    synthesis_prompt = """You are the chief design director arbitrating two independent website directions.
 Select or synthesize the strongest direction WITHOUT averaging them into a bland compromise.
 Prefer the idea with the clearest brand-specific visual logic, typography, spatial rhythm, mobile translation and conversion path.
 Reject template smell and unsupported business facts. The chosenDirection must be implementable with local HTML/CSS/JS.
@@ -684,14 +680,12 @@ INPUT:
             "challenger": challenger["value"],
             "trainingContext": context,
         }, ensure_ascii=False)
-        synthesis = run_structured_candidate(
-            synthesis_candidate,
-            synthesis_prompt,
-            SYNTHESIS_SCHEMA,
-            cwd=cwd,
-            timeout=timeout,
-            agent_override="web-final-auditor",
-        )
+    synthesis = _run_preferred_structured(
+        ["ag-opus-4.6", "ag-gemini-3.1-pro", "ag-sonnet-4.6", "codex-astra"],
+        "council_synthesis", synthesis_prompt, SYNTHESIS_SCHEMA,
+        cwd=cwd, timeout=timeout, disabled_providers=disabled_providers,
+        agent_override="web-final-auditor",
+    )
 
     return {
         "createdAt": now(),

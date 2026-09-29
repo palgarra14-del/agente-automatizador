@@ -6,6 +6,8 @@ AGY=os.environ.get("ANTIGRAVITY_CLI","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
+ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
+_ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}
 
 class ProviderUnavailable(RuntimeError):
     pass
@@ -103,11 +105,23 @@ def extract_structured(text,schema):
     raise ProviderUnavailable("structured_output_invalid:"+(";".join(errors[-3:]) if errors else "missing"))
 
 def antigravity_authenticated():
+    now=time.monotonic()
+    if (
+        _ANTIGRAVITY_AUTH_CACHE["authenticated"]
+        and now-_ANTIGRAVITY_AUTH_CACHE["checkedAt"] < ANTIGRAVITY_AUTH_TTL
+    ):
+        return True
     if not Path(AGY).is_file():
+        _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=False)
         return False
-    proc=_run([AGY,"models"],timeout=20)
+    try:
+        proc=_run([AGY,"models"],timeout=60)
+    except ProviderUnavailable:
+        return False
     combined=(proc.stdout+"\n"+proc.stderr).lower()
-    return proc.returncode==0 and "please sign in" not in combined and "sign in" not in combined
+    authenticated=proc.returncode==0 and "please sign in" not in combined and "sign in" not in combined
+    _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=authenticated)
+    return authenticated
 
 def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=None,effort="medium",mode="plan"):
     if not antigravity_authenticated():
