@@ -129,6 +129,36 @@ except m.ProviderUnavailable as e:
   assert.match(result.error,/not_free/);
 });
 
+test('OpenCode persistent runner keeps password in env and connects only to local service', () => {
+  const result=python(`
+import importlib.util,json,tempfile,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.OPENCODE_FREE_ENABLED=True
+m.opencode_ready=lambda model=None: True
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
+captured={}
+def fake_run(args,**kwargs):
+    captured["args"]=args
+    captured["password"]=kwargs.get("env",{}).get("OPENCODE_PASSWORD")
+    captured["timeout"]=kwargs.get("timeout")
+    return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
+m._run=fake_run
+value=m.opencode_structured(
+  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  cwd=tempfile.mkdtemp(),model="opencode/ling-3.0-flash-fin-free"
+)
+print(json.dumps({"value":value,"args":captured["args"],"password":captured["password"],"timeout":captured["timeout"]}))
+`);
+  assert.equal(result.value.ok,true);
+  assert.equal(result.password,'secret-value');
+  assert.ok(result.timeout <= 35);
+  assert.ok(result.args.includes('--server'));
+  assert.ok(result.args.includes('http://127.0.0.1:49374'));
+  assert.ok(!result.args.includes('--standalone'));
+  assert.ok(!result.args.includes('secret-value'));
+});
+
 test('Copilot Free provider is opt-in and disabled by default', () => {
   const result=python(`
 import importlib.util,json
