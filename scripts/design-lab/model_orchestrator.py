@@ -905,6 +905,7 @@ def run_role_structured(
     excluded_families=None,
     excluded_candidates=None,
     require_premium=False,
+    use_role_agent=True,
 ):
     require_visual = bool(images) or role in VISUAL_ROLES
     errors = []
@@ -930,7 +931,7 @@ def run_role_structured(
                 cwd=cwd,
                 timeout=timeout,
                 images=images,
-                agent_override=ROLE_AGENTS.get(role),
+                agent_override=ROLE_AGENTS.get(role) if use_role_agent else None,
             )
             result["routingScore"] = item["routingScore"]
             result["fallbackErrors"] = errors
@@ -982,6 +983,7 @@ def run_edit_role(
     disabled_providers=None,
     excluded_families=None,
     excluded_candidates=None,
+    use_role_agent=True,
 ):
     errors = []
     for item in rank_candidates(
@@ -1002,7 +1004,7 @@ def run_edit_role(
                 prompt,
                 cwd=cwd,
                 timeout=timeout,
-                agent_override=ROLE_AGENTS.get(role),
+                agent_override=ROLE_AGENTS.get(role) if use_role_agent else None,
             )
             result["routingScore"] = item["routingScore"]
             result["fallbackErrors"] = errors
