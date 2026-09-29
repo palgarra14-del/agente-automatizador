@@ -33,6 +33,37 @@ function clip(value, max = 900) {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
+function normalizedMemory(memory) {
+  return Array.isArray(memory)
+    ? memory.filter((entry) => entry && typeof entry.kind === 'string').slice(-12)
+    : [];
+}
+
+function applyLearningMemory(signals, memory) {
+  const byKind = new Map(normalizedMemory(memory).map((entry) => [entry.kind, entry]));
+  return signals.map((signal) => {
+    const prior = byKind.get(signal.kind);
+    if (!prior) return signal;
+    const seenCount = Number.isInteger(prior.seenCount) ? prior.seenCount : 0;
+    const recurrenceBoost = Math.min(18, seenCount * 2);
+    let outcomeAdjustment = 0;
+    if (prior.lastOutcome === 'completed') outcomeAdjustment = -18;
+    else if (prior.lastOutcome === 'failed') outcomeAdjustment = -10;
+    else if (prior.lastOutcome === 'blocked') outcomeAdjustment = -16;
+    const score = Math.max(1, signal.score + recurrenceBoost + outcomeAdjustment);
+    return {
+      ...signal,
+      score,
+      learning: {
+        seenCount,
+        lastOutcome: prior.lastOutcome ?? null,
+        recurrenceBoost,
+        outcomeAdjustment
+      }
+    };
+  });
+}
+
 function unavailableDesiredSkills(project, capabilityRegistry) {
   const desired = DESIRED_SKILLS[project?.id] ?? [];
   return desired.flatMap((skillId) => {
@@ -65,7 +96,7 @@ export class AutonomousGapIntelligence {
     this.specialistRegistry = specialistRegistry;
   }
 
-  analyze({ history = [], recentProposalPaths = [] } = {}) {
+  analyze({ history = [], recentProposalPaths = [], memory = [] } = {}) {
     const recent = Array.isArray(history) ? history.slice(-12) : [];
     const failures = recent.filter((entry) => entry?.status !== 'completed');
     const classes = failures.map((entry) => failureClass(entry?.error)).filter(Boolean);
@@ -133,9 +164,10 @@ export class AutonomousGapIntelligence {
       });
     }
 
-    signals.sort((a, b) => b.score - a.score || a.kind.localeCompare(b.kind));
-    const primary = signals.find((signal) => signal.actionable) ?? signals[0];
-    const secondary = signals.filter((signal) => signal !== primary).slice(0, 3);
+    const learnedSignals = applyLearningMemory(signals, memory);
+    learnedSignals.sort((a, b) => b.score - a.score || a.kind.localeCompare(b.kind));
+    const primary = learnedSignals.find((signal) => signal.actionable) ?? learnedSignals[0];
+    const secondary = learnedSignals.filter((signal) => signal !== primary).slice(0, 3);
     const avoid = [...new Set(recentProposalPaths)].slice(0, 12);
 
     const directive = [
@@ -151,7 +183,7 @@ export class AutonomousGapIntelligence {
       version: 1,
       projectId: this.project.id,
       primary: primary.kind,
-      signals: signals.slice(0, 6),
+      signals: learnedSignals.slice(0, 6),
       directive: clip(directive, 3_500)
     };
   }
