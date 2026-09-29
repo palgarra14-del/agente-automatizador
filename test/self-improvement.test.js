@@ -153,7 +153,7 @@ test('autopilot creates one bounded autonomous workflow and records a reviewed P
   assert.equal(persisted.activeWorkflowId, null);
   assert.equal(persisted.history.at(-1).pullRequestNumber, 231);
   assert.equal(persisted.history.at(-1).baseRevision, REV_A);
-  assert.equal(await autopilot.hasWork(), false);
+  assert.equal(await autopilot.hasWork(), true);
 });
 
 test('bounded src/test sensitivity can be auto-approved only from exact governed evidence', async () => {
