@@ -21,7 +21,10 @@ on:
         required: false
         type: string
   schedule:
+    - cron: '2 * * * *'
     - cron: '17 * * * *'
+    - cron: '32 * * * *'
+    - cron: '47 * * * *'
 
 permissions:
   actions: write
@@ -79,6 +82,7 @@ jobs:
           AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
           AGENT_CLOUD_REQUESTED_LANE: ${{ inputs.lane }}
+          AGENT_CLOUD_SCHEDULE: ${{ github.event.schedule }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
           node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
