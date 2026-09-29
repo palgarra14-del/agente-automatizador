@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 512 * 1024
+MAX_STDIN_BYTES = 1536 * 1024
 ALLOWED_ACTIONS = {"structured", "edit"}
 
 # The bridge is a hard free-only boundary.
@@ -110,7 +110,7 @@ def main():
     role = _text(request.get("role"), "gateway_role", 80)
     if role not in ROLE_POLICY:
         raise ValueError("gateway_role_unknown")
-    prompt = _text(request.get("prompt"), "gateway_prompt", 220_000)
+    prompt = _text(request.get("prompt"), "gateway_prompt", 1_200_000)
     timeout = _timeout(request.get("timeoutSeconds"))
     excluded_families = _string_list(request.get("excludedFamilies"), "gateway_excluded_families")
     excluded_candidates = _string_list(request.get("excludedCandidates"), "gateway_excluded_candidates")
