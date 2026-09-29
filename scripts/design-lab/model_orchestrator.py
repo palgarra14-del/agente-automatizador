@@ -21,6 +21,8 @@ from model_router import (
     codex_structured,
     ollama_ready,
     ollama_structured,
+    opencode_ready,
+    opencode_structured,
 )
 
 HOME = Path.home()
@@ -29,6 +31,16 @@ STATE = Path(os.environ.get(
     str(HOME / ".local/state/engineering-orchestrator/design-lab"),
 )).resolve()
 PERFORMANCE = STATE / "model-performance.jsonl"
+
+COST_POLICY = os.environ.get("MODEL_COST_POLICY", "free_only").strip().lower()
+FREE_COST_CLASSES = {"free_quota", "free_hosted", "local_zero_external"}
+
+def cost_allowed(spec):
+    if COST_POLICY == "allow_all":
+        return True
+    if COST_POLICY == "free_only":
+        return spec.get("costClass") in FREE_COST_CLASSES
+    return False
 
 # cost_class is relative operational cost, not a price quote.
 CANDIDATES = {
@@ -94,6 +106,24 @@ CANDIDATES = {
         "costClass": "free_quota",
         "visual": False,
         "editing": True,
+    },
+    "oc-ling-3-flash": {
+        "provider": "opencode",
+        "model": "opencode/ling-3.0-flash-fin-free",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
+    "oc-nemotron-lightning": {
+        "provider": "opencode",
+        "model": "opencode/nemotron-3.5-lightning-free",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
     },
     "codex-astra": {
         "provider": "codex",
@@ -172,6 +202,7 @@ ROLE_POLICY = {
         ("ag-gemini-3.1-pro", 0.96),
         ("ag-sonnet-4.6", 0.91),
         ("ag-gpt-oss-120b", 0.78),
+        ("oc-ling-3-flash", 0.76),
         ("codex-astra", 0.84),
     ],
     "council_synthesis": [
@@ -215,6 +246,8 @@ ROLE_POLICY = {
         ("ag-gemini-3.8-flash", 0.97),
         ("codex-luna", 0.93),
         ("ag-gemini-3.1-pro", 0.83),
+        ("oc-nemotron-lightning", 0.82),
+        ("oc-ling-3-flash", 0.79),
         ("ollama-qwen-3b", 0.68),
         ("codex-5.6-terra", 0.88),
         ("codex-5.6-luna", 0.86),
@@ -230,11 +263,15 @@ ROLE_POLICY = {
     "offline_analysis": [
         ("ollama-qwen-3b", 0.92),
         ("ag-gemini-3.8-flash", 0.90),
+        ("oc-nemotron-lightning", 0.88),
+        ("oc-ling-3-flash", 0.87),
         ("ag-gpt-oss-120b", 0.86),
     ],
     "blocker_diagnosis": [
         ("ag-gemini-3.8-flash", 0.94),
+        ("oc-nemotron-lightning", 0.90),
         ("ollama-qwen-3b", 0.88),
+        ("oc-ling-3-flash", 0.86),
         ("ag-gemini-3.1-pro", 0.84),
     ],
 }
@@ -361,20 +398,26 @@ def empirical_stats(role, candidate):
     }
 
 
-def provider_available(provider):
+def provider_available(provider, model=None):
     if provider == "antigravity":
         return antigravity_authenticated()
     if provider == "codex":
         return codex_ready()
     if provider == "ollama":
         return ollama_ready()
+    if provider == "opencode":
+        return opencode_ready(model)
     return False
 
 
 def candidate_available(candidate, disabled_providers=None):
     spec = CANDIDATES[candidate]
     disabled = set(disabled_providers or ())
-    return spec["provider"] not in disabled and provider_available(spec["provider"])
+    return (
+        cost_allowed(spec)
+        and spec["provider"] not in disabled
+        and provider_available(spec["provider"], spec.get("model"))
+    )
 
 
 def routing_score(role, candidate, prior):
@@ -450,6 +493,10 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
         if images:
             raise ProviderUnavailable("ollama_candidate_has_no_visual_input")
         value = ollama_structured(prompt, schema, cwd=cwd, timeout=timeout)
+    elif provider == "opencode":
+        if images:
+            raise ProviderUnavailable("opencode_candidate_has_no_visual_input")
+        value = opencode_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
     else:
         raise ProviderUnavailable("unsupported_provider:" + provider)
     return {
@@ -715,6 +762,8 @@ def route_fix_role(review, qa=None):
 def policy_snapshot():
     return {
         "generatedAt": now(),
+        "costPolicy": COST_POLICY,
+        "freeCostClasses": sorted(FREE_COST_CLASSES),
         "candidates": CANDIDATES,
         "roles": {
             role: [

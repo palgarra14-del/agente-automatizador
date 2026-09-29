@@ -95,6 +95,40 @@ print(json.dumps(m.generate_structured("x",{"required":["ok"]},providers=("antig
   assert.match(result.errors[0],/antigravity/);
 });
 
+test('OpenCode free-only guard accepts only local or explicitly free hosted models', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps({
+  "hostedFree":m.opencode_model_is_free("opencode/ling-3.0-flash-fin-free"),
+  "local":m.opencode_model_is_free("ollama/qwen2.5-coder:3b"),
+  "ambiguous":m.opencode_model_is_free("opencode/big-pickle"),
+  "paidLike":m.opencode_model_is_free("openai/gpt-5")
+}))
+`);
+  assert.equal(result.hostedFree,true);
+  assert.equal(result.local,true);
+  assert.equal(result.ambiguous,false);
+  assert.equal(result.paidLike,false);
+});
+
+test('OpenCode refuses a non-free model before any provider call', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.opencode_ready=lambda *a,**k: True
+try:
+    m.opencode_structured("x",{"type":"object"},model="opencode/big-pickle")
+    print(json.dumps({"blocked":False}))
+except m.ProviderUnavailable as e:
+    print(json.dumps({"blocked":True,"error":str(e)}))
+`);
+  assert.equal(result.blocked,true);
+  assert.match(result.error,/not_free/);
+});
+
 test('doctor can use free/local semantic diagnosis for an unknown failure', () => {
   const result=python(`
 import importlib.util,json,sys,os
