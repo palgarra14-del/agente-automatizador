@@ -195,7 +195,7 @@ m.antigravity_authenticated=lambda: True
 captured={}
 def fake_run(args,cwd=None,timeout=30,check=False,input_text=None):
     captured["args"]=args
-    return subprocess.CompletedProcess(args,0,stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"{\\\"ok\\\":true}","structured_output":{"ok":True}}}),stderr='')
+    return subprocess.CompletedProcess(args,0,stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"","structured_output":{"ok":True}}}),stderr='')
 m._run=fake_run
 value=m.antigravity_structured(
   "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
