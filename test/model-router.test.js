@@ -39,7 +39,7 @@ except m.ProviderUnavailable as e:
   assert.match(result.error,/above_maximum/);
 });
 
-test('Antigravity explicit model selection omits incompatible effort flag', () => {
+test('Antigravity explicit model selection omits incompatible effort flag and sends prompts over stdin', () => {
   const result=python(`
 import importlib.util,json
 spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
@@ -48,18 +48,50 @@ m.antigravity_authenticated=lambda: True
 seen={}
 class P:
     returncode=0
-    stdout='{"ok":true}'
+    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"{\\\"ok\\\":true}","structured_output":{"ok":True}}})
     stderr=''
 def fake_run(args,**kwargs):
     seen["args"]=args
+    seen["input"]=kwargs.get("input_text")
     return P()
 m._run=fake_run
 schema={"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}
-m.antigravity_structured("x",schema,cwd="/tmp",model="gemini-3.1-pro-high",effort="medium")
-print(json.dumps(seen))
+value=m.antigravity_structured("x"*300000,schema,cwd="/tmp",model="gemini-3.1-pro-high",effort="medium")
+print(json.dumps({"seen":seen,"value":value}))
 `);
-  assert.ok(result.args.includes('--model'));
-  assert.ok(!result.args.includes('--effort'));
+  assert.ok(result.seen.args.includes('--model'));
+  assert.ok(!result.seen.args.includes('--effort'));
+  assert.ok(!result.seen.args.includes('-p'));
+  assert.ok(result.seen.args.includes('--input-format'));
+  assert.ok(result.seen.args.includes('stream-json'));
+  assert.ok(result.seen.input.length > 300000);
+  assert.equal(JSON.parse(result.seen.input).message.content.length,300000);
+  assert.equal(result.value.ok,true);
+});
+
+test('Antigravity edit also transports large prompts over stdin', () => {
+  const result=python(`
+import importlib.util,json,tempfile
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.antigravity_authenticated=lambda: True
+seen={}
+class P:
+    returncode=0
+    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","response":"edited"}})
+    stderr=''
+def fake_run(args,**kwargs):
+    seen["args"]=args
+    seen["input"]=kwargs.get("input_text")
+    return P()
+m._run=fake_run
+value=m.antigravity_edit("y"*350000,cwd=tempfile.mkdtemp(),model="gemini-3.8-flash-high")
+print(json.dumps({"seen":seen,"value":value}))
+`);
+  assert.ok(!result.seen.args.includes('-p'));
+  assert.ok(result.seen.args.includes('--input-format'));
+  assert.equal(JSON.parse(result.seen.input).message.content.length,350000);
+  assert.equal(result.value.stdout,'edited');
 });
 
 test('Antigravity authentication caches a recent positive readiness check', () => {
