@@ -58,6 +58,18 @@ test('executor attempt exhaustion is classified as model execution debt', () => 
   assert.match(analysis.directive, /codex_home/);
 });
 
+test('implementation no-change failures become a concrete autonomous priority', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('callflow') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'workflow_implementation_no_changes', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'reliability:implementation-noop');
+  assert.match(analysis.directive, /implementation-noop/);
+});
+
 test('unavailable desired capabilities stay visible but cannot become the implementable primary by themselves', () => {
   const intelligence = new AutonomousGapIntelligence({ project: project('website-pilot') });
   const analysis = intelligence.analyze({ history: [] });
