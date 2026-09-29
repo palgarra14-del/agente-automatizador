@@ -4,8 +4,8 @@ const PROFILE = 'autonomous-maintenance';
 const SELF_STATE_KEY = 'autopilotSelfImprovement';
 const PROJECT_STATE_KEY = 'autopilotProjectImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
-const SELF_COOLDOWN_MS = 0;
-const PROJECT_COOLDOWN_MS = 0;
+const SELF_COOLDOWN_MS = 30 * 60 * 1000;
+const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_STARTS_PER_24H = 24;
@@ -274,6 +274,7 @@ export class AutonomousProjectImprovement {
       completedAt >= lastStartAt &&
       typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision);
+    if (completedLatestStart && latest.status === 'completed') return false;
     if (completedLatestStart && latest.baseRevision.toLowerCase() !== this.operatorRevision) return false;
     return true;
   }
