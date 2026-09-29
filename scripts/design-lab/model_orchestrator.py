@@ -273,6 +273,12 @@ def outcome_reward(row):
     delta = row.get("scoreDelta")
     if isinstance(delta, (int, float)):
         reward += 0.35 * _clamp(delta / 0.6)
+    else:
+        absolute=row.get("scoreAfter")
+        if isinstance(absolute,(int,float)):
+            # Useful for initial builders/council choices where there is no
+            # meaningful before-score. 8.6 is neutral; 9.4 is strongly positive.
+            reward += 0.22 * _clamp((float(absolute)-8.6)/0.8)
     if row.get("selected") is True:
         reward += 0.10
     elif row.get("selected") is False:
