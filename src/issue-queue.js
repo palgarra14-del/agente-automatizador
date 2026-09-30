@@ -1770,7 +1770,7 @@ export class SupervisedIssueQueue {
     return next;
   }
 
-  async processExisting(issue, parsed, record) {
+  async processExisting(issue, parsed, record, { deadlineCapAt = null } = {}) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
     const currentRequest = await this.revalidateCurrentRequest(issue, record);
@@ -2044,7 +2044,10 @@ export class SupervisedIssueQueue {
               const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
               if (!recoveredApproval.ok) return recoveredApproval.record;
               if (!this.executionEnabled) return this.executionDeferred(record);
-              const result = await this.workflowEngine.run(record.workflowId);
+              const result = await this.workflowEngine.run(
+                record.workflowId,
+                deadlineCapAt === null ? {} : { deadlineCapAt }
+              );
               return this.settleWorkflow(issue, key, record, result);
             }
             if (appliedState) {
@@ -2076,7 +2079,10 @@ export class SupervisedIssueQueue {
           return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before workflow approval. No further execution will occur.`);
         }
         if (latestDecision?.decision !== 'approve') return record;
-        await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId, { externalApprovalFingerprint: record.pendingApproval.fingerprint });
+        await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId, {
+          externalApprovalFingerprint: record.pendingApproval.fingerprint,
+          ...(deadlineCapAt === null ? {} : { deadlineCapAt })
+        });
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
@@ -2094,7 +2100,7 @@ export class SupervisedIssueQueue {
         const activeWorkflowApproval = await this.revalidateActiveApproval(issue, key, record);
         if (!activeWorkflowApproval.ok) return activeWorkflowApproval.record;
         if (!this.executionEnabled) return this.executionDeferred(record);
-        const result = await this.workflowEngine.run(record.workflowId);
+        const result = await this.workflowEngine.run(record.workflowId, deadlineCapAt === null ? {} : { deadlineCapAt });
         return this.settleWorkflow(issue, key, record, result);
       }
     }
@@ -2104,7 +2110,10 @@ export class SupervisedIssueQueue {
       if (!active.ok) return active.record;
     }
 
-    const workflow = await this.workflowEngine.get(record.workflowId);
+    const workflow = await this.workflowEngine.get(
+      record.workflowId,
+      deadlineCapAt === null ? {} : { deadlineCapAt }
+    );
     if (!workflow) {
       const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
       return this.finalizeTerminal(issue, key, next, 'Agent workflow state is missing. Manual inspection is required; no continuation was attempted.');
@@ -2158,24 +2167,33 @@ export class SupervisedIssueQueue {
         if (!recoveredStart.ok) return recoveredStart.record;
       }
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
+      const result = await this.workflowEngine.run(workflow.id, {
+        ...(this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {}),
+        ...(deadlineCapAt === null ? {} : { deadlineCapAt })
+      });
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.RUNNING) {
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.resume(workflow.id);
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        deadlineCapAt === null ? {} : { deadlineCapAt }
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.BLOCKED &&
         workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.resume(workflow.id);
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        deadlineCapAt === null ? {} : { deadlineCapAt }
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     return this.settleWorkflow(issue, key, record, workflow);
   }
 
-  async processIssue(issue) {
+  async processIssue(issue, { deadlineCapAt = null } = {}) {
     if (!Number.isInteger(issue?.number) || !issue.id || issue.state !== 'open' || issue.pull_request) return null;
     if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) return null;
     let parsed;
@@ -2201,7 +2219,9 @@ export class SupervisedIssueQueue {
     }
     const key = this.requestKey(issue);
     const existing = await this.getRecord(key);
-    return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
+    return existing
+      ? this.processExisting(issue, parsed, existing, { deadlineCapAt })
+      : this.initializeIssue(issue, parsed);
   }
 
   async hasWork() {
@@ -2237,7 +2257,10 @@ export class SupervisedIssueQueue {
     return false;
   }
 
-  async tick() {
+  async tick({ deadlineCapAt = null } = {}) {
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) {
+      throw new Error('issue_queue_deadline_invalid');
+    }
     let notificationError = null;
     const state = await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
@@ -2287,7 +2310,7 @@ export class SupervisedIssueQueue {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
         return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
       }
-      const activeResult = await this.processIssue(issue);
+      const activeResult = await this.processIssue(issue, { deadlineCapAt });
       if (!activeResult) continue;
       if (['awaiting_start_approval', 'awaiting_workflow_approval', 'execution_deferred'].includes(activeResult.status)) {
         parkedResult ??= activeResult;
@@ -2326,7 +2349,7 @@ export class SupervisedIssueQueue {
           };
         }
       }
-      const result = await this.processIssue(issue);
+      const result = await this.processIssue(issue, { deadlineCapAt });
       if (result) return result;
     }
     if (notificationError) throw notificationError;

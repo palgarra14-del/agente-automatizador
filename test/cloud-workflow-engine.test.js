@@ -685,3 +685,21 @@ test('cloud workflow refuses to rebind arbitrary external workspace evidence', a
 
   await assert.rejects(() => instance.get(id), /cloud_workspace_rebind_evidence_invalid/);
 });
+
+
+test('durable workflow remaining time honors the active inherited deadline cap', async () => {
+  const engine = Object.create(DurableCloudWorkflowEngine.prototype);
+  engine.now = () => 1_000;
+  engine.executionDeadlineContext = null;
+  const plan = { id: 'workflow-drain-cap', deadlineAt: 20_000 };
+
+  const uncapped = engine.remainingMs(plan);
+  const capped = await engine.withExecutionDeadlineCap(
+    plan.id,
+    6_000,
+    async () => engine.remainingMs(plan)
+  );
+
+  assert.equal(uncapped, 19_000);
+  assert.equal(capped, 5_000);
+});

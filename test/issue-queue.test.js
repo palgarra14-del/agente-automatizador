@@ -2475,3 +2475,40 @@ test('checkpoint approval proof survives a crash and a later rejection stops rec
   assert.equal(rejected.status, 'rejected');
   assert.equal(continuationAttempts, 1);
 });
+
+
+test('queue propagates a drain deadline into real workflow execution', async () => {
+  const { store, issue, workflowEngine, queue, project } = await queueFixture();
+  const { parsed, fields } = persistedRequestFields(queue, issue, project, workflowEngine.plan);
+  const key = queue.requestKey(issue);
+  workflowEngine.plan.status = WorkflowStepStatus.PENDING;
+  workflowEngine.plan.steps[0].status = WorkflowStepStatus.RUNNING;
+  const record = {
+    version: 1,
+    issueNumber: issue.number,
+    issueId: issue.id,
+    author: issue.user.login,
+    ...fields,
+    request: parsed.request,
+    workflowId: workflowEngine.plan.id,
+    status: 'running',
+    reason: null,
+    createdAt: '2026-09-12T00:00:00.000Z',
+    updatedAt: '2026-09-12T00:00:00.000Z',
+    pendingApproval: null,
+    startApprovalFingerprint: null,
+    startApprovalCommentId: null,
+    startApprovedBy: null,
+    activeApproval: null,
+    initializationLease: null,
+    lastProcessedCommentId: 0
+  };
+  await store.mutate((data) => {
+    data.requests = { [key]: clone(record) };
+  });
+
+  const result = await queue.tick({ deadlineCapAt: 123_456 });
+
+  assert.equal(result.status, 'running');
+  assert.deepEqual(workflowEngine.runCalls.at(-1), { deadlineCapAt: 123_456 });
+});
