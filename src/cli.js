@@ -299,8 +299,17 @@ try {
             onTick: (record) => {
               if (record) console.log(JSON.stringify(view(record)));
             },
-            onError: (error) => {
+            onError: async (error) => {
               console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
+              if (!autonomousSelfImprovement) return;
+              try {
+                const autonomousResult = await autonomousSelfImprovement.tick();
+                if (autonomousResult && autonomousResult.status !== 'idle') {
+                  console.log(JSON.stringify({ queueError: maskSecrets(error.message), autonomous: autonomousResult }));
+                }
+              } catch (autonomousError) {
+                console.error(`autonomous fallback tick failed: ${maskSecrets(autonomousError.message)}`);
+              }
             }
           });
         } finally {

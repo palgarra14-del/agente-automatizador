@@ -35,6 +35,7 @@ STATE = Path(os.environ.get(
     str(HOME / ".local/state/engineering-orchestrator/design-lab"),
 )).resolve()
 PERFORMANCE = STATE / "model-performance.jsonl"
+RUNTIME_HEALTH = STATE / "model-runtime-health.json"
 
 COST_POLICY = os.environ.get("MODEL_COST_POLICY", "free_only").strip().lower()
 PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
@@ -49,6 +50,56 @@ CANDIDATE_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS", "90"))
 )
 _RUNTIME_FAILURES = {"providers": {}, "candidates": {}}
+
+def _load_runtime_failures():
+    global _RUNTIME_FAILURES
+    try:
+        raw = json.loads(RUNTIME_HEALTH.read_text(encoding="utf-8"))
+        now = time.time()
+        loaded = {"providers": {}, "candidates": {}}
+        for bucket_name in loaded:
+            bucket = raw.get(bucket_name, {}) if isinstance(raw, dict) else {}
+            if not isinstance(bucket, dict):
+                continue
+            for key, entry in bucket.items():
+                if not isinstance(key, str) or not isinstance(entry, dict):
+                    continue
+                until_epoch = float(entry.get("untilEpoch", 0.0))
+                if until_epoch <= now:
+                    continue
+                loaded[bucket_name][key] = {
+                    "until": time.monotonic() + (until_epoch - now),
+                    "untilEpoch": until_epoch,
+                    "reason": str(entry.get("reason") or "unavailable")[-400:],
+                }
+        _RUNTIME_FAILURES = loaded
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        _RUNTIME_FAILURES = {"providers": {}, "candidates": {}}
+
+
+def _persist_runtime_failures():
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        now_mono = time.monotonic()
+        now_epoch = time.time()
+        payload = {"version": 1, "providers": {}, "candidates": {}}
+        for bucket_name in ("providers", "candidates"):
+            for key, entry in _RUNTIME_FAILURES[bucket_name].items():
+                remaining = float(entry.get("until", 0.0)) - now_mono
+                if remaining <= 0:
+                    continue
+                payload[bucket_name][key] = {
+                    "untilEpoch": float(entry.get("untilEpoch", now_epoch + remaining)),
+                    "reason": str(entry.get("reason") or "unavailable")[-400:],
+                }
+        temporary = RUNTIME_HEALTH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(RUNTIME_HEALTH)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+_load_runtime_failures()
 
 def cost_allowed(spec):
     cost_class = spec.get("costClass")
@@ -719,6 +770,7 @@ def _runtime_cooldown(candidate):
         if float(entry.get("until", 0.0)) > current:
             return scope, entry
         bucket.pop(key, None)
+        _persist_runtime_failures()
     return None
 
 
@@ -742,10 +794,13 @@ def _remember_unavailability(candidate, exc):
     spec = CANDIDATES[candidate]
     bucket_name = "providers" if provider_wide else "candidates"
     key = spec["provider"] if provider_wide else candidate
+    until_epoch = time.time() + ttl
     _RUNTIME_FAILURES[bucket_name][key] = {
         "until": time.monotonic() + ttl,
+        "untilEpoch": until_epoch,
         "reason": reason[-400:],
     }
+    _persist_runtime_failures()
     return "provider" if provider_wide else "candidate"
 
 

@@ -609,30 +609,38 @@ export class GitHubIssueChannel {
   }
 
   async request(path, options = {}) {
-    const timeoutController = new globalThis.AbortController();
-    const timeout = setTimeout(() => {
-      timeoutController.abort(new Error('github_issue_queue_request_timeout'));
-    }, this.requestTimeoutMs);
-    const timeoutSignal = timeoutController.signal;
-    const signal = options.signal
-      ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
-    let response;
-    try {
-      response = await this.fetch(`https://api.github.com${path}`, {
-        ...options,
-        signal,
-        headers: { ...this.headers(), ...(options.headers ?? {}) }
-      });
-      if (!response.ok) throw new Error(`GitHub issue queue request failed: ${response.status}`);
-      if (response.status === 204) return null;
-      return await response.json();
-    } catch (error) {
-      if (timeoutSignal.aborted) throw new Error('github_issue_queue_request_timeout', { cause: error });
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+    const method = String(options.method ?? 'GET').toUpperCase();
+    const retryDelaysMs = method === 'GET' ? [250, 750] : [];
+    let lastError = null;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      const timeoutController = new globalThis.AbortController();
+      const timeout = setTimeout(() => timeoutController.abort(new Error('github_issue_queue_request_timeout')), this.requestTimeoutMs);
+      const timeoutSignal = timeoutController.signal;
+      const signal = options.signal ? globalThis.AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+      try {
+        const response = await this.fetch(`https://api.github.com${path}`, {
+          ...options, signal, headers: { ...this.headers(), ...(options.headers ?? {}) }
+        });
+        if (!response.ok) {
+          const error = new Error(`GitHub issue queue request failed: ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        if (response.status === 204) return null;
+        return await response.json();
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        lastError = timeoutSignal.aborted ? new Error('github_issue_queue_request_timeout', { cause: error }) : error;
+        const status = Number(error?.status ?? 0);
+        const transient = timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
+          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? ''));
+        if (!transient || attempt >= retryDelaysMs.length) throw lastError;
+      } finally {
+        clearTimeout(timeout);
+      }
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, retryDelaysMs[attempt]));
     }
+    throw lastError ?? new Error('github_issue_queue_request_failed');
   }
 
   async openIssues({ perPage = 100, maxPages = 5 } = {}) {

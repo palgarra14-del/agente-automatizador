@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 const orchestrator = resolve('scripts/design-lab/model_orchestrator.py');
@@ -8,7 +11,8 @@ const router = resolve('scripts/design-lab/model_router.py');
 const lab = resolve('scripts/design-lab/website-design-training-lab.py');
 
 function python(source, args = []) {
-  const run = spawnSync('python3', ['-c', source, ...args], { encoding: 'utf8' });
+  const stateDir = mkdtempSync(join(tmpdir(), 'design-model-'));
+  const run = spawnSync('python3', ['-c', source, ...args], { encoding: 'utf8', env: { ...process.env, DESIGN_LAB_STATE_DIR: stateDir } });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   return JSON.parse(run.stdout);
 }
