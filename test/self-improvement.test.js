@@ -383,7 +383,7 @@ test('autopilot enforces cooldown and a hard daily start budget', async () => {
   assert.equal((await cooling.tick()).status, 'idle');
 });
 
-test('completed failed cycle can retry immediately after authoritative main advances', async () => {
+test('completed failed cycle can retry immediately so intelligence can adapt on the same revision', async () => {
   const now = Date.parse('2026-09-23T12:00:00Z');
   const state = {
     version: 1,
@@ -406,13 +406,32 @@ test('completed failed cycle can retry immediately after authoritative main adva
     updatedAt: null
   };
 
+  let sameCreates = 0;
+  const sameStore = fakeStore({ autopilotSelfImprovement: state });
   const sameRevision = new AutonomousSelfImprovement({
-    store: fakeStore({ autopilotSelfImprovement: state }),
-    workflowEngine: { async create() { throw new Error('same revision must remain cooled down'); } },
+    store: sameStore,
+    workflowEngine: {
+      async create() {
+        sameCreates += 1;
+        return { id: 'workflow-recovery' };
+      },
+      async get() {
+        return {
+          id: 'workflow-recovery',
+          profile: 'autonomous-maintenance',
+          projectId: 'self',
+          status: 'failed',
+          result: { error: 'fixture_stop' },
+          steps: []
+        };
+      }
+    },
     operatorRevision: REV_A,
     now: () => now
   });
-  assert.equal(await sameRevision.hasWork(), false);
+  assert.equal(await sameRevision.hasWork(), true);
+  assert.equal((await sameRevision.tick()).status, 'failed');
+  assert.equal(sameCreates, 1);
 
   let creates = 0;
   const advancedStore = fakeStore({ autopilotSelfImprovement: state });
@@ -442,7 +461,7 @@ test('completed failed cycle can retry immediately after authoritative main adva
   assert.equal(creates, 1);
 });
 
-test('daily start cap permits exactly one fresh-main retry after the prior revision exhausted the budget', async () => {
+test('fresh-main retry remains eligible for bounded adaptive recovery after a failure', async () => {
   const now = Date.parse('2026-09-23T12:00:00Z');
   const starts = [
     '2026-09-23T02:00:00.000Z',
@@ -500,7 +519,7 @@ test('daily start cap permits exactly one fresh-main retry after the prior revis
   assert.equal(creates, 1);
   assert.equal(store.state.autopilotSelfImprovement.starts.length, 5);
   assert.equal(store.state.autopilotSelfImprovement.history.at(-1).baseRevision, REV_B);
-  assert.equal(await autopilot.hasWork(), false);
+  assert.equal(await autopilot.hasWork(), true);
 });
 
 test('billing failures back off instead of creating a costly retry loop', async () => {
@@ -815,4 +834,46 @@ test('autonomous maintenance never exceeds an inherited drain deadline', async (
     refreshPristineDeadline: false,
     deadlineCapAt: inheritedDeadline
   }]);
+});
+
+
+test('three consecutive same-revision failures trigger cooldown instead of thrashing', async () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const starts = [
+    '2026-09-23T11:40:00.000Z',
+    '2026-09-23T11:45:00.000Z',
+    '2026-09-23T11:50:00.000Z'
+  ];
+  const history = starts.map((completedAt, index) => ({
+    workflowId: `workflow-failed-${index + 1}`,
+    status: 'failed',
+    error: 'workflow_budget_deadline_exceeded',
+    changedPaths: [],
+    pullRequestNumber: null,
+    pullRequestUrl: null,
+    finalHead: null,
+    baseRevision: REV_A,
+    completedAt
+  }));
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: null,
+      activeBaseRevision: null,
+      sequence: 3,
+      starts,
+      history,
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: { async create() { throw new Error('failure retry budget must cool down'); } },
+    operatorRevision: REV_A,
+    now: () => now
+  });
+
+  assert.equal(await autopilot.hasWork(), false);
+  assert.equal((await autopilot.tick()).status, 'idle');
 });

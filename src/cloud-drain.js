@@ -127,16 +127,16 @@ export async function runCloudDrain({
       autonomousResult
     });
 
-    if (autonomousResult?.status === 'failed') {
-      stopReason = 'autonomous_failure';
-      break;
-    }
-
     const humanGate = Boolean(queueResult && HUMAN_GATE_STATUSES.has(queueResult.status));
     const parkedApprovalGate = Boolean(queueResult && PARKED_APPROVAL_STATUSES.has(queueResult.status));
     const autonomousHasWork = autonomousSelfImprovement
       ? await autonomousSelfImprovement.hasWork()
       : false;
+
+    if (autonomousResult?.status === 'failed' && !autonomousHasWork) {
+      stopReason = 'autonomous_failure';
+      break;
+    }
 
     if (humanGate) {
       if (!parkedApprovalGate || !autonomousHasWork) {
