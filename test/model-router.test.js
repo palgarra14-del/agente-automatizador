@@ -127,6 +127,32 @@ print(json.dumps(m.generate_structured("x",{"required":["ok"]},providers=("antig
   assert.match(result.errors[0],/antigravity/);
 });
 
+test('OpenCode model discovery retries a transient empty service response', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+fd,path=tempfile.mkstemp(); os.close(fd)
+m.OPENCODE=path
+m.OPENCODE_FREE_ENABLED=True
+m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
+m.time.sleep=lambda *_: None
+calls={"count":0}
+def fake_run(args,**kwargs):
+    calls["count"]+=1
+    stdout="" if calls["count"]==1 else "opencode/mimo-v2.6-flash-free\\nopencode/space-bunny-free\\n"
+    return subprocess.CompletedProcess(args,0,stdout=stdout,stderr="")
+m._run=fake_run
+ready,models=m._opencode_models_snapshot()
+print(json.dumps({"ready":ready,"models":sorted(models),"calls":calls["count"]}))
+os.unlink(path)
+`);
+  assert.equal(result.ready,true);
+  assert.equal(result.calls,2);
+  assert.deepEqual(result.models,['opencode/mimo-v2.6-flash-free','opencode/space-bunny-free']);
+});
+
 test('OpenCode free-only guard accepts only local or explicitly free hosted models', () => {
   const result=python(`
 import importlib.util,json
