@@ -27,7 +27,7 @@ async function configuredLanes() {
 async function activeLanes() {
   const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status'],{timeout:15_000});
   if (!runs.ok) return new Set();
-  let parsed=[];
+  let parsed;
   try { parsed=JSON.parse(runs.stdout); } catch { return new Set(); }
   const active = new Set();
   for (const item of parsed.filter((run) => run.status !== 'completed')) {
