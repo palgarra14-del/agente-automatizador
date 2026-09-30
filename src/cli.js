@@ -11,6 +11,7 @@ import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
 import { runCloudDrain } from './cloud-drain.js';
+import { cloudPeekHasWork } from './cloud-peek.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -225,15 +226,18 @@ try {
           recovery
         }, null, 2));
       } else if (action === 'cloud-peek') {
-        await activeStore.readSnapshot({ repair: true });
-        const queueWork = await queue.hasWork();
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-        console.log(String(queueWork || autonomousWork));
+        console.log(String(await cloudPeekHasWork({
+          store: activeStore,
+          queue,
+          autonomousSelfImprovement
+        })));
       } else if (action === 'cloud-execution-peek') {
-        await activeStore.readSnapshot({ repair: true });
-        const queueWork = await queue.hasExecutionWork();
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-        console.log(String(queueWork || autonomousWork));
+        console.log(String(await cloudPeekHasWork({
+          store: activeStore,
+          queue,
+          autonomousSelfImprovement,
+          executionOnly: true
+        })));
       } else if (action === 'cloud-control-once') {
         const result = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
