@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { planHeartbeat } from '../src/cloud-heartbeat.js';
+import { operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
@@ -20,9 +20,17 @@ async function run(command,args,options={}) {
   }
 }
 
-async function configuredLanes() {
-  const raw = JSON.parse(await readFile(new URL('../config/issue-queue.json', import.meta.url),'utf8'));
-  return (raw.cloudLanes ?? []).map((lane) => lane.id);
+async function loadConfig() {
+  return JSON.parse(await readFile(new URL('../config/issue-queue.json', import.meta.url),'utf8'));
+}
+
+async function openOperatorIssues() {
+  const result = await run('gh',[
+    'issue','list','--repo',repo,'--state','open','--limit','100',
+    '--json','number,author,body'
+  ],{timeout:15_000});
+  if (!result.ok) return [];
+  try { return JSON.parse(result.stdout); } catch { return []; }
 }
 
 async function activeLanes(lanes) {
@@ -40,17 +48,20 @@ async function activeLanes(lanes) {
   return active;
 }
 
-async function observeLane(lane,active) {
-  if (active.has(lane)) return {lane,active:true};
+async function observeLane(lane,active,operatorLanes) {
+  const operatorRequested = operatorLanes.has(lane);
+  if (active.has(lane)) return {lane,active:true,operatorRequested};
   const result=await run(cli,['src/cli.js','inbox','cloud-peek','--lane',lane],{timeout:timeoutMs});
-  if (!result.ok) return {lane,active:false,error:result.stderr || result.stdout || 'cloud_peek_failed'};
-  return {lane,active:false,hasWork:result.stdout.split(/\s+/).at(-1) === 'true'};
+  if (!result.ok) return {lane,active:false,operatorRequested,error:result.stderr || result.stdout || 'cloud_peek_failed'};
+  return {lane,active:false,operatorRequested,hasWork:result.stdout.split(/\s+/).at(-1) === 'true'};
 }
 
-const lanes=await configuredLanes();
+const config=await loadConfig();
+const lanes=(config.cloudLanes ?? []).map((lane) => lane.id);
 const active=await activeLanes(lanes);
+const operatorLanes=new Set(operatorRequestedLanes(await openOperatorIssues(),config));
 const observations=[];
-for (const lane of lanes) observations.push(await observeLane(lane,active));
+for (const lane of lanes) observations.push(await observeLane(lane,active,operatorLanes));
 
 const plan=planHeartbeat(observations,{
   maxHeavy:Number(process.env.AGENT_MAX_HEAVY || 3),
