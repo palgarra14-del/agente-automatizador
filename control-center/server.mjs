@@ -179,21 +179,39 @@ function validateTask(input) {
   if (!Object.hasOwn(laneScopes, lane)) throw new Error('lane_invalid');
   const goal = String(input.goal || '').trim();
   if (goal.length < 5 || goal.length > 1000) throw new Error('goal_invalid');
+  const profile = input.profile === 'website-build' ? 'website-build' : 'app-improvement';
+  if (profile === 'website-build' && lane !== 'website-pilot') throw new Error('website_build_lane_invalid');
   const allowedPaths = Array.isArray(input.allowedPaths) && input.allowedPaths.length
     ? input.allowedPaths.map((p) => String(p).trim()).filter(Boolean)
     : laneScopes[lane];
   if (!allowedPaths.length || allowedPaths.length > 40) throw new Error('scope_invalid');
-  return { lane, goal, allowedPaths };
+  let businessBrief = null;
+  if (profile === 'website-build') {
+    const source = input.businessBrief || {};
+    const businessName = String(source.businessName || '').trim();
+    const category = String(source.category || '').trim();
+    const location = String(source.location || '').trim();
+    const services = String(source.services || '').split(/[\n,]+/).map((v) => v.trim()).filter(Boolean);
+    if (!businessName || !category || !location || !services.length) throw new Error('business_brief_incomplete');
+    businessBrief = {
+      version: 1, businessName, category, summary: goal, locations: [location],
+      services, contact: {}, brand: {},
+      website: { primaryGoal: 'Conseguir contactos', requiredPages: ['home','services','contact'], requiredFeatures: [] },
+      facts: [], contentRestrictions: [], assets: {}
+    };
+  }
+  return { lane, goal, allowedPaths, profile, businessBrief };
 }
 
 async function createTask(input) {
-  const { lane, goal, allowedPaths } = validateTask(input);
+  const { lane, goal, allowedPaths, profile, businessBrief } = validateTask(input);
   const request = {
     version: 1,
     projectId: lane,
-    profile: 'app-improvement',
+    profile,
     goal,
-    scope: { allowedPaths, forbiddenPaths: [] }
+    scope: { allowedPaths, forbiddenPaths: [] },
+    ...(businessBrief ? { input: { businessBrief } } : {})
   };
   const title = `[Agent][${lane}] ${goal.replace(/\s+/g, ' ').slice(0, 72)}`;
   const body = `${marker}\n${JSON.stringify(request, null, 2)}`;
