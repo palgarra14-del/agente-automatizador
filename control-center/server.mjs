@@ -211,6 +211,13 @@ async function wakeLane(lane) {
   return { lane, dispatched: true };
 }
 
+async function restartAgentService() {
+  const result = await run('systemctl', ['--user', 'restart', 'engineering-orchestrator-inbox.service'], { cwd: '/', timeout: 30_000 });
+  if (!result.ok) throw new Error(`service_restart_failed:${result.stderr}`);
+  const active = await run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-inbox.service'], { cwd: '/' });
+  return { restarted: true, active: active.stdout === 'active' };
+}
+
 async function approveTask(input) {
   const issue = Number(input.issueNumber);
   const decision = input.decision === 'reject' ? 'reject' : 'approve';
@@ -267,6 +274,7 @@ const server = createServer(async (req, res) => {
       const input = await bodyJson(req);
       return sendJson(res, 200, await wakeLane(String(input.lane || '')));
     }
+    if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
     if (req.method === 'POST' && url.pathname === '/api/approve') return sendJson(res, 200, await approveTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/retry') return sendJson(res, 200, await retryRun(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/logout') {
