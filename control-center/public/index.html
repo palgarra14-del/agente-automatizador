@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#08111f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Agent Control</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="login" class="overlay">
+    <form id="loginForm" class="login-card">
+      <div class="logo">A</div>
+      <h1>Agent Control</h1>
+      <p>Acceso privado al agente del MSI.</p>
+      <label>Clave de acceso<input id="pin" autocomplete="current-password" type="password" required></label>
+      <button class="primary" type="submit">Entrar</button>
+      <small id="loginError"></small>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MSI · ORCHESTRATOR</p>
+      <h1>Agent Control</h1>
+    </div>
+    <div class="live"><span id="liveDot"></span><strong id="liveText">Conectando</strong></div>
+  </header>
+
+  <main>
+    <section class="hero card">
+      <div>
+        <p class="eyebrow">ESTADO GENERAL</p>
+        <h2 id="heroTitle">Comprobando el agente…</h2>
+        <p id="heroSub">Esperando telemetría del MSI.</p>
+      </div>
+      <button id="refreshBtn" class="ghost">Actualizar</button>
+    </section>
+
+    <section id="stats" class="stats"></section>
+
+    <section>
+      <div class="section-title">
+        <div><p class="eyebrow">CARRILES</p><h2>Equipo del agente</h2></div>
+      </div>
+      <div id="lanes" class="lane-grid"></div>
+    </section>
+
+    <section class="card composer">
+      <div class="section-title">
+        <div><p class="eyebrow">NUEVA ORDEN</p><h2>Habla directamente con el agente</h2></div>
+      </div>
+      <form id="taskForm">
+        <label>Destino
+          <select id="lane">
+            <option value="self">Agente / Automejora</option>
+            <option value="callflow">Callflow</option>
+            <option value="leadfinder">LeadFinder</option>
+            <option value="website-pilot">Website Pilot</option>
+          </select>
+        </label>
+        <label>Tarea
+          <textarea id="goal" rows="6" maxlength="1000" placeholder="Ej.: revisa por qué Callflow falla al cargar leads, encuentra la causa, corrígela, prueba y continúa hasta dejarlo estable." required></textarea>
+        </label>
+        <div class="composer-actions">
+          <span id="taskHint">Se enviará a la cola gobernada del agente y quedará registrada.</span>
+          <button id="sendTask" class="primary" type="submit">Enviar tarea</button>
+        </div>
+      </form>
+      <div id="taskResult" class="result hidden"></div>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">TRABAJO</p><h2>Tareas abiertas</h2></div>
+          <span id="taskCount" class="counter">0</span>
+        </div>
+        <div id="tasks" class="list"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">EJECUCIÓN</p><h2>Últimos workflows</h2></div>
+        </div>
+        <div id="runs" class="list"></div>
+      </article>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">PROCESOS</p><h2>Qué está haciendo ahora</h2></div>
+        </div>
+        <pre id="processes" class="terminal"></pre>
+      </article>
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">LOGS</p><h2>Actividad reciente</h2></div>
+        </div>
+        <pre id="logs" class="terminal"></pre>
+      </article>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button data-jump="top">Inicio</button>
+    <button data-jump="lanes">Carriles</button>
+    <button data-jump="taskForm">Nueva tarea</button>
+  </nav>
+
+  <div id="toast" class="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
