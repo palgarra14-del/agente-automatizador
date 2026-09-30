@@ -136,6 +136,19 @@ try {
             modelCandidate: typeof routing?.candidate === 'string' ? routing.candidate : null,
             modelProvider: typeof routing?.provider === 'string' ? routing.provider : null,
             model: typeof routing?.model === 'string' ? routing.model : null,
+            resourceClass: typeof routing?.resourceClass === 'string' ? routing.resourceClass : null,
+            providerSlot: routing?.providerSlot && typeof routing.providerSlot === 'object'
+              ? {
+                  provider: typeof routing.providerSlot.provider === 'string' ? routing.providerSlot.provider : null,
+                  slot: Number.isInteger(routing.providerSlot.slot) ? routing.providerSlot.slot : null,
+                  limit: Number.isInteger(routing.providerSlot.limit) ? routing.providerSlot.limit : null,
+                  coordinated: routing.providerSlot.coordinated === true
+                }
+              : null,
+            routingScore: Number.isFinite(routing?.routingScore) ? routing.routingScore : null,
+            fallbackErrors: Array.isArray(routing?.fallbackErrors)
+              ? routing.fallbackErrors.filter((item) => typeof item === 'string').slice(-8)
+              : [],
             routingMode: typeof routing?.mode === 'string' ? routing.mode : null,
             usedFallback: Boolean(routing && (
               String(routing.mode ?? '').includes('fallback') ||
