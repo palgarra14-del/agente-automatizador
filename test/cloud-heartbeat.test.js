@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -42,4 +42,53 @@ test('active lane is never dispatched twice', () => {
     {lane:'leadfinder',hasWork:true}
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['leadfinder']);
+});
+
+
+test('authorized operator issues map only to configured lanes', () => {
+  const config = {
+    allowedActors:['palgarra14-del'],
+    cloudLanes:[
+      {id:'self',projectIds:['self']},
+      {id:'callflow',projectIds:['callflow']}
+    ]
+  };
+  const body = (projectId) => '<!-- agent-request:v1 -->\n' + JSON.stringify({version:1,projectId});
+  const lanes = operatorRequestedLanes([
+    {author:{login:'palgarra14-del'},body:body('self')},
+    {author:{login:'someone-else'},body:body('callflow')},
+    {author:{login:'palgarra14-del'},body:body('unknown')},
+    {author:{login:'palgarra14-del'},body:'malformed'}
+  ],config);
+  assert.deepEqual(lanes,['self']);
+});
+
+test('operator self work outranks ordinary business work when capacity is scarce', () => {
+  const plan = planHeartbeat([
+    {lane:'self',hasWork:true,operatorRequested:true},
+    {lane:'callflow',hasWork:true}
+  ],{
+    maxHeavy:1,
+    maxBusinessHeavy:1,
+    maxSelfHeavy:1
+  });
+  assert.deepEqual(plan.dispatch,[{
+    lane:'self',
+    priority:'operator',
+    reason:'work_detected'
+  }]);
+  assert.equal(plan.deferred[0].lane,'callflow');
+  assert.equal(plan.deferred[0].reason,'global_capacity');
+});
+
+test('unauthorized issue content cannot elevate a lane to operator priority', () => {
+  const config = {
+    allowedActors:['palgarra14-del'],
+    cloudLanes:[{id:'self',projectIds:['self']}]
+  };
+  const lanes = operatorRequestedLanes([{
+    author:{login:'attacker'},
+    body:'<!-- agent-request:v1 -->\n'+JSON.stringify({version:1,projectId:'self'})
+  }],config);
+  assert.deepEqual(lanes,[]);
 });
