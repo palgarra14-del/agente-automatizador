@@ -306,3 +306,42 @@ test('cloud drain surfaces an autonomous failure after bounded recovery is exhau
   assert.equal(result.remainingWork, true);
   assert.equal(result.continuationRecommended, false);
 });
+
+
+test('cloud drain yields only at an iteration boundary and preserves pending work', async () => {
+  const queue = scriptedQueue([
+    { status: 'running', issueNumber: 21 },
+    { status: 'completed', issueNumber: 21 }
+  ]);
+  let checks = 0;
+  const result = await runCloudDrain({
+    queue,
+    shouldYield: async () => {
+      checks += 1;
+      return checks >= 2;
+    }
+  });
+
+  assert.equal(result.stopReason, 'scheduler_yield');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].queueResult.status, 'running');
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(queue.calls.tick, 1);
+  assert.equal(queue.calls.ingest, 1);
+});
+
+test('cloud drain can yield before any work starts when higher-priority capacity is waiting', async () => {
+  const queue = scriptedQueue([{ status: 'running', issueNumber: 22 }]);
+  const result = await runCloudDrain({
+    queue,
+    shouldYield: async () => true
+  });
+
+  assert.equal(result.stopReason, 'scheduler_yield');
+  assert.equal(result.iterations.length, 0);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(queue.calls.tick, 0);
+  assert.equal(queue.calls.ingest, 0);
+});
