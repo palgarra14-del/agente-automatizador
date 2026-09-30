@@ -364,6 +364,36 @@ function assertRepositoryContextPaths(paths, context, label) {
   if (outside) throw new Error(`${label}_references_unsupplied_path:${outside}`);
 }
 
+function repositoryContextPathPriority(path) {
+  const normalized = path.toLowerCase();
+  const parts = normalized.split('/');
+  const basename = parts.at(-1);
+  let score = parts.length === 1 ? 500 : 0;
+  if ([
+    'package.json', 'pyproject.toml', 'requirements.txt', 'cargo.toml', 'go.mod',
+    'readme.md', 'vite.config.js', 'vite.config.ts', 'next.config.js', 'next.config.mjs',
+    'tsconfig.json', 'jsconfig.json'
+  ].includes(basename)) score += 1_000;
+  if (/^(src|app|pages|components|lib|server|api|scripts)\//.test(normalized)) score += 300;
+  if (/\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|css|scss|html|vue|svelte)$/.test(normalized)) score += 100;
+  if (/(^|\/)(?:test|tests|__tests__|fixtures?|snapshots?|docs?)(\/|$)/.test(normalized)) score -= 150;
+  return score;
+}
+
+function selectRepositoryContextPaths(candidatePaths, maxFiles) {
+  if (candidatePaths.length <= maxFiles) return candidatePaths;
+  return [...candidatePaths]
+    .sort((left, right) => {
+      const priority = repositoryContextPathPriority(right) - repositoryContextPathPriority(left);
+      if (priority) return priority;
+      const depth = left.split('/').length - right.split('/').length;
+      if (depth) return depth;
+      return left.localeCompare(right);
+    })
+    .slice(0, maxFiles)
+    .sort();
+}
+
 export async function collectReadOnlyRepositoryContext({
   workspace,
   project,
@@ -409,12 +439,16 @@ export async function collectReadOnlyRepositoryContext({
     if (firstForbiddenPath) throw new Error(`repository_context_forbidden_path:${firstForbiddenPath}`);
     throw new Error('repository_context_empty');
   }
-  if (candidatePaths.length > maxFiles) throw new Error(`repository_context_file_limit_exceeded:${candidatePaths.length}>${maxFiles}`);
+  const selectedPaths = selectRepositoryContextPaths(candidatePaths, maxFiles);
+  const effectiveMaxFileBytes = Math.min(maxFileBytes, Math.floor(maxTotalBytes / selectedPaths.length));
+  if (effectiveMaxFileBytes < 1_024) {
+    throw new Error(`repository_context_total_budget_too_small:${maxTotalBytes}/${selectedPaths.length}`);
+  }
 
   const files = [];
   let totalBytes = 0;
   let sourceTotalBytes = 0;
-  for (const path of candidatePaths) {
+  for (const path of selectedPaths) {
     const target = resolve(root, path);
     if (!isWithin(root, target)) throw new Error(`repository_context_path_escape:${path}`);
     let source;
@@ -429,7 +463,7 @@ export async function collectReadOnlyRepositoryContext({
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(source); }
     catch (error) { throw new Error(`repository_context_non_utf8_file:${path}`, { cause: error }); }
     if (text.includes('\u0000')) throw new Error(`repository_context_non_text_file:${path}`);
-    const excerpt = excerptRepositoryText(maskSecrets(text), maxFileBytes);
+    const excerpt = excerptRepositoryText(maskSecrets(text), effectiveMaxFileBytes);
     totalBytes += excerpt.excerptBytes;
     if (totalBytes > maxTotalBytes) throw new Error(`repository_context_total_bytes_exceeded:${totalBytes}>${maxTotalBytes}`);
     files.push({
@@ -443,6 +477,12 @@ export async function collectReadOnlyRepositoryContext({
   return {
     version: 1,
     files,
+    selection: {
+      strategy: candidatePaths.length > selectedPaths.length ? 'deterministic_relevance_v1' : 'complete',
+      candidateFiles: candidatePaths.length,
+      selectedFiles: selectedPaths.length,
+      omittedFiles: candidatePaths.length - selectedPaths.length
+    },
     fingerprint: repositoryContextFingerprint(files)
   };
 }
