@@ -6160,12 +6160,34 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
     if (!role) return super.execute(request, { workspace, timeoutMs });
     try {
       await this.controlSurface(workspace);
-      const routed = await this.gateway.structured({
-        role,
-        prompt: buildReadOnlySkillPrompt(request),
-        schema: multiModelSchemaForContract(request.contract),
-        excludedFamilies: request.context?.modelRouting?.excludedFamilies ?? []
-      }, { workspace, timeoutMs });
+      const prompt = buildReadOnlySkillPrompt(request);
+      const schema = multiModelSchemaForContract(request.contract);
+      const excludedFamilies = request.context?.modelRouting?.excludedFamilies ?? [];
+      let routed;
+      let primaryError = null;
+      try {
+        routed = await this.gateway.structured({
+          role,
+          prompt,
+          schema,
+          excludedFamilies
+        }, { workspace, timeoutMs });
+      } catch (error) {
+        primaryError = error;
+        try {
+          routed = await this.gateway.structured({
+            role: 'offline_analysis',
+            prompt,
+            schema,
+            excludedFamilies
+          }, { workspace, timeoutMs: Math.min(timeoutMs, 180_000) });
+        } catch (offlineError) {
+          throw new Error(
+            `read_only_multimodel_failed:${clip(primaryError.message, 700)};offline_analysis_failed:${clip(offlineError.message, 700)}`,
+            { cause: offlineError }
+          );
+        }
+      }
       const output = JSON.stringify(routed.value ?? {});
       if (Buffer.byteLength(output) > this.maxOutputBytes) throw new Error('skill_output_too_large');
       return {
@@ -6178,7 +6200,12 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
         outputBytes: Buffer.byteLength(output),
         result: routed.value,
         executionMode: 'free-multimodel',
-        modelRouting: routed.modelRouting
+        modelRouting: primaryError ? {
+          ...routed.modelRouting,
+          mode: 'free-multimodel-readonly-fallback',
+          primaryRole: role,
+          primaryError: clip(primaryError.message, 700)
+        } : routed.modelRouting
       };
     } catch (error) {
       if (this.allowSessionFallback) {
