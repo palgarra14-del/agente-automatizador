@@ -4,9 +4,11 @@
 Published model strengths seed the priors. Real lab outcomes progressively
 adjust routing without allowing one lucky run to permanently dominate.
 """
+import hashlib
 import json
 import math
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -209,6 +211,15 @@ CANDIDATES = {
         "visual": True,
         "editing": True,
     },
+    "ollama-qwen-7b": {
+        "provider": "ollama",
+        "model": "qwen2.5-coder:7b",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "local_zero_external",
+        "visual": False,
+        "editing": False,
+    },
     "ollama-qwen-3b": {
         "provider": "ollama",
         "model": os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b"),
@@ -239,6 +250,7 @@ MODEL_FAMILY = {
     "codex-5.6-sol": "openai",
     "codex-5.6-terra": "openai",
     "codex-5.6-luna": "openai",
+    "ollama-qwen-7b": "qwen-local",
     "ollama-qwen-3b": "qwen-local",
 }
 
@@ -394,8 +406,13 @@ ROLE_POLICY = {
         ("codex-astra", 0.995),
         ("codex-sol", 0.985),
     ],
+    "local_patch": [
+        ("ollama-qwen-7b", 1.00),
+        ("ollama-qwen-3b", 0.92),
+    ],
     "offline_analysis": [
-        ("ollama-qwen-3b", 0.99),
+        ("ollama-qwen-7b", 1.00),
+        ("ollama-qwen-3b", 0.94),
         ("oc-mimo-2.6-flash", 0.90),
         ("ag-gpt-oss-120b", 0.88),
         ("ag-gemini-3.8-flash", 0.86),
@@ -873,7 +890,7 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
     elif provider == "ollama":
         if images:
             raise ProviderUnavailable("ollama_candidate_has_no_visual_input")
-        value = ollama_structured(prompt, schema, cwd=cwd, timeout=timeout)
+        value = ollama_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
     elif provider == "opencode":
         if images:
             raise ProviderUnavailable("opencode_candidate_has_no_visual_input")
@@ -974,6 +991,25 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
     }
 
 
+def _workspace_edit_fingerprint(cwd):
+    workdir = str(Path(cwd).resolve())
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=workdir, capture_output=True, timeout=15, check=False
+        )
+        diff = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--", "."],
+            cwd=workdir, capture_output=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProviderUnavailable("edit_workspace_fingerprint_failed:" + str(exc)) from exc
+    if status.returncode != 0 or diff.returncode != 0:
+        detail = (status.stderr or diff.stderr or b"")[-800:]
+        raise ProviderUnavailable("edit_workspace_fingerprint_failed:" + detail.decode("utf-8", errors="replace"))
+    return hashlib.sha256(status.stdout + b"\0" + diff.stdout).hexdigest()
+
+
 def run_edit_role(
     role,
     prompt,
@@ -998,6 +1034,7 @@ def run_edit_role(
         if cooldown_error:
             errors.append(cooldown_error)
             continue
+        before = _workspace_edit_fingerprint(cwd)
         try:
             result = run_edit_candidate(
                 candidate,
@@ -1006,12 +1043,24 @@ def run_edit_role(
                 timeout=timeout,
                 agent_override=ROLE_AGENTS.get(role) if use_role_agent else None,
             )
-            result["routingScore"] = item["routingScore"]
-            result["fallbackErrors"] = errors
-            return result
         except ProviderUnavailable as exc:
+            after = _workspace_edit_fingerprint(cwd)
+            if after != before:
+                raise ProviderUnavailable(
+                    "candidate_failed_after_workspace_change:" + candidate + ":" + str(exc)
+                ) from exc
             _remember_unavailability(candidate, exc)
             errors.append(candidate + ":" + str(exc))
+            continue
+        after = _workspace_edit_fingerprint(cwd)
+        if after == before:
+            no_change = ProviderUnavailable("completed_without_workspace_changes")
+            _remember_unavailability(candidate, no_change)
+            errors.append(candidate + ":completed_without_workspace_changes")
+            continue
+        result["routingScore"] = item["routingScore"]
+        result["fallbackErrors"] = errors
+        return result
     raise ProviderUnavailable(";".join(errors) or "no_edit_candidate_available")
 
 

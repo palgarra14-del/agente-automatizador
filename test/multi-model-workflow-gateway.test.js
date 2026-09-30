@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 import {
   MultiModelCodingWorker,
@@ -83,10 +86,12 @@ test('coding worker gives website work to frontend routing and app work to long-
       };
     }
   };
+  let fingerprint = 0;
   const worker = new MultiModelCodingWorker({
     gateway,
     allowSessionFallback: false,
-    controlSurface: async () => {}
+    controlSurface: async () => {},
+    workspaceFingerprint: async () => String(fingerprint++)
   });
 
   const website = await worker.execute({
@@ -225,4 +230,125 @@ test('python workflow gateway is a hard free-only boundary', () => {
   assert.match(gateway, /MAX_STDIN_BYTES = 1536 \* 1024/);
   assert.match(gateway, /gateway_prompt", 1_200_000/);
   assert.match(gateway, /use_role_agent=False/);
+});
+
+test('coding worker falls back to a bounded local patch when direct free editing makes no changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-patch-worker-'));
+  try {
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src', 'feature.ts'), 'export const value = 1;\n');
+    const fingerprints = ['clean', 'clean', 'patched'];
+    let structuredRequest = null;
+    const gateway = {
+      async edit() {
+        return {
+          result: { stdout: 'done without edits' },
+          modelRouting: { mode: 'free-multimodel', candidate: 'ag-gemini-3.8-flash', family: 'google', provider: 'antigravity', model: 'fixture' }
+        };
+      },
+      async structured(request) {
+        structuredRequest = request;
+        return {
+          value: {
+            summary: 'Raise the fixture value.',
+            edits: [{ path: 'src/feature.ts', search: 'export const value = 1;', replace: 'export const value = 2;' }]
+          },
+          modelRouting: { mode: 'free-multimodel', candidate: 'ollama-qwen-7b', family: 'qwen-local', provider: 'ollama', model: 'qwen2.5-coder:7b' }
+        };
+      }
+    };
+    const worker = new MultiModelCodingWorker({
+      gateway,
+      allowSessionFallback: false,
+      controlSurface: async () => {},
+      workspaceFingerprint: async () => fingerprints.shift()
+    });
+    const result = await worker.execute({
+      objective: 'Raise the fixture value.',
+      projectId: 'leadfinder',
+      workflow: { profile: 'autonomous-maintenance' },
+      scope: { allowedPaths: ['src'], forbiddenPaths: [] },
+      diagnosis: { diagnosis: { relevantPaths: ['src/feature.ts'] } }
+    }, { workspace: root, timeoutMs: 120_000 });
+
+    assert.equal(result.status, 'completed');
+    assert.equal(result.modelRouting.mode, 'free-multimodel-local-patch');
+    assert.equal(result.modelRouting.candidate, 'ollama-qwen-7b');
+    assert.equal(structuredRequest.role, 'local_patch');
+    assert.deepEqual(structuredRequest.schema.required, ['summary', 'edits']);
+    assert.match(await readFile(join(root, 'src', 'feature.ts'), 'utf8'), /value = 2/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('coding worker never routes to another model after a direct provider fails with workspace changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'partial-edit-worker-'));
+  try {
+    let structuredCalls = 0;
+    const fingerprints = ['clean', 'dirty'];
+    const worker = new MultiModelCodingWorker({
+      gateway: {
+        async edit() { throw new Error('provider failed after editing'); },
+        async structured() { structuredCalls += 1; throw new Error('must not run'); }
+      },
+      allowSessionFallback: false,
+      controlSurface: async () => {},
+      workspaceFingerprint: async () => fingerprints.shift()
+    });
+    const result = await worker.execute({
+      objective: 'Change one file.',
+      projectId: 'callflow',
+      workflow: { profile: 'autonomous-maintenance' },
+      scope: { allowedPaths: ['src'], forbiddenPaths: [] },
+      diagnosis: { diagnosis: { relevantPaths: ['src/a.ts'] } }
+    }, { workspace: root, timeoutMs: 120_000 });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(structuredCalls, 0);
+    assert.match(result.output, /direct_model_failed_after_workspace_change/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('local patch fallback rejects edits outside the diagnosis-bound authorized files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'unauthorized-patch-worker-'));
+  try {
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src', 'feature.ts'), 'export const value = 1;\n');
+    await writeFile(join(root, 'README.md'), 'safe\n');
+    const fingerprints = ['clean', 'clean'];
+    const worker = new MultiModelCodingWorker({
+      gateway: {
+        async edit() { throw new Error('quota exhausted'); },
+        async structured() {
+          return {
+            value: {
+              summary: 'Bad route.',
+              edits: [{ path: 'README.md', search: 'safe', replace: 'unsafe' }]
+            },
+            modelRouting: { mode: 'free-multimodel', candidate: 'ollama-qwen-7b', family: 'qwen-local', provider: 'ollama', model: 'qwen2.5-coder:7b' }
+          };
+        }
+      },
+      allowSessionFallback: false,
+      controlSurface: async () => {},
+      workspaceFingerprint: async () => fingerprints.shift()
+    });
+    const result = await worker.execute({
+      objective: 'Change the feature.',
+      projectId: 'leadfinder',
+      workflow: { profile: 'autonomous-maintenance' },
+      scope: { allowedPaths: ['src'], forbiddenPaths: [] },
+      diagnosis: { diagnosis: { relevantPaths: ['src/feature.ts'] } }
+    }, { workspace: root, timeoutMs: 120_000 });
+
+    assert.equal(result.status, 'failed');
+    assert.match(result.output, /local_patch_path_not_authorized:README\.md/);
+    assert.equal(await readFile(join(root, 'README.md'), 'utf8'), 'safe\n');
+    assert.equal(await readFile(join(root, 'src', 'feature.ts'), 'utf8'), 'export const value = 1;\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

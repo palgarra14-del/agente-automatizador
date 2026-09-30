@@ -21,6 +21,7 @@ m.OPENCODE="/bin/true"
 m.OPENCODE_MODELS_TTL=60
 m.time.monotonic=lambda: 10.0
 m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
 calls=[]
 def fake_run(args,cwd=None,timeout=30,input_text=None,env=None):
     calls.append(args)
@@ -42,6 +43,7 @@ m.OPENCODE_FREE_ENABLED=True
 m.OPENCODE="/bin/true"
 m.OPENCODE_MODELS_TTL=60
 m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
 calls=[]
 def fake_run(args,cwd=None,timeout=30,input_text=None,env=None):
     calls.append(args)
@@ -73,6 +75,7 @@ m.OPENCODE_MODELS_TTL=1
 clock=[100.0]
 m.time.monotonic=lambda: clock[0]
 m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
 calls=[]
 def fake_run(args,cwd=None,timeout=30,input_text=None,env=None):
     calls.append(args)
