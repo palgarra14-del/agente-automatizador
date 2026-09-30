@@ -22,7 +22,7 @@ test('heartbeat prioritizes two business lanes and keeps one spare slot for self
     {lane:'callflow',hasWork:true}
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder','self']);
-  assert.deepEqual(plan.deferred,[{lane:'website-pilot',reason:'business_capacity'}]);
+  assert.deepEqual(plan.deferred,[{lane:'website-pilot',priority:'business',reason:'business_capacity'}]);
 });
 
 test('active business work consumes capacity and suppresses unnecessary self expansion', () => {
