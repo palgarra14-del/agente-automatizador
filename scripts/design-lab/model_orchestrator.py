@@ -134,6 +134,69 @@ def cost_allowed(spec):
         return True
     return COST_POLICY == "allow_all" and PAID_MODELS_EXPLICITLY_ENABLED
 
+
+def candidate_resource_class(candidate):
+    spec = CANDIDATES[candidate]
+    cost_class = spec.get("costClass")
+    if cost_class == "local_zero_external":
+        return "local"
+    if cost_class == "free_hosted":
+        return "hosted_free"
+    if cost_class == "free_quota":
+        if candidate in {"ag-opus-4.6", "ag-sonnet-4.6", "ag-gemini-3.1-pro"}:
+            return "deep_free"
+        return "workhorse_free"
+    return "paid"
+
+
+@contextmanager
+def provider_slot(provider, *, timeout_seconds):
+    limit = PROVIDER_CONCURRENCY.get(provider, 1)
+    if fcntl is None:
+        yield {"provider": provider, "slot": 0, "limit": limit, "coordinated": False}
+        return
+
+    PROVIDER_SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    wait_budget = min(PROVIDER_SLOT_WAIT_SECONDS, max(0.1, float(timeout_seconds)))
+    deadline = time.monotonic() + wait_budget
+
+    while True:
+        for slot in range(limit):
+            lock_path = PROVIDER_SLOT_DIR / f"{provider}-{slot}.lock"
+            handle = lock_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.close()
+                continue
+
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(json.dumps({
+                    "pid": os.getpid(),
+                    "provider": provider,
+                    "slot": slot,
+                    "acquiredAt": datetime.now(timezone.utc).isoformat(),
+                }))
+                handle.flush()
+                yield {
+                    "provider": provider,
+                    "slot": slot,
+                    "limit": limit,
+                    "coordinated": True,
+                }
+                return
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+
+        if time.monotonic() >= deadline:
+            raise ProviderUnavailable(f"provider_capacity_timeout:{provider}")
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
 # cost_class is relative operational cost, not a price quote.
 CANDIDATES = {
     "ag-sonnet-4.6": {
@@ -948,45 +1011,48 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
     _require_cost_allowed(candidate, spec)
     provider = spec["provider"]
     started = time.monotonic()
-    if provider == "antigravity":
-        value = antigravity_structured(
-            prompt,
-            schema,
-            cwd=cwd,
-            timeout=timeout,
-            model=spec["model"],
-            agent=agent_override or spec.get("agent"),
-            effort=spec.get("effort", "medium"),
-            mode="plan",
-        )
-    elif provider == "codex":
-        value = codex_structured(
-            prompt,
-            schema,
-            cwd=cwd,
-            timeout=timeout,
-            model=spec["model"],
-            effort=spec.get("effort"),
-            images=images,
-        )
-    elif provider == "ollama":
-        if images:
-            raise ProviderUnavailable("ollama_candidate_has_no_visual_input")
-        value = ollama_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
-    elif provider == "opencode":
-        if images:
-            raise ProviderUnavailable("opencode_candidate_has_no_visual_input")
-        value = opencode_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
-    elif provider == "copilot":
-        if images:
-            raise ProviderUnavailable("copilot_candidate_has_no_visual_input")
-        value = copilot_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
-    else:
-        raise ProviderUnavailable("unsupported_provider:" + provider)
+    with provider_slot(provider, timeout_seconds=timeout) as resource_slot:
+        if provider == "antigravity":
+            value = antigravity_structured(
+                prompt,
+                schema,
+                cwd=cwd,
+                timeout=timeout,
+                model=spec["model"],
+                agent=agent_override or spec.get("agent"),
+                effort=spec.get("effort", "medium"),
+                mode="plan",
+            )
+        elif provider == "codex":
+            value = codex_structured(
+                prompt,
+                schema,
+                cwd=cwd,
+                timeout=timeout,
+                model=spec["model"],
+                effort=spec.get("effort"),
+                images=images,
+            )
+        elif provider == "ollama":
+            if images:
+                raise ProviderUnavailable("ollama_candidate_has_no_visual_input")
+            value = ollama_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
+        elif provider == "opencode":
+            if images:
+                raise ProviderUnavailable("opencode_candidate_has_no_visual_input")
+            value = opencode_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
+        elif provider == "copilot":
+            if images:
+                raise ProviderUnavailable("copilot_candidate_has_no_visual_input")
+            value = copilot_structured(prompt, schema, cwd=cwd, timeout=timeout, model=spec["model"])
+        else:
+            raise ProviderUnavailable("unsupported_provider:" + provider)
     return {
         "candidate": candidate,
         "provider": provider,
         "model": spec["model"],
+        "resourceClass": candidate_resource_class(candidate),
+        "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "value": value,
     }
@@ -1044,30 +1110,34 @@ def run_role_structured(
 def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=None):
     spec = _candidate_by_name(candidate)
     _require_cost_allowed(candidate, spec)
+    provider = spec["provider"]
     started = time.monotonic()
-    if spec["provider"] == "antigravity":
-        result = antigravity_edit(
-            prompt,
-            cwd=cwd,
-            timeout=timeout,
-            model=spec["model"],
-            agent=agent_override or spec.get("agent"),
-            effort=spec.get("effort", "medium"),
-        )
-    elif spec["provider"] == "codex":
-        result = codex_edit(
-            prompt,
-            cwd=cwd,
-            timeout=timeout,
-            model=spec["model"],
-            effort=spec.get("effort"),
-        )
-    else:
-        raise ProviderUnavailable("candidate_cannot_edit_workspace")
+    with provider_slot(provider, timeout_seconds=timeout) as resource_slot:
+        if provider == "antigravity":
+            result = antigravity_edit(
+                prompt,
+                cwd=cwd,
+                timeout=timeout,
+                model=spec["model"],
+                agent=agent_override or spec.get("agent"),
+                effort=spec.get("effort", "medium"),
+            )
+        elif provider == "codex":
+            result = codex_edit(
+                prompt,
+                cwd=cwd,
+                timeout=timeout,
+                model=spec["model"],
+                effort=spec.get("effort"),
+            )
+        else:
+            raise ProviderUnavailable("candidate_cannot_edit_workspace")
     return {
         "candidate": candidate,
-        "provider": spec["provider"],
+        "provider": provider,
         "model": spec["model"],
+        "resourceClass": candidate_resource_class(candidate),
+        "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "result": result,
     }
@@ -1330,10 +1400,13 @@ def policy_snapshot():
             "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
             "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,
         },
+        "providerConcurrency": PROVIDER_CONCURRENCY,
+        "providerSlotWaitSeconds": PROVIDER_SLOT_WAIT_SECONDS,
         "candidates": {
             candidate: {
                 **spec,
                 "family": candidate_family(candidate),
+                "resourceClass": candidate_resource_class(candidate),
                 "specialization": SPECIALIZATION_POLICY.get(candidate),
             }
             for candidate, spec in CANDIDATES.items()
