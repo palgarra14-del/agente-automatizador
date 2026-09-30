@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_ROOT="$(cd "$ROOT/.." && pwd)"
+AGENT_ROOT="${AGENT_ROOT:-$HOME/projects/agente-automatizador}"
+[[ -d "$AGENT_ROOT/.git" || -f "$AGENT_ROOT/.git" ]] || { echo "No encuentro el agente en $AGENT_ROOT"; exit 1; }
 BIN="$HOME/.local/bin/cloudflared"
 UNITS="$HOME/.config/systemd/user"
 mkdir -p "$HOME/.local/bin" "$UNITS" "$HOME/.config/agent-control-center"
@@ -50,6 +51,12 @@ EOF
 
 systemctl --user daemon-reload
 systemctl --user enable --now agent-control-center.service agent-control-tunnel.service
+
+for _ in {1..30}; do
+  [[ -s "$HOME/.config/agent-control-center/access-token" && -s "$HOME/.config/agent-control-center/tunnel-url" ]] && break
+  sleep 1
+done
+
 echo "Control center activo."
-echo "Clave: $(cat "$HOME/.config/agent-control-center/access-token")"
-echo "URL: espera unos segundos y ejecuta: cat $HOME/.config/agent-control-center/tunnel-url"
+[[ -s "$HOME/.config/agent-control-center/access-token" ]] && echo "Clave: $(<"$HOME/.config/agent-control-center/access-token")"
+[[ -s "$HOME/.config/agent-control-center/tunnel-url" ]] && echo "URL: $(<"$HOME/.config/agent-control-center/tunnel-url")"
