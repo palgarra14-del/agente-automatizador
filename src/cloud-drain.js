@@ -49,6 +49,7 @@ export async function runCloudDrain({
   const durationLimitMs = integerInRange(maxDurationMs, DEFAULT_MAX_DURATION_MS, 'cloud_drain_max_duration', 1_000, 30 * 60 * 1000);
   const startedAt = now();
   if (!Number.isFinite(startedAt)) throw new Error('cloud_drain_clock_invalid');
+  const deadlineAt = startedAt + durationLimitMs;
 
   const iterations = [];
   let stopReason = 'iteration_limit';
@@ -66,7 +67,31 @@ export async function runCloudDrain({
 
     let autonomousResult = null;
     if (autonomousSelfImprovement && shouldRunAutonomous(queueResult)) {
-      autonomousResult = await autonomousSelfImprovement.tick();
+      const beforeAutonomous = now();
+      if (!Number.isFinite(beforeAutonomous)) throw new Error('cloud_drain_clock_invalid');
+      if (beforeAutonomous >= deadlineAt) {
+        iterations.push({
+          index: index + 1,
+          admitted: Boolean(admitted),
+          queueResult,
+          autonomousResult
+        });
+        stopReason = 'duration_limit';
+        break;
+      }
+      try {
+        autonomousResult = await autonomousSelfImprovement.tick({ deadlineCapAt: deadlineAt });
+      } catch (error) {
+        if (error?.message !== 'workflow_deadline_cap_exceeded') throw error;
+        iterations.push({
+          index: index + 1,
+          admitted: Boolean(admitted),
+          queueResult,
+          autonomousResult
+        });
+        stopReason = 'duration_limit';
+        break;
+      }
     }
 
     iterations.push({

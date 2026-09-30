@@ -464,7 +464,10 @@ export class AutonomousProjectImprovement {
     return workflow.id;
   }
 
-  async tick() {
+  async tick({ deadlineCapAt = null } = {}) {
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) {
+      throw new Error('autonomous_self_improvement_deadline_invalid');
+    }
     let state = await this.readState();
 
     let workflowId = state.activeWorkflowId;
@@ -477,7 +480,8 @@ export class AutonomousProjectImprovement {
     }
 
     const baseRevision = state.activeBaseRevision ?? this.operatorRevision;
-    const tickDeadlineAt = this.now() + this.workflowTimeoutMs;
+    const localDeadlineAt = this.now() + this.workflowTimeoutMs;
+    const tickDeadlineAt = deadlineCapAt === null ? localDeadlineAt : Math.min(localDeadlineAt, deadlineCapAt);
     for (let transition = 0; transition < 4; transition += 1) {
       let plan = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
       if (!plan) {

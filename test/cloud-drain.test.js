@@ -180,3 +180,53 @@ test('cloud drain never converts a failed autonomous iteration into idle success
   assert.equal(result.continuationRecommended, false);
   assert.equal(queue.calls.hasWork, 0);
 });
+
+test('cloud drain passes its absolute deadline into autonomous maintenance', async () => {
+  const queue = scriptedQueue([null]);
+  let observed = null;
+  const autonomousSelfImprovement = {
+    async tick(options) {
+      observed = options;
+      return { status: 'idle', workflowId: null };
+    },
+    async hasWork() {
+      return false;
+    }
+  };
+
+  const result = await runCloudDrain({
+    queue,
+    autonomousSelfImprovement,
+    maxDurationMs: 5_000,
+    now: () => 1_000
+  });
+
+  assert.deepEqual(observed, { deadlineCapAt: 6_000 });
+  assert.equal(result.stopReason, 'idle');
+  assert.equal(result.remainingWork, false);
+});
+
+test('cloud drain turns an exhausted inherited workflow deadline into continuation', async () => {
+  const queue = scriptedQueue([null]);
+  const autonomousSelfImprovement = {
+    async tick() {
+      throw new Error('workflow_deadline_cap_exceeded');
+    },
+    async hasWork() {
+      return true;
+    }
+  };
+
+  const result = await runCloudDrain({
+    queue,
+    autonomousSelfImprovement,
+    maxDurationMs: 5_000,
+    now: () => 1_000
+  });
+
+  assert.equal(result.stopReason, 'duration_limit');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].autonomousResult, null);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, true);
+});

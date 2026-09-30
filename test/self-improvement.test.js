@@ -753,3 +753,66 @@ test('partially started autonomous workflow can never refresh its deadline', asy
     deadlineCapAt: now + 300_000
   }]);
 });
+
+test('autonomous maintenance never exceeds an inherited drain deadline', async () => {
+  const now = Date.parse('2026-09-24T10:00:00Z');
+  const inheritedDeadline = now + 30_000;
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-bounded-by-drain',
+      activeBaseRevision: REV_A,
+      sequence: 1,
+      starts: ['2026-09-24T09:00:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  let plan = {
+    id: 'workflow-bounded-by-drain',
+    profile: 'autonomous-maintenance',
+    projectId: 'self',
+    status: 'pending',
+    result: null,
+    deadlineAt: now + 300_000,
+    workspace: '/tmp/already-started',
+    outputBytes: 0,
+    modelUsage: { calls: 0 },
+    bootstrap: { status: 'pending' },
+    steps: [
+      { id: 'inspect-project', status: 'ready', attempts: 1, evidence: {}, error: null }
+    ]
+  };
+  const getOptions = [];
+  const runOptions = [];
+  const engine = {
+    async get(id, options) {
+      assert.equal(id, plan.id);
+      getOptions.push(clone(options));
+      return clone(plan);
+    },
+    async run(id, options) {
+      assert.equal(id, plan.id);
+      runOptions.push(clone(options));
+      plan = { ...plan, status: 'failed', result: { error: 'fixture_stop' } };
+      return clone(plan);
+    }
+  };
+  const autopilot = new AutonomousSelfImprovement({
+    store,
+    workflowEngine: engine,
+    operatorRevision: REV_A,
+    workflowTimeoutMs: 18 * 60_000,
+    now: () => now
+  });
+
+  const result = await autopilot.tick({ deadlineCapAt: inheritedDeadline });
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(getOptions, [{ deadlineCapAt: inheritedDeadline }]);
+  assert.deepEqual(runOptions, [{
+    refreshPristineDeadline: false,
+    deadlineCapAt: inheritedDeadline
+  }]);
+});
