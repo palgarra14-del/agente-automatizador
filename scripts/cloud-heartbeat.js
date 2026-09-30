@@ -9,6 +9,7 @@ const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizado
 const workflow = process.env.AGENT_CLOUD_WORKFLOW || 'agent-cloud.yml';
 const cli = process.execPath;
 const timeoutMs = Number(process.env.AGENT_HEARTBEAT_PEEK_TIMEOUT_MS || 45_000);
+const dryRun = ['1','true','yes','on'].includes(String(process.env.AGENT_HEARTBEAT_DRY_RUN || '').toLowerCase());
 
 async function run(command,args,options={}) {
   try {
@@ -24,7 +25,7 @@ async function configuredLanes() {
   return (raw.cloudLanes ?? []).map((lane) => lane.id);
 }
 
-async function activeLanes() {
+async function activeLanes(lanes) {
   const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status'],{timeout:15_000});
   if (!runs.ok) return new Set();
   let parsed;
@@ -32,7 +33,7 @@ async function activeLanes() {
   const active = new Set();
   for (const item of parsed.filter((run) => run.status !== 'completed')) {
     const jobs=await run('gh',['run','view',String(item.databaseId),'--repo',repo,'--json','jobs','--jq','.jobs[].name'],{timeout:15_000});
-    for (const lane of await configuredLanes()) {
+    for (const lane of lanes) {
       if (jobs.stdout.includes(`(${lane})`)) active.add(lane);
     }
   }
@@ -47,7 +48,7 @@ async function observeLane(lane,active) {
 }
 
 const lanes=await configuredLanes();
-const active=await activeLanes();
+const active=await activeLanes(lanes);
 const observations=[];
 for (const lane of lanes) observations.push(await observeLane(lane,active));
 
@@ -59,9 +60,13 @@ const plan=planHeartbeat(observations,{
 
 const dispatched=[];
 for (const item of plan.dispatch) {
+  if (dryRun) {
+    dispatched.push({...item,ok:true,dryRun:true,error:null});
+    continue;
+  }
   const result=await run('gh',['workflow','run',workflow,'--repo',repo,'-f',`lane=${item.lane}`],{timeout:30_000});
-  dispatched.push({...item,ok:result.ok,error:result.ok?null:(result.stderr||result.stdout)});
+  dispatched.push({...item,ok:result.ok,dryRun:false,error:result.ok?null:(result.stderr||result.stdout)});
 }
 
-console.log(JSON.stringify({...plan,dispatched},null,2));
+console.log(JSON.stringify({...plan,dryRun,dispatched},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;
