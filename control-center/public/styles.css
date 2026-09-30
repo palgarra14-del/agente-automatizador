@@ -47,6 +47,8 @@ main{max-width:1180px;margin:0 auto;padding:20px;display:grid;gap:18px}
 .lane p{color:var(--muted);font-size:12px;line-height:1.45;margin-top:8px;min-height:34px}
 .lane button{width:100%;margin-top:12px}
 .composer form{display:grid;gap:14px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.brief-fields{display:grid;gap:12px}
 label{display:grid;gap:7px;color:#c9d5e7;font-size:13px;font-weight:650}
 select,input,textarea{width:100%;border:1px solid var(--line);background:#081321;color:#f2f6fb;border-radius:14px;padding:13px 14px;outline:none}
 select:focus,input:focus,textarea:focus{border-color:#466fa8;box-shadow:0 0 0 3px rgba(122,167,255,.1)}
@@ -88,6 +90,6 @@ a{color:#9fc1ff;text-decoration:none}
   .hero{align-items:flex-start}.hero h2{font-size:23px}.hero .ghost{padding:10px 12px}
   .stats{grid-template-columns:repeat(2,1fr);gap:9px}.stat{padding:13px}
   .lane-grid{grid-template-columns:1fr 1fr;gap:9px}.lane{padding:13px}
-  .composer-actions{align-items:stretch;flex-direction:column}.composer-actions .primary{width:100%}
+  .form-row{grid-template-columns:1fr}.composer-actions{align-items:stretch;flex-direction:column}.composer-actions .primary{width:100%}
   .bottom-nav{width:calc(100% - 28px);justify-content:space-around}.bottom-nav button{flex:1;padding:9px 5px;font-size:12px}
 }
