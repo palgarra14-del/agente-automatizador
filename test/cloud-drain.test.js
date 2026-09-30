@@ -152,7 +152,49 @@ test('cloud drain stops before starting another iteration after the duration gua
   assert.equal(result.iterations.length, 1);
   assert.equal(result.remainingWork, true);
   assert.equal(result.continuationRecommended, true);
-  assert.equal(queue.calls.tick, 1);
+  assert.equal(queue.calls.tick, 0);
+});
+
+test('cloud drain passes its absolute deadline into governed queue work', async () => {
+  let observed = null;
+  const queue = {
+    async ingestAdmissionIntents() { return null; },
+    async tick(options) {
+      observed = options;
+      return null;
+    },
+    async hasWork() { return false; }
+  };
+
+  const result = await runCloudDrain({
+    queue,
+    maxDurationMs: 5_000,
+    now: () => 1_000
+  });
+
+  assert.deepEqual(observed, { deadlineCapAt: 6_000 });
+  assert.equal(result.stopReason, 'idle');
+  assert.equal(result.remainingWork, false);
+});
+
+test('cloud drain turns a governed queue deadline exhaustion into continuation', async () => {
+  const queue = {
+    async ingestAdmissionIntents() { return null; },
+    async tick() { throw new Error('workflow_deadline_cap_exceeded'); },
+    async hasWork() { return true; }
+  };
+
+  const result = await runCloudDrain({
+    queue,
+    maxDurationMs: 5_000,
+    now: () => 1_000
+  });
+
+  assert.equal(result.stopReason, 'duration_limit');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].queueResult, null);
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, true);
 });
 
 test('cloud drain never converts a failed autonomous iteration into idle success', async () => {

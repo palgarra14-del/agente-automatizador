@@ -95,6 +95,12 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
     return cap;
   }
 
+  remainingMs(plan) {
+    const workflowRemaining = super.remainingMs(plan);
+    const cap = this.executionDeadlineCap(plan.id);
+    return cap === null ? workflowRemaining : Math.min(workflowRemaining, cap - this.now());
+  }
+
   async withExecutionDeadlineCap(id, explicit, task) {
     const cap = this.executionDeadlineCap(id, explicit ?? null);
     if (cap === null) return task();
