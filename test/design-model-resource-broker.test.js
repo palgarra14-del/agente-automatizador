@@ -115,3 +115,34 @@ print(json.dumps({"resourceClass":result["resourceClass"],"slot":result["provide
   assert.equal(result.slot.limit, 1);
   assert.equal(result.slot.coordinated, true);
 });
+
+
+test('operational roles preserve deep-free models for second-wave escalation', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="free_only"
+def order(role):
+  return [{"candidate":x["candidate"],"wave":x["resourceWave"],"resource":x["resourceClass"]} for x in m.rank_candidates(role)]
+print(json.dumps({
+  "research":order("research_and_audit"),
+  "orchestration":order("autonomous_orchestration"),
+  "diagnosis":order("blocker_diagnosis")
+}))
+`);
+  for (const role of ['research','orchestration','diagnosis']) {
+    const ranked = result[role];
+    assert.equal(ranked[0].candidate, 'ag-gemini-3.8-flash');
+    const firstDeep = ranked.findIndex((item) => item.resource === 'deep_free');
+    const workhorseFallback = ranked.findIndex((item) => item.candidate === 'ag-gpt-oss-120b');
+    assert.ok(workhorseFallback > 0);
+    assert.ok(firstDeep > workhorseFallback);
+    assert.equal(ranked[firstDeep].wave, 1);
+  }
+});
