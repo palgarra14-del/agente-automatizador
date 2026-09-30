@@ -162,15 +162,36 @@ $('loginForm').addEventListener('submit', async (event) => {
   }
 });
 
+function syncTaskMode() {
+  const website = $('profile').value === 'website-build';
+  $('briefFields').classList.toggle('hidden', !website);
+  if (website) $('lane').value = 'website-pilot';
+  $('taskHint').textContent = website
+    ? 'Website Pilot recibirá el brief y la tarea como una solicitud de creación de web.'
+    : 'Se enviará a la cola gobernada del agente y quedará registrada.';
+}
+$('profile').addEventListener('change', syncTaskMode);
+syncTaskMode();
+
 $('taskForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const button = $('sendTask');
   button.disabled = true;
   button.textContent = 'Enviando…';
   try {
+    const profile = $('profile').value;
+    const payload = {lane:$('lane').value, goal:$('goal').value, profile};
+    if (profile === 'website-build') {
+      payload.businessBrief = {
+        businessName:$('businessName').value,
+        category:$('category').value,
+        location:$('location').value,
+        services:$('services').value
+      };
+    }
     const result = await api('/api/task', {
       method:'POST',
-      body:JSON.stringify({lane:$('lane').value, goal:$('goal').value})
+      body:JSON.stringify(payload)
     });
     $('taskResult').classList.remove('hidden');
     $('taskResult').innerHTML = 'Tarea #' + esc(result.issueNumber || '—') + ' enviada a <strong>' + esc(laneNames[result.lane]) + '</strong>. '+
