@@ -153,3 +153,70 @@ test('non-recoverable repair failure is surfaced immediately', async () => {
     /cloud_state_snapshot_untrusted/
   );
 });
+
+
+test('exhausted bounded GitHub state reads become continuation instead of wedging the lane', async () => {
+  let leaseAttempts = 0;
+  let repairs = 0;
+  const store = {
+    async withGlobalLease() {
+      leaseAttempts += 1;
+      throw new Error('cloud_state_github_request_failed');
+    },
+    async readSnapshot() {
+      repairs += 1;
+      throw new Error('cloud_state_github_request_failed');
+    }
+  };
+
+  const output = await runCloudDrainWithRecovery({
+    store,
+    queue: {},
+    retryDelaysMs: [1],
+    sleep: async () => {},
+    drain: async () => result()
+  });
+
+  assert.equal(leaseAttempts, 2);
+  assert.equal(repairs, 2);
+  assert.equal(output.stopReason, 'state_recovery_limit');
+  assert.equal(output.remainingWork, true);
+  assert.equal(output.continuationRecommended, true);
+  assert.deepEqual(output.recovery.map((entry) => entry.error), [
+    'cloud_state_github_request_failed',
+    'cloud_state_github_request_failed'
+  ]);
+});
+
+
+test('GitHub state request failure caused by inherited deadline immediately chains continuation', async () => {
+  let repairs = 0;
+  let sleeps = 0;
+  const deadlineError = new Error('workflow_deadline_cap_exceeded');
+  const requestError = new Error('cloud_state_github_request_failed', { cause: deadlineError });
+  const store = {
+    async withGlobalLease() {
+      throw requestError;
+    },
+    async readSnapshot() {
+      repairs += 1;
+      return {};
+    }
+  };
+
+  const output = await runCloudDrainWithRecovery({
+    store,
+    queue: {},
+    retryDelaysMs: [1, 1],
+    sleep: async () => { sleeps += 1; },
+    drain: async () => result()
+  });
+
+  assert.equal(repairs, 0);
+  assert.equal(sleeps, 0);
+  assert.equal(output.stopReason, 'duration_limit');
+  assert.equal(output.remainingWork, true);
+  assert.equal(output.continuationRecommended, true);
+  assert.equal(output.recovery.length, 1);
+  assert.equal(output.recovery[0].deadlineExhausted, true);
+});
