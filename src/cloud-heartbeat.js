@@ -1,17 +1,47 @@
 import { planWork } from './work-scheduler.js';
 
 const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generation_election_failed|github_request_failed|state_recovery_failed|checkpoint_recovery_failed|witness_recovery_failed)|cloud_global_lease_(busy|lost|release_failed)|workflow_deadline_cap_exceeded|timeout|deadline/i;
+const REQUEST_MARKER = '<!-- agent-request:v1 -->';
+
+export function operatorRequestedLanes(issues = [], config = {}) {
+  const allowedActors = new Set((config.allowedActors ?? []).map(String));
+  const projectToLane = new Map();
+  for (const lane of config.cloudLanes ?? []) {
+    if (!lane?.id || !Array.isArray(lane.projectIds)) continue;
+    for (const projectId of lane.projectIds) projectToLane.set(projectId, lane.id);
+  }
+
+  const lanes = new Set();
+  for (const issue of issues) {
+    if (!allowedActors.has(issue?.author?.login)) continue;
+    const body = typeof issue?.body === 'string' ? issue.body : '';
+    if (!body || body.length > 128 * 1024) continue;
+    const markerAt = body.indexOf(REQUEST_MARKER);
+    if (markerAt < 0) continue;
+    let request;
+    try {
+      request = JSON.parse(body.slice(markerAt + REQUEST_MARKER.length).trim());
+    } catch {
+      continue;
+    }
+    if (request?.version !== 1 || typeof request?.projectId !== 'string') continue;
+    const lane = projectToLane.get(request.projectId);
+    if (lane) lanes.add(lane);
+  }
+  return [...lanes].sort();
+}
 
 export function classifyLaneObservation(observation) {
   const lane = observation?.lane;
   if (!lane) throw new Error('lane_observation_invalid');
-  if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active' };
-  if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected' };
+  const operatorRequested = observation.operatorRequested === true;
+  if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active', operatorRequested };
+  if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected', operatorRequested };
   if (observation.error && RECOVERABLE.test(String(observation.error))) {
-    return { lane, state:'recovery', runnable:true, reason:'recoverable_control_error' };
+    return { lane, state:'recovery', runnable:true, reason:'recoverable_control_error', operatorRequested };
   }
-  if (observation.error) return { lane, state:'blocked', runnable:false, reason:'non_recoverable_control_error' };
-  return { lane, state:'idle', runnable:false, reason:'idle' };
+  if (observation.error) return { lane, state:'blocked', runnable:false, reason:'non_recoverable_control_error', operatorRequested };
+  return { lane, state:'idle', runnable:false, reason:'idle', operatorRequested };
 }
 
 export function planHeartbeat(observations = [], limits = {}) {
@@ -21,14 +51,16 @@ export function planHeartbeat(observations = [], limits = {}) {
     .map((item) => ({
       id:`running:${item.lane}`,
       lane:item.lane,
-      source:item.lane === 'self' ? 'autonomous' : 'business'
+      source:item.operatorRequested ? 'operator' : (item.lane === 'self' ? 'autonomous' : 'business'),
+      operatorRequested:item.operatorRequested
     }));
   const pending = classified
     .filter((item) => item.runnable)
     .map((item) => ({
       id:`${item.state}:${item.lane}`,
       lane:item.lane,
-      source:item.lane === 'self' ? 'autonomous' : 'business',
+      source:item.operatorRequested ? 'operator' : (item.lane === 'self' ? 'autonomous' : 'business'),
+      operatorRequested:item.operatorRequested,
       reliability:item.state === 'recovery'
     }));
   const plan = planWork(pending, { running, ...limits });
@@ -38,9 +70,10 @@ export function planHeartbeat(observations = [], limits = {}) {
     running,
     dispatch:plan.selected.map((item) => ({
       lane:item.lane,
+      priority:item.band,
       reason:classified.find((entry) => entry.lane === item.lane)?.reason ?? 'scheduled'
     })),
-    deferred:plan.deferred.map(({item,reason}) => ({lane:item.lane,reason})),
+    deferred:plan.deferred.map(({item,reason}) => ({lane:item.lane,priority:item.band,reason})),
     yieldCandidates:plan.yieldCandidates
   };
 }
