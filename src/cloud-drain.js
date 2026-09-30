@@ -30,7 +30,8 @@ export async function runCloudDrain({
   autonomousSelfImprovement = null,
   maxIterations = DEFAULT_MAX_ITERATIONS,
   maxDurationMs = DEFAULT_MAX_DURATION_MS,
-  now = () => Date.now()
+  now = () => Date.now(),
+  shouldYield = null
 } = {}) {
   if (!queue ||
       typeof queue.tick !== 'function' ||
@@ -44,6 +45,9 @@ export async function runCloudDrain({
     throw new Error('cloud_drain_autonomous_worker_invalid');
   }
   if (typeof now !== 'function') throw new Error('cloud_drain_clock_invalid');
+  if (shouldYield !== null && typeof shouldYield !== 'function') {
+    throw new Error('cloud_drain_yield_check_invalid');
+  }
 
   const iterationLimit = integerInRange(maxIterations, DEFAULT_MAX_ITERATIONS, 'cloud_drain_max_iterations', 1, 32);
   const durationLimitMs = integerInRange(maxDurationMs, DEFAULT_MAX_DURATION_MS, 'cloud_drain_max_duration', 1_000, 30 * 60 * 1000);
@@ -55,6 +59,11 @@ export async function runCloudDrain({
   let stopReason = 'iteration_limit';
 
   for (let index = 0; index < iterationLimit; index += 1) {
+    if (shouldYield && await shouldYield()) {
+      stopReason = 'scheduler_yield';
+      break;
+    }
+
     const beforeIteration = now();
     if (!Number.isFinite(beforeIteration)) throw new Error('cloud_drain_clock_invalid');
     if (beforeIteration - startedAt >= durationLimitMs) {
