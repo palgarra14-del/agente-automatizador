@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
+import { planHeartbeat } from '../src/cloud-heartbeat.js';
+
+const execFileAsync = promisify(execFile);
+const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
+const workflow = process.env.AGENT_CLOUD_WORKFLOW || 'agent-cloud.yml';
+const cli = process.execPath;
+const timeoutMs = Number(process.env.AGENT_HEARTBEAT_PEEK_TIMEOUT_MS || 45_000);
+
+async function run(command,args,options={}) {
+  try {
+    const {stdout='',stderr=''} = await execFileAsync(command,args,{timeout:options.timeout ?? 30_000,maxBuffer:2_000_000});
+    return {ok:true,stdout:stdout.trim(),stderr:stderr.trim()};
+  } catch (error) {
+    return {ok:false,stdout:String(error.stdout||'').trim(),stderr:String(error.stderr||error.message||'').trim()};
+  }
+}
+
+async function configuredLanes() {
+  const raw = JSON.parse(await readFile(new URL('../config/issue-queue.json', import.meta.url),'utf8'));
+  return (raw.cloudLanes ?? []).map((lane) => lane.id);
+}
+
+async function activeLanes() {
+  const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status'],{timeout:15_000});
+  if (!runs.ok) return new Set();
+  let parsed=[];
+  try { parsed=JSON.parse(runs.stdout); } catch { return new Set(); }
+  const active = new Set();
+  for (const item of parsed.filter((run) => run.status !== 'completed')) {
+    const jobs=await run('gh',['run','view',String(item.databaseId),'--repo',repo,'--json','jobs','--jq','.jobs[].name'],{timeout:15_000});
+    for (const lane of await configuredLanes()) {
+      if (jobs.stdout.includes(`(${lane})`)) active.add(lane);
+    }
+  }
+  return active;
+}
+
+async function observeLane(lane,active) {
+  if (active.has(lane)) return {lane,active:true};
+  const result=await run(cli,['src/cli.js','inbox','cloud-peek','--lane',lane],{timeout:timeoutMs});
+  if (!result.ok) return {lane,active:false,error:result.stderr || result.stdout || 'cloud_peek_failed'};
+  return {lane,active:false,hasWork:result.stdout.split(/\s+/).at(-1) === 'true'};
+}
+
+const lanes=await configuredLanes();
+const active=await activeLanes();
+const observations=[];
+for (const lane of lanes) observations.push(await observeLane(lane,active));
+
+const plan=planHeartbeat(observations,{
+  maxHeavy:Number(process.env.AGENT_MAX_HEAVY || 3),
+  maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || 2),
+  maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1)
+});
+
+const dispatched=[];
+for (const item of plan.dispatch) {
+  const result=await run('gh',['workflow','run',workflow,'--repo',repo,'-f',`lane=${item.lane}`],{timeout:30_000});
+  dispatched.push({...item,ok:result.ok,error:result.ok?null:(result.stderr||result.stdout)});
+}
+
+console.log(JSON.stringify({...plan,dispatched},null,2));
+if (dispatched.some((item)=>!item.ok)) process.exitCode=1;
