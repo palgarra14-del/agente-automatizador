@@ -230,6 +230,21 @@ document.addEventListener('click', async (event) => {
 });
 
 $('refreshBtn').addEventListener('click', refresh);
+$('restartServiceBtn').addEventListener('click', async () => {
+  const button = $('restartServiceBtn');
+  button.disabled = true;
+  button.textContent = 'Reiniciando…';
+  try {
+    const result = await api('/api/restart-service', {method:'POST', body:'{}'});
+    toast(result.active ? 'Agente reiniciado y activo' : 'Reinicio solicitado');
+    setTimeout(refresh, 1800);
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Reiniciar agente';
+  }
+});
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 refresh();
