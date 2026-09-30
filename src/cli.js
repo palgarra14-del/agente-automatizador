@@ -225,10 +225,12 @@ try {
           recovery
         }, null, 2));
       } else if (action === 'cloud-peek') {
+        await activeStore.readSnapshot({ repair: true });
         const queueWork = await queue.hasWork();
         const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
         console.log(String(queueWork || autonomousWork));
       } else if (action === 'cloud-execution-peek') {
+        await activeStore.readSnapshot({ repair: true });
         const queueWork = await queue.hasExecutionWork();
         const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
         console.log(String(queueWork || autonomousWork));

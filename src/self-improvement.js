@@ -10,6 +10,7 @@ const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_STARTS_PER_24H = 24;
+const MAX_CONSECUTIVE_FAILURE_RETRIES = 3;
 const HISTORY_LIMIT = 20;
 const GAP_MEMORY_LIMIT = 12;
 const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
@@ -332,6 +333,18 @@ export class AutonomousProjectImprovement {
     )].sort();
   }
 
+  consecutiveSameRevisionFailures(state) {
+    let failures = 0;
+    for (let index = state.history.length - 1; index >= 0; index -= 1) {
+      const entry = state.history[index];
+      if (entry?.status !== 'failed' ||
+          typeof entry?.baseRevision !== 'string' ||
+          entry.baseRevision.toLowerCase() !== this.operatorRevision) break;
+      failures += 1;
+    }
+    return failures;
+  }
+
   cooldownApplies(state, starts = this.recentStarts(state)) {
     const lastStart = starts.at(-1);
     if (!lastStart) return false;
@@ -345,6 +358,8 @@ export class AutonomousProjectImprovement {
       typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision);
     if (completedLatestStart && latest.status === 'completed') return false;
+    if (completedLatestStart && latest.status === 'failed' &&
+        this.consecutiveSameRevisionFailures(state) < MAX_CONSECUTIVE_FAILURE_RETRIES) return false;
     if (completedLatestStart && latest.baseRevision.toLowerCase() !== this.operatorRevision) return false;
     return true;
   }

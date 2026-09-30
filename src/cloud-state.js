@@ -2200,19 +2200,33 @@ export class GitHubStateStore extends JsonStore {
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(this.now() + this.leaseTtlMs).toISOString()
     };
-    await this.mutateInternal(async (data) => {
-      const existing = data.cloudExecutionLease;
-      const existingExpiry = Date.parse(existing?.expiresAt ?? '');
-      if (existing && Number.isFinite(existingExpiry) && existingExpiry > this.now()) {
-        const abandoned = await this.lockOwnerIsAbandoned({
-          ownerIdentity: existing.ownerId,
-          createdAt: existing.createdAt
-        });
-        if (!abandoned) throw new Error('cloud_global_lease_busy');
+    const retryDelaysMs = [250, 750, 1_500];
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.mutateInternal(async (data) => {
+          const existing = data.cloudExecutionLease;
+          const existingExpiry = Date.parse(existing?.expiresAt ?? '');
+          if (existing && Number.isFinite(existingExpiry) && existingExpiry > this.now()) {
+            const abandoned = await this.lockOwnerIsAbandoned({
+              ownerIdentity: existing.ownerId,
+              createdAt: existing.createdAt
+            });
+            if (!abandoned) throw new Error('cloud_global_lease_busy');
+          }
+          data.cloudExecutionLease = lease;
+          return lease;
+        }, { requireLease: false });
+        break;
+      } catch (error) {
+        const retryable = /^(cloud_state_conflict|cloud_state_generation_election_failed|cloud_state_partial_publication)$/.test(error?.message ?? '');
+        if (!retryable || attempt >= retryDelaysMs.length) throw error;
+        this.hotLeaseSnapshot = null;
+        this.lastPublishedSnapshot = null;
+        await this.sleepWithinDeadline(retryDelaysMs[attempt]);
       }
-      data.cloudExecutionLease = lease;
-      return lease;
-    }, { requireLease: false });
+    }
+
     this.activeGlobalLeaseId = lease.leaseId;
     if (this.lastPublishedSnapshot) this.cacheSnapshotForActiveLease(this.lastPublishedSnapshot);
     return lease;

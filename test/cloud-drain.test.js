@@ -197,30 +197,39 @@ test('cloud drain turns a governed queue deadline exhaustion into continuation',
   assert.equal(result.continuationRecommended, true);
 });
 
-test('cloud drain never converts a failed autonomous iteration into idle success', async () => {
-  const queue = scriptedQueue([null]);
+test('cloud drain keeps iterating after a failed autonomous cycle when intelligence has recovery work', async () => {
+  const queue = scriptedQueue([null, null]);
+  let autonomousCalls = 0;
   const autonomousSelfImprovement = {
     async tick() {
+      autonomousCalls += 1;
+      if (autonomousCalls === 1) {
+        return {
+          status: 'failed',
+          error: 'workflow_budget_deadline_exceeded',
+          workflowId: 'workflow-deadline'
+        };
+      }
       return {
-        status: 'failed',
-        error: 'workflow_budget_deadline_exceeded',
-        workflowId: 'workflow-deadline'
+        status: 'completed',
+        error: null,
+        workflowId: 'workflow-recovery'
       };
     },
     async hasWork() {
-      return false;
+      return autonomousCalls < 2;
     }
   };
 
   const result = await runCloudDrain({ queue, autonomousSelfImprovement });
 
-  assert.equal(result.stopReason, 'autonomous_failure');
-  assert.equal(result.iterations.length, 1);
+  assert.equal(result.stopReason, 'idle');
+  assert.equal(result.iterations.length, 2);
   assert.equal(result.iterations[0].autonomousResult.status, 'failed');
-  assert.equal(result.iterations[0].autonomousResult.error, 'workflow_budget_deadline_exceeded');
-  assert.equal(result.remainingWork, true);
+  assert.equal(result.iterations[1].autonomousResult.status, 'completed');
+  assert.equal(result.remainingWork, false);
   assert.equal(result.continuationRecommended, false);
-  assert.equal(queue.calls.hasWork, 0);
+  assert.equal(autonomousCalls, 2);
 });
 
 test('cloud drain passes its absolute deadline into autonomous maintenance', async () => {
@@ -271,4 +280,29 @@ test('cloud drain turns an exhausted inherited workflow deadline into continuati
   assert.equal(result.iterations[0].autonomousResult, null);
   assert.equal(result.remainingWork, true);
   assert.equal(result.continuationRecommended, true);
+});
+
+
+test('cloud drain surfaces an autonomous failure after bounded recovery is exhausted', async () => {
+  const queue = scriptedQueue([null]);
+  const autonomousSelfImprovement = {
+    async tick() {
+      return {
+        status: 'failed',
+        error: 'workflow_budget_deadline_exceeded',
+        workflowId: 'workflow-terminal-failure'
+      };
+    },
+    async hasWork() {
+      return false;
+    }
+  };
+
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+
+  assert.equal(result.stopReason, 'autonomous_failure');
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].autonomousResult.status, 'failed');
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
 });

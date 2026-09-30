@@ -2227,3 +2227,30 @@ test('cloud state compaction can trim old events only after terminal workflow cl
   assert.ok(result.removedEvents > 0);
   assert.equal(state.events.length, 100);
 });
+
+
+test('global lease acquisition retries transient generation-election races', async () => {
+  const now = Date.parse('2026-09-30T00:00:00Z');
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:lease-retry:1',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const mutateInternal = store.mutateInternal.bind(store);
+  let attempts = 0;
+  store.mutateInternal = async (...args) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('cloud_state_generation_election_failed');
+    return mutateInternal(...args);
+  };
+
+  const lease = await store.claimGlobalLease();
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [250]);
+  assert.equal(lease.ownerId, 'github:lease-retry:1');
+  assert.equal((await store.load()).cloudExecutionLease?.leaseId, lease.leaseId);
+});
