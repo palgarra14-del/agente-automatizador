@@ -215,7 +215,10 @@ def _opencode_models_snapshot():
         _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
         return False,set()
     try:
-        proc=_run([OPENCODE,"models"],timeout=20)
+        server,password=_opencode_service_connection()
+        env=os.environ.copy()
+        env["OPENCODE_PASSWORD"]=password
+        proc=_run([OPENCODE,"models","--server",server],timeout=20,env=env)
     except ProviderUnavailable:
         _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
         return False,set()
@@ -416,11 +419,11 @@ def ollama_ready():
     except Exception:
         return False
 
-def ollama_structured(prompt,schema,cwd=None,timeout=180):
+def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None):
     if not ollama_ready():
         raise ProviderUnavailable("ollama_unavailable")
     payload={
-      "model":OLLAMA_MODEL,
+      "model":str(model or OLLAMA_MODEL),
       "prompt":prompt,
       "stream":False,
       "format":schema,

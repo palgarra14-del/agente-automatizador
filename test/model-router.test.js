@@ -272,3 +272,71 @@ print(json.dumps(m.model_diagnosis({},{"category":"unknown_failure","confidence"
   assert.equal(result.source,'model:ollama');
   assert.equal(result.safeAction,'none');
 });
+
+test('OpenCode readiness authenticates model discovery against the local persistent service', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+fd,path=tempfile.mkstemp(); os.close(fd)
+m.OPENCODE=path
+m.OPENCODE_FREE_ENABLED=True
+m._OPENCODE_MODELS_CACHE={"checkedAt":0.0,"ready":False,"models":set()}
+m._opencode_service_connection=lambda: ("http://127.0.0.1:49374","secret-value")
+captured={}
+def fake_run(args,**kwargs):
+    captured["args"]=args
+    captured["password"]=kwargs.get("env",{}).get("OPENCODE_PASSWORD")
+    return subprocess.CompletedProcess(args,0,stdout="opencode/mimo-v2.6-flash-free\\n",stderr="")
+m._run=fake_run
+ready=m.opencode_ready("opencode/mimo-v2.6-flash-free")
+print(json.dumps({"ready":ready,"args":captured["args"],"password":captured["password"]}))
+os.unlink(path)
+`);
+  assert.equal(result.ready,true);
+  assert.ok(result.args.includes('--server'));
+  assert.ok(result.args.includes('http://127.0.0.1:49374'));
+  assert.equal(result.password,'secret-value');
+  assert.ok(!result.args.includes('secret-value'));
+});
+
+test('edit router skips a successful no-op candidate but fails closed after a partial failed edit', () => {
+  const result=python(`
+import importlib.util,json,sys
+sys.path.insert(0,${JSON.stringify(dirname(router))})
+import model_orchestrator as m
+ranked=[
+  {"candidate":"ag-gemini-3.8-flash","routingScore":1.0},
+  {"candidate":"ag-sonnet-4.6","routingScore":0.9},
+]
+m.rank_candidates=lambda *a,**k: ranked
+m._cooldown_error=lambda candidate: None
+m._remember_unavailability=lambda *a,**k: "candidate"
+calls=[]
+marks=iter(["base","base","base","changed"])
+m._workspace_edit_fingerprint=lambda cwd: next(marks)
+def fake(candidate,*args,**kwargs):
+    calls.append(candidate)
+    return {"candidate":candidate,"provider":"fixture","model":"fixture","elapsedSeconds":0,"result":{}}
+m.run_edit_candidate=fake
+first=m.run_edit_role("implementation","x",cwd="/tmp")
+partial_calls=[]
+marks2=iter(["base","changed"])
+m._workspace_edit_fingerprint=lambda cwd: next(marks2)
+def partial(candidate,*args,**kwargs):
+    partial_calls.append(candidate)
+    raise m.ProviderUnavailable("boom")
+m.run_edit_candidate=partial
+try:
+    m.run_edit_role("implementation","x",cwd="/tmp")
+    partial_error=None
+except m.ProviderUnavailable as e:
+    partial_error=str(e)
+print(json.dumps({"selected":first["candidate"],"fallbackErrors":first["fallbackErrors"],"calls":calls,"partialCalls":partial_calls,"partialError":partial_error}))
+`);
+  assert.equal(result.selected,'ag-sonnet-4.6');
+  assert.deepEqual(result.calls,['ag-gemini-3.8-flash','ag-sonnet-4.6']);
+  assert.match(result.fallbackErrors[0],/completed_without_workspace_changes/);
+  assert.deepEqual(result.partialCalls,['ag-gemini-3.8-flash']);
+  assert.match(result.partialError,/candidate_failed_after_workspace_change/);
+});

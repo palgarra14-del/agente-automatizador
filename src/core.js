@@ -5311,65 +5311,286 @@ export class CodexSdkWorker extends CodingWorker {
 }
 
 
+async function codingWorkspaceFingerprint(workspace) {
+  const options = { cwd: workspace, timeoutMs: 10_000, outputLimit: 256 * 1024 };
+  const [status, diff] = await Promise.all([
+    runProcess('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], options),
+    runProcess('git', ['diff', '--no-ext-diff', '--binary', 'HEAD', '--', '.'], options)
+  ]);
+  if (!status.ok || !diff.ok) throw new Error('coding_workspace_fingerprint_failed');
+  return createHash('sha256').update(status.stdout).update('\0').update(diff.stdout).digest('hex');
+}
+
+function localPatchRelevantPaths(task = {}) {
+  const raw = [
+    ...(Array.isArray(task?.diagnosis?.diagnosis?.relevantPaths) ? task.diagnosis.diagnosis.relevantPaths : []),
+    ...(Array.isArray(task?.inspectionEvidence?.inspectionEvidence?.relevantPaths) ? task.inspectionEvidence.inspectionEvidence.relevantPaths : [])
+  ];
+  const scope = normalizeRunScope(task.scope ?? {});
+  const paths = [];
+  for (const value of raw) {
+    let path;
+    try { path = normalizeRepositoryPath(value, 'local patch path'); }
+    catch { continue; }
+    if (immutableForbiddenPathPattern.test(path) || packageManagerControlPathPattern.test(path)) continue;
+    if (scope.forbiddenPaths.some((root) => pathIsWithinRoot(path, root))) continue;
+    if (scope.allowedPaths.length && !scope.allowedPaths.some((root) => pathIsWithinRoot(path, root))) continue;
+    if (!paths.includes(path)) paths.push(path);
+    if (paths.length >= 4) break;
+  }
+  return paths;
+}
+
+async function localPatchContext(task, workspace) {
+  const files = [];
+  let totalBytes = 0;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (const path of localPatchRelevantPaths(task)) {
+    const target = resolve(workspace, path);
+    const within = relative(resolve(workspace), target);
+    if (!within || within.startsWith('..' + sep) || within === '..' || parse(within).root) continue;
+    let info;
+    try {
+      await assertSafePathChain(target);
+      info = await lstat(target);
+    } catch { continue; }
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 96 * 1024) continue;
+    const bytes = await readFile(target);
+    totalBytes += bytes.length;
+    if (totalBytes > 256 * 1024) break;
+    let content;
+    try { content = decoder.decode(bytes); } catch { continue; }
+    files.push({ path, content });
+  }
+  return files;
+}
+
+const localPatchSchema = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'edits'],
+  properties: {
+    summary: { type: 'string', minLength: 1, maxLength: 800 },
+    edits: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 4,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'search', 'replace'],
+        properties: {
+          path: { type: 'string', minLength: 1, maxLength: 240 },
+          search: { type: 'string', minLength: 1, maxLength: 12_000 },
+          replace: { type: 'string', maxLength: 16_000 }
+        }
+      }
+    }
+  }
+});
+
+function buildLocalPatchPrompt(task, files) {
+  const cleanTask = sanitizeCodingTask({
+    objective: task?.objective,
+    projectId: task?.projectId,
+    scope: task?.scope,
+    inspectionEvidence: task?.inspectionEvidence,
+    diagnosis: task?.diagnosis
+  });
+  return [
+    'You are a local, offline patch planner inside a controlled engineering workflow.',
+    'Return only the requested JSON object. Do not use network access and do not invent files.',
+    'Propose the smallest exact search/replace edits that satisfy the objective.',
+    'Every edit path MUST be one of the supplied files. Each search string MUST occur exactly once in that file.',
+    'Do not touch secrets, .env files, dependencies, deployment controls, Git metadata, workflows, or files outside the supplied list.',
+    'Prefer one small edit when it is sufficient. Preserve existing behavior unless the objective explicitly requires changing it.',
+    '',
+    'TASK:',
+    JSON.stringify(cleanTask, null, 2),
+    '',
+    'AUTHORIZED FILE CONTENTS:',
+    JSON.stringify(files, null, 2)
+  ].join('\n');
+}
+
+async function applyLocalPatch(workspace, files, patch) {
+  if (!patch || typeof patch !== 'object' || !Array.isArray(patch.edits) || patch.edits.length < 1 || patch.edits.length > 4) {
+    throw new Error('local_patch_result_invalid');
+  }
+  const originals = new Map(files.map((file) => [file.path, file.content]));
+  const next = new Map(originals);
+  const touched = new Set();
+  for (const edit of patch.edits) {
+    const path = normalizeRepositoryPath(edit?.path, 'local patch edit path');
+    if (!originals.has(path)) throw new Error('local_patch_path_not_authorized:' + path);
+    if (typeof edit.search !== 'string' || !edit.search || typeof edit.replace !== 'string') throw new Error('local_patch_edit_invalid');
+    if (Buffer.byteLength(edit.search) > 12_000 || Buffer.byteLength(edit.replace) > 16_000) throw new Error('local_patch_edit_too_large');
+    const current = next.get(path);
+    const first = current.indexOf(edit.search);
+    if (first < 0 || current.indexOf(edit.search, first + edit.search.length) >= 0) {
+      throw new Error('local_patch_search_not_unique:' + path);
+    }
+    const updated = current.slice(0, first) + edit.replace + current.slice(first + edit.search.length);
+    next.set(path, updated);
+    if (updated !== originals.get(path)) touched.add(path);
+  }
+  if (!touched.size) throw new Error('local_patch_no_changes');
+  for (const path of touched) {
+    const target = resolve(workspace, path);
+    await assertSafePathChain(target);
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error('local_patch_target_invalid:' + path);
+  }
+  const written = [];
+  try {
+    for (const path of touched) {
+      await writeFile(resolve(workspace, path), next.get(path), 'utf8');
+      written.push(path);
+    }
+  } catch (error) {
+    let rollbackFailed = false;
+    for (const path of written.reverse()) {
+      try { await writeFile(resolve(workspace, path), originals.get(path), 'utf8'); }
+      catch { rollbackFailed = true; }
+    }
+    throw new Error(rollbackFailed ? 'local_patch_write_rollback_incomplete' : 'local_patch_write_failed', { cause: error });
+  }
+  return [...touched].sort();
+}
+
 export class MultiModelCodingWorker extends CodingWorker {
   constructor({
     gateway = new MultiModelGatewayClient(),
     fallback = new CodexSdkWorker(),
     allowSessionFallback = process.env.MULTI_MODEL_ALLOW_CODEX_SESSION_FALLBACK === '1',
-    controlSurface = assertWorkerProjectControlSurface
+    controlSurface = assertWorkerProjectControlSurface,
+    workspaceFingerprint = codingWorkspaceFingerprint
   } = {}) {
     super();
-    Object.assign(this, { gateway, fallback, allowSessionFallback, controlSurface });
+    Object.assign(this, { gateway, fallback, allowSessionFallback, controlSurface, workspaceFingerprint });
   }
 
   async execute(task, { workspace, timeoutMs }) {
     const role = multiModelRoleForTask(task);
+    const failed = async (error, routing = {}) => {
+      if (this.allowSessionFallback) {
+        const fallback = await this.fallback.execute(task, { workspace, timeoutMs });
+        return {
+          ...fallback,
+          modelRouting: {
+            mode: 'session-fallback',
+            candidate: 'codex-session',
+            family: 'openai',
+            provider: 'codex',
+            model: null,
+            gatewayError: clip(error.message, 1_000)
+          }
+        };
+      }
+      const output = clip(error.message, 1_600);
+      return {
+        status: 'failed',
+        summary: 'Free multi-model gateway could not complete the coding task',
+        timedOut: /timeout/i.test(output),
+        authMode: 'free-multimodel',
+        paidApiUsed: false,
+        modelRouting: { mode: 'free-multimodel', ...routing, error: output },
+        output,
+        outputBytes: Buffer.byteLength(output)
+      };
+    };
+
     try {
       await this.controlSurface(workspace);
-      const routed = await this.gateway.edit({
-        role,
-        prompt: buildWorkerPrompt(task)
-      }, { workspace, timeoutMs });
-      const output = JSON.stringify(routed.result ?? {});
+      const before = await this.workspaceFingerprint(workspace);
+      let routed = null;
+      let directError = null;
+      try {
+        routed = await this.gateway.edit({
+          role,
+          prompt: buildWorkerPrompt(task)
+        }, { workspace, timeoutMs });
+      } catch (error) {
+        directError = error;
+      }
+
+      const afterDirect = await this.workspaceFingerprint(workspace);
+      if (afterDirect !== before) {
+        if (directError) return failed(new Error('direct_model_failed_after_workspace_change:' + directError.message));
+        const output = JSON.stringify(routed?.result ?? {});
+        return {
+          status: 'completed',
+          summary: 'Free multi-model gateway completed the coding task via ' + routed.modelRouting.candidate,
+          codexThreadId: null,
+          usage: null,
+          authMode: 'free-multimodel:' + routed.modelRouting.provider,
+          paidApiUsed: false,
+          timedOut: false,
+          diagnostics: [],
+          modelRouting: routed.modelRouting,
+          output: clip(output),
+          outputBytes: Buffer.byteLength(output)
+        };
+      }
+
+      const files = await localPatchContext(task, workspace);
+      if (!files.length) {
+        const reason = directError?.message ?? 'direct_model_completed_without_workspace_changes';
+        return failed(new Error(reason + ';local_patch_context_empty'));
+      }
+
+      let patchRouted;
+      try {
+        patchRouted = await this.gateway.structured({
+          role: 'local_patch',
+          prompt: buildLocalPatchPrompt(task, files),
+          schema: localPatchSchema
+        }, { workspace, timeoutMs: Math.min(timeoutMs, 180_000) });
+      } catch (patchError) {
+        const reason = directError?.message ?? 'direct_model_completed_without_workspace_changes';
+        return failed(new Error(reason + ';local_patch_failed:' + patchError.message));
+      }
+
+      let touched;
+      try {
+        touched = await applyLocalPatch(workspace, files, patchRouted.value);
+      } catch (patchError) {
+        const reason = directError?.message ?? 'direct_model_completed_without_workspace_changes';
+        return failed(new Error(reason + ';local_patch_rejected:' + patchError.message), {
+          localPatchCandidate: patchRouted.modelRouting?.candidate ?? null
+        });
+      }
+
+      const afterPatch = await this.workspaceFingerprint(workspace);
+      if (afterPatch === before) {
+        return failed(new Error('local_patch_applied_without_workspace_change'), {
+          localPatchCandidate: patchRouted.modelRouting?.candidate ?? null
+        });
+      }
+      const output = JSON.stringify({
+        summary: patchRouted.value?.summary ?? 'Local patch applied',
+        touchedPaths: touched
+      });
       return {
         status: 'completed',
-        summary: `Free multi-model gateway completed the coding task via ${routed.modelRouting.candidate}`,
+        summary: 'Local free patch fallback completed the coding task via ' + patchRouted.modelRouting.candidate,
         codexThreadId: null,
         usage: null,
-        authMode: `free-multimodel:${routed.modelRouting.provider}`,
+        authMode: 'free-multimodel:' + patchRouted.modelRouting.provider,
         paidApiUsed: false,
         timedOut: false,
-        diagnostics: [],
-        modelRouting: routed.modelRouting,
+        diagnostics: directError ? [clip(directError.message, 600)] : ['direct_model_completed_without_workspace_changes'],
+        modelRouting: {
+          ...patchRouted.modelRouting,
+          mode: 'free-multimodel-local-patch',
+          directCandidate: routed?.modelRouting?.candidate ?? null,
+          directError: directError ? clip(directError.message, 600) : 'completed_without_workspace_changes'
+        },
         output: clip(output),
         outputBytes: Buffer.byteLength(output)
       };
     } catch (error) {
-      if (!this.allowSessionFallback) {
-        const output = clip(error.message, 1_600);
-        return {
-          status: 'failed',
-          summary: 'Free multi-model gateway could not complete the coding task',
-          timedOut: /timeout/i.test(output),
-          authMode: 'free-multimodel',
-          paidApiUsed: false,
-          modelRouting: { mode: 'free-multimodel', error: output },
-          output,
-          outputBytes: Buffer.byteLength(output)
-        };
-      }
-      const fallback = await this.fallback.execute(task, { workspace, timeoutMs });
-      return {
-        ...fallback,
-        modelRouting: {
-          mode: 'session-fallback',
-          candidate: 'codex-session',
-          family: 'openai',
-          provider: 'codex',
-          model: null,
-          gatewayError: clip(error.message, 1_000)
-        }
-      };
+      return failed(error);
     }
   }
 }
