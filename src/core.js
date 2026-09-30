@@ -4600,7 +4600,10 @@ function multiModelGatewayEnvironment(environment = process.env) {
     'OLLAMA_URL', 'OLLAMA_MODEL',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
     'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
-    'MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS', 'MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS'
+    'MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS', 'MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS',
+    'MODEL_PROVIDER_SLOT_WAIT_SECONDS', 'MODEL_PROVIDER_MAX_ANTIGRAVITY',
+    'MODEL_PROVIDER_MAX_OLLAMA', 'MODEL_PROVIDER_MAX_OPENCODE',
+    'MODEL_PROVIDER_MAX_COPILOT', 'MODEL_PROVIDER_MAX_CODEX'
   ];
   return {
     ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
@@ -4674,6 +4677,8 @@ export class MultiModelGatewayClient {
           family: parsed.family ?? null,
           provider: parsed.provider,
           model: parsed.model,
+          resourceClass: parsed.resourceClass ?? null,
+          providerSlot: parsed.providerSlot ?? null,
           routingScore: parsed.routingScore ?? null,
           fallbackErrors: Array.isArray(parsed.fallbackErrors) ? parsed.fallbackErrors.slice(-8) : []
         }
