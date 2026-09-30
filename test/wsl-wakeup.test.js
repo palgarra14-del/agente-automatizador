@@ -113,7 +113,7 @@ test('WSL wakeup sync is idempotent and status is ownership-bound', async () => 
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     const first = await syncWslWakeup(options);
     assert.equal(first.healthy, true);
@@ -139,11 +139,47 @@ test('WSL wakeup sync is idempotent and status is ownership-bound', async () => 
   }
 });
 
+test('WSL wakeup starts the guardian in the current Windows session once', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'w-'));
+  const fixture = fixtureRunner();
+  await seedInboxService(home);
+  let running = false;
+  let starts = 0;
+  const options = {
+    home,
+    platform: 'linux',
+    pathValue: '/usr/bin:/bin',
+    environment: environment({ HOME: home }),
+    commandRunner: fixture.runner,
+    regExecutable: '/fake/reg.exe',
+    guardianRunning: async () => running,
+    guardianStarter: async (expected) => {
+      starts += 1;
+      assert.equal(expected.powershellInterop, '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe');
+      assert.equal(expected.wsl, 'C:\\Windows\\System32\\wsl.exe');
+      running = true;
+    }
+  };
+  try {
+    const first = await syncWslWakeup(options);
+    assert.equal(first.running, true);
+    assert.equal(first.started, true);
+    assert.equal(starts, 1);
+
+    const second = await syncWslWakeup(options);
+    assert.equal(second.running, true);
+    assert.equal(second.started, false);
+    assert.equal(starts, 1);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('WSL wakeup refuses foreign or tampered startup state', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     const installed = await syncWslWakeup(options);
     const runEntry = [...fixture.registry.keys()].find((entry) => entry.endsWith(`|${WSL_WAKEUP_RUN_VALUE}`));
@@ -176,7 +212,7 @@ test('WSL wakeup refuses a symlinked config ancestor before creating guardian st
     await mkdir(serviceDirectory, { recursive: true });
     await writeFile(join(serviceDirectory, 'engineering-orchestrator-inbox.service'), '# managed-by=engineering-orchestrator:v1\n');
 
-    const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+    const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
     await assert.rejects(syncWslWakeup(options), /wsl_guardian_directory_invalid/);
     await assert.rejects(lstat(join(target, 'engineering-orchestrator')), /ENOENT/);
     assert.equal(fixture.registry.size, 0);
@@ -190,7 +226,7 @@ test('WSL wakeup rolls registry and guardian back if Windows registration fails'
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner({ failRunWrite: true });
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     await assert.rejects(syncWslWakeup(options), /windows_registry_write_failed:EngineeringOrchestratorWSLWakeup/);
     assert.equal(fixture.registry.size, 0);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { INBOX_SERVICE_NAME, runLocalCommand, serviceStatus } from './service.js';
@@ -21,6 +21,31 @@ function identifier(value, label) {
   const normalized = text(String(value ?? ''), label);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(normalized)) throw new Error(`${label} contains unsafe characters`);
   return normalized;
+}
+
+function windowsPathToWsl(path) {
+  const match = text(path, 'Windows path').match(/^([A-Za-z]):\\(.*)$/);
+  if (!match) throw new Error('windows_path_invalid');
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll('\\', '/')}`;
+}
+
+async function guardianProcessActive(guardianPath) {
+  let entries;
+  try {
+    entries = await readdir('/proc', { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    try {
+      const argv = (await readFile(`/proc/${entry.name}/cmdline`, 'utf8')).split('\0').filter(Boolean);
+      if (argv.includes(guardianPath)) return true;
+    } catch {
+      // Processes can disappear while /proc is being inspected.
+    }
+  }
+  return false;
 }
 
 function paths(home) {
@@ -131,7 +156,51 @@ export function wslWakeupConfiguration({
   const wsl = `${windowsSystemRoot}\\System32\\wsl.exe`;
   const command = `${powershell} -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "& ${wsl} -d ${distro} --user ${linuxUser} --exec ${guardianPath}"`;
   if (command.length > 260) throw new Error('wsl_wakeup_run_command_exceeds_windows_limit');
-  return { distro, linuxUser, guardianPath, command, commandHash: createHash('sha256').update(command).digest('hex') };
+  return {
+    distro,
+    linuxUser,
+    guardianPath,
+    powershell,
+    powershellInterop: windowsPathToWsl(powershell),
+    wsl,
+    command,
+    commandHash: createHash('sha256').update(command).digest('hex')
+  };
+}
+
+async function startWslGuardian(expected, { home, environment, commandRunner }) {
+  const ps = `Start-Process -WindowStyle Hidden -FilePath '${expected.wsl}' -ArgumentList @('-d','${expected.distro}','--user','${expected.linuxUser}','--exec','${expected.guardianPath}')`;
+  const result = await commandRunner(expected.powershellInterop, [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle',
+    'Hidden',
+    '-Command',
+    ps
+  ], {
+    cwd: resolve(home),
+    env: interopEnvironment(environment, home),
+    timeoutMs: 10_000,
+    maxOutputBytes: 16_384
+  });
+  if (result.exitCode !== 0) throw new Error('wsl_guardian_current_session_start_failed');
+}
+
+async function ensureWslGuardianRunning(expected, {
+  home,
+  environment,
+  commandRunner,
+  guardianRunning,
+  guardianStarter
+}) {
+  if (await guardianRunning(expected.guardianPath)) return false;
+  await guardianStarter(expected, { home, environment, commandRunner });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await guardianRunning(expected.guardianPath)) return true;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  throw new Error('wsl_guardian_current_session_not_running');
 }
 
 function interopEnvironment(environment, home) {
@@ -233,7 +302,8 @@ export async function wslWakeupStatus({
   platform = process.platform,
   environment = process.env,
   commandRunner = runLocalCommand,
-  regExecutable = '/mnt/c/Windows/System32/reg.exe'
+  regExecutable = '/mnt/c/Windows/System32/reg.exe',
+  guardianRunning = guardianProcessActive
 } = {}) {
   if (!supported(environment, platform)) return { supported: false, installed: false, healthy: false, reason: 'wsl_interop_unavailable' };
   const expected = wslWakeupConfiguration({ home, environment });
@@ -252,7 +322,8 @@ export async function wslWakeupStatus({
     registry.hash === expected.commandHash &&
     registry.run === expected.command
   );
-  return { supported: true, installed, healthy, reason: healthy || !installed ? null : 'wsl_wakeup_state_incomplete_or_changed', ...expected };
+  const running = installed ? await guardianRunning(expected.guardianPath) : false;
+  return { supported: true, installed, healthy, running, reason: healthy || !installed ? null : 'wsl_wakeup_state_incomplete_or_changed', ...expected };
 }
 
 export async function syncWslWakeup({
@@ -261,7 +332,9 @@ export async function syncWslWakeup({
   pathValue = process.env.PATH ?? '',
   environment = process.env,
   commandRunner = runLocalCommand,
-  regExecutable = '/mnt/c/Windows/System32/reg.exe'
+  regExecutable = '/mnt/c/Windows/System32/reg.exe',
+  guardianRunning = guardianProcessActive,
+  guardianStarter = startWslGuardian
 } = {}) {
   if (!supported(environment, platform)) throw new Error('wsl_wakeup_requires_windows_interop');
   const inbox = await serviceStatus({ home, pathValue, commandRunner });
@@ -278,7 +351,12 @@ export async function syncWslWakeup({
     registryBefore.run !== expected.command;
   if (!changed) {
     await chmod(expected.guardianPath, 0o700);
-    return { ...(await wslWakeupStatus({ home, platform, environment, commandRunner, regExecutable })), changed: false };
+    const started = await ensureWslGuardianRunning(expected, { home, environment, commandRunner, guardianRunning, guardianStarter });
+    return {
+      ...(await wslWakeupStatus({ home, platform, environment, commandRunner, regExecutable, guardianRunning })),
+      changed: false,
+      started
+    };
   }
 
   const { guardianPath } = await ensureGuardianDirectory(home);
@@ -287,9 +365,10 @@ export async function syncWslWakeup({
     await regSet(commandRunner, regExecutable, ownerKey, ownerValue, ownerMarker, { environment, home });
     await regSet(commandRunner, regExecutable, ownerKey, hashValue, expected.commandHash, { environment, home });
     await regSet(commandRunner, regExecutable, runKey, WSL_WAKEUP_RUN_VALUE, expected.command, { environment, home });
-    const status = await wslWakeupStatus({ home, platform, environment, commandRunner, regExecutable });
-    if (!status.healthy) throw new Error('wsl_wakeup_verification_failed');
-    return { ...status, changed: true };
+    const started = await ensureWslGuardianRunning(expected, { home, environment, commandRunner, guardianRunning, guardianStarter });
+    const status = await wslWakeupStatus({ home, platform, environment, commandRunner, regExecutable, guardianRunning });
+    if (!status.healthy || !status.running) throw new Error('wsl_wakeup_verification_failed');
+    return { ...status, changed: true, started };
   } catch (error) {
     try {
       await restoreRegistry(commandRunner, regExecutable, registryBefore, { environment, home });
