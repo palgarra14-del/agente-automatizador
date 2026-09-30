@@ -2030,18 +2030,49 @@ test('global lease release reconciles partial publication without duplicating co
   assert.equal(executions, 1);
 });
 
-test('global lease release still fails closed when authoritative state retains the same lease', async () => {
+test('global lease release retries a transient write failure while authoritative ownership is unchanged', async () => {
   const now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
-  const store = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:77:3',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
   const lease = await store.claimGlobalLease();
   const mutateInternal = store.mutateInternal.bind(store);
-  let injectReleaseFailure = true;
+  let releaseAttempts = 0;
   store.mutateInternal = async (...args) => {
-    if (injectReleaseFailure) {
-      injectReleaseFailure = false;
-      throw new Error('injected_release_write_failure');
-    }
+    releaseAttempts += 1;
+    if (releaseAttempts === 1) throw new Error('injected_release_write_failure');
+    return mutateInternal(...args);
+  };
+
+  assert.equal(await store.releaseGlobalLease(lease.leaseId), true);
+  assert.equal(releaseAttempts, 2);
+  assert.deepEqual(sleeps, [250]);
+
+  const state = await store.load();
+  assert.equal(state.cloudExecutionLease ?? null, null);
+});
+
+test('global lease release still fails closed when authoritative state retains the same lease after bounded retries', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:77:3',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const lease = await store.claimGlobalLease();
+  const mutateInternal = store.mutateInternal.bind(store);
+  let releaseAttempts = 0;
+  store.mutateInternal = async (...args) => {
+    releaseAttempts += 1;
+    if (releaseAttempts <= 3) throw new Error('injected_release_write_failure');
     return mutateInternal(...args);
   };
 
@@ -2050,6 +2081,8 @@ test('global lease release still fails closed when authoritative state retains t
     /injected_release_write_failure/
   );
 
+  assert.equal(releaseAttempts, 3);
+  assert.deepEqual(sleeps, [250, 750]);
   const state = await store.load();
   assert.equal(state.cloudExecutionLease?.leaseId, lease.leaseId);
   assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');

@@ -2225,26 +2225,38 @@ export class GitHubStateStore extends JsonStore {
       data.cloudExecutionLease = null;
       return true;
     }, { requireLease: false });
+    const retryDelaysMs = [250, 750];
     let released;
-    try {
-      released = await clearLease();
-    } catch (error) {
-      let snapshot;
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        snapshot = await this.readSnapshot({ repair: true });
-      } catch {
+        released = await clearLease();
+        break;
+      } catch (error) {
+        let snapshot;
+        try {
+          snapshot = await this.readSnapshot({ repair: true });
+        } catch {
+          if (attempt < retryDelaysMs.length) {
+            await this.sleep(retryDelaysMs[attempt]);
+            continue;
+          }
+          throw error;
+        }
+        const current = snapshot.state.cloudExecutionLease;
+        if (!current) {
+          if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+          return true;
+        }
+        if (current.leaseId !== leaseId || current.ownerId !== this.ownerId) {
+          if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+          return false;
+        }
+        if (attempt < retryDelaysMs.length) {
+          await this.sleep(retryDelaysMs[attempt]);
+          continue;
+        }
         throw error;
       }
-      const current = snapshot.state.cloudExecutionLease;
-      if (!current) {
-        if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
-        return true;
-      }
-      if (current.leaseId !== leaseId || current.ownerId !== this.ownerId) {
-        if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
-        return false;
-      }
-      throw error;
     }
     if (released && this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
     this.hotLeaseSnapshot = null;
