@@ -101,11 +101,19 @@ function renderTasks(data) {
     const priority = t.request?.priority || r?.priority || 'normal';
     const execution = r?.execution;
     const model = execution?.modelCandidate || execution?.model || null;
+    const slot = execution?.providerSlot;
+    const slotLabel = slot?.provider && Number.isInteger(slot?.slot) && Number.isInteger(slot?.limit)
+      ? 'Slot: ' + slot.provider + ' ' + (slot.slot + 1) + '/' + slot.limit
+      : null;
     const executionBits = [
       execution?.stepId ? 'Paso: ' + execution.stepId : null,
       execution?.specialist ? 'Especialista: ' + execution.specialist : null,
-      model ? 'IA: ' + model : null,
+      model ? 'IA: ' + model + (execution?.modelProvider ? ' (' + execution.modelProvider + ')' : '') : null,
+      execution?.resourceClass ? 'Recurso: ' + execution.resourceClass : null,
+      slotLabel,
+      Number.isFinite(execution?.routingScore) ? 'Routing: ' + execution.routingScore.toFixed(3) : null,
       execution ? 'Intentos: ' + execution.attempts + (execution.maxAttempts ? '/' + execution.maxAttempts : '') : null,
+      execution?.fallbackErrors?.length ? 'Fallbacks: ' + execution.fallbackErrors.length : null,
       execution?.usedFallback ? 'fallback activo/usado' : null
     ].filter(Boolean);
     const executionHtml = executionBits.length
