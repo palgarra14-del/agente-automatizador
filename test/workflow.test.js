@@ -1982,6 +1982,53 @@ test('read-only hard billing failure blocks after one model call without retryin
   assert.equal(blocked.modelUsage.entries[0].status, 'failed');
 });
 
+test('executor step start atomically recovers a pre-start orphaned model reservation', async () => {
+  const configured = configFrom({
+    id: 'atomic-model-step-start',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxModelCalls: 6 }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]) });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover pre-start model reservation atomically'
+  });
+
+  const orphan = await instance.reserveWorkflowModelCall(created.id, 'inspect-project');
+  assert.equal(orphan.callId, 'model-call-1');
+
+  const originalUpdate = instance.update.bind(instance);
+  let updateCalls = 0;
+  instance.update = async (...args) => {
+    updateCalls += 1;
+    return originalUpdate(...args);
+  };
+
+  const started = await instance.beginWorkflowExecutorStep(created.id, 'inspect-project', {
+    reserveModel: true,
+    evidence: { workspacePath: configured.workspace }
+  });
+  const plan = await instance.get(created.id);
+  const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(updateCalls, 1);
+  assert.equal(started.callId, 'model-call-2');
+  assert.equal(inspect.status, WorkflowStepStatus.RUNNING);
+  assert.equal(inspect.attempts, 1);
+  assert.equal(inspect.evidence.recoveredInterruptedModelCallId, 'model-call-1');
+  assert.deepEqual(plan.modelUsage.entries.map((entry) => [entry.id, entry.attempt, entry.status]), [
+    ['model-call-1', 1, 'failed'],
+    ['model-call-2', 1, 'started']
+  ]);
+});
+
 test('run recovers an orphaned read-only model reservation without refunding model budget', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-orphaned-readonly-'));
   const configured = managedProject('orphaned-readonly', root, {
