@@ -55,14 +55,32 @@
         <div><p class="eyebrow">NUEVA ORDEN</p><h2>Habla directamente con el agente</h2></div>
       </div>
       <form id="taskForm">
-        <label>Destino
-          <select id="lane">
-            <option value="self">Agente / Automejora</option>
-            <option value="callflow">Callflow</option>
-            <option value="leadfinder">LeadFinder</option>
-            <option value="website-pilot">Website Pilot</option>
-          </select>
-        </label>
+        <div class="form-row">
+          <label>Destino
+            <select id="lane">
+              <option value="self">Agente / Automejora</option>
+              <option value="callflow">Callflow</option>
+              <option value="leadfinder">LeadFinder</option>
+              <option value="website-pilot">Website Pilot</option>
+            </select>
+          </label>
+          <label>Tipo
+            <select id="profile">
+              <option value="app-improvement">Mejorar / reparar</option>
+              <option value="website-build">Crear una web</option>
+            </select>
+          </label>
+        </div>
+        <div id="briefFields" class="brief-fields hidden">
+          <div class="form-row">
+            <label>Negocio<input id="businessName" placeholder="Peluquería Ejemplo"></label>
+            <label>Categoría<input id="category" placeholder="Peluquería"></label>
+          </div>
+          <div class="form-row">
+            <label>Localidad<input id="location" placeholder="Madrid"></label>
+            <label>Servicios<input id="services" placeholder="Corte, color, mechas"></label>
+          </div>
+        </div>
         <label>Tarea
           <textarea id="goal" rows="6" maxlength="1000" placeholder="Ej.: revisa por qué Callflow falla al cargar leads, encuentra la causa, corrígela, prueba y continúa hasta dejarlo estable." required></textarea>
         </label>
