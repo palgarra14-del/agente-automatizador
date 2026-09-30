@@ -572,6 +572,27 @@ ROLE_POLICY = {
     ],
 }
 
+# Operational roles preserve the deepest free-quota models for work where their
+# extra reasoning/visual quality has the highest marginal value. A later wave is
+# still reachable automatically if the cheaper workhorse wave is unavailable.
+ROLE_RESOURCE_WAVES = {
+    "research_and_audit": [
+        {"workhorse_free", "hosted_free"},
+        {"deep_free"},
+        {"local"},
+    ],
+    "autonomous_orchestration": [
+        {"workhorse_free", "hosted_free"},
+        {"deep_free"},
+        {"local"},
+    ],
+    "blocker_diagnosis": [
+        {"workhorse_free", "hosted_free"},
+        {"deep_free"},
+        {"local"},
+    ],
+}
+
 VISUAL_ROLES = {
     "creative_direction", "concept_challenger", "visual_review",
     "visual_fix", "final_audit"
@@ -951,6 +972,17 @@ def routing_score(role, candidate, prior):
     return round(score + exploration, 5), stats
 
 
+def resource_wave(role, candidate):
+    waves = ROLE_RESOURCE_WAVES.get(role)
+    if not waves:
+        return 0
+    resource_class = candidate_resource_class(candidate)
+    for index, classes in enumerate(waves):
+        if resource_class in classes:
+            return index
+    return len(waves)
+
+
 def rank_candidates(
     role,
     *,
@@ -980,12 +1012,21 @@ def rank_candidates(
         ranked.append({
             "candidate": candidate,
             "family": candidate_family(candidate),
+            "resourceClass": candidate_resource_class(candidate),
+            "resourceWave": resource_wave(role, candidate),
             "routingScore": score,
             "prior": prior,
             "stats": stats,
             **spec,
         })
-    return sorted(ranked, key=lambda item: (-item["routingScore"], item["candidate"]))
+    return sorted(
+        ranked,
+        key=lambda item: (
+            item["resourceWave"],
+            -item["routingScore"],
+            item["candidate"],
+        ),
+    )
 
 
 def choose_candidate(role, **kwargs):
@@ -1402,6 +1443,10 @@ def policy_snapshot():
         },
         "providerConcurrency": PROVIDER_CONCURRENCY,
         "providerSlotWaitSeconds": PROVIDER_SLOT_WAIT_SECONDS,
+        "roleResourceWaves": {
+            role: [sorted(classes) for classes in waves]
+            for role, waves in ROLE_RESOURCE_WAVES.items()
+        },
         "candidates": {
             candidate: {
                 **spec,
@@ -1417,6 +1462,8 @@ def policy_snapshot():
                 {
                     "candidate": candidate,
                     "prior": prior,
+                    "resourceClass": candidate_resource_class(candidate),
+                    "resourceWave": resource_wave(role, candidate),
                     "empirical": empirical_stats(role, candidate),
                 }
                 for candidate, prior in candidates
