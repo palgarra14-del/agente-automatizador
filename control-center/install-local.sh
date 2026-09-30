@@ -50,7 +50,9 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now agent-control-center.service agent-control-tunnel.service
+systemctl --user enable agent-control-center.service agent-control-tunnel.service
+systemctl --user restart agent-control-center.service
+systemctl --user is-active --quiet agent-control-tunnel.service || systemctl --user start agent-control-tunnel.service
 
 for _ in {1..30}; do
   [[ -s "$HOME/.config/agent-control-center/access-token" && -s "$HOME/.config/agent-control-center/tunnel-url" ]] && break
