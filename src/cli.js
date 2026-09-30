@@ -10,7 +10,7 @@ import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
-import { runCloudDrain } from './cloud-drain.js';
+import { runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
 
 const args = process.argv.slice(2);
@@ -245,10 +245,11 @@ try {
         });
         console.log(JSON.stringify(view(result), null, 2));
       } else if (action === 'cloud-drain') {
-        const result = await activeStore.withGlobalLease(() => runCloudDrain({
+        const result = await runCloudDrainWithRecovery({
+          store: activeStore,
           queue,
           autonomousSelfImprovement
-        }));
+        });
         console.log(JSON.stringify({
           version: result.version,
           stopReason: result.stopReason,
@@ -256,6 +257,7 @@ try {
           continuationRecommended: result.continuationRecommended,
           elapsedMs: result.elapsedMs,
           limits: result.limits,
+          recovery: result.recovery ?? [],
           iterations: result.iterations.map((iteration) => ({
             index: iteration.index,
             admitted: iteration.admitted,

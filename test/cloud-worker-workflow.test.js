@@ -231,7 +231,7 @@ test('cloud-once emits queue and autonomous results separately for auditability'
 test('production cloud execution uses the bounded drain while retaining cloud-once for diagnostics', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   assert.match(cli, /action === 'cloud-drain'/);
-  assert.match(cli, /runCloudDrain\(\{[\s\S]*queue,[\s\S]*autonomousSelfImprovement/);
+  assert.match(cli, /runCloudDrainWithRecovery\(\{[\s\S]*store: activeStore,[\s\S]*queue,[\s\S]*autonomousSelfImprovement/);
   assert.match(cli, /stopReason: result\.stopReason/);
   assert.match(cli, /continuationRecommended: result\.continuationRecommended/);
   assert.match(cli, /iterations: result\.iterations\.map/);
