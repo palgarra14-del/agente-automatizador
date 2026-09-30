@@ -94,6 +94,8 @@ def _result_envelope(result):
         "family": candidate_family(candidate) if candidate else None,
         "provider": result.get("provider"),
         "model": result.get("model"),
+        "resourceClass": result.get("resourceClass"),
+        "providerSlot": result.get("providerSlot"),
         "routingScore": result.get("routingScore"),
         "elapsedSeconds": result.get("elapsedSeconds"),
         "fallbackErrors": result.get("fallbackErrors") or [],
