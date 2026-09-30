@@ -99,3 +99,6 @@ a{color:#9fc1ff;text-decoration:none}
 .badge.priority-normal{background:rgba(110,168,255,.12);border-color:rgba(110,168,255,.28);color:#bfd7ff}
 .badge.priority-low{background:rgba(150,160,175,.10);border-color:rgba(150,160,175,.22);color:#b9c2d0}
 .execution-line{margin-top:.65rem;padding:.6rem .7rem;border-radius:.7rem;background:rgba(255,255,255,.035);font-size:.78rem;line-height:1.45;color:var(--muted)}
+
+button.danger{border-color:rgba(255,110,110,.35);color:#ffb3b3;background:rgba(255,90,90,.08)}
+button.danger:hover{background:rgba(255,90,90,.14)}

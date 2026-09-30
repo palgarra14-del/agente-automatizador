@@ -257,6 +257,19 @@ async function retryRun(input) {
   return { runId, dispatched: true };
 }
 
+async function cancelTask(input) {
+  const workflowId = String(input.workflowId || '').trim();
+  if (!/^workflow-[a-z0-9-]{8,120}$/i.test(workflowId)) throw new Error('workflow_invalid');
+  const queue = await getQueue();
+  if (queue.error) throw new Error(`queue_unavailable:${queue.error}`);
+  const record = (queue.records || []).find((item) => item.workflowId === workflowId);
+  if (!record) throw new Error('workflow_not_in_queue');
+  if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) throw new Error('workflow_already_terminal');
+  const result = await run('node', ['src/cli.js', 'workflow', 'cancel', workflowId, '--reason', 'workflow_cancelled_by_control_center'], { timeout: 30_000 });
+  if (!result.ok) throw new Error(`workflow_cancel_failed:${result.stderr}`);
+  return { issueNumber: record.issueNumber, workflowId, cancellationRequested: true };
+}
+
 async function serveStatic(req, res) {
   const url = new URL(req.url, 'http://localhost');
   let pathname = decodeURIComponent(url.pathname);
@@ -298,6 +311,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
     if (req.method === 'POST' && url.pathname === '/api/approve') return sendJson(res, 200, await approveTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/retry') return sendJson(res, 200, await retryRun(await bodyJson(req)));
+    if (req.method === 'POST' && url.pathname === '/api/cancel-task') return sendJson(res, 200, await cancelTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/logout') {
       res.setHeader('set-cookie', 'agent_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0');
       return sendJson(res, 200, { ok: true });

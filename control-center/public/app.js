@@ -6,6 +6,7 @@ const laneNames = {
   'website-pilot': 'Website Pilot'
 };
 const activeStates = new Set(['admitted','initializing','running','pending_approval','awaiting_start_approval','awaiting_workflow_approval','execution_deferred','active']);
+const terminalStates = new Set(['completed','failed','blocked','rejected']);
 const priorityNames = {high:'Alta', normal:'Normal', low:'Baja'};
 let loading = false;
 
@@ -114,11 +115,14 @@ function renderTasks(data) {
     const approvalHtml = approval?.fingerprint
       ? '<div class="approval"><button data-approve="'+t.number+'" data-fp="'+approval.fingerprint+'">Aprobar</button><button data-reject="'+t.number+'" data-fp="'+approval.fingerprint+'">Rechazar</button></div>'
       : '';
+    const cancelHtml = r?.workflowId && !terminalStates.has(state)
+      ? '<div class="approval"><button class="danger" data-cancel-workflow="'+esc(r.workflowId)+'" data-cancel-issue="'+t.number+'">Cancelar tarea</button></div>'
+      : '';
     return '<div class="item"><div class="item-top"><strong>#'+t.number+' · '+esc(laneNames[t.request?.projectId] || t.request?.projectId)+'</strong>'+
       '<div class="badges"><span class="badge priority-'+esc(priority)+'">'+esc(priorityNames[priority] || priority)+'</span><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div></div>'+
       '<div class="meta">'+esc(t.request?.goal || t.title)+'<br>Actualizada hace '+age(t.updatedAt)+' · <a target="_blank" href="'+esc(t.url)+'">abrir issue</a>'+
       (r?.reason ? '<br>Motivo: '+esc(r.reason) : '')+'</div>'+
-      executionHtml+approvalHtml+'</div>';
+      executionHtml+approvalHtml+cancelHtml+'</div>';
   }).join('');
 }
 
@@ -224,12 +228,14 @@ document.addEventListener('click', async (event) => {
   const retry = event.target.closest('[data-retry]');
   const approve = event.target.closest('[data-approve]');
   const reject = event.target.closest('[data-reject]');
+  const cancel = event.target.closest('[data-cancel-workflow]');
   const jump = event.target.closest('[data-jump]');
   if (jump) {
     const id = jump.dataset.jump;
     (id === 'top' ? document.body : $(id))?.scrollIntoView({behavior:'smooth',block:'start'});
     return;
   }
+  if (cancel && !globalThis.confirm('Cancelar esta tarea? El workflow se detendra de forma gobernada y quedara registrado.')) return;
   try {
     if (wake) {
       wake.disabled = true;
@@ -254,11 +260,18 @@ document.addEventListener('click', async (event) => {
       toast(decision === 'approve' ? 'Aprobación enviada' : 'Rechazo enviado');
       setTimeout(refresh, 1200);
     }
+    if (cancel) {
+      cancel.disabled = true;
+      await api('/api/cancel-task',{method:'POST',body:JSON.stringify({workflowId:cancel.dataset.cancelWorkflow})});
+      toast('Cancelacion solicitada para la tarea #' + cancel.dataset.cancelIssue);
+      setTimeout(refresh, 1000);
+    }
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
     if (wake) wake.disabled = false;
     if (retry) retry.disabled = false;
+    if (cancel) cancel.disabled = false;
   }
 });
 
