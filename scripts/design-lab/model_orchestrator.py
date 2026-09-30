@@ -42,6 +42,7 @@ STATE = Path(os.environ.get(
 )).resolve()
 PERFORMANCE = STATE / "model-performance.jsonl"
 RUNTIME_HEALTH = STATE / "model-runtime-health.json"
+OUTCOME_CLASSES = {"execution", "quality", "availability"}
 
 COST_POLICY = os.environ.get("MODEL_COST_POLICY", "free_only").strip().lower()
 PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
@@ -793,11 +794,14 @@ def record_outcome(
     run_id=None,
     defect_types=None,
     note=None,
+    outcome_class="execution",
 ):
     if role not in ROLE_POLICY:
         raise ValueError("unknown_role")
     if candidate not in CANDIDATES:
         raise ValueError("unknown_candidate")
+    if outcome_class not in OUTCOME_CLASSES:
+        raise ValueError("unknown_outcome_class")
     delta = None
     if isinstance(score_before, (int, float)) and isinstance(score_after, (int, float)):
         delta = round(float(score_after) - float(score_before), 4)
@@ -807,6 +811,7 @@ def record_outcome(
         "candidate": candidate,
         "provider": CANDIDATES[candidate]["provider"],
         "model": CANDIDATES[candidate]["model"],
+        "outcomeClass": outcome_class,
         "success": bool(success),
         "elapsedSeconds": elapsed_seconds,
         "qaPass": qa_pass,
@@ -816,11 +821,20 @@ def record_outcome(
         "selected": selected,
         "runId": run_id,
         "defectTypes": defect_types or [],
-        "note": note,
+        "note": str(note)[:800] if note is not None else None,
     }
-    STATE.mkdir(parents=True, exist_ok=True)
-    with PERFORMANCE.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    PERFORMANCE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = PERFORMANCE.with_suffix(PERFORMANCE.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with PERFORMANCE.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.flush()
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
     return row
 
 
@@ -851,19 +865,58 @@ def outcome_reward(row):
 
 
 def empirical_stats(role, candidate):
-    rows = [
+    all_rows = [
         row for row in read_outcomes()
         if row.get("role") == role and row.get("candidate") == candidate
+    ][-80:]
+    availability_samples = sum(
+        1 for row in all_rows if row.get("outcomeClass") == "availability"
+    )
+    rows = [
+        row for row in all_rows
+        if row.get("outcomeClass", "execution") != "availability"
     ][-40:]
     if not rows:
-        return {"samples": 0, "meanReward": 0.0, "successRate": None}
+        return {
+            "samples": 0,
+            "availabilitySamples": availability_samples,
+            "meanReward": 0.0,
+            "successRate": None,
+        }
     rewards = [outcome_reward(row) for row in rows]
     successes = [1.0 if row.get("success") is True else 0.0 for row in rows]
     return {
         "samples": len(rows),
+        "availabilitySamples": availability_samples,
         "meanReward": round(sum(rewards) / len(rewards), 4),
         "successRate": round(sum(successes) / len(successes), 4),
     }
+
+
+def outcome_class_for_error(error):
+    text = str(error).lower()
+    availability_markers = (
+        "provider_capacity_timeout", "runtime_cooldown", "quota", "rate limit",
+        "rate_limit", "not_authenticated", "authentication", "unauthorized",
+        "forbidden", "service unavailable", "service_unavailable",
+        "connection refused", "credits exhausted", "credit exhausted",
+        "billing", "payment", "plan required", "upgrade required",
+    )
+    return "availability" if any(marker in text for marker in availability_markers) else "execution"
+
+
+def record_production_outcome(role, candidate, *, success, elapsed_seconds=None, error=None, note=None):
+    try:
+        return record_outcome(
+            role,
+            candidate,
+            success=success,
+            elapsed_seconds=elapsed_seconds,
+            outcome_class=outcome_class_for_error(error) if error is not None else "execution",
+            note=note if note is not None else (str(error) if error is not None else "production"),
+        )
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _runtime_cooldown(candidate):
@@ -1129,6 +1182,7 @@ def run_role_structured(
         if cooldown_error:
             errors.append(cooldown_error)
             continue
+        attempt_started = time.monotonic()
         try:
             result = run_structured_candidate(
                 candidate,
@@ -1139,10 +1193,24 @@ def run_role_structured(
                 images=images,
                 agent_override=ROLE_AGENTS.get(role) if use_role_agent else None,
             )
+            record_production_outcome(
+                role,
+                candidate,
+                success=True,
+                elapsed_seconds=result.get("elapsedSeconds"),
+                note="production_structured_success",
+            )
             result["routingScore"] = item["routingScore"]
             result["fallbackErrors"] = errors
             return result
         except ProviderUnavailable as exc:
+            record_production_outcome(
+                role,
+                candidate,
+                success=False,
+                elapsed_seconds=round(time.monotonic() - attempt_started, 2),
+                error=exc,
+            )
             _remember_unavailability(candidate, exc)
             errors.append(candidate + ":" + str(exc))
     raise ProviderUnavailable(";".join(errors) or "no_role_candidate_available")
@@ -1228,6 +1296,7 @@ def run_edit_role(
             errors.append(cooldown_error)
             continue
         before = _workspace_edit_fingerprint(cwd)
+        attempt_started = time.monotonic()
         try:
             result = run_edit_candidate(
                 candidate,
@@ -1238,6 +1307,13 @@ def run_edit_role(
             )
         except ProviderUnavailable as exc:
             after = _workspace_edit_fingerprint(cwd)
+            record_production_outcome(
+                role,
+                candidate,
+                success=False,
+                elapsed_seconds=round(time.monotonic() - attempt_started, 2),
+                error=exc,
+            )
             if after != before:
                 raise ProviderUnavailable(
                     "candidate_failed_after_workspace_change:" + candidate + ":" + str(exc)
@@ -1248,9 +1324,23 @@ def run_edit_role(
         after = _workspace_edit_fingerprint(cwd)
         if after == before:
             no_change = ProviderUnavailable("completed_without_workspace_changes")
+            record_production_outcome(
+                role,
+                candidate,
+                success=False,
+                elapsed_seconds=result.get("elapsedSeconds"),
+                error=no_change,
+            )
             _remember_unavailability(candidate, no_change)
             errors.append(candidate + ":completed_without_workspace_changes")
             continue
+        record_production_outcome(
+            role,
+            candidate,
+            success=True,
+            elapsed_seconds=result.get("elapsedSeconds"),
+            note="production_edit_success",
+        )
         result["routingScore"] = item["routingScore"]
         result["fallbackErrors"] = errors
         return result
