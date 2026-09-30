@@ -12,6 +12,7 @@ import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
 import { runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
+import { schedulerYieldRequested } from './scheduler-yield.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -281,7 +282,10 @@ try {
         const result = await runCloudDrainWithRecovery({
           store: activeStore,
           queue,
-          autonomousSelfImprovement
+          autonomousSelfImprovement,
+          drainOptions: {
+            shouldYield: () => schedulerYieldRequested(cloudLane.id)
+          }
         });
         console.log(JSON.stringify({
           version: result.version,
