@@ -1,0 +1,12 @@
+{
+  "name": "Agent Control Center",
+  "short_name": "Agent Control",
+  "description": "Control móvil del agente autónomo del MSI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07101c",
+  "theme_color": "#08111f",
+  "icons": [
+    {"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
