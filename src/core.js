@@ -2176,6 +2176,62 @@ export class WorkflowEngine {
     return { plan, callId };
   }
 
+  async beginWorkflowExecutorStep(id, stepId, { reserveModel = false, evidence = {} } = {}) {
+    let callId = null;
+    const plan = await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === stepId);
+      if (!step) throw new Error('workflow_step_not_found');
+
+      const orphanedStartedCalls = saved.modelUsage.entries.filter((entry) =>
+        entry.status === 'started' &&
+        entry.surface === 'workflow' &&
+        entry.stepId === step.id &&
+        entry.attempt === step.attempts + 1
+      );
+      if (orphanedStartedCalls.length > 1) throw new Error('workflow_model_reservation_ambiguous');
+      if (orphanedStartedCalls.length === 1) {
+        completeModelCall(saved.modelUsage, orphanedStartedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
+      }
+
+      if (reserveModel) {
+        if (saved.modelUsage.calls >= saved.modelUsage.maxCalls) {
+          step.status = WorkflowStepStatus.FAILED;
+          step.error = 'workflow_model_call_budget_exhausted';
+          step.evidence = {
+            type: 'model-budget',
+            ...workflowEvidenceContext(saved, step),
+            calls: saved.modelUsage.calls,
+            maxCalls: saved.modelUsage.maxCalls,
+            interruptedModelCallId: orphanedStartedCalls[0]?.id ?? null
+          };
+          saved.status = WorkflowStepStatus.FAILED;
+          saved.result = { error: step.error, stepId: step.id };
+          return;
+        }
+        callId = reserveModelCall(saved.modelUsage, {
+          surface: 'workflow',
+          skill: step.skill,
+          stepId: step.id,
+          specialist: step.specialist,
+          attempt: step.attempts + 1
+        });
+      }
+
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      step.evidence = {
+        type: 'executor-start',
+        ...workflowEvidenceContext(saved, step),
+        ...evidence,
+        ...(orphanedStartedCalls.length === 1 ? {
+          recoveredInterruptedModelCallId: orphanedStartedCalls[0].id
+        } : {})
+      };
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    return { plan, callId };
+  }
+
   async completeWorkflowModelCall(id, callId, usage, status) {
     if (!callId) return this.get(id);
     return this.update(id, (saved) => { completeModelCall(saved.modelUsage, callId, usage, status); });
@@ -2328,19 +2384,9 @@ export class WorkflowEngine {
       : typeof this.skillExecutor.usesModel === 'function'
         ? this.skillExecutor.usesModel(next.skill) !== false
         : true;
-    let modelCallId = null;
-    if (consumesModel) {
-      const reservation = await this.reserveWorkflowModelCall(id, next.id);
-      if (!reservation.callId) return reservation.plan;
-      modelCallId = reservation.callId;
-    }
-    await this.update(id, (saved) => {
-      const step = saved.steps.find((item) => item.id === next.id);
-      step.status = WorkflowStepStatus.RUNNING;
-      step.attempts += 1;
-      step.evidence = {
-        type: 'executor-start',
-        ...workflowEvidenceContext(saved, step),
+    const started = await this.beginWorkflowExecutorStep(id, next.id, {
+      reserveModel: consumesModel,
+      evidence: {
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
@@ -2348,9 +2394,10 @@ export class WorkflowEngine {
         repositoryControlFingerprint: before.repositoryControl.fingerprint,
         repositoryContextFingerprint: repositoryContext?.fingerprint ?? null,
         repositoryContextPaths: repositoryContext?.files?.map((file) => file.path) ?? []
-      };
-      saved.status = WorkflowStepStatus.RUNNING;
+      }
     });
+    if (consumesModel && !started.callId) return started.plan;
+    const modelCallId = started.callId;
     const runningPlan = await this.get(id);
     const runningStep = runningPlan.steps.find((item) => item.id === next.id);
     const priorEvidence = Object.fromEntries(runningStep.dependsOn.map((dependencyId) => {
@@ -2652,24 +2699,18 @@ export class WorkflowEngine {
         assetEvidence: observedAssets
       };
     }
-    const reservation = await this.reserveWorkflowModelCall(id, next.id);
-    if (!reservation.callId) return reservation.plan;
-    const modelCallId = reservation.callId;
-    await this.update(id, (saved) => {
-      const step = saved.steps.find((item) => item.id === next.id);
-      step.status = WorkflowStepStatus.RUNNING;
-      step.attempts += 1;
-      step.evidence = {
-        type: 'executor-start',
-        ...workflowEvidenceContext(saved, step),
+    const started = await this.beginWorkflowExecutorStep(id, next.id, {
+      reserveModel: true,
+      evidence: {
         workspacePath: workspaceProject.workspace,
         repositoryState: { branch: before.branch, head: before.head, remote: before.remote },
         workspaceBeforeFingerprint: before.changeSet.changeSetFingerprint,
         protectedIgnoredFingerprint: before.protectedIgnored.fingerprint,
         repositoryControlFingerprint: before.repositoryControl.fingerprint
-      };
-      saved.status = WorkflowStepStatus.RUNNING;
+      }
     });
+    if (!started.callId) return started.plan;
+    const modelCallId = started.callId;
     const runningPlan = await this.get(id);
     const remainingMs = this.remainingMs(runningPlan);
     if (remainingMs <= 0) return this.failDeadline(id);
