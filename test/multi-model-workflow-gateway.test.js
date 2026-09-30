@@ -169,6 +169,62 @@ test('independent review excludes the implementation family from multimodel rout
   assert.equal(result.paidApiUsed, false);
 });
 
+test('read-only multimodel skills fall back to local offline analysis when the specialist route fails', async () => {
+  const calls = [];
+  const gateway = {
+    async structured(request) {
+      calls.push(request);
+      if (request.role === 'independent_review') throw new Error('specialist_provider_unavailable');
+      return {
+        value: {
+          reviewEvidence: {
+            verdict: 'PASS',
+            summary: 'Local fallback completed the bounded review.',
+            findings: []
+          }
+        },
+        modelRouting: {
+          mode: 'free-multimodel',
+          candidate: 'ollama-qwen-7b',
+          family: 'qwen-local',
+          provider: 'ollama',
+          model: 'qwen2.5-coder:7b'
+        }
+      };
+    }
+  };
+  const executor = new MultiModelReadOnlySkillExecutor({
+    gateway,
+    allowSessionFallback: false,
+    controlSurface: async () => {}
+  });
+
+  const result = await executor.execute({
+    skill: 'code.review',
+    goal: 'Review the bounded implementation.',
+    contract: {
+      version: 2,
+      inputs: ['project'],
+      outputs: ['reviewEvidence']
+    },
+    context: {
+      modelRouting: { excludedFamilies: ['google'] }
+    }
+  }, {
+    workspace: '/tmp/review',
+    timeoutMs: 120_000
+  });
+
+  assert.deepEqual(calls.map((call) => call.role), ['independent_review', 'offline_analysis']);
+  assert.deepEqual(calls[1].excludedFamilies, ['google']);
+  assert.equal(result.ok, true);
+  assert.equal(result.authMode, 'free-multimodel:ollama');
+  assert.equal(result.modelRouting.mode, 'free-multimodel-readonly-fallback');
+  assert.equal(result.modelRouting.primaryRole, 'independent_review');
+  assert.equal(result.modelRouting.candidate, 'ollama-qwen-7b');
+  assert.match(result.modelRouting.primaryError, /specialist_provider_unavailable/);
+});
+
 test('website planning uses the creative lead rather than the generic research route', async () => {
   let observed = null;
   const gateway = {
