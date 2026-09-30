@@ -323,6 +323,17 @@ async function seedAdmittedRequest(queue, store, issue, project) {
   return { key, parsed };
 }
 
+test('new issue scheduling considers high priority before lower-priority requests', async () => {
+  const { queue, channel, issue } = await queueFixture();
+  issue.body = requestBody({ priority: 'low', goal: 'Low priority request' });
+  const high = { ...clone(issue), number: 42, id: 4200, body: requestBody({ priority: 'high', goal: 'High priority request' }) };
+  channel.issues.push(high);
+  channel.commentsByIssue.set(high.number, []);
+  const result = await queue.tick();
+  assert.equal(result.issueNumber, 42);
+  assert.equal(result.request.priority, 'high');
+});
+
 test('new issue requests defer without persistence or model work when operator checkout is behind main', async () => {
   const { store, channel, workflowEngine, projects } = await queueFixture();
   channel.remoteBranchHead = 'b'.repeat(40);
@@ -1053,10 +1064,13 @@ test('issue request protocol is strict, bounded, canonical, and redacts accident
   const parsed = parseIssueRequestBody(requestBody({ goal: 'Use Authorization: Bearer abcdefghijklmnop safely' }));
   assert.equal(parsed.request.projectId, 'callflow');
   assert.equal(parsed.request.profile, 'app-improvement');
+  assert.equal(parsed.request.priority, 'normal');
   assert.equal(parsed.request.goal.includes('abcdefghijklmnop'), false);
   assert.match(parsed.requestFingerprint, /^[a-f0-9]{64}$/);
   assert.match(parsed.issueBodyFingerprint, /^[a-f0-9]{64}$/);
 
+  assert.equal(normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', priority: 'high', goal: 'x', scope: { allowedPaths: ['app'] } }).priority, 'high');
+  assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', priority: 'urgent', goal: 'x', scope: { allowedPaths: ['app'] } }), /priority must be low, normal, or high/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'data-analysis', goal: 'x', scope: { allowedPaths: ['app'] } }), /profile must be app-improvement or website-build/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x' }), /scope is required/);
   assert.throws(() => normalizeIssueRequest({ version: 1, projectId: 'callflow', profile: 'app-improvement', goal: 'x', scope: { allowedPaths: [] } }), /at least one bounded path/);

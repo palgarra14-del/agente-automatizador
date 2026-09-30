@@ -5,9 +5,9 @@ const laneNames = {
   leadfinder: 'LeadFinder',
   'website-pilot': 'Website Pilot'
 };
-const activeStates = new Set(['admitted','initializing','running','pending_approval','active']);
+const activeStates = new Set(['admitted','initializing','running','pending_approval','awaiting_start_approval','awaiting_workflow_approval','execution_deferred','active']);
+const priorityNames = {high:'Alta', normal:'Normal', low:'Baja'};
 let loading = false;
-let lastData = null;
 
 function esc(value='') {
   return String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -37,7 +37,7 @@ async function api(path, options={}) {
     headers: {'content-type':'application/json', ...(options.headers || {})}
   });
   let data = {};
-  try { data = await response.json(); } catch {}
+  try { data = await response.json(); } catch { /* response may intentionally have no JSON body */ }
   if (response.status === 401) {
     $('login').classList.remove('hidden');
     throw new Error('unauthorized');
@@ -62,7 +62,6 @@ function laneState(data, lane) {
 function renderStats(data) {
   const records = data.queue?.records || [];
   const active = records.filter((r) => activeStates.has(r.status)).length;
-  const failed = records.filter((r) => ['failed','blocked'].includes(r.status)).length;
   const latestRun = data.runs?.[0];
   const values = [
     [data.service?.active ? 'ONLINE' : 'OFFLINE','Servicio'],
@@ -98,14 +97,28 @@ function renderTasks(data) {
   $('tasks').innerHTML = tasks.map((t) => {
     const r = queueRecord(data, t.number);
     const state = r?.status || 'pendiente';
+    const priority = t.request?.priority || r?.priority || 'normal';
+    const execution = r?.execution;
+    const model = execution?.modelCandidate || execution?.model || null;
+    const executionBits = [
+      execution?.stepId ? 'Paso: ' + execution.stepId : null,
+      execution?.specialist ? 'Especialista: ' + execution.specialist : null,
+      model ? 'IA: ' + model : null,
+      execution ? 'Intentos: ' + execution.attempts + (execution.maxAttempts ? '/' + execution.maxAttempts : '') : null,
+      execution?.usedFallback ? 'fallback activo/usado' : null
+    ].filter(Boolean);
+    const executionHtml = executionBits.length
+      ? '<div class="execution-line">' + executionBits.map(esc).join(' · ') + '</div>'
+      : '';
     const approval = r?.pendingApproval;
     const approvalHtml = approval?.fingerprint
       ? '<div class="approval"><button data-approve="'+t.number+'" data-fp="'+approval.fingerprint+'">Aprobar</button><button data-reject="'+t.number+'" data-fp="'+approval.fingerprint+'">Rechazar</button></div>'
       : '';
     return '<div class="item"><div class="item-top"><strong>#'+t.number+' · '+esc(laneNames[t.request?.projectId] || t.request?.projectId)+'</strong>'+
-      '<span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div>'+
-      '<div class="meta">'+esc(t.request?.goal || t.title)+'<br>Actualizada hace '+age(t.updatedAt)+' · <a target="_blank" href="'+esc(t.url)+'">abrir issue</a></div>'+
-      approvalHtml+'</div>';
+      '<div class="badges"><span class="badge priority-'+esc(priority)+'">'+esc(priorityNames[priority] || priority)+'</span><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div></div>'+
+      '<div class="meta">'+esc(t.request?.goal || t.title)+'<br>Actualizada hace '+age(t.updatedAt)+' · <a target="_blank" href="'+esc(t.url)+'">abrir issue</a>'+
+      (r?.reason ? '<br>Motivo: '+esc(r.reason) : '')+'</div>'+
+      executionHtml+approvalHtml+'</div>';
   }).join('');
 }
 
@@ -125,7 +138,6 @@ function renderRuns(data) {
 }
 
 function render(data) {
-  lastData = data;
   renderStats(data);
   renderLanes(data);
   renderTasks(data);
@@ -180,7 +192,7 @@ $('taskForm').addEventListener('submit', async (event) => {
   button.textContent = 'Enviando…';
   try {
     const profile = $('profile').value;
-    const payload = {lane:$('lane').value, goal:$('goal').value, profile};
+    const payload = {lane:$('lane').value, goal:$('goal').value, profile, priority:$('priority').value};
     if (profile === 'website-build') {
       payload.businessBrief = {
         businessName:$('businessName').value,

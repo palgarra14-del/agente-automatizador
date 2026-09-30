@@ -11,7 +11,7 @@ const port = 18787 + Math.floor(Math.random() * 500);
 async function waitFor(url, timeout=5000) {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
-    try { return await fetch(url); } catch {}
+    try { return await fetch(url); } catch { /* server may still be starting */ }
     await new Promise((r) => setTimeout(r, 80));
   }
   throw new Error('server_start_timeout');

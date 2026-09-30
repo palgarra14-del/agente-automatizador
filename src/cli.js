@@ -105,19 +105,52 @@ try {
   } else if (command === 'inbox') {
     const action = args[1] ?? 'once';
     if (action === 'status') {
-      const requests = Object.values((await store.load()).requests ?? {}).map((record) => ({
-        issueNumber: record.issueNumber,
-        workflowId: record.workflowId,
-        status: record.status,
-        reason: record.reason,
-        pendingApproval: record.pendingApproval ? {
-          kind: record.pendingApproval.kind,
-          stepId: record.pendingApproval.stepId,
-          fingerprint: record.pendingApproval.fingerprint
-        } : null,
-        publication: record.publication ?? null,
-        updatedAt: record.updatedAt
-      }));
+      const state = await store.load();
+      const requests = Object.values(state.requests ?? {}).map((record) => {
+        const workflow = record.workflowId ? state.workflows?.[record.workflowId] ?? null : null;
+        const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
+        const activeStep = steps.find((step) => step.status === 'running')
+          ?? steps.find((step) => step.status === 'awaiting_approval')
+          ?? steps.find((step) => ['blocked', 'failed'].includes(step.status))
+          ?? steps.find((step) => step.status === 'ready')
+          ?? [...steps].reverse().find((step) => step.status === 'completed')
+          ?? null;
+        const routing = activeStep?.evidence?.workerEvidence?.modelRouting
+          ?? activeStep?.evidence?.modelRouting
+          ?? null;
+        return {
+          issueNumber: record.issueNumber,
+          workflowId: record.workflowId,
+          status: record.status,
+          reason: record.reason,
+          priority: record.request?.priority ?? 'normal',
+          execution: workflow ? {
+            workflowStatus: workflow.status ?? null,
+            stepId: activeStep?.id ?? null,
+            skill: activeStep?.skill ?? null,
+            specialist: activeStep?.specialist ?? null,
+            stepStatus: activeStep?.status ?? null,
+            attempts: Number.isInteger(activeStep?.attempts) ? activeStep.attempts : 0,
+            maxAttempts: Number.isInteger(workflow.budgets?.maxAttempts) ? workflow.budgets.maxAttempts : null,
+            modelCandidate: typeof routing?.candidate === 'string' ? routing.candidate : null,
+            modelProvider: typeof routing?.provider === 'string' ? routing.provider : null,
+            model: typeof routing?.model === 'string' ? routing.model : null,
+            routingMode: typeof routing?.mode === 'string' ? routing.mode : null,
+            usedFallback: Boolean(routing && (
+              String(routing.mode ?? '').includes('fallback') ||
+              routing.localPatchCandidate ||
+              routing.primaryError
+            ))
+          } : null,
+          pendingApproval: record.pendingApproval ? {
+            kind: record.pendingApproval.kind,
+            stepId: record.pendingApproval.stepId,
+            fingerprint: record.pendingApproval.fingerprint
+          } : null,
+          publication: record.publication ?? null,
+          updatedAt: record.updatedAt
+        };
+      });
       console.log(JSON.stringify(requests, null, 2));
     } else {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));

@@ -232,10 +232,18 @@ function pathList(value, label) {
   }))].sort();
 }
 
+function requestPriorityRank(value) {
+  if (value === 'high') return 0;
+  if (value === 'low') return 2;
+  return 1;
+}
+
 export function normalizeIssueRequest(value) {
-  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'scope', 'input']), 'agent request');
+  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'priority', 'scope', 'input']), 'agent request');
   if (value.version !== 1) throw new Error('agent request version must be 1');
   if (!['app-improvement', 'website-build'].includes(value.profile)) throw new Error('issue queue profile must be app-improvement or website-build');
+  const priority = value.priority === undefined || value.priority === null || value.priority === '' ? 'normal' : value.priority;
+  if (!['low', 'normal', 'high'].includes(priority)) throw new Error('agent request priority must be low, normal, or high');
   if (!value.scope || typeof value.scope !== 'object' || Array.isArray(value.scope)) throw new Error('agent request scope is required');
   const scope = value.scope;
   assertObjectKeys(scope, new Set(['allowedPaths', 'forbiddenPaths']), 'agent request scope');
@@ -254,6 +262,7 @@ export function normalizeIssueRequest(value) {
     version: 1,
     projectId: boundedString(value.projectId, 'agent request projectId', { required: true, max: 80 }),
     profile: value.profile,
+    priority,
     goal: maskSecrets(boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 })),
     scope: {
       allowedPaths,
@@ -2293,6 +2302,9 @@ export class SupervisedIssueQueue {
         key.startsWith(keyPrefix) &&
         this.ownsRecord(record) &&
         !['completed', 'failed', 'blocked', 'rejected'].includes(record.status)
+      )
+      .sort(([, left], [, right]) =>
+        requestPriorityRank(left?.request?.priority) - requestPriorityRank(right?.request?.priority)
       );
     const activeKeys = new Set(activeEntries.map(([key]) => key));
     const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
@@ -2330,7 +2342,18 @@ export class SupervisedIssueQueue {
       if (notificationError) throw notificationError;
       return parkedResult;
     }
-    const issues = await this.channel.openIssues();
+    const issues = (await this.channel.openIssues())
+      .map((issue, index) => {
+        let priority = 'normal';
+        if (typeof issue.body === 'string' && issue.body.includes(ISSUE_REQUEST_MARKER)) {
+          try { priority = parseIssueRequestBody(issue.body).request.priority; } catch { /* invalid requests retain normal scheduling priority until validation */ }
+        }
+        return { issue, index, priority };
+      })
+      .sort((left, right) =>
+        requestPriorityRank(left.priority) - requestPriorityRank(right.priority) || left.index - right.index
+      )
+      .map(({ issue }) => issue);
     let remoteOperatorRevision = null;
     for (const issue of issues) {
       const issueKey = this.requestKey(issue);

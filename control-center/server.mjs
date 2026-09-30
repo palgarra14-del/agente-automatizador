@@ -37,7 +37,7 @@ async function ensureToken() {
   try {
     const value = (await readFile(tokenFile, 'utf8')).trim();
     if (value.length >= 12) return value;
-  } catch {}
+  } catch { /* token file does not exist yet */ }
   await mkdir(dirname(tokenFile), { recursive: true, mode: 0o700 });
   const value = randomBytes(12).toString('base64url');
   await writeFile(tokenFile, value + '\n', { mode: 0o600 });
@@ -181,6 +181,8 @@ function validateTask(input) {
   if (goal.length < 5 || goal.length > 1000) throw new Error('goal_invalid');
   const profile = input.profile === 'website-build' ? 'website-build' : 'app-improvement';
   if (profile === 'website-build' && lane !== 'website-pilot') throw new Error('website_build_lane_invalid');
+  const priority = String(input.priority || 'normal').trim().toLowerCase();
+  if (!['low', 'normal', 'high'].includes(priority)) throw new Error('priority_invalid');
   const allowedPaths = Array.isArray(input.allowedPaths) && input.allowedPaths.length
     ? input.allowedPaths.map((p) => String(p).trim()).filter(Boolean)
     : laneScopes[lane];
@@ -200,15 +202,16 @@ function validateTask(input) {
       facts: [], contentRestrictions: [], assets: {}
     };
   }
-  return { lane, goal, allowedPaths, profile, businessBrief };
+  return { lane, goal, allowedPaths, profile, priority, businessBrief };
 }
 
 async function createTask(input) {
-  const { lane, goal, allowedPaths, profile, businessBrief } = validateTask(input);
+  const { lane, goal, allowedPaths, profile, priority, businessBrief } = validateTask(input);
   const request = {
     version: 1,
     projectId: lane,
     profile,
+    priority,
     goal,
     scope: { allowedPaths, forbiddenPaths: [] },
     ...(businessBrief ? { input: { businessBrief } } : {})
@@ -219,7 +222,7 @@ async function createTask(input) {
   if (!created.ok) throw new Error(`issue_create_failed:${created.stderr}`);
   const url = created.stdout.split(/\s+/).find((item) => /^https:\/\//.test(item)) || created.stdout;
   const match = /\/issues\/(\d+)/.exec(url);
-  return { lane, goal, issueNumber: match ? Number(match[1]) : null, url };
+  return { lane, goal, priority, issueNumber: match ? Number(match[1]) : null, url };
 }
 
 async function wakeLane(lane) {

@@ -93,3 +93,9 @@ a{color:#9fc1ff;text-decoration:none}
   .form-row{grid-template-columns:1fr}.composer-actions{align-items:stretch;flex-direction:column}.composer-actions .primary{width:100%}
   .bottom-nav{width:calc(100% - 28px);justify-content:space-around}.bottom-nav button{flex:1;padding:9px 5px;font-size:12px}
 }
+
+.badges{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
+.badge.priority-high{background:rgba(255,120,80,.14);border-color:rgba(255,120,80,.34);color:#ffc0aa}
+.badge.priority-normal{background:rgba(110,168,255,.12);border-color:rgba(110,168,255,.28);color:#bfd7ff}
+.badge.priority-low{background:rgba(150,160,175,.10);border-color:rgba(150,160,175,.22);color:#b9c2d0}
+.execution-line{margin-top:.65rem;padding:.6rem .7rem;border-radius:.7rem;background:rgba(255,255,255,.035);font-size:.78rem;line-height:1.45;color:var(--muted)}
