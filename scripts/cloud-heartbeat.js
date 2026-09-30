@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
@@ -69,6 +70,10 @@ const plan=planHeartbeat(observations,{
   maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1)
 });
 
+const yieldRequests = dryRun
+  ? plan.yieldCandidates.map((item) => item.lane)
+  : await syncSchedulerYieldRequests(lanes, plan.yieldCandidates);
+
 const dispatched=[];
 for (const item of plan.dispatch) {
   if (dryRun) {
@@ -79,5 +84,5 @@ for (const item of plan.dispatch) {
   dispatched.push({...item,ok:result.ok,dryRun:false,error:result.ok?null:(result.stderr||result.stdout)});
 }
 
-console.log(JSON.stringify({...plan,dryRun,dispatched},null,2));
+console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;
