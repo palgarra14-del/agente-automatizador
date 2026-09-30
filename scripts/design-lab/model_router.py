@@ -218,14 +218,21 @@ def _opencode_models_snapshot():
         server,password=_opencode_service_connection()
         env=os.environ.copy()
         env["OPENCODE_PASSWORD"]=password
-        proc=_run([OPENCODE,"models","--server",server],timeout=20,env=env)
+        proc=None
+        models=set()
+        for attempt in range(3):
+            proc=_run([OPENCODE,"models","--server",server],timeout=20,env=env)
+            if proc.returncode!=0:
+                break
+            models={line.strip() for line in proc.stdout.splitlines() if line.strip()}
+            if models:
+                break
+            if attempt < 2:
+                time.sleep(0.15)
     except ProviderUnavailable:
         _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=False,models=set())
         return False,set()
-    ready=proc.returncode==0
-    models={
-        line.strip() for line in proc.stdout.splitlines() if line.strip()
-    } if ready else set()
+    ready=bool(proc and proc.returncode==0 and models)
     _OPENCODE_MODELS_CACHE.update(checkedAt=now,ready=ready,models=models)
     return ready,set(models)
 
