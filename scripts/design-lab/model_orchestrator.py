@@ -10,8 +10,14 @@ import math
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production runtime is Linux
+    fcntl = None
 
 from model_router import (
     ProviderUnavailable,
@@ -49,6 +55,27 @@ PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
 CANDIDATE_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS", "90"))
 )
+PROVIDER_SLOT_WAIT_SECONDS = max(
+    0.1, float(os.environ.get("MODEL_PROVIDER_SLOT_WAIT_SECONDS", "45"))
+)
+_PROVIDER_CONCURRENCY_DEFAULTS = {
+    "antigravity": 2,
+    "ollama": 1,
+    "opencode": 1,
+    "copilot": 1,
+    "codex": 1,
+}
+PROVIDER_CONCURRENCY = {
+    provider: max(
+        1,
+        int(os.environ.get(
+            f"MODEL_PROVIDER_MAX_{provider.upper().replace('-', '_')}",
+            str(default),
+        )),
+    )
+    for provider, default in _PROVIDER_CONCURRENCY_DEFAULTS.items()
+}
+PROVIDER_SLOT_DIR = STATE / "provider-slots"
 _RUNTIME_FAILURES = {"providers": {}, "candidates": {}}
 
 def _load_runtime_failures():
