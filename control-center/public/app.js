@@ -62,7 +62,7 @@ function laneState(data, lane) {
   if (worker) {
     return {
       state: 'trabajando',
-      detail: worker.action + ' · proceso ' + worker.pid + ' · ' + worker.elapsed,
+      detail: worker.action + ' · proceso ' + worker.pid + ' · ' + worker.elapsed + (worker.backend ? ' · ' + worker.backend : ''),
       cls: 'good'
     };
   }
@@ -125,6 +125,60 @@ function renderAiHealth(data) {
   $('aiHealth').innerHTML = cards.join('') || '<div class="meta">Sin telemetría de modelos disponible.</div>';
 }
 
+function renderOperations(data) {
+  const operations = new Map((data.cloudOperations || []).map((item) => [item.lane, item]));
+  $('operations').innerHTML = Object.keys(laneNames).map((lane) => {
+    const op = operations.get(lane);
+    if (!op?.worker) {
+      return '<article class="operation-item">'+
+        '<div class="item-top"><strong>'+esc(laneNames[lane])+'</strong><span class="badge warn">en espera</span></div>'+
+        '<div class="meta">Sin worker cloud ejecutándose ahora mismo.</div>'+
+      '</article>';
+    }
+    const current = op.current;
+    const latest = op.latest;
+    const execution = current?.execution;
+    const model = execution?.modelCandidate || execution?.model || null;
+    const task = current?.issueNumber ? (data.tasks || []).find((item) => item.number === current.issueNumber) : null;
+    const slot = execution?.providerSlot;
+    const details = [
+      op.worker.action ? 'Worker: ' + op.worker.action : null,
+      op.worker.elapsed ? 'Tiempo: ' + op.worker.elapsed : null,
+      op.worker.backend ? 'Backend vivo: ' + op.worker.backend : (op.worker.modelGatewayActive ? 'Backend vivo: model-gateway' : null),
+      current?.issueNumber ? 'Issue #' + current.issueNumber : null,
+      execution?.stepId ? 'Paso: ' + execution.stepId : null,
+      execution?.specialist ? 'Especialista: ' + execution.specialist : null,
+      model ? 'IA: ' + model + (execution?.modelProvider ? ' (' + execution.modelProvider + ')' : '') : null,
+      execution?.resourceClass ? 'Recurso: ' + execution.resourceClass : null,
+      slot?.provider && Number.isInteger(slot.slot) && Number.isInteger(slot.limit)
+        ? 'Slot: ' + slot.provider + ' ' + (slot.slot + 1) + '/' + slot.limit
+        : null,
+      Number.isFinite(execution?.routingScore) ? 'Routing: ' + execution.routingScore.toFixed(3) : null,
+      execution ? 'Intentos: ' + execution.attempts + (execution.maxAttempts ? '/' + execution.maxAttempts : '') : null
+    ].filter(Boolean);
+    const fallback = execution?.fallbackCategories?.length
+      ? '<div class="fallback-line">Fallback: '+esc(execution.fallbackCategories.join(', '))+'</div>'
+      : (execution?.usedFallback ? '<div class="fallback-line">Fallback activo/usado</div>' : '');
+    const goal = current?.goal || task?.request?.goal || null;
+    const issueLink = task?.url ? ' · <a target="_blank" href="'+esc(task.url)+'">abrir issue</a>' : '';
+    const state = current?.status || 'trabajando';
+    const autonomousLine = !current
+      ? '<div class="operation-goal">Trabajo autónomo/de carril sin issue activo.</div>'
+      : '';
+    const latestLine = !current && latest?.issueNumber
+      ? '<div class="meta">Último issue registrado: #'+esc(latest.issueNumber)+' · '+esc(latest.status)+' · hace '+age(latest.updatedAt)+'</div>'
+      : '';
+    return '<article class="operation-item">'+
+      '<div class="item-top"><strong>'+esc(laneNames[lane])+'</strong><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div>'+
+      (goal ? '<div class="operation-goal">'+esc(goal)+issueLink+'</div>' : autonomousLine)+
+      '<div class="operation-details">'+details.map(esc).join(' · ')+'</div>'+
+      latestLine+
+      fallback+
+      (op.error ? '<div class="fallback-line">Estado cloud no disponible temporalmente.</div>' : '')+
+    '</article>';
+  }).join('');
+}
+
 function renderTasks(data) {
   const tasks = [...(data.tasks || [])].sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0,12);
   $('taskCount').textContent = String(tasks.length);
@@ -150,7 +204,8 @@ function renderTasks(data) {
       slotLabel,
       Number.isFinite(execution?.routingScore) ? 'Routing: ' + execution.routingScore.toFixed(3) : null,
       execution ? 'Intentos: ' + execution.attempts + (execution.maxAttempts ? '/' + execution.maxAttempts : '') : null,
-      execution?.fallbackErrors?.length ? 'Fallbacks: ' + execution.fallbackErrors.length : null,
+      execution?.fallbackCount ? 'Fallbacks: ' + execution.fallbackCount : null,
+      execution?.fallbackCategories?.length ? 'Motivos: ' + execution.fallbackCategories.join(', ') : null,
       execution?.usedFallback ? 'fallback activo/usado' : null
     ].filter(Boolean);
     const executionHtml = executionBits.length
@@ -190,6 +245,7 @@ function render(data) {
   renderStats(data);
   renderLanes(data);
   renderAiHealth(data);
+  renderOperations(data);
   renderTasks(data);
   renderRuns(data);
   $('processes').textContent = (data.processes || []).join('\n') || 'No hay procesos de trabajo visibles ahora mismo.';

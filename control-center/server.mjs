@@ -16,6 +16,8 @@ const port = Number(process.env.AGENT_CONTROL_PORT || 8787);
 const repo = process.env.AGENT_CONTROL_REPO || 'palgarra14-del/agente-automatizador';
 const tokenFile = process.env.AGENT_CONTROL_TOKEN_FILE || join(homedir(), '.config', 'agent-control-center', 'access-token');
 const marker = '<!-- agent-request:v1 -->';
+const cloudStatusCache = new Map();
+const cloudStatusCacheMs = 30_000;
 
 const laneScopes = Object.freeze({
   self: ['src', 'scripts', 'config', 'test', '.github', 'README.md', 'package.json'],
@@ -146,12 +148,24 @@ async function getGit() {
   return { branch: branch.stdout, commit: commit.stdout, dirty: Boolean(dirty.stdout) };
 }
 
-async function getProcesses() {
-  const result = await run('ps', ['-eo', 'pid=,etime=,cmd='], { cwd: '/', timeout: 5_000 });
-  if (!result.ok) return [];
-  return result.stdout.split('\n')
-    .filter((line) => /src\/cli\.js|cloud-drain|codex|opencode|antigravity|ollama|engineering-orchestrator/i.test(line))
-    .slice(0, 30);
+async function getProcessSnapshot() {
+  const result = await run('ps', ['-eo', 'pid=,ppid=,etime=,cmd='], { cwd: '/', timeout: 5_000, maxBuffer: 1_500_000 });
+  if (!result.ok) return { rows: [], visible: [] };
+  const rows = result.stdout.split('\n').map((line) => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(line);
+    return match ? {
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      elapsed: match[3],
+      command: match[4],
+      raw: line
+    } : null;
+  }).filter(Boolean);
+  const visible = rows
+    .filter((row) => /src\/cli\.js|cloud-drain|cloud-recover|model-gateway|codex|opencode|antigravity|ollama|llama-server|engineering-orchestrator/i.test(row.command))
+    .slice(0, 40)
+    .map((row) => row.raw);
+  return { rows, visible };
 }
 
 function providerFailureCategory(reason) {
@@ -238,19 +252,78 @@ async function getAiHealth(processes = []) {
   return { providers, lastModel };
 }
 
-function getWorkActivity(processes = []) {
+function getWorkActivity(rows = []) {
+  const childrenByParent = new Map();
+  for (const row of rows) {
+    const children = childrenByParent.get(row.ppid) || [];
+    children.push(row);
+    childrenByParent.set(row.ppid, children);
+  }
+  const descendants = (pid) => {
+    const result = [];
+    const queue = [...(childrenByParent.get(pid) || [])];
+    while (queue.length) {
+      const child = queue.shift();
+      result.push(child);
+      queue.push(...(childrenByParent.get(child.pid) || []));
+    }
+    return result;
+  };
+
   const seen = new Set();
   const activity = [];
-  for (const line of processes) {
-    const match = /^\s*(\d+)\s+(\S+)\s+node\s+src\/cli\.js\s+inbox\s+(cloud-[a-z-]+)\s+--lane\s+([a-z0-9-]+)/i.exec(line);
+  for (const row of rows) {
+    const match = /(?:^|\s)node\s+src\/cli\.js\s+inbox\s+(cloud-[a-z-]+)\s+--lane\s+([a-z0-9-]+)/i.exec(row.command);
     if (!match) continue;
-    const [, pid, elapsed, action, lane] = match;
+    const [, action, lane] = match;
     const key = lane + ':' + action;
     if (seen.has(key)) continue;
     seen.add(key);
-    activity.push({ pid: Number(pid), elapsed, action, lane });
+    const tree = descendants(row.pid);
+    const commands = tree.map((item) => item.command.toLowerCase());
+    const backend = commands.some((command) => command.includes('antigravity'))
+      ? 'Antigravity'
+      : commands.some((command) => command.includes('opencode'))
+        ? 'OpenCode'
+        : commands.some((command) => command.includes('llama-server') || command.includes('ollama'))
+          ? 'Ollama'
+          : commands.some((command) => command.includes('model-gateway.py'))
+            ? 'model-gateway'
+            : null;
+    activity.push({
+      pid: row.pid,
+      elapsed: row.elapsed,
+      action,
+      lane,
+      backend,
+      modelGatewayActive: commands.some((command) => command.includes('model-gateway.py'))
+    });
   }
   return activity;
+}
+
+async function getCloudOperations(workActivity = []) {
+  const lanes = [...new Set(workActivity.map((item) => item.lane).filter((lane) => Object.hasOwn(laneScopes, lane)))];
+  const now = Date.now();
+  return Promise.all(lanes.map(async (lane) => {
+    const worker = workActivity.find((item) => item.lane === lane) ?? null;
+    const cached = cloudStatusCache.get(lane);
+    if (cached && now - cached.at < cloudStatusCacheMs) {
+      return { lane, worker, ...cached.value, cached: true };
+    }
+    const result = await run('node', ['src/cli.js', 'inbox', 'cloud-status', '--lane', lane], { timeout: 15_000 });
+    if (!result.ok) {
+      return { lane, worker, current: null, records: [], error: 'cloud_status_unavailable', cached: false };
+    }
+    const value = parseJsonOutput(result, { current: null, records: [] });
+    const safe = {
+      current: value.current ?? null,
+      latest: value.latest ?? null,
+      records: Array.isArray(value.records) ? value.records : []
+    };
+    cloudStatusCache.set(lane, { at: now, value: safe });
+    return { lane, worker, ...safe, cached: false };
+  }));
 }
 
 async function getLogs(limit = 80) {
@@ -262,15 +335,17 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, git, queue, tasks, runs, processes, logs] = await Promise.all([
-    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getProcesses(), getLogs(70)
+  const [service, git, queue, tasks, runs, processSnapshot, logs] = await Promise.all([
+    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getProcessSnapshot(), getLogs(70)
   ]);
+  const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
-  const workActivity = getWorkActivity(processes);
+  const workActivity = getWorkActivity(processSnapshot.rows);
+  const cloudOperations = await getCloudOperations(workActivity);
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, git, queue, tasks, runs, processes, logs, aiHealth, workActivity,
+    service, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations,
     host: { online: true, agentRoot, repo }
   };
 }

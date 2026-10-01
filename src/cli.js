@@ -58,6 +58,83 @@ async function loadWorkflowInput(profile) {
   return { businessBrief: parsed };
 }
 
+function routingFailureCategory(value) {
+  const text = String(value || '').toLowerCase();
+  if (/quota|resource_exhausted|insufficient/.test(text)) return 'quota';
+  if (/rate.?limit|429/.test(text)) return 'rate_limit';
+  if (/auth|login|token|unauthorized|forbidden/.test(text)) return 'auth';
+  if (/timeout|timed out|etimedout/.test(text)) return 'timeout';
+  if (/unavailable|connection|refused|network|5\d\d/.test(text)) return 'service_unavailable';
+  if (/without_workspace_changes|no_changes/.test(text)) return 'no_changes';
+  return 'other';
+}
+
+function summarizeQueueRecord(state, record) {
+  if (!record) return null;
+  const workflow = record.workflowId ? state.workflows?.[record.workflowId] ?? null : null;
+  const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
+  const activeStep = steps.find((step) => step.status === 'running')
+    ?? steps.find((step) => step.status === 'awaiting_approval')
+    ?? steps.find((step) => ['blocked', 'failed'].includes(step.status))
+    ?? steps.find((step) => step.status === 'ready')
+    ?? [...steps].reverse().find((step) => step.status === 'completed')
+    ?? null;
+  const routing = activeStep?.evidence?.workerEvidence?.modelRouting
+    ?? activeStep?.evidence?.modelRouting
+    ?? null;
+  const fallbackCategories = Array.isArray(routing?.fallbackErrors)
+    ? [...new Set(routing.fallbackErrors.filter((item) => typeof item === 'string').map(routingFailureCategory))].slice(-8)
+    : [];
+  return {
+    issueNumber: record.issueNumber,
+    workflowId: record.workflowId,
+    projectId: record.request?.projectId ?? null,
+    goal: record.request?.goal ?? null,
+    profile: record.request?.profile ?? null,
+    status: record.status,
+    reason: record.reason,
+    priority: record.request?.priority ?? 'normal',
+    execution: workflow ? {
+      workflowStatus: workflow.status ?? null,
+      stepId: activeStep?.id ?? null,
+      skill: activeStep?.skill ?? null,
+      specialist: activeStep?.specialist ?? null,
+      stepStatus: activeStep?.status ?? null,
+      attempts: Number.isInteger(activeStep?.attempts) ? activeStep.attempts : 0,
+      maxAttempts: Number.isInteger(workflow.budgets?.maxAttempts) ? workflow.budgets.maxAttempts : null,
+      modelCandidate: typeof routing?.candidate === 'string' ? routing.candidate : null,
+      modelProvider: typeof routing?.provider === 'string' ? routing.provider : null,
+      model: typeof routing?.model === 'string' ? routing.model : null,
+      resourceClass: typeof routing?.resourceClass === 'string' ? routing.resourceClass : null,
+      providerSlot: routing?.providerSlot && typeof routing.providerSlot === 'object'
+        ? {
+            provider: typeof routing.providerSlot.provider === 'string' ? routing.providerSlot.provider : null,
+            slot: Number.isInteger(routing.providerSlot.slot) ? routing.providerSlot.slot : null,
+            limit: Number.isInteger(routing.providerSlot.limit) ? routing.providerSlot.limit : null,
+            coordinated: routing.providerSlot.coordinated === true
+          }
+        : null,
+      routingScore: Number.isFinite(routing?.routingScore) ? routing.routingScore : null,
+      fallbackCategories,
+      fallbackCount: Array.isArray(routing?.fallbackErrors) ? routing.fallbackErrors.length : 0,
+      routingMode: typeof routing?.mode === 'string' ? routing.mode : null,
+      usedFallback: Boolean(routing && (
+        String(routing.mode ?? '').includes('fallback') ||
+        routing.localPatchCandidate ||
+        routing.primaryError ||
+        fallbackCategories.length
+      ))
+    } : null,
+    pendingApproval: record.pendingApproval ? {
+      kind: record.pendingApproval.kind,
+      stepId: record.pendingApproval.stepId,
+      fingerprint: record.pendingApproval.fingerprint
+    } : null,
+    publication: record.publication ?? null,
+    updatedAt: record.updatedAt
+  };
+}
+
 try {
   if (command === 'run') {
     const project = projects.get(take('--project'));
@@ -107,71 +184,14 @@ try {
     const action = args[1] ?? 'once';
     if (action === 'status') {
       const state = await store.load();
-      const requests = Object.values(state.requests ?? {}).map((record) => {
-        const workflow = record.workflowId ? state.workflows?.[record.workflowId] ?? null : null;
-        const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
-        const activeStep = steps.find((step) => step.status === 'running')
-          ?? steps.find((step) => step.status === 'awaiting_approval')
-          ?? steps.find((step) => ['blocked', 'failed'].includes(step.status))
-          ?? steps.find((step) => step.status === 'ready')
-          ?? [...steps].reverse().find((step) => step.status === 'completed')
-          ?? null;
-        const routing = activeStep?.evidence?.workerEvidence?.modelRouting
-          ?? activeStep?.evidence?.modelRouting
-          ?? null;
-        return {
-          issueNumber: record.issueNumber,
-          workflowId: record.workflowId,
-          status: record.status,
-          reason: record.reason,
-          priority: record.request?.priority ?? 'normal',
-          execution: workflow ? {
-            workflowStatus: workflow.status ?? null,
-            stepId: activeStep?.id ?? null,
-            skill: activeStep?.skill ?? null,
-            specialist: activeStep?.specialist ?? null,
-            stepStatus: activeStep?.status ?? null,
-            attempts: Number.isInteger(activeStep?.attempts) ? activeStep.attempts : 0,
-            maxAttempts: Number.isInteger(workflow.budgets?.maxAttempts) ? workflow.budgets.maxAttempts : null,
-            modelCandidate: typeof routing?.candidate === 'string' ? routing.candidate : null,
-            modelProvider: typeof routing?.provider === 'string' ? routing.provider : null,
-            model: typeof routing?.model === 'string' ? routing.model : null,
-            resourceClass: typeof routing?.resourceClass === 'string' ? routing.resourceClass : null,
-            providerSlot: routing?.providerSlot && typeof routing.providerSlot === 'object'
-              ? {
-                  provider: typeof routing.providerSlot.provider === 'string' ? routing.providerSlot.provider : null,
-                  slot: Number.isInteger(routing.providerSlot.slot) ? routing.providerSlot.slot : null,
-                  limit: Number.isInteger(routing.providerSlot.limit) ? routing.providerSlot.limit : null,
-                  coordinated: routing.providerSlot.coordinated === true
-                }
-              : null,
-            routingScore: Number.isFinite(routing?.routingScore) ? routing.routingScore : null,
-            fallbackErrors: Array.isArray(routing?.fallbackErrors)
-              ? routing.fallbackErrors.filter((item) => typeof item === 'string').slice(-8)
-              : [],
-            routingMode: typeof routing?.mode === 'string' ? routing.mode : null,
-            usedFallback: Boolean(routing && (
-              String(routing.mode ?? '').includes('fallback') ||
-              routing.localPatchCandidate ||
-              routing.primaryError
-            ))
-          } : null,
-          pendingApproval: record.pendingApproval ? {
-            kind: record.pendingApproval.kind,
-            stepId: record.pendingApproval.stepId,
-            fingerprint: record.pendingApproval.fingerprint
-          } : null,
-          publication: record.publication ?? null,
-          updatedAt: record.updatedAt
-        };
-      });
+      const requests = Object.values(state.requests ?? {}).map((record) => summarizeQueueRecord(state, record));
       console.log(JSON.stringify(requests, null, 2));
     } else {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
-      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-prepare' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair';
+      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-prepare' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair' || action === 'cloud-status';
       const requestedLaneId = take('--lane') ?? 'self';
       const cloudLane = cloudAction
         ? queueConfig.cloudLanes.find((lane) => lane.id === requestedLaneId)
@@ -272,6 +292,22 @@ try {
           repair: { generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration },
           recovery
         }, null, 2));
+      } else if (action === 'cloud-status') {
+        const cloudState = await activeStore.load();
+        const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+        const records = Object.values(cloudState.requests ?? {})
+          .filter((record) => cloudLane.projectIds.includes(record.request?.projectId))
+          .sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
+          .slice(0, 6)
+          .map((record) => summarizeQueueRecord(cloudState, record));
+        const current = records.find((record) => !terminal.has(record.status)) ?? null;
+        console.log(JSON.stringify({
+          lane: cloudLane.id,
+          projectIds: cloudLane.projectIds,
+          current,
+          latest: records[0] ?? null,
+          records
+        }, null, 2));
       } else if (action === 'cloud-peek') {
         console.log(String(await cloudPeekHasWork({
           store: activeStore,
@@ -369,7 +405,7 @@ try {
         if (checkoutReloadRevision) {
           console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
-      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-repair [--lane <id>]|cloud-recover [--lane <id>]|cloud-peek [--lane <id>]|cloud-execution-peek [--lane <id>]|cloud-control-once [--lane <id>]|cloud-drain [--lane <id>]|cloud-once [--lane <id>]|watch|status>');
+      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-repair [--lane <id>]|cloud-recover [--lane <id>]|cloud-status [--lane <id>]|cloud-peek [--lane <id>]|cloud-execution-peek [--lane <id>]|cloud-control-once [--lane <id>]|cloud-drain [--lane <id>]|cloud-once [--lane <id>]|watch|status>');
     }
   } else if (command === 'service') {
     const action = args[1] ?? 'status';
