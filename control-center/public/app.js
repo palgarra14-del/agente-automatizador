@@ -23,9 +23,16 @@ function age(value) {
 }
 function statusClass(value) {
   const s = String(value || '').toLowerCase();
-  if (['success','completed','active','running','queued','admitted','initializing'].includes(s)) return 'good';
-  if (['failure','failed','cancelled','blocked','rejected'].includes(s)) return 'bad';
+  if (['success','completed','active','running','queued','admitted','initializing','available'].includes(s)) return 'good';
+  if (['failure','failed','cancelled','blocked','rejected','offline'].includes(s)) return 'bad';
   return 'warn';
+}
+function duration(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 60) return Math.ceil(value) + ' s';
+  if (value < 3600) return Math.ceil(value / 60) + ' min';
+  if (value < 86400) return Math.ceil(value / 3600) + ' h';
+  return Math.ceil(value / 86400) + ' d';
 }
 function toast(text) {
   $('toast').textContent = text;
@@ -86,6 +93,28 @@ function renderLanes(data) {
       '<button data-wake="'+lane+'">Reactivar / comprobar</button>'+
     '</article>';
   }).join('');
+}
+
+function renderAiHealth(data) {
+  const health = data.aiHealth || {};
+  const providers = health.providers || [];
+  const last = health.lastModel;
+  const cards = [];
+  if (last) {
+    cards.push('<article class="health-item">'+
+      '<div class="item-top"><strong>Último modelo registrado</strong><span class="badge '+statusClass(last.success ? 'success' : 'failure')+'">'+(last.success ? 'OK' : 'FALLO')+'</span></div>'+
+      '<div class="meta">'+esc(last.candidate)+' · '+esc(last.provider)+(last.role ? ' · '+esc(last.role) : '')+
+      '<br>Hace '+age(last.recordedAt)+(last.model ? ' · '+esc(last.model) : '')+'</div></article>');
+  }
+  for (const provider of providers) {
+    const detail = provider.state === 'cooldown'
+      ? 'Motivo: '+esc(provider.reasonCategory || 'unknown')+' · reintento en '+duration(provider.retryInSeconds)
+      : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
+    cards.push('<article class="health-item">'+
+      '<div class="item-top"><strong>'+esc(provider.label)+'</strong><span class="badge '+statusClass(provider.state)+'">'+esc(provider.state)+'</span></div>'+
+      '<div class="meta">'+esc(provider.kind)+'<br>'+detail+'</div></article>');
+  }
+  $('aiHealth').innerHTML = cards.join('') || '<div class="meta">Sin telemetría de modelos disponible.</div>';
 }
 
 function renderTasks(data) {
@@ -152,6 +181,7 @@ function renderRuns(data) {
 function render(data) {
   renderStats(data);
   renderLanes(data);
+  renderAiHealth(data);
   renderTasks(data);
   renderRuns(data);
   $('processes').textContent = (data.processes || []).join('\n') || 'No hay procesos de trabajo visibles ahora mismo.';

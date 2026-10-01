@@ -150,8 +150,92 @@ async function getProcesses() {
   const result = await run('ps', ['-eo', 'pid=,etime=,cmd='], { cwd: '/', timeout: 5_000 });
   if (!result.ok) return [];
   return result.stdout.split('\n')
-    .filter((line) => /src\/cli\.js|cloud-drain|codex|opencode|antigravity|engineering-orchestrator/i.test(line))
+    .filter((line) => /src\/cli\.js|cloud-drain|codex|opencode|antigravity|ollama|engineering-orchestrator/i.test(line))
     .slice(0, 30);
+}
+
+function providerFailureCategory(reason) {
+  const text = String(reason || '').toLowerCase();
+  if (/quota|resource_exhausted|insufficient/.test(text)) return 'quota';
+  if (/rate.?limit|429/.test(text)) return 'rate_limit';
+  if (/auth|login|token|unauthorized|forbidden/.test(text)) return 'auth';
+  if (/timeout|timed out|etimedout/.test(text)) return 'timeout';
+  if (/unavailable|connection|refused|network|5\d\d/.test(text)) return 'service_unavailable';
+  return 'unknown';
+}
+
+async function getAiHealth(processes = []) {
+  const stateDir = process.env.DESIGN_LAB_STATE_DIR || join(homedir(), '.local', 'state', 'engineering-orchestrator', 'design-lab');
+  const now = Date.now() / 1000;
+  let runtime = { providers: {}, candidates: {} };
+  try {
+    runtime = JSON.parse(await readFile(join(stateDir, 'model-runtime-health.json'), 'utf8'));
+  } catch { /* optional runtime health file */ }
+
+  const localText = processes.join('\n').toLowerCase();
+  const providers = [
+    {
+      id: 'antigravity',
+      label: 'Antigravity',
+      kind: 'cloud-free',
+      local: false,
+      processActive: localText.includes('antigravity')
+    },
+    {
+      id: 'opencode',
+      label: 'OpenCode',
+      kind: 'local/free',
+      local: true,
+      processActive: localText.includes('opencode')
+    },
+    {
+      id: 'ollama',
+      label: 'Ollama',
+      kind: 'local/free',
+      local: true,
+      processActive: localText.includes('ollama')
+    }
+  ].map((provider) => {
+    const persisted = runtime.providers?.[provider.id] ?? null;
+    const untilEpoch = Number(persisted?.untilEpoch || 0);
+    const cooldown = untilEpoch > now;
+    return {
+      ...provider,
+      state: cooldown ? 'cooldown' : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
+      reasonCategory: cooldown ? providerFailureCategory(persisted?.reason) : null,
+      cooldownUntil: cooldown ? new Date(untilEpoch * 1000).toISOString() : null,
+      retryInSeconds: cooldown ? Math.max(0, Math.ceil(untilEpoch - now)) : 0
+    };
+  });
+
+  let lastModel = null;
+  const performanceTail = await run('tail', ['-n', '80', join(stateDir, 'model-performance.jsonl')], {
+    cwd: '/',
+    timeout: 2_000,
+    maxBuffer: 250_000
+  });
+  if (performanceTail.ok) {
+    const lines = performanceTail.stdout.split('\n').filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        const record = JSON.parse(lines[index]);
+        if (record?.candidate && record?.provider) {
+          lastModel = {
+            recordedAt: record.recordedAt ?? null,
+            role: record.role ?? null,
+            candidate: record.candidate,
+            provider: record.provider,
+            model: record.model ?? null,
+            success: record.success === true,
+            runId: record.runId ?? null
+          };
+          break;
+        }
+      } catch { /* ignore malformed historical line */ }
+    }
+  }
+
+  return { providers, lastModel };
 }
 
 async function getLogs(limit = 80) {
@@ -166,10 +250,11 @@ async function snapshot() {
   const [service, git, queue, tasks, runs, processes, logs] = await Promise.all([
     getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getProcesses(), getLogs(70)
   ]);
+  const aiHealth = await getAiHealth(processes);
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, git, queue, tasks, runs, processes, logs,
+    service, git, queue, tasks, runs, processes, logs, aiHealth,
     host: { online: true, agentRoot, repo }
   };
 }
