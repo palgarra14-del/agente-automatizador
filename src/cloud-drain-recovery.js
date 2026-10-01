@@ -17,7 +17,14 @@ const RECOVERABLE_CONTROL_ERRORS = new Set([
 const DEFAULT_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 
 export function recoverableCloudControlError(error) {
-  return RECOVERABLE_CONTROL_ERRORS.has(String(error?.message ?? ''));
+  const message = String(error?.message ?? '');
+  if (RECOVERABLE_CONTROL_ERRORS.has(message)) return true;
+  if (/^cloud_state_github_rate_limited:(?:403|429)$/.test(message)) return true;
+  return /^cloud_state_github_request_failed:(?:502|503|504)$/.test(message);
+}
+
+function rateLimitedCloudControlError(error) {
+  return /^cloud_state_github_rate_limited:(?:403|429)$/.test(String(error?.message ?? ''));
 }
 
 function causedByWorkflowDeadline(error) {
@@ -68,6 +75,7 @@ export async function runCloudDrainWithRecovery({
       if (!recoverableCloudControlError(error)) throw error;
 
       const deadlineExhausted = causedByWorkflowDeadline(error);
+      const rateLimited = rateLimitedCloudControlError(error);
       const evidence = {
         attempt: attempt + 1,
         error: error.message,
@@ -75,8 +83,29 @@ export async function runCloudDrainWithRecovery({
         repairError: null,
         generation: null,
         authorityGeneration: null,
-        ...(deadlineExhausted ? { deadlineExhausted: true } : {})
+        ...(deadlineExhausted ? { deadlineExhausted: true } : {}),
+        ...(rateLimited ? {
+          rateLimited: true,
+          retryAfterMs: Number.isFinite(error?.retryAfterMs) ? Math.max(0, Math.round(error.retryAfterMs)) : null
+        } : {})
       };
+
+      if (rateLimited) {
+        recovery.push(evidence);
+        return {
+          version: 1,
+          iterations: [],
+          stopReason: 'rate_limited',
+          remainingWork: true,
+          continuationRecommended: false,
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+          limits: {
+            recoveryAttempts: attempt + 1,
+            retryAfterMs: evidence.retryAfterMs
+          },
+          recovery
+        };
+      }
 
       if (deadlineExhausted) {
         recovery.push(evidence);

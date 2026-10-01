@@ -189,6 +189,55 @@ test('exhausted bounded GitHub state reads become continuation instead of wedgin
 });
 
 
+test('GitHub rate limit yields the lane without repair loops or immediate redispatch', async () => {
+  let repairs = 0;
+  let sleeps = 0;
+  const rateLimitError = new Error('cloud_state_github_rate_limited:403');
+  rateLimitError.retryAfterMs = 61_000;
+  const store = {
+    async withGlobalLease() {
+      throw rateLimitError;
+    },
+    async readSnapshot() {
+      repairs += 1;
+      return {};
+    }
+  };
+
+  const output = await runCloudDrainWithRecovery({
+    store,
+    queue: {},
+    retryDelaysMs: [1, 1],
+    sleep: async () => { sleeps += 1; },
+    drain: async () => result()
+  });
+
+  assert.equal(repairs, 0);
+  assert.equal(sleeps, 0);
+  assert.equal(output.stopReason, 'rate_limited');
+  assert.equal(output.remainingWork, true);
+  assert.equal(output.continuationRecommended, false);
+  assert.equal(output.limits.retryAfterMs, 61_000);
+  assert.equal(output.recovery.length, 1);
+  assert.equal(output.recovery[0].rateLimited, true);
+});
+
+test('plain GitHub permission 403 stays terminal instead of becoming a retry loop', async () => {
+  const store = {
+    async withGlobalLease() {
+      throw new Error('cloud_state_github_request_failed:403');
+    },
+    async readSnapshot() {
+      throw new Error('must not repair a permission failure');
+    }
+  };
+
+  await assert.rejects(
+    () => runCloudDrainWithRecovery({ store, queue: {}, retryDelaysMs: [1], sleep: async () => {} }),
+    /cloud_state_github_request_failed:403/
+  );
+});
+
 test('GitHub state request failure caused by inherited deadline immediately chains continuation', async () => {
   let repairs = 0;
   let sleeps = 0;

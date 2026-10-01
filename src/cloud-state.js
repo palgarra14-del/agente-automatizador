@@ -11,6 +11,7 @@ const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
 const GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 const GITHUB_NETWORK_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
+const GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS = 30_000;
 const STATUS_PAGE_SIZE = 100;
 const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
@@ -269,6 +270,14 @@ function responseError(status) {
   return new Error(`cloud_state_github_request_failed:${status}`);
 }
 
+function rateLimitError(status, retryAfterMs = null) {
+  const error = new Error(`cloud_state_github_rate_limited:${status}`);
+  if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    error.retryAfterMs = Math.round(retryAfterMs);
+  }
+  return error;
+}
+
 function transientGitHubStatus(status) {
   return [502, 503, 504].includes(status);
 }
@@ -428,8 +437,22 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          if (deadlineAt !== null) {
+            if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+            const remainingMs = Math.floor(deadlineAt - this.now());
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
+          }
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
+        }
+      }
+      if (method === 'GET' && [403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
         }
       }
       const transientDelayMs = method === 'GET' ? GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt] : undefined;

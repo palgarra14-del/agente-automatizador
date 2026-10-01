@@ -802,6 +802,100 @@ test('cloud-state rate-limit retry cannot sleep past the active workflow deadlin
   assert.deepEqual(sleeps, []);
 });
 
+test('cloud-state yields immediately on a long GitHub rate-limit reset', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:rate-limit:long',
+    now: () => 10_000,
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      return {
+        status: 403,
+        ok: false,
+        headers: {
+          get(name) {
+            const key = String(name).toLowerCase();
+            if (key === 'x-ratelimit-remaining') return '0';
+            if (key === 'x-ratelimit-reset') return '70';
+            return null;
+          }
+        },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'API rate limit exceeded' }); },
+        async json() { return { message: 'API rate limit exceeded' }; }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => store.refSha('tags/test'),
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 61_000
+  );
+  assert.equal(reads, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test('cloud-state still fails closed for a non-rate-limit GitHub 403', async () => {
+  let reads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:permission:403',
+    fetchImpl: async () => {
+      reads += 1;
+      return {
+        status: 403,
+        ok: false,
+        headers: { get() { return null; } },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'Resource not accessible by integration' }); },
+        async json() { return { message: 'Resource not accessible by integration' }; }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => store.refSha('tags/test'),
+    /cloud_state_github_request_failed:403/
+  );
+  assert.equal(reads, 1);
+});
+
+test('cloud-state performs a short bounded rate-limit retry in place', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:rate-limit:short',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      if (reads > 1) return response(200, { object: { sha: 'a'.repeat(40) } });
+      return {
+        status: 429,
+        ok: false,
+        headers: {
+          get(name) {
+            return String(name).toLowerCase() === 'retry-after' ? '5' : null;
+          }
+        },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'rate limit exceeded' }); },
+        async json() { return { message: 'rate limit exceeded' }; }
+      };
+    }
+  });
+
+  assert.equal(await store.refSha('tags/test'), 'a'.repeat(40));
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [5_000]);
+});
+
 test('cloud-state GraphQL status read is bounded by the active workflow deadline', async () => {
   let graphqlReads = 0;
   const store = new GitHubStateStore({
