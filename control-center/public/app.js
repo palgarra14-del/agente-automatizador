@@ -163,9 +163,11 @@ function renderOperations(data) {
     const issueLink = task?.url ? ' · <a target="_blank" href="'+esc(task.url)+'">abrir issue</a>' : '';
     const state = current?.status || 'trabajando';
     const autonomousLine = !current
-      ? '<div class="operation-goal">Trabajo autónomo/de carril sin issue activo.</div>'
+      ? (op.loading
+        ? '<div class="operation-goal">Leyendo estado cloud del carril…</div>'
+        : '<div class="operation-goal">Trabajo autónomo/de carril sin issue activo.</div>')
       : '';
-    const latestLine = !current && latest?.issueNumber
+    const latestLine = !current && !op.loading && latest?.issueNumber
       ? '<div class="meta">Último issue registrado: #'+esc(latest.issueNumber)+' · '+esc(latest.status)+' · hace '+age(latest.updatedAt)+'</div>'
       : '';
     return '<article class="operation-item">'+

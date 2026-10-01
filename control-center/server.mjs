@@ -17,7 +17,7 @@ const repo = process.env.AGENT_CONTROL_REPO || 'palgarra14-del/agente-automatiza
 const tokenFile = process.env.AGENT_CONTROL_TOKEN_FILE || join(homedir(), '.config', 'agent-control-center', 'access-token');
 const marker = '<!-- agent-request:v1 -->';
 const cloudStatusCache = new Map();
-const cloudStatusCacheMs = 30_000;
+const cloudStatusCacheMs = 45_000;
 
 const laneScopes = Object.freeze({
   self: ['src', 'scripts', 'config', 'test', '.github', 'README.md', 'package.json'],
@@ -302,28 +302,59 @@ function getWorkActivity(rows = []) {
   return activity;
 }
 
-async function getCloudOperations(workActivity = []) {
+function refreshCloudStatus(lane) {
+  const existing = cloudStatusCache.get(lane) || {};
+  if (existing.pending) return;
+  const pending = (async () => {
+    const result = await run('node', ['src/cli.js', 'inbox', 'cloud-status', '--lane', lane], { timeout: 12_000 });
+    if (!result.ok) {
+      cloudStatusCache.set(lane, {
+        at: Date.now(),
+        value: existing.value ?? null,
+        error: 'cloud_status_unavailable'
+      });
+      return;
+    }
+    const value = parseJsonOutput(result, { current: null, latest: null, records: [] });
+    cloudStatusCache.set(lane, {
+      at: Date.now(),
+      value: {
+        current: value.current ?? null,
+        latest: value.latest ?? null,
+        records: Array.isArray(value.records) ? value.records : []
+      },
+      error: null
+    });
+  })().catch(() => {
+    cloudStatusCache.set(lane, {
+      at: Date.now(),
+      value: existing.value ?? null,
+      error: 'cloud_status_unavailable'
+    });
+  });
+  cloudStatusCache.set(lane, { ...existing, pending });
+}
+
+function getCloudOperations(workActivity = []) {
   const lanes = [...new Set(workActivity.map((item) => item.lane).filter((lane) => Object.hasOwn(laneScopes, lane)))];
   const now = Date.now();
-  return Promise.all(lanes.map(async (lane) => {
+  return lanes.map((lane) => {
     const worker = workActivity.find((item) => item.lane === lane) ?? null;
     const cached = cloudStatusCache.get(lane);
-    if (cached && now - cached.at < cloudStatusCacheMs) {
-      return { lane, worker, ...cached.value, cached: true };
-    }
-    const result = await run('node', ['src/cli.js', 'inbox', 'cloud-status', '--lane', lane], { timeout: 15_000 });
-    if (!result.ok) {
-      return { lane, worker, current: null, records: [], error: 'cloud_status_unavailable', cached: false };
-    }
-    const value = parseJsonOutput(result, { current: null, records: [] });
-    const safe = {
-      current: value.current ?? null,
-      latest: value.latest ?? null,
-      records: Array.isArray(value.records) ? value.records : []
+    const stale = !cached?.at || now - cached.at >= cloudStatusCacheMs;
+    if (stale && !cached?.pending) refreshCloudStatus(lane);
+    const latestCache = cloudStatusCache.get(lane) || {};
+    return {
+      lane,
+      worker,
+      current: latestCache.value?.current ?? null,
+      latest: latestCache.value?.latest ?? null,
+      records: latestCache.value?.records ?? [],
+      error: latestCache.error ?? null,
+      loading: Boolean(latestCache.pending && !latestCache.value),
+      cached: Boolean(latestCache.value)
     };
-    cloudStatusCache.set(lane, { at: now, value: safe });
-    return { lane, worker, ...safe, cached: false };
-  }));
+  });
 }
 
 async function getLogs(limit = 80) {
