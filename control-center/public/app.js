@@ -73,10 +73,13 @@ function taskRows(data) {
   });
 }
 function rowNeedsAttention(row) {
-  return Boolean(
-    row.record?.pendingApproval ||
-    ['blocked','failed'].includes(row.state)
-  );
+  if (row.record?.pendingApproval) return true;
+  const updatedAt = new Date(row.record?.updatedAt || row.task?.updatedAt || 0).getTime();
+  const ageMs = Number.isFinite(updatedAt) ? Math.max(0, Date.now() - updatedAt) : Number.POSITIVE_INFINITY;
+  const reason = String(row.record?.reason || '').toLowerCase();
+  const explicitlyHuman = /human|approval|credential|auth|permission|secret|manual|config_changed|request_body_invalid|identity_or_state_changed/.test(reason);
+  if (explicitlyHuman && ageMs <= 48 * 60 * 60 * 1000) return true;
+  return row.state === 'blocked' && ageMs <= 6 * 60 * 60 * 1000;
 }
 function rowSort(left, right) {
   const attention = Number(rowNeedsAttention(right)) - Number(rowNeedsAttention(left));
@@ -109,17 +112,10 @@ function renderAttention(data) {
         detail:(laneNames[row.lane] || row.lane || 'Carril') + ' · ' + (row.task.request?.goal || row.task.title || ''),
         action:'task-' + row.task.number
       });
-    } else if (row.state === 'blocked') {
+    } else if (rowNeedsAttention(row)) {
       items.push({
         severity:'bad',
-        title:'Tarea bloqueada · #' + row.task.number,
-        detail:(laneNames[row.lane] || row.lane || 'Carril') + (row.record?.reason ? ' · ' + row.record.reason : ''),
-        action:'task-' + row.task.number
-      });
-    } else if (row.state === 'failed') {
-      items.push({
-        severity:'bad',
-        title:'Tarea fallida · #' + row.task.number,
+        title:(row.state === 'blocked' ? 'Tarea bloqueada' : 'Intervención requerida') + ' · #' + row.task.number,
         detail:(laneNames[row.lane] || row.lane || 'Carril') + (row.record?.reason ? ' · ' + row.record.reason : ''),
         action:'task-' + row.task.number
       });
@@ -127,11 +123,11 @@ function renderAttention(data) {
   }
 
   for (const provider of data.aiHealth?.providers || []) {
-    if (provider.state === 'cooldown') {
+    if (provider.state === 'cooldown' && provider.reasonCategory === 'auth') {
       items.push({
-        severity:'warn',
-        title:provider.label + ' en cooldown',
-        detail:'Motivo: ' + (provider.reasonCategory || 'desconocido') + ' · reintento en ' + duration(provider.retryInSeconds),
+        severity:'bad',
+        title:provider.label + ' requiere autenticación',
+        detail:'El proveedor está en cooldown por un problema de autenticación que puede requerir intervención.',
         action:'aiHealth'
       });
     } else if (provider.local && provider.state === 'offline') {
@@ -140,17 +136,6 @@ function renderAttention(data) {
         title:provider.label + ' no disponible',
         detail:'No se detecta el proceso local del proveedor.',
         action:'aiHealth'
-      });
-    }
-  }
-
-  for (const operation of data.cloudOperations || []) {
-    if (operation.error) {
-      items.push({
-        severity:'warn',
-        title:'Telemetría cloud degradada · ' + (laneNames[operation.lane] || operation.lane),
-        detail:'El carril sigue siendo independiente, pero su estado cloud no se ha podido leer temporalmente.',
-        action:'operations'
       });
     }
   }
@@ -166,7 +151,7 @@ function renderAttention(data) {
 }
 function renderQueueView(data) {
   const rows = taskRows(data)
-    .filter((row) => !['completed','rejected'].includes(row.state))
+    .filter((row) => !terminalStates.has(row.state))
     .sort(rowSort)
     .slice(0, 8);
 
