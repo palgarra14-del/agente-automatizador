@@ -238,6 +238,21 @@ async function getAiHealth(processes = []) {
   return { providers, lastModel };
 }
 
+function getWorkActivity(processes = []) {
+  const seen = new Set();
+  const activity = [];
+  for (const line of processes) {
+    const match = /^\s*(\d+)\s+(\S+)\s+node\s+src\/cli\.js\s+inbox\s+(cloud-[a-z-]+)\s+--lane\s+([a-z0-9-]+)/i.exec(line);
+    if (!match) continue;
+    const [, pid, elapsed, action, lane] = match;
+    const key = lane + ':' + action;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    activity.push({ pid: Number(pid), elapsed, action, lane });
+  }
+  return activity;
+}
+
 async function getLogs(limit = 80) {
   const count = Math.max(10, Math.min(300, Number(limit) || 80));
   const result = await run('journalctl', ['--user', '-u', 'engineering-orchestrator-inbox.service',
@@ -251,10 +266,11 @@ async function snapshot() {
     getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getProcesses(), getLogs(70)
   ]);
   const aiHealth = await getAiHealth(processes);
+  const workActivity = getWorkActivity(processes);
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, git, queue, tasks, runs, processes, logs, aiHealth,
+    service, git, queue, tasks, runs, processes, logs, aiHealth, workActivity,
     host: { online: true, agentRoot, repo }
   };
 }

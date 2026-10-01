@@ -23,7 +23,7 @@ function age(value) {
 }
 function statusClass(value) {
   const s = String(value || '').toLowerCase();
-  if (['success','completed','active','running','queued','admitted','initializing','available'].includes(s)) return 'good';
+  if (['success','completed','active','running','working','trabajando','queued','admitted','initializing','available'].includes(s)) return 'good';
   if (['failure','failed','cancelled','blocked','rejected','offline'].includes(s)) return 'bad';
   return 'warn';
 }
@@ -58,6 +58,14 @@ function queueRecord(data, issueNumber) {
   return (data.queue?.records || []).find((r) => r.issueNumber === issueNumber);
 }
 function laneState(data, lane) {
+  const worker = (data.workActivity || []).find((item) => item.lane === lane);
+  if (worker) {
+    return {
+      state: 'trabajando',
+      detail: worker.action + ' · proceso ' + worker.pid + ' · ' + worker.elapsed,
+      cls: 'good'
+    };
+  }
   const issues = (data.tasks || []).filter((t) => t.request?.projectId === lane);
   const records = issues.map((t) => queueRecord(data, t.number)).filter(Boolean);
   const live = records.find((r) => activeStates.has(r.status));
