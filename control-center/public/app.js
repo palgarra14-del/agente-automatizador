@@ -8,7 +8,9 @@ const laneNames = {
 const activeStates = new Set(['admitted','initializing','running','pending_approval','awaiting_start_approval','awaiting_workflow_approval','execution_deferred','active']);
 const terminalStates = new Set(['completed','failed','blocked','rejected']);
 const priorityNames = {high:'Alta', normal:'Normal', low:'Baja'};
+const priorityOrder = {high:0, normal:1, low:2};
 let loading = false;
+let lastData = null;
 
 function esc(value='') {
   return String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -56,6 +58,128 @@ async function api(path, options={}) {
 
 function queueRecord(data, issueNumber) {
   return (data.queue?.records || []).find((r) => r.issueNumber === issueNumber);
+}
+function taskRows(data) {
+  return (data.tasks || []).map((task) => {
+    const record = queueRecord(data, task.number);
+    const priority = task.request?.priority || record?.priority || 'normal';
+    return {
+      task,
+      record,
+      priority,
+      state: record?.status || 'pendiente',
+      lane: task.request?.projectId || record?.projectId || null
+    };
+  });
+}
+function rowNeedsAttention(row) {
+  return Boolean(
+    row.record?.pendingApproval ||
+    ['blocked','failed'].includes(row.state)
+  );
+}
+function rowSort(left, right) {
+  const attention = Number(rowNeedsAttention(right)) - Number(rowNeedsAttention(left));
+  if (attention) return attention;
+  const priority = (priorityOrder[left.priority] ?? 1) - (priorityOrder[right.priority] ?? 1);
+  if (priority) return priority;
+  const active = Number(activeStates.has(right.state)) - Number(activeStates.has(left.state));
+  if (active) return active;
+  return new Date(right.task.updatedAt || 0) - new Date(left.task.updatedAt || 0);
+}
+function renderAttention(data) {
+  const items = [];
+  const rows = taskRows(data);
+
+  if (!data.service?.active) {
+    items.push({severity:'bad', title:'Agente principal parado', detail:'El servicio engineering-orchestrator-inbox no está activo.', action:'top'});
+  }
+  if (data.queue?.error) {
+    items.push({severity:'bad', title:'Cola no disponible', detail:'El Control Center no ha podido leer el estado gobernado de la cola.', action:'top'});
+  }
+  if (data.git?.dirty) {
+    items.push({severity:'warn', title:'Cambios locales sin commit', detail:'El checkout principal tiene cambios locales; conviene revisarlos antes de mezclar más trabajo.', action:'top'});
+  }
+
+  for (const row of rows) {
+    if (row.record?.pendingApproval) {
+      items.push({
+        severity:'warn',
+        title:'Aprobación pendiente · #' + row.task.number,
+        detail:(laneNames[row.lane] || row.lane || 'Carril') + ' · ' + (row.task.request?.goal || row.task.title || ''),
+        action:'task-' + row.task.number
+      });
+    } else if (row.state === 'blocked') {
+      items.push({
+        severity:'bad',
+        title:'Tarea bloqueada · #' + row.task.number,
+        detail:(laneNames[row.lane] || row.lane || 'Carril') + (row.record?.reason ? ' · ' + row.record.reason : ''),
+        action:'task-' + row.task.number
+      });
+    } else if (row.state === 'failed') {
+      items.push({
+        severity:'bad',
+        title:'Tarea fallida · #' + row.task.number,
+        detail:(laneNames[row.lane] || row.lane || 'Carril') + (row.record?.reason ? ' · ' + row.record.reason : ''),
+        action:'task-' + row.task.number
+      });
+    }
+  }
+
+  for (const provider of data.aiHealth?.providers || []) {
+    if (provider.state === 'cooldown') {
+      items.push({
+        severity:'warn',
+        title:provider.label + ' en cooldown',
+        detail:'Motivo: ' + (provider.reasonCategory || 'desconocido') + ' · reintento en ' + duration(provider.retryInSeconds),
+        action:'aiHealth'
+      });
+    } else if (provider.local && provider.state === 'offline') {
+      items.push({
+        severity:'bad',
+        title:provider.label + ' no disponible',
+        detail:'No se detecta el proceso local del proveedor.',
+        action:'aiHealth'
+      });
+    }
+  }
+
+  for (const operation of data.cloudOperations || []) {
+    if (operation.error) {
+      items.push({
+        severity:'warn',
+        title:'Telemetría cloud degradada · ' + (laneNames[operation.lane] || operation.lane),
+        detail:'El carril sigue siendo independiente, pero su estado cloud no se ha podido leer temporalmente.',
+        action:'operations'
+      });
+    }
+  }
+
+  const visible = items.slice(0, 10);
+  $('attentionCount').textContent = String(items.length);
+  $('attention').innerHTML = visible.length
+    ? visible.map((item) => '<article class="attention-item '+item.severity+'">'+
+        '<div><strong>'+esc(item.title)+'</strong><p>'+esc(item.detail)+'</p></div>'+
+        (item.action ? '<button class="mini" data-jump="'+esc(item.action)+'">Ver</button>' : '')+
+      '</article>').join('')
+    : '<article class="attention-clear"><strong>Sin intervención necesaria</strong><p>El sistema no reporta bloqueos, aprobaciones pendientes ni proveedores locales caídos.</p></article>';
+}
+function renderQueueView(data) {
+  const rows = taskRows(data)
+    .filter((row) => !['completed','rejected'].includes(row.state))
+    .sort(rowSort)
+    .slice(0, 8);
+
+  $('queueView').innerHTML = rows.length
+    ? rows.map((row, index) => '<div class="queue-row">'+
+        '<span class="queue-index">'+(index + 1)+'</span>'+
+        '<div class="queue-main"><strong>'+esc(laneNames[row.lane] || row.lane || 'Sin carril')+'</strong>'+
+        '<span>'+esc(row.task.request?.goal || row.task.title || '')+'</span></div>'+
+        '<div class="badges"><span class="badge priority-'+esc(row.priority)+'">'+esc(priorityNames[row.priority] || row.priority)+'</span>'+
+        '<span class="badge '+statusClass(row.state)+'">'+esc(row.state)+'</span></div>'+
+        '<button class="mini" data-jump="task-'+row.task.number+'">#'+row.task.number+'</button>'+
+      '</div>').join('')
+    : '<div class="meta">No hay tareas abiertas pendientes de ejecución.</div>';
 }
 function laneState(data, lane) {
   const worker = (data.workActivity || []).find((item) => item.lane === lane);
@@ -182,16 +306,25 @@ function renderOperations(data) {
 }
 
 function renderTasks(data) {
-  const tasks = [...(data.tasks || [])].sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0,12);
-  $('taskCount').textContent = String(tasks.length);
-  if (!tasks.length) {
-    $('tasks').innerHTML = '<div class="meta">No hay tareas abiertas del agente.</div>';
+  const laneFilter = $('taskLaneFilter')?.value || 'all';
+  const viewFilter = $('taskViewFilter')?.value || 'all';
+  let rows = taskRows(data).sort(rowSort);
+  if (laneFilter !== 'all') rows = rows.filter((row) => row.lane === laneFilter);
+  if (viewFilter === 'attention') rows = rows.filter(rowNeedsAttention);
+  if (viewFilter === 'active') rows = rows.filter((row) => activeStates.has(row.state));
+  if (viewFilter === 'high') rows = rows.filter((row) => row.priority === 'high');
+  rows = rows.slice(0, 16);
+
+  $('taskCount').textContent = String(rows.length);
+  if (!rows.length) {
+    $('tasks').innerHTML = '<div class="meta">No hay tareas que coincidan con este filtro.</div>';
     return;
   }
-  $('tasks').innerHTML = tasks.map((t) => {
-    const r = queueRecord(data, t.number);
-    const state = r?.status || 'pendiente';
-    const priority = t.request?.priority || r?.priority || 'normal';
+  $('tasks').innerHTML = rows.map((row) => {
+    const t = row.task;
+    const r = row.record;
+    const state = row.state;
+    const priority = row.priority;
     const execution = r?.execution;
     const model = execution?.modelCandidate || execution?.model || null;
     const slot = execution?.providerSlot;
@@ -220,7 +353,7 @@ function renderTasks(data) {
     const cancelHtml = r?.workflowId && !terminalStates.has(state)
       ? '<div class="approval"><button class="danger" data-cancel-workflow="'+esc(r.workflowId)+'" data-cancel-issue="'+t.number+'">Cancelar tarea</button></div>'
       : '';
-    return '<div class="item"><div class="item-top"><strong>#'+t.number+' · '+esc(laneNames[t.request?.projectId] || t.request?.projectId)+'</strong>'+
+    return '<div class="item" id="task-'+t.number+'"><div class="item-top"><strong>#'+t.number+' · '+esc(laneNames[row.lane] || row.lane || 'Sin carril')+'</strong>'+
       '<div class="badges"><span class="badge priority-'+esc(priority)+'">'+esc(priorityNames[priority] || priority)+'</span><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div></div>'+
       '<div class="meta">'+esc(t.request?.goal || t.title)+'<br>Actualizada hace '+age(t.updatedAt)+' · <a target="_blank" href="'+esc(t.url)+'">abrir issue</a>'+
       (r?.reason ? '<br>Motivo: '+esc(r.reason) : '')+'</div>'+
@@ -244,7 +377,10 @@ function renderRuns(data) {
 }
 
 function render(data) {
+  lastData = data;
   renderStats(data);
+  renderAttention(data);
+  renderQueueView(data);
   renderLanes(data);
   renderAiHealth(data);
   renderOperations(data);
@@ -293,6 +429,12 @@ function syncTaskMode() {
 $('profile').addEventListener('change', syncTaskMode);
 syncTaskMode();
 
+for (const id of ['taskLaneFilter','taskViewFilter']) {
+  $(id)?.addEventListener('change', () => {
+    if (lastData) renderTasks(lastData);
+  });
+}
+
 $('taskForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const button = $('sendTask');
@@ -336,7 +478,12 @@ document.addEventListener('click', async (event) => {
   const jump = event.target.closest('[data-jump]');
   if (jump) {
     const id = jump.dataset.jump;
-    (id === 'top' ? document.body : $(id))?.scrollIntoView({behavior:'smooth',block:'start'});
+    if (id?.startsWith('task-') && !$(id) && lastData) {
+      $('taskLaneFilter').value = 'all';
+      $('taskViewFilter').value = 'all';
+      renderTasks(lastData);
+    }
+    (id === 'top' ? document.body : $(id))?.scrollIntoView({behavior:'smooth',block:'center'});
     return;
   }
   if (cancel && !globalThis.confirm('Cancelar esta tarea? El workflow se detendra de forma gobernada y quedara registrado.')) return;

@@ -43,6 +43,22 @@
 
     <section id="stats" class="stats"></section>
 
+    <section id="attentionCard" class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">ATENCIÓN</p><h2>Qué necesita tu intervención</h2></div>
+        <span id="attentionCount" class="counter">0</span>
+      </div>
+      <div id="attention" class="attention-grid"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">COLA</p><h2>Vista por prioridad</h2></div>
+      </div>
+      <div id="queueView" class="queue-view"></div>
+      <p class="queue-note">La prioridad ordena la vista. El scheduler puede posponer una tarea si necesita aprobación, una dependencia está caída o existe un bloqueo de seguridad.</p>
+    </section>
+
     <section>
       <div class="section-title">
         <div><p class="eyebrow">CARRILES</p><h2>Equipo del agente</h2></div>
@@ -118,6 +134,21 @@
         <div class="section-title">
           <div><p class="eyebrow">TRABAJO</p><h2>Tareas abiertas</h2></div>
           <span id="taskCount" class="counter">0</span>
+        </div>
+        <div class="task-filters">
+          <select id="taskLaneFilter" aria-label="Filtrar tareas por carril">
+            <option value="all">Todos los carriles</option>
+            <option value="self">Agente / Automejora</option>
+            <option value="callflow">Callflow</option>
+            <option value="leadfinder">LeadFinder</option>
+            <option value="website-pilot">Website Pilot</option>
+          </select>
+          <select id="taskViewFilter" aria-label="Filtrar tareas por estado">
+            <option value="all">Todas</option>
+            <option value="attention">Requieren atención</option>
+            <option value="active">Activas</option>
+            <option value="high">Prioridad alta</option>
+          </select>
         </div>
         <div id="tasks" class="list"></div>
       </article>
