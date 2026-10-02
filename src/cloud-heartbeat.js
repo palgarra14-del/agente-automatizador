@@ -2,6 +2,15 @@ import { planWork } from './work-scheduler.js';
 
 const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generation_election_failed|github_request_failed|state_recovery_failed|checkpoint_recovery_failed|witness_recovery_failed)|cloud_global_lease_(busy|lost|release_failed)|workflow_deadline_cap_exceeded|timeout|deadline/i;
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
+const CRITICAL_CI_WAITING_STATUSES = new Set(['queued', 'pending', 'waiting']);
+
+export function criticalCiDemand(runs = []) {
+  if (!Array.isArray(runs)) throw new Error('ci_runs_invalid');
+  return runs.filter((run) =>
+    run?.name === 'CI' &&
+    CRITICAL_CI_WAITING_STATUSES.has(String(run?.status ?? '').toLowerCase())
+  ).length;
+}
 
 export function operatorRequestedLanes(issues = [], config = {}) {
   const allowedActors = new Set((config.allowedActors ?? []).map(String));
@@ -74,6 +83,7 @@ export function planHeartbeat(observations = [], limits = {}) {
       reason:classified.find((entry) => entry.lane === item.lane)?.reason ?? 'scheduled'
     })),
     deferred:plan.deferred.map(({item,reason}) => ({lane:item.lane,priority:item.band,reason})),
-    yieldCandidates:plan.yieldCandidates
+    yieldCandidates:plan.yieldCandidates,
+    externalPriorityDemand:plan.limits.reserveForExternal
   };
 }

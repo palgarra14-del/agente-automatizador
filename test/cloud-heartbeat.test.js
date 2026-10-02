@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, criticalCiDemand, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+
+test('critical CI demand counts only waiting CI runs', () => {
+  assert.equal(criticalCiDemand([
+    {name:'CI',status:'queued'},
+    {name:'CI',status:'pending'},
+    {name:'CI',status:'in_progress'},
+    {name:'CI',status:'completed'},
+    {name:'Agent Cloud Worker',status:'queued'}
+  ]),2);
+});
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -34,6 +44,31 @@ test('active business work leaves the last runner for waiting business before se
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['website-pilot']);
   assert.equal(plan.deferred.find((item)=>item.lane==='self').reason,'global_capacity');
+});
+
+test('queued CI reserves spare runner capacity from self maintenance', () => {
+  const plan=planHeartbeat([
+    {lane:'callflow',active:true},
+    {lane:'leadfinder',active:true},
+    {lane:'self',hasWork:true}
+  ],{
+    reserveForExternal:1
+  });
+  assert.deepEqual(plan.dispatch,[]);
+  assert.equal(plan.deferred[0].lane,'self');
+  assert.equal(plan.deferred[0].reason,'external_priority_capacity');
+  assert.equal(plan.externalPriorityDemand,1);
+});
+
+test('self recovery still outranks queued CI pressure', () => {
+  const plan=planHeartbeat([
+    {lane:'callflow',active:true},
+    {lane:'leadfinder',active:true},
+    {lane:'self',error:'cloud_state_github_request_failed'}
+  ],{
+    reserveForExternal:1
+  });
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['self']);
 });
 
 test('active lane is never dispatched twice', () => {
