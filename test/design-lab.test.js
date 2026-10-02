@@ -375,6 +375,7 @@ test('emergency local renderer creates a deterministic QA-safe site without inve
 from pathlib import Path
 brief=json.loads(sys.argv[2])
 root=Path(sys.argv[1])
+(root/"brief.txt").write_text(json.dumps({**brief,"syntheticContact":m.SYNTHETIC_CONTACT}),encoding="utf-8")
 meta=m.build_emergency_site(root,brief,"no_edit_candidate_available")
 audit=m.static_quality_audit(root)
 intent=json.loads((root/"design-intent.json").read_text())
