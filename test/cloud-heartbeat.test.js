@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, heartbeatObservationOrder, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, heartbeatObservationOrder, heartbeatRunLane, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -34,6 +34,26 @@ test('heartbeat observes business lanes before self unless the operator explicit
     heartbeatObservationOrder(['self','website-pilot','leadfinder','callflow'],new Set(['self'])),
     ['self','callflow','leadfinder','website-pilot']
   );
+});
+
+test('heartbeat recognizes queued lane-scoped dispatches before jobs are materialized', () => {
+  const lanes=['self','website-pilot','leadfinder','callflow'];
+  assert.equal(heartbeatRunLane({
+    event:'workflow_dispatch',
+    displayTitle:'Agent Cloud Worker (leadfinder)'
+  },lanes),'leadfinder');
+  assert.equal(heartbeatRunLane({
+    event:'push',
+    displayTitle:'Agent Cloud Worker (leadfinder)'
+  },lanes),null);
+  assert.equal(heartbeatRunLane({
+    event:'workflow_dispatch',
+    displayTitle:'Agent Cloud Worker (unknown)'
+  },lanes),null);
+  assert.equal(heartbeatRunLane({
+    event:'workflow_dispatch',
+    displayTitle:'Agent Cloud Worker'
+  },lanes),null);
 });
 
 test('heartbeat fills all runner capacity with business before self', () => {
