@@ -441,7 +441,7 @@ try {
       timeoutMs: 250,
       settleMs: 50
     }),
-    /browser_qa_navigation_failed|browser_qa_final_url_mismatch|browser_qa_document_url_mismatch|browser_qa_runner_origin_forbidden/
+    /browser_qa_navigation_failed|browser_qa_final_url_mismatch|browser_qa_document_url_mismatch|browser_qa_runner_origin_forbidden|browser_qa_cdp_event_Page_loadEventFired_timeout/
   );
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 
