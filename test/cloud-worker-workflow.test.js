@@ -10,6 +10,10 @@ const self = projects.projects.find((project) => project.id === 'self');
 const website = projects.projects.find((project) => project.id === 'website-pilot');
 const callflow = projects.projects.find((project) => project.id === 'callflow');
 
+test('lane-scoped dispatches expose their lane before jobs are materialized', () => {
+  assert.match(workflow, /^run-name: Agent Cloud Worker \(\$\{\{ inputs\.lane \|\| github\.event_name \}\}\)$/m);
+});
+
 test('cloud worker reacts to owner control-plane events with a scheduled fallback only', () => {
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);

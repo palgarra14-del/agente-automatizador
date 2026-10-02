@@ -2,6 +2,24 @@ import { planWork } from './work-scheduler.js';
 
 const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generation_election_failed|github_request_failed|state_recovery_failed|checkpoint_recovery_failed|witness_recovery_failed)|cloud_global_lease_(busy|lost|release_failed)|workflow_deadline_cap_exceeded|timeout|deadline/i;
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
+const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
+
+export function heartbeatObservationOrder(lanes = [], operatorLanes = []) {
+  const operator = operatorLanes instanceof Set ? operatorLanes : new Set(operatorLanes ?? []);
+  const rank = new Map(HEARTBEAT_LANE_ORDER.map((lane, index) => [lane, index]));
+  return [...lanes].sort((left, right) =>
+    Number(operator.has(right)) - Number(operator.has(left)) ||
+    (rank.get(left) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right) ?? Number.MAX_SAFE_INTEGER) ||
+    String(left).localeCompare(String(right))
+  );
+}
+
+export function heartbeatRunLane(run, lanes = []) {
+  if (run?.event !== 'workflow_dispatch') return null;
+  const match = /^Agent Cloud Worker \(([a-z0-9-]{1,80})\)$/.exec(String(run?.displayTitle ?? ''));
+  if (!match) return null;
+  return new Set((lanes ?? []).map(String)).has(match[1]) ? match[1] : null;
+}
 
 export function operatorRequestedLanes(issues = [], config = {}) {
   const allowedActors = new Set((config.allowedActors ?? []).map(String));
@@ -35,6 +53,9 @@ export function classifyLaneObservation(observation) {
   const lane = observation?.lane;
   if (!lane) throw new Error('lane_observation_invalid');
   const operatorRequested = observation.operatorRequested === true;
+  if (observation.observationSkipped === true) {
+    return { lane, state:'deferred', runnable:false, reason:'observation_budget', operatorRequested };
+  }
   if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active', operatorRequested };
   if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected', operatorRequested };
   if (observation.error && RECOVERABLE.test(String(observation.error))) {

@@ -287,7 +287,11 @@ if (!address || typeof address === 'string') throw new Error('browser_qa_smoke_s
 const origin = `http://127.0.0.1:${address.port}`;
 
 const controller = new AbortController();
-const timer = setTimeout(() => controller.abort(), 20_000);
+// This script exercises many independent adversarial fixtures. Keep one hard
+// overall ceiling, but leave enough headroom for a loaded self-hosted runner;
+// individual browser operations remain bounded by their own tighter timeouts.
+const smokeDeadlineMs = 45_000;
+const timer = setTimeout(() => controller.abort(), smokeDeadlineMs);
 let browser = null;
 
 function fixtureRequest(route, targets = [], requiredSections = ['hero']) {
