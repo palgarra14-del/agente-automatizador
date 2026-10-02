@@ -36,6 +36,34 @@ test('heartbeat observes business lanes before self unless the operator explicit
   );
 });
 
+test('heartbeat rotates ordinary business observation order so a slow earlier lane cannot starve website pilot forever', () => {
+  const lanes=['self','website-pilot','leadfinder','callflow'];
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,new Set(),1),
+    ['leadfinder','website-pilot','callflow','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,new Set(),2),
+    ['website-pilot','callflow','leadfinder','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,new Set(['callflow']),2),
+    ['callflow','website-pilot','leadfinder','self']
+  );
+});
+
+test('heartbeat observation rotation is bounded for large and negative counters', () => {
+  const lanes=['callflow','leadfinder','website-pilot','self'];
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,new Set(),5),
+    ['website-pilot','callflow','leadfinder','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,new Set(),-1),
+    ['website-pilot','callflow','leadfinder','self']
+  );
+});
+
 test('heartbeat recognizes queued lane-scoped dispatches before jobs are materialized', () => {
   const lanes=['self','website-pilot','leadfinder','callflow'];
   assert.equal(heartbeatRunLane({
