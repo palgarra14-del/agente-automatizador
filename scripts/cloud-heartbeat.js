@@ -22,9 +22,14 @@ const dryRun = ['1','true','yes','on'].includes(String(process.env.AGENT_HEARTBE
 async function run(command,args,options={}) {
   try {
     const {stdout='',stderr=''} = await execFileAsync(command,args,{timeout:options.timeout ?? 30_000,maxBuffer:2_000_000});
-    return {ok:true,stdout:stdout.trim(),stderr:stderr.trim()};
+    return {ok:true,stdout:stdout.trim(),stderr:stderr.trim(),timedOut:false};
   } catch (error) {
-    return {ok:false,stdout:String(error.stdout||'').trim(),stderr:String(error.stderr||error.message||'').trim()};
+    return {
+      ok:false,
+      stdout:String(error.stdout||'').trim(),
+      stderr:String(error.stderr||error.message||'').trim(),
+      timedOut:error?.killed === true && Boolean(error?.signal)
+    };
   }
 }
 
@@ -65,6 +70,7 @@ async function observeLane(lane,active,operatorLanes,peekTimeoutMs=timeoutMs) {
   const operatorRequested = operatorLanes.has(lane);
   if (active.has(lane)) return {lane,active:true,operatorRequested};
   const result=await run(cli,['src/cli.js','inbox','cloud-peek','--lane',lane],{timeout:peekTimeoutMs});
+  if (result.timedOut) return {lane,active:false,operatorRequested,observationSkipped:true};
   if (!result.ok) return {lane,active:false,operatorRequested,error:result.stderr || result.stdout || 'cloud_peek_failed'};
   return {lane,active:false,operatorRequested,hasWork:result.stdout.split(/\s+/).at(-1) === 'true'};
 }

@@ -12,6 +12,32 @@ test('cloud peek reads and reports queue or autonomous work', async () => {
   assert.deepEqual(calls, [{ repair: true }]);
 });
 
+test('cloud peek returns early for a durable admission intent without deep state validation', async () => {
+  let snapshotReads = 0;
+  let queueReads = 0;
+  const store = { async readSnapshot() { snapshotReads += 1; throw new Error('must_not_read_snapshot'); } };
+  const queue = {
+    async pendingAdmissionIntents() { return [{ projectId:'website-pilot', issueNumber:123 }]; },
+    async hasWork() { queueReads += 1; return false; }
+  };
+
+  assert.equal(await cloudPeekHasWork({ store, queue }), true);
+  assert.equal(snapshotReads, 0);
+  assert.equal(queueReads, 0);
+});
+
+test('cloud peek still validates cloud state when no admission intent exists', async () => {
+  const calls = [];
+  const store = { async readSnapshot(options) { calls.push(options); return {}; } };
+  const queue = {
+    async pendingAdmissionIntents() { return []; },
+    async hasWork() { return false; }
+  };
+
+  assert.equal(await cloudPeekHasWork({ store, queue }), false);
+  assert.deepEqual(calls, [{ repair:true }]);
+});
+
 test('cloud execution peek uses execution-only queue work', async () => {
   let normalCalls = 0;
   let executionCalls = 0;
