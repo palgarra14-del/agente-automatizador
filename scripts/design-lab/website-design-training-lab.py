@@ -262,6 +262,19 @@ def next_run_number(entries=None):
                 highest=max(highest,int(match.group(1)))
     return highest+1
 
+def training_attempts():
+    attempts=[]
+    if not RUNS.exists():
+        return attempts
+    for path in RUNS.iterdir():
+        if not path.is_dir():
+            continue
+        match=re.match(r"^run-(\d+)-training-(.+)$",path.name)
+        if not match:
+            continue
+        attempts.append({"runNumber":int(match.group(1)),"briefSlug":match.group(2)})
+    return sorted(attempts,key=lambda item:item["runNumber"])
+
 def concept_tokens(value):
     import re
     return {token for token in re.findall(r"[a-z0-9áéíóúüñ]+", str(value).lower()) if len(token) >= 4}
@@ -698,15 +711,26 @@ def choose_brief():
       entry for entry in completed_history()
       if entry.get("phase","training") == "training"
     ]
-    if not all_training:
+    attempts=training_attempts()
+    if not all_training and not attempts:
         return BRIEFS[0]
     weakest=weakest_dimension(official or all_training)
-    recent_slugs={entry.get("briefSlug") for entry in all_training[-2:]}
-    candidates=[brief for brief in BRIEFS if weakest in BRIEF_FOCUS.get(brief["slug"],[]) and brief["slug"] not in recent_slugs]
+    if attempts:
+        recent_slugs={item["briefSlug"] for item in attempts[-2:]}
+        rotation_index=len(attempts)
+    else:
+        recent_slugs={entry.get("briefSlug") for entry in all_training[-2:]}
+        rotation_index=len(all_training)
+    candidates=[]
+    if weakest:
+        candidates=[
+          brief for brief in BRIEFS
+          if weakest in BRIEF_FOCUS.get(brief["slug"],[]) and brief["slug"] not in recent_slugs
+        ]
     if not candidates:
         candidates=[brief for brief in BRIEFS if brief["slug"] not in recent_slugs] or BRIEFS
     candidates=sorted(candidates,key=lambda brief: brief["slug"])
-    return candidates[len(all_training) % len(candidates)]
+    return candidates[rotation_index % len(candidates)]
 
 def last_failed_holdout_at(entries):
     failed=[entry for entry in entries if entry.get("phase")=="holdout" and official_evidence(entry) and not record_passes(entry) and entry.get("completedAt")]
