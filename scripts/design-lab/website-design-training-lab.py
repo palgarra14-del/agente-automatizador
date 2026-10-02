@@ -827,9 +827,12 @@ def _emergency_cta_label(category):
 
 def build_emergency_site(run_dir, brief, failure_trace=""):
     seed=int(hashlib.sha256((str(brief.get("slug",""))+"|"+str(brief.get("business",""))).encode("utf-8")).hexdigest()[:8],16)
-    palette=EMERGENCY_PALETTES[seed % len(EMERGENCY_PALETTES)]
+    run_match=re.match(r"^run-(\d+)-",Path(run_dir).name)
+    variant=int(run_match.group(1)) if run_match else 0
+    palette_index=(seed + variant) % len(EMERGENCY_PALETTES)
+    palette=EMERGENCY_PALETTES[palette_index]
     layouts=("editorial-split","offset-ledger","quiet-poster")
-    layout=layouts[(seed // len(EMERGENCY_PALETTES)) % len(layouts)]
+    layout=layouts[((seed // len(EMERGENCY_PALETTES)) + variant) % len(layouts)]
     business=str(brief.get("business") or "Negocio local").strip()
     category=str(brief.get("category") or "Servicio local").strip()
     supplied=str(brief.get("brief") or "").strip()
@@ -938,7 +941,9 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
       "fallbackErrors":[str(failure_trace)[-1200:]] if failure_trace else [],
       "elapsedSeconds":0.0,
       "emergencyRenderer":True,
-      "layout":layout
+      "layout":layout,
+      "variant":variant,
+      "paletteIndex":palette_index
     }
     (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
     return metadata
