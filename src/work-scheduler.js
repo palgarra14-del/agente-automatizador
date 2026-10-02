@@ -58,7 +58,7 @@ export function rankWork(items = []) {
 export function planWork(items = [], {
   running = [],
   maxHeavy = 3,
-  maxBusinessHeavy = 2,
+  maxBusinessHeavy = 3,
   maxSelfHeavy = 1
 } = {}) {
   if (!Number.isInteger(maxHeavy) || maxHeavy < 1) throw new Error('max_heavy_invalid');
@@ -104,17 +104,20 @@ export function planWork(items = [], {
     if (item.lane === 'self') selfHeavy += 1;
   }
 
-  const waitingOperator = deferred.find(({ item, reason }) =>
-    item.band === 'operator' && reason === 'global_capacity'
+  const waitingPriorityWork = deferred.find(({ item, reason }) =>
+    reason === 'global_capacity' &&
+    (item.band === 'operator' || BUSINESS_LANES.has(item.lane))
   );
-  const yieldCandidates = waitingOperator
+  const yieldCandidates = waitingPriorityWork
     ? normalizedRunning
         .filter((item) => item.lane === 'self' && item.heavy)
         .sort((a, b) => scoreWork(a) - scoreWork(b) || a.createdAtMs - b.createdAtMs)
         .map((item) => ({
           id: item.id,
           lane: item.lane,
-          reason: 'yield_at_next_safe_checkpoint_for_operator_work'
+          reason: waitingPriorityWork.item.band === 'operator'
+            ? 'yield_at_next_safe_checkpoint_for_operator_work'
+            : 'yield_at_next_safe_checkpoint_for_business_work'
         }))
     : [];
 
@@ -137,7 +140,7 @@ export function schedulingPolicySnapshot() {
     principles: [
       'operator work outranks autonomous work',
       'business throughput outranks self-improvement',
-      'self-improvement consumes spare capacity',
+      'self-improvement consumes only spare capacity after runnable business work',
       'human gates never block independent runnable work',
       'running work yields only at a safe checkpoint'
     ]
