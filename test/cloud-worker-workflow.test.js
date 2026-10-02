@@ -304,9 +304,24 @@ test('autonomous self-maintenance failures cannot masquerade as a successful clo
 test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
   assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
-  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 30m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 25m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
   assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
+});
+
+test('cloud drain supervisor timeout yields to a governed continuation instead of failing the workflow', () => {
+  const drainStart = workflow.indexOf('- name: Drain governed cloud work continuously');
+  const retryStart = workflow.indexOf('- name: Schedule exact rate-limit continuation');
+  assert.ok(drainStart > 0 && retryStart > drainStart);
+  const drain = workflow.slice(drainStart, retryStart);
+  assert.match(drain, /set \+e/);
+  assert.match(drain, /DRAIN_EXIT="\$\?"/);
+  assert.match(drain, /124\|137\|143/);
+  assert.match(drain, /"stopReason":"supervisor_timeout"/);
+  assert.match(drain, /"continuationRecommended":true/);
+  assert.match(drain, /supervisorTimeoutMs":1500000/);
+  assert.match(drain, /exit "\$DRAIN_EXIT"/);
+  assert.match(drain, /drain hit supervisor timeout; scheduling governed continuation/);
 });
 
 test('scheduled self-maintenance wakes hourly while active work still chains immediately', () => {
