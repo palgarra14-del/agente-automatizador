@@ -91,10 +91,20 @@ test('WSL guardian supervises the three configured local Actions runners without
   for (const directory of WSL_MANAGED_RUNNER_DIRECTORIES) {
     assert.match(guardian, new RegExp(`runner_watch "\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
   }
-  assert.match(guardian, /runner_listener_active/);
+  assert.match(guardian, /runner_listener_pid/);
+  assert.match(guardian, /runner_worker_active/);
+  assert.match(guardian, /listener_elapsed_seconds/);
+  assert.match(guardian, /recycle_stale_idle_listener/);
   assert.match(guardian, /\/proc\/\[0-9\]\*/);
   assert.match(guardian, /readlink "\$process\/cwd"/);
+  assert.match(guardian, /readlink "\$process\/exe"/);
   assert.match(guardian, /Runner\.Listener/);
+  assert.match(guardian, /Runner\.Worker/);
+  assert.match(guardian, /ps -o etimes=/);
+  assert.match(guardian, /"\$elapsed" -ge 7200/);
+  assert.match(guardian, /kill -TERM "\$pid"/);
+  assert.match(guardian, /kill -KILL "\$pid"/);
+  assert.match(guardian, /runner_worker_active "\$runner" && return 1/);
   assert.match(guardian, /run\.sh/);
   assert.match(guardian, /\[ ! -L "\$runner" \]/);
   assert.match(guardian, /\[ ! -L "\$runner\/\.runner" \]/);
