@@ -255,12 +255,24 @@ test('autonomous cloud work keeps model billing disabled and confines cross-repo
   assert.match(workflow, /AGENT_CROSS_REPO_READY=true/);
   assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
   assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 5);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
   assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY|secrets\.OPENAI_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
   assert.match(workflow, /node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE" > "\$RESULT_FILE"/);
+});
+
+test('GitHub rate limits schedule one delayed lane retry without holding a runner', () => {
+  const retryStart = workflow.indexOf('- name: Schedule exact rate-limit continuation');
+  const continuationStart = workflow.indexOf('- name: Continue same lane while governed work remains');
+  assert.ok(retryStart > 0 && continuationStart > retryStart);
+  const retry = workflow.slice(retryStart, continuationStart);
+  assert.match(workflow, /rate_limit_retry_ms=\$RATE_LIMIT_RETRY_MS/);
+  assert.match(retry, /if: steps\.drain\.outputs\.rate_limit_retry_ms != ''/);
+  assert.match(retry, /AGENT_RATE_LIMIT_RETRY_MS: \$\{\{ steps\.drain\.outputs\.rate_limit_retry_ms \}\}/);
+  assert.match(retry, /node scripts\/schedule-cloud-retry\.js/);
+  assert.doesNotMatch(retry, /GITHUB_TOKEN|secrets\./);
 });
 
 test('cloud continuation dispatch is lane-scoped and only follows an explicit drain recommendation', () => {
