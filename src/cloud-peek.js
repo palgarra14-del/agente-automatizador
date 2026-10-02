@@ -12,6 +12,11 @@ export async function cloudPeekHasWork({
 }) {
   if (!store || !queue) throw new Error('cloud_peek_dependencies_required');
 
+  if (typeof queue.pendingAdmissionIntents === 'function') {
+    const intents = await queue.pendingAdmissionIntents();
+    if (Array.isArray(intents) && intents.length > 0) return true;
+  }
+
   try {
     await store.readSnapshot({ repair: true });
   } catch (error) {
