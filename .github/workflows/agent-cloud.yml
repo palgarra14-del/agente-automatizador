@@ -1,4 +1,5 @@
 name: Agent Cloud Worker
+run-name: Agent Cloud Worker (${{ inputs.lane || github.event_name }})
 
 on:
   push:
