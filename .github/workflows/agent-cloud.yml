@@ -230,7 +230,22 @@ jobs:
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
         run: |
           RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
-          timeout --signal=TERM --kill-after=30s 30m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          set +e
+          timeout --signal=TERM --kill-after=30s 25m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          DRAIN_EXIT="$?"
+          set -e
+          case "$DRAIN_EXIT" in
+            0)
+              ;;
+            124|137|143)
+              printf '%s\n' '{"version":1,"iterations":[],"stopReason":"supervisor_timeout","remainingWork":true,"continuationRecommended":true,"elapsedMs":1500000,"limits":{"supervisorTimeoutMs":1500000}}' > "$RESULT_FILE"
+              echo "::notice::$AGENT_CLOUD_LANE drain hit supervisor timeout; scheduling governed continuation"
+              ;;
+            *)
+              cat "$RESULT_FILE" || true
+              exit "$DRAIN_EXIT"
+              ;;
+          esac
           cat "$RESULT_FILE"
           CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
           RATE_LIMIT_RETRY_MS="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); const value=result.stopReason === "rate_limited" && Number.isFinite(result.limits?.retryAfterMs) ? Math.max(0, Math.round(result.limits.retryAfterMs)) : null; process.stdout.write(value === null ? "" : String(value));' "$RESULT_FILE")"
