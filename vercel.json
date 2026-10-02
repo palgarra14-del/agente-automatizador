@@ -36,5 +36,6 @@
       ]
     }
   ],
-  "outputDirectory": "control-center/public"
+  "outputDirectory": "control-center/public",
+  "ignoreCommand": "test -n \"$VERCEL_GIT_PREVIOUS_SHA\" && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" \"$VERCEL_GIT_COMMIT_SHA\" -- api/control-proxy.mjs control-center vercel.json package.json package-lock.json"
 }
