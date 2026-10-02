@@ -20,8 +20,8 @@ ${JSON.stringify({
   scope: { allowedPaths: ['src'] }
 })}`;
 
-test('trusted main pushes wake self while scheduled watchdogs are staggered and manual recovery can cover every lane', () => {
-  assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), ['self']);
+test('scheduled watchdogs are staggered, push does not wake self, and manual recovery can cover every lane', () => {
+  assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), []);
   assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '2 * * * *', config }), ['self']);
   assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '17 * * * *', config }), ['website-pilot']);
   assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '32 * * * *', config }), ['leadfinder']);
