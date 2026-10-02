@@ -58,7 +58,7 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable agent-control-center.service agent-control-tunnel.service
 systemctl --user restart agent-control-center.service
-systemctl --user is-active --quiet agent-control-tunnel.service || systemctl --user start agent-control-tunnel.service
+systemctl --user restart agent-control-tunnel.service
 
 for _ in {1..30}; do
   [[ -s "$CONFIG_DIR/access-token" && -s "$TUNNEL_URL_FILE" ]] && break
