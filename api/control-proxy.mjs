@@ -40,7 +40,7 @@ export async function resolveTunnelOrigin({
       accept: 'application/vnd.github+json',
       'user-agent': 'agent-control-vercel-proxy'
     },
-    signal: AbortSignal.timeout(5_000)
+    signal: globalThis.AbortSignal.timeout(5_000)
   });
   if (!response.ok) throw new Error(`control_locator_fetch_failed:${response.status}`);
   const gist = await response.json();
@@ -49,7 +49,7 @@ export async function resolveTunnelOrigin({
   if (!raw && typeof file?.raw_url === 'string') {
     const rawResponse = await fetchImpl(file.raw_url, {
       headers: { 'user-agent': 'agent-control-vercel-proxy' },
-      signal: AbortSignal.timeout(5_000)
+      signal: globalThis.AbortSignal.timeout(5_000)
     });
     if (!rawResponse.ok) throw new Error(`control_locator_raw_fetch_failed:${rawResponse.status}`);
     raw = await rawResponse.text();
@@ -70,7 +70,7 @@ function requestHeaders(req) {
     'x-forwarded-host', 'x-forwarded-port', 'x-forwarded-proto',
     'x-vercel-id', 'x-vercel-deployment-url', 'x-vercel-forwarded-for'
   ]);
-  const headers = new Headers();
+  const headers = new globalThis.Headers();
   for (const [name, value] of Object.entries(req.headers || {})) {
     const key = name.toLowerCase();
     if (blocked.has(key) || value === undefined) continue;
@@ -105,7 +105,7 @@ export default async function handler(req, res) {
       headers,
       body,
       redirect: 'manual',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+      signal: globalThis.AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
     });
 
     res.statusCode = response.status;
