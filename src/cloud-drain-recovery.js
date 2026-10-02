@@ -27,6 +27,22 @@ function rateLimitedCloudControlError(error) {
   return /^cloud_state_github_rate_limited:(?:403|429)$/.test(String(error?.message ?? ''));
 }
 
+export function cloudRateLimitDeferral(error, { phase = 'cloud_control' } = {}) {
+  if (!rateLimitedCloudControlError(error)) return null;
+  const retryAfterMs = Number.isFinite(error?.retryAfterMs)
+    ? Math.max(0, Math.round(error.retryAfterMs))
+    : null;
+  return {
+    version: 1,
+    phase: String(phase || 'cloud_control'),
+    deferred: true,
+    stopReason: 'rate_limited',
+    remainingWork: true,
+    continuationRecommended: false,
+    retryAfterMs
+  };
+}
+
 function causedByWorkflowDeadline(error) {
   let current = error;
   for (let depth = 0; current && depth < 8; depth += 1) {
