@@ -12,6 +12,13 @@ const DEFAULT_GH_BIN = '/usr/bin/gh';
 const MIN_RETRY_SECONDS = 30;
 const MAX_RETRY_SECONDS = 2 * 60 * 60;
 const RETRY_PADDING_MS = 5_000;
+const LANE_RETRY_STAGGER_SECONDS = Object.freeze({
+  callflow: 0,
+  leadfinder: 15,
+  'website-pilot': 30,
+  self: 60
+});
+const UNKNOWN_LANE_STAGGER_SECONDS = 45;
 
 function assertLane(lane) {
   const value = String(lane ?? '').trim();
@@ -26,6 +33,18 @@ export function boundedRateLimitRetrySeconds(retryAfterMs) {
   return Math.max(
     MIN_RETRY_SECONDS,
     Math.min(MAX_RETRY_SECONDS, Math.ceil(paddedMs / 1000))
+  );
+}
+
+export function rateLimitRetryStaggerSeconds(lane) {
+  const safeLane = assertLane(lane);
+  return LANE_RETRY_STAGGER_SECONDS[safeLane] ?? UNKNOWN_LANE_STAGGER_SECONDS;
+}
+
+export function laneRateLimitRetrySeconds(retryAfterMs, lane) {
+  return Math.min(
+    MAX_RETRY_SECONDS,
+    boundedRateLimitRetrySeconds(retryAfterMs) + rateLimitRetryStaggerSeconds(lane)
   );
 }
 
@@ -62,7 +81,7 @@ export async function scheduleCloudRateLimitRetry({
   if (!/^\/[A-Za-z0-9_./-]{1,500}$/.test(String(home || ''))) throw new Error('cloud_retry_home_invalid');
   if (typeof exec !== 'function') throw new Error('cloud_retry_exec_invalid');
 
-  const delaySeconds = boundedRateLimitRetrySeconds(retryAfterMs);
+  const delaySeconds = laneRateLimitRetrySeconds(retryAfterMs, safeLane);
   const unit = cloudRetryUnitName(safeLane);
   const timerUnit = `${unit}.timer`;
 
