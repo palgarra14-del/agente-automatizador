@@ -234,6 +234,82 @@ print(json.dumps({"args":captured["args"]}))
   assert.ok(!result.args.includes('--dangerously-skip-permissions'));
 });
 
+test('free-only frontend editing falls back to local Ollama when hosted editors are unavailable', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.COST_POLICY="free_only"
+m.provider_available=lambda provider,model=None: provider=="ollama"
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+ranked=m.rank_candidates("frontend_implementation",require_edit=True)
+print(json.dumps({"candidate":ranked[0]["candidate"],"editing":ranked[0]["editing"],"cost":ranked[0]["costClass"]}))
+`);
+  assert.equal(result.candidate, 'ollama-qwen-7b');
+  assert.equal(result.editing, true);
+  assert.equal(result.cost, 'local_zero_external');
+});
+
+test('non-git design workspaces use a deterministic tree fingerprint that detects edits', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=Path(tempfile.mkdtemp())
+(root/"brief.txt").write_text("brief",encoding="utf-8")
+before=m._workspace_edit_fingerprint(root)
+(root/"index.html").write_text("<main>ok</main>",encoding="utf-8")
+after=m._workspace_edit_fingerprint(root)
+print(json.dumps({"different":before!=after,"stable":after==m._workspace_edit_fingerprint(root)}))
+`);
+  assert.equal(result.different, true);
+  assert.equal(result.stable, true);
+});
+
+test('local Ollama editor writes only validated web files and blocks path escape', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=Path(tempfile.mkdtemp())
+m.STATE=root/"state"; m.PROVIDER_SLOT_DIR=m.STATE/"slots"
+m.ollama_structured=lambda *args,**kwargs: {
+ "files":[
+   {"path":"index.html","content":"<!doctype html><html lang=\\\"es\\\"><main>Local</main></html>"},
+   {"path":"design-intent.json","content":"{\\\"concept\\\":\\\"local\\\"}"}
+ ],
+ "summary":"built locally"
+}
+result=m.run_edit_candidate("ollama-qwen-7b","build",cwd=root,timeout=30)
+blocked=False
+try:
+ m._apply_ollama_edit_package(root,{"files":[{"path":"../escape.html","content":"x"}],"summary":"x"})
+except m.ProviderUnavailable:
+ blocked=True
+print(json.dumps({
+ "provider":result["provider"],
+ "exists":(root/"index.html").exists(),
+ "summary":result["result"]["stdout"],
+ "blocked":blocked,
+ "escaped":(root.parent/"escape.html").exists()
+}))
+`);
+  assert.equal(result.provider, 'ollama');
+  assert.equal(result.exists, true);
+  assert.equal(result.summary, 'built locally');
+  assert.equal(result.blocked, true);
+  assert.equal(result.escaped, false);
+});
+
 test('experimental visual reviews cannot qualify for mastery', () => {
   const result = python(`
 import importlib.util,json,sys
