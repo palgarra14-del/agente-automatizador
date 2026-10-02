@@ -48,10 +48,7 @@ export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', r
     return [lane];
   }
   if (eventName === 'workflow_dispatch') return lanes;
-  if (eventName === 'push') {
-    const selfLane = projectToLane.get('self');
-    return selfLane ? [selfLane] : lanes;
-  }
+  if (eventName === 'push') return [];
   if (!['issues', 'issue_comment'].includes(eventName)) return lanes;
   if (eventName === 'issues' && eventAction !== 'opened') return lanes;
   if (typeof issueBody !== 'string') return lanes;
