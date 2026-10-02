@@ -562,8 +562,17 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           await this.sleepWithinDeadline(delayMs);
           continue;
+        }
+      }
+      if ([403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
         }
       }
       const transientDelayMs = GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt];
