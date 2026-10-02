@@ -359,7 +359,7 @@ CANDIDATES = {
         "effort": "medium",
         "costClass": "local_zero_external",
         "visual": False,
-        "editing": True,
+        "editing": False,
     },
     "ollama-qwen-3b": {
         "provider": "ollama",
@@ -445,7 +445,6 @@ ROLE_POLICY = {
         ("ag-gemini-3.1-pro", 0.92),
         ("codex-5.6-sol", 0.89),
         ("codex-5.6-terra", 0.86),
-        ("ollama-qwen-7b", 0.62),
     ],
     "long_horizon_implementation": [
         ("codex-astra", 0.995),
@@ -486,7 +485,6 @@ ROLE_POLICY = {
         ("ag-gemini-3.8-flash", 0.96),
         ("ag-gemini-3.1-pro", 0.93),
         ("ag-opus-4.6", 0.91),
-        ("ollama-qwen-7b", 0.58),
     ],
     "code_fix": [
         ("codex-astra", 0.995),
@@ -497,7 +495,6 @@ ROLE_POLICY = {
         ("ag-gpt-oss-120b", 0.91),
         ("codex-5.6-sol", 0.90),
         ("codex-5.6-terra", 0.87),
-        ("ollama-qwen-7b", 0.60),
     ],
 
     # Fast/high-volume work should not consume the deepest reviewers.
@@ -1151,147 +1148,6 @@ def run_role_structured(
     raise ProviderUnavailable(";".join(errors) or "no_role_candidate_available")
 
 
-OLLAMA_EDIT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["files", "summary"],
-    "properties": {
-        "files": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 8,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["path", "content"],
-                "properties": {
-                    "path": {"type": "string", "minLength": 1, "maxLength": 140},
-                    "content": {"type": "string", "minLength": 1, "maxLength": 180000},
-                },
-            },
-        },
-        "summary": {"type": "string", "minLength": 1, "maxLength": 700},
-    },
-}
-OLLAMA_EDIT_ALLOWED_SUFFIXES = {".html", ".css", ".js", ".svg"}
-OLLAMA_EDIT_MAX_TOTAL_BYTES = 600_000
-
-
-def _safe_ollama_edit_target(root, relative_path):
-    root = Path(root).resolve()
-    raw = str(relative_path or "").strip().replace("\\", "/")
-    relative = Path(raw)
-    if not raw or relative.is_absolute() or ".." in relative.parts or any(part.startswith(".") for part in relative.parts):
-        raise ProviderUnavailable("ollama_edit_path_invalid:" + raw[:160])
-    if len(relative.parts) > 4:
-        raise ProviderUnavailable("ollama_edit_path_too_deep:" + raw[:160])
-    suffix = relative.suffix.lower()
-    if suffix == ".json":
-        if relative.as_posix() != "design-intent.json":
-            raise ProviderUnavailable("ollama_edit_json_path_forbidden:" + raw[:160])
-    elif suffix not in OLLAMA_EDIT_ALLOWED_SUFFIXES:
-        raise ProviderUnavailable("ollama_edit_suffix_forbidden:" + suffix)
-    target = (root / relative).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise ProviderUnavailable("ollama_edit_path_escape:" + raw[:160]) from exc
-    if target.exists() and target.is_symlink():
-        raise ProviderUnavailable("ollama_edit_symlink_forbidden:" + raw[:160])
-    return target, relative.as_posix()
-
-
-def _ollama_workspace_context(cwd):
-    root = Path(cwd).resolve()
-    chunks = []
-    total = 0
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        relative = path.relative_to(root).as_posix()
-        suffix = path.suffix.lower()
-        if suffix == ".json" and relative != "design-intent.json":
-            continue
-        if suffix not in OLLAMA_EDIT_ALLOWED_SUFFIXES and relative != "design-intent.json":
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if len(content) > 120_000:
-            content = content[:120_000]
-        piece = f"\n--- {relative} ---\n{content}\n"
-        encoded = len(piece.encode("utf-8"))
-        if total + encoded > 220_000:
-            break
-        chunks.append(piece)
-        total += encoded
-    return "".join(chunks) or "\n(no editable site files exist yet)\n"
-
-
-def _apply_ollama_edit_package(cwd, package):
-    root = Path(cwd).resolve()
-    files = package.get("files") if isinstance(package, dict) else None
-    if not isinstance(files, list) or not files:
-        raise ProviderUnavailable("ollama_edit_files_missing")
-    prepared = []
-    seen = set()
-    total = 0
-    for item in files:
-        if not isinstance(item, dict):
-            raise ProviderUnavailable("ollama_edit_file_invalid")
-        target, relative = _safe_ollama_edit_target(root, item.get("path"))
-        if relative in seen:
-            raise ProviderUnavailable("ollama_edit_duplicate_path:" + relative)
-        seen.add(relative)
-        content = item.get("content")
-        if not isinstance(content, str) or not content:
-            raise ProviderUnavailable("ollama_edit_content_invalid:" + relative)
-        size = len(content.encode("utf-8"))
-        total += size
-        if total > OLLAMA_EDIT_MAX_TOTAL_BYTES:
-            raise ProviderUnavailable("ollama_edit_payload_too_large")
-        prepared.append((target, relative, content))
-    for target, relative, content in prepared:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(target.name + ".ollama-tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(target)
-    return {
-        "stdout": str(package.get("summary") or "Local Ollama workspace edit applied.")[-6000:],
-        "stderr": "",
-        "returncode": 0,
-        "files": [relative for _, relative, _ in prepared],
-        "totalBytes": total,
-    }
-
-
-def _ollama_edit(prompt, *, cwd, timeout, model):
-    context = _ollama_workspace_context(cwd)
-    edit_prompt = f"""You are the emergency local website builder. The preferred hosted editor is unavailable, so complete the requested workspace edit without shell access or network access.
-Return only JSON matching the supplied schema. The files array must contain complete file contents, not patches or markdown fences.
-You may write only index.html, design-intent.json, and local .html/.css/.js/.svg files within at most three nested directories.
-Never write scripts that fetch remote resources. Prefer a self-contained index.html plus design-intent.json for a fresh build.
-If existing editable files are shown below, preserve good work and return complete replacements only for files that need to change.
-The caller will validate paths and write the files atomically.
-
-ORIGINAL TASK:
-{prompt}
-
-CURRENT EDITABLE WORKSPACE:
-{context}
-"""
-    package = ollama_structured(
-        edit_prompt,
-        OLLAMA_EDIT_SCHEMA,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        num_predict=6000,
-    )
-    return _apply_ollama_edit_package(cwd, package)
-
-
 def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=None):
     spec = _candidate_by_name(candidate)
     _require_cost_allowed(candidate, spec)
@@ -1314,13 +1170,6 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
                 timeout=timeout,
                 model=spec["model"],
                 effort=spec.get("effort"),
-            )
-        elif provider == "ollama":
-            result = _ollama_edit(
-                prompt,
-                cwd=cwd,
-                timeout=timeout,
-                model=spec["model"],
             )
         else:
             raise ProviderUnavailable("candidate_cannot_edit_workspace")
