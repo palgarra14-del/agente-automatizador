@@ -64,9 +64,10 @@ const operatorLanes=new Set(operatorRequestedLanes(await openOperatorIssues(),co
 const observations=[];
 for (const lane of lanes) observations.push(await observeLane(lane,active,operatorLanes));
 
+const maxHeavy=Number(process.env.AGENT_MAX_HEAVY || 3);
 const plan=planHeartbeat(observations,{
-  maxHeavy:Number(process.env.AGENT_MAX_HEAVY || 3),
-  maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || 2),
+  maxHeavy,
+  maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || maxHeavy),
   maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1)
 });
 
