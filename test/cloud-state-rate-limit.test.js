@@ -63,18 +63,20 @@ test('cloud-state exhausts bounded GET network retries before failing closed', a
   assert.deepEqual(waits, [1_000, 3_000]);
 });
 
-test('cloud-state retries a GET when GitHub reports a secondary rate limit', async () => {
+test('cloud-state yields a GET when GitHub reports a long secondary rate limit', async () => {
   let calls = 0;
   const waits = [];
   const subject = store(async () => {
     calls += 1;
-    if (calls === 1) return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
-    return response(200, { object: { sha: SHA } });
+    return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
   }, async (ms) => waits.push(ms));
 
-  assert.equal(await subject.refSha('tags/test'), SHA);
-  assert.equal(calls, 2);
-  assert.deepEqual(waits, [60_000]);
+  await assert.rejects(
+    () => subject.refSha('tags/test'),
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 60_000
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(waits, []);
 });
 
 test('cloud-state honors the primary rate-limit reset timestamp when the window is exhausted', async () => {
@@ -126,37 +128,21 @@ test('cloud-state never retries mutating requests after a rate-limit response', 
   assert.deepEqual(waits, []);
 });
 
-test('cloud-state exact GraphQL status reads retry rate limits without retrying mutations', async () => {
+test('cloud-state exact GraphQL status reads yield on long secondary rate limits', async () => {
   let calls = 0;
   const waits = [];
   const subject = store(async (url) => {
     calls += 1;
     assert.equal(url, 'https://api.github.com/graphql');
-    if (calls === 1) return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
-    return response(200, {
-      data: {
-        repository: {
-          object: {
-            status: {
-              context: {
-                context: 'agent-cloud-state-v2/test',
-                state: 'SUCCESS',
-                description: 'r=' + SHA,
-                targetUrl: null
-              }
-            }
-          }
-        }
-      }
-    });
+    return response(403, null, { body: 'You have exceeded a secondary rate limit.' });
   }, async (ms) => waits.push(ms));
 
-  const status = await subject.readStatusContext(SHA, 'agent-cloud-state-v2/test');
-
-  assert.equal(status.state, 'success');
-  assert.equal(status.description, 'r=' + SHA);
-  assert.equal(calls, 2);
-  assert.deepEqual(waits, [60_000]);
+  await assert.rejects(
+    () => subject.readStatusContext(SHA, 'agent-cloud-state-v2/test'),
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 60_000
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(waits, []);
 });
 
 test('exact GraphQL status reads honor the primary rate-limit reset timestamp', async () => {

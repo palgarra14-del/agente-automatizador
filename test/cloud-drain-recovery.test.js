@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  cloudRateLimitDeferral,
   recoverableCloudControlError,
   runCloudDrainWithRecovery
 } from '../src/cloud-drain-recovery.js';
@@ -23,6 +24,28 @@ test('recoverable control error classifier is narrow and excludes safety failure
   assert.equal(recoverableCloudControlError(new Error('cloud_global_lease_busy')), true);
   assert.equal(recoverableCloudControlError(new Error('cloud_state_history_fork')), false);
   assert.equal(recoverableCloudControlError(new Error('cloud_state_snapshot_untrusted')), false);
+});
+
+test('rate-limit deferral is explicit and does not mask permission failures', () => {
+  const rateLimitError = new Error('cloud_state_github_rate_limited:403');
+  rateLimitError.retryAfterMs = 61_234.4;
+  assert.deepEqual(cloudRateLimitDeferral(rateLimitError, { phase: 'cloud_recover' }), {
+    version: 1,
+    phase: 'cloud_recover',
+    deferred: true,
+    stopReason: 'rate_limited',
+    remainingWork: true,
+    continuationRecommended: false,
+    retryAfterMs: 61_234
+  });
+  assert.equal(
+    cloudRateLimitDeferral(new Error('cloud_state_github_request_failed:403'), { phase: 'cloud_recover' }),
+    null
+  );
+  assert.equal(
+    cloudRateLimitDeferral(new Error('cloud_state_history_fork'), { phase: 'cloud_recover' }),
+    null
+  );
 });
 
 test('drain recovers transient state publication failure and resumes work in-process', async () => {
