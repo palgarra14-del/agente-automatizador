@@ -14,14 +14,14 @@ test('lane-scoped dispatches expose their lane before jobs are materialized', ()
   assert.match(workflow, /^run-name: Agent Cloud Worker \(\$\{\{ inputs\.lane \|\| github\.event_name \}\}\)$/m);
 });
 
-test('cloud worker reacts to owner control-plane events with a scheduled fallback only', () => {
+test('cloud worker reacts to owner control-plane events and scheduled watchdogs without push-triggered self work', () => {
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);
   assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+lane:\n\s+description: Trusted cloud lane for bounded continuation\n\s+required: false\n\s+type: string/);
   for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
-  assert.match(workflow, /push:\n\s+branches: \[main\][\s\S]*paths:[\s\S]*'\.github\/workflows\/agent-cloud\.yml'[\s\S]*'src\/\*\*'[\s\S]*'config\/\*\*'[\s\S]*'scripts\/\*\*'/);
-  assert.match(workflow, /github\.event_name == 'push'/);
+  assert.doesNotMatch(workflow, /^\s*push:/m);
+  assert.doesNotMatch(workflow, /github\.event_name == 'push'/);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
   assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
@@ -34,10 +34,11 @@ test('temporary quota-outage mode pins every cloud job to the private local runn
   assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
 });
 
-test('trusted main updates wake the cloud worker without requiring a manual dispatch', () => {
-  assert.match(workflow, /push:\n\s+branches: \[main\]/);
-  assert.match(workflow, /github\.event_name == 'push'/);
-  assert.doesNotMatch(workflow, /push:\n\s+branches: \[(?!main\])/);
+test('trusted main updates do not consume a runner for self-maintenance', () => {
+  assert.doesNotMatch(workflow, /^\s*push:/m);
+  assert.doesNotMatch(workflow, /github\.event_name == 'push'/);
+  const route = readFileSync(new URL('../scripts/cloud-lane-route.js', import.meta.url), 'utf8');
+  assert.match(route, /if \(eventName === 'push'\) return \[\];/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
