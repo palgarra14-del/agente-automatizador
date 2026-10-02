@@ -216,6 +216,22 @@ function fakeGitHub() {
     };
   };
 
+  const refsPayload = (variables) => {
+    const refNode = (qualifiedName) => {
+      const value = refs.get(String(qualifiedName ?? ''));
+      return value ? { target: { oid: value } } : null;
+    };
+    return {
+      data: {
+        repository: {
+          state: refNode(variables.stateRef),
+          checkpoint: refNode(variables.checkpointRef),
+          witness: refNode(variables.witnessRef)
+        }
+      }
+    };
+  };
+
   const addStatus = (targetSha, { context, description, state = 'success', target_url = null }) => {
     const entry = {
       id: statusId++, state, description, target_url, context,
@@ -236,6 +252,9 @@ function fakeGitHub() {
 
     if (url.pathname === '/graphql') {
       assert.equal(method, 'POST');
+      if (typeof body?.query === 'string' && body.query.includes('CloudStateRefs')) {
+        return response(200, refsPayload(body.variables));
+      }
       if (typeof body?.query === 'string' && body.query.includes('CloudStateContext')) {
         return response(200, statusContextPayload(body.variables));
       }
@@ -1015,6 +1034,30 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
 test('generation claim namespace root cannot be used as a state tag', () => {
   const fake = fakeGitHub();
   assert.throws(() => storeFor(fake, { tag: 'agent-cloud-state-v2-claims' }), /tag_reserved/);
+});
+
+test('cloud-state reads state, checkpoint and witness refs in one exact GraphQL request', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const stateSha = 'a'.repeat(40);
+  const checkpointSha = 'b'.repeat(40);
+  const witnessSha = 'c'.repeat(40);
+  fake.forceTag(stateTag, stateSha);
+  fake.forceTag(checkpointTag, checkpointSha);
+  fake.forceTag(witnessTag, witnessSha);
+  fake.resetRequestCount();
+
+  assert.deepEqual(await store.readRefs(), { stateSha, checkpointSha, witnessSha });
+  assert.equal(fake.requestCount(), 1);
+});
+
+test('cloud-state coalesced ref read preserves missing refs as null', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.resetRequestCount();
+
+  assert.deepEqual(await store.readRefs(), { stateSha: null, checkpointSha: null, witnessSha: null });
+  assert.equal(fake.requestCount(), 1);
 });
 
 test('lane initialization marker is looked up by exact context and binds deterministic root', async () => {
