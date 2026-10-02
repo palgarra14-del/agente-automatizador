@@ -472,12 +472,100 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async readRefs() {
-    const [stateSha, checkpointSha, witnessSha] = await Promise.all([
-      this.refSha(`tags/${encodeURIComponent(this.tag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.witnessTag)}`)
-    ]);
-    return { stateSha, checkpointSha, witnessSha };
+    const query = `query CloudStateRefs($owner: String!, $name: String!, $stateRef: String!, $checkpointRef: String!, $witnessRef: String!) {
+      repository(owner: $owner, name: $name) {
+        state: ref(qualifiedName: $stateRef) { target { oid } }
+        checkpoint: ref(qualifiedName: $checkpointRef) { target { oid } }
+        witness: ref(qualifiedName: $witnessRef) { target { oid } }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      stateRef: `refs/tags/${this.tag}`,
+      checkpointRef: `refs/tags/${this.checkpointTag}`,
+      witnessRef: `refs/tags/${this.witnessTag}`
+    };
+    const deadlineAt = this.activeRequestDeadline();
+
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchWithDeadline('https://api.github.com/graphql', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query, variables })
+        }, deadlineAt);
+      } catch (error) {
+        if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
+        const networkRetryDelayMs = GITHUB_NETWORK_READ_RETRY_DELAYS_MS[attempt];
+        if (networkRetryDelayMs !== undefined) {
+          try {
+            await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          } catch (retryError) {
+            if (retryError?.message === 'workflow_deadline_cap_exceeded') {
+              throw new Error('cloud_state_github_request_failed', { cause: retryError });
+            }
+            throw retryError;
+          }
+          continue;
+        }
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+
+      if (response.ok) {
+        let payload;
+        try { payload = await response.json(); } catch { throw new Error('cloud_state_graphql_invalid'); }
+        if (Array.isArray(payload?.errors) && payload.errors.length > 0) throw new Error('cloud_state_graphql_invalid');
+        const repository = payload?.data?.repository;
+        if (!repository || !Object.hasOwn(repository, 'state') ||
+            !Object.hasOwn(repository, 'checkpoint') || !Object.hasOwn(repository, 'witness')) {
+          throw new Error('cloud_state_graphql_invalid');
+        }
+        const refValue = (value) => {
+          if (value === null) return null;
+          return assertSha(value?.target?.oid, 'cloud_state_ref_invalid');
+        };
+        return {
+          stateSha: refValue(repository.state),
+          checkpointSha: refValue(repository.checkpoint),
+          witnessSha: refValue(repository.witness)
+        };
+      }
+
+      const fallbackDelayMs = GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
+        if (delayMs !== null) {
+          if (deadlineAt !== null) {
+            if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+            const remainingMs = Math.floor(deadlineAt - this.now());
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
+          }
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
+          await this.sleepWithinDeadline(delayMs, deadlineAt);
+          continue;
+        }
+      }
+      if ([403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
+        }
+      }
+      const transientDelayMs = GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt];
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs, deadlineAt);
+        continue;
+      }
+      throw responseError(response.status);
+    }
   }
 
   async readCommit(sha) {
