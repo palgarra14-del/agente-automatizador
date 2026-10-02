@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
@@ -12,6 +12,7 @@ import {
   summarizeLaneRuns,
   summarizeRunners
 } from './telemetry.mjs';
+import { summarizeDesignLab } from './design-lab-status.mjs';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -193,6 +194,67 @@ async function getGithubRateLimit() {
     const payload = parseJsonOutput(result, { resources: {} });
     return { ...payload, error: null };
   });
+}
+
+
+async function optionalJson(path) {
+  try { return JSON.parse(await readFile(path, 'utf8')); } catch { return null; }
+}
+
+async function optionalText(path) {
+  try { return (await readFile(path, 'utf8')).trim(); } catch { return ''; }
+}
+
+async function getDesignLab() {
+  return cachedTelemetry('design-lab', 10_000, async () => {
+    const stateDir = process.env.DESIGN_LAB_STATE_DIR || join(homedir(), '.local', 'state', 'engineering-orchestrator', 'design-lab');
+    const runsDir = join(stateDir, 'runs');
+    const [service, timer, summary, quotaRaw] = await Promise.all([
+      run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-design-lab.service'], { cwd:'/', timeout:3_000 }),
+      run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-design-lab.timer'], { cwd:'/', timeout:3_000 }),
+      optionalJson(join(stateDir, 'training-summary.json')),
+      optionalText(join(stateDir, 'quota-not-before.txt'))
+    ]);
+    let latestName = null;
+    try {
+      const entries = await readdir(runsDir, { withFileTypes:true });
+      const ranked = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({ name:entry.name, number:Number(/^run-(\d+)/.exec(entry.name)?.[1] || -1) }))
+        .filter((entry) => entry.number >= 0)
+        .sort((a,b) => b.number - a.number || b.name.localeCompare(a.name));
+      latestName = ranked[0]?.name || null;
+    } catch { /* state may not exist yet */ }
+
+    let latest = null;
+    if (latestName) {
+      const root = join(runsDir, latestName);
+      const [route, qa, result, deferredReason, brief] = await Promise.all([
+        optionalJson(join(root, 'model-route-build.json')),
+        optionalJson(join(root, 'qa-initial.json')),
+        optionalJson(join(root, 'result.json')),
+        optionalText(join(root, 'review-initial-deferred.txt')),
+        optionalJson(join(root, 'brief.txt'))
+      ]);
+      latest = { name:latestName, route, qa, result, deferredReason, brief };
+    }
+
+    return summarizeDesignLab({
+      serviceState: service.stdout || (service.ok ? 'active' : 'unknown'),
+      timerState: timer.stdout || (timer.ok ? 'active' : 'unknown'),
+      summary,
+      latest,
+      quotaNotBeforeEpoch: Number(quotaRaw)
+    });
+  });
+}
+
+async function runDesignLabCycle() {
+  await run('systemctl', ['--user', 'reset-failed', 'engineering-orchestrator-design-lab.service'], { cwd:'/', timeout:5_000 });
+  const result = await run('systemctl', ['--user', 'start', '--no-block', 'engineering-orchestrator-design-lab.service'], { cwd:'/', timeout:8_000 });
+  if (!result.ok) throw new Error(`design_lab_start_failed:${result.stderr}`);
+  telemetryCache.delete('design-lab');
+  return { started:true };
 }
 
 async function getQueue() {
@@ -431,8 +493,8 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs] = await Promise.all([
-    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70)
+  const [service, git, queue, tasks, runs, runnerSource, rateLimitSource, designLab, processSnapshot, logs] = await Promise.all([
+    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getDesignLab(), getProcessSnapshot(), getLogs(70)
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
@@ -450,6 +512,7 @@ async function snapshot() {
     runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
     githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
     controlHealth,
+    designLab,
     telemetry: {
       tasksAgeMs: telemetryAgeMs('tasks'),
       runsAgeMs: telemetryAgeMs('runs'),
@@ -606,6 +669,7 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, await wakeLane(String(input.lane || '')));
     }
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
+    if (req.method === 'POST' && url.pathname === '/api/run-design-lab') return sendJson(res, 200, await runDesignLabCycle());
     if (req.method === 'POST' && url.pathname === '/api/change-pin') {
       const result = await changeAccessPin(await bodyJson(req));
       setSessionCookie(res);

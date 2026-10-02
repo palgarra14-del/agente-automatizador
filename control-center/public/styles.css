@@ -160,3 +160,9 @@ button.danger:hover{background:rgba(255,90,90,.14)}
   .infra-summary{grid-template-columns:repeat(3,1fr);gap:6px}.infra-kpi{padding:10px}.infra-kpi strong{font-size:17px}
   .budget-row{grid-template-columns:1fr auto}.budget-meter{grid-column:1/-1;grid-row:2}.budget-row small{grid-row:3}
 }
+
+.design-lab-panel{margin-top:14px;padding:16px;border:1px solid var(--line);border-radius:17px;background:linear-gradient(135deg,#0b1725,#101d2c)}
+.design-lab-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.design-lab-head h3{margin:2px 0 0;font-size:16px}
+.design-lab-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:14px 0}.design-lab-grid>div{padding:11px;border:1px solid var(--line);border-radius:12px;background:#091522;display:grid;gap:4px}
+.design-lab-grid span{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.design-lab-grid strong{font-size:11px;line-height:1.45}
+@media(max-width:680px){.design-lab-grid{grid-template-columns:1fr}.design-lab-head{align-items:center}}
