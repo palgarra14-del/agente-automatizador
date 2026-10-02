@@ -57,6 +57,29 @@ test('control center serves UI and protects API', async () => {
     });
     assert.equal(login.status, 200);
     assert.match(login.headers.get('set-cookie') || '', /agent_session=/);
+
+    const sessionCookie = (login.headers.get('set-cookie') || '').split(';')[0];
+    const changed = await fetch(base + '/api/change-pin', {
+      method:'POST',
+      headers:{'content-type':'application/json', cookie:sessionCookie},
+      body:JSON.stringify({pin:'11111'})
+    });
+    assert.equal(changed.status, 200);
+    assert.match(changed.headers.get('set-cookie') || '', /agent_session=/);
+
+    const oldLogin = await fetch(base + '/api/login', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({pin:token})
+    });
+    assert.equal(oldLogin.status, 401);
+
+    const newLogin = await fetch(base + '/api/login', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({pin:'11111'})
+    });
+    assert.equal(newLogin.status, 200);
   } finally {
     child.kill('SIGTERM');
     await rm(home, {recursive:true, force:true});
