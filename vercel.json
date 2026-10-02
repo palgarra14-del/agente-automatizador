@@ -1,5 +1,30 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "git": {
-    "deploymentEnabled": false
-  }
+    "deploymentEnabled": {
+      "*": false,
+      "main": true
+    }
+  },
+  "functions": {
+    "api/control-proxy.mjs": {
+      "maxDuration": 15
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "destination": "/api/control-proxy?__path=:path*"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "X-Frame-Options", "value": "DENY" }
+      ]
+    }
+  ]
 }
