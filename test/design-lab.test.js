@@ -381,6 +381,37 @@ print(json.dumps({
   }
 });
 
+test('deferred run directories rotate briefs without becoming official training evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-deferred-briefs-'));
+  try {
+    const result = python(`
+from pathlib import Path
+root=Path(sys.argv[1])
+m.RUNS=root/"runs"
+m.HISTORY=root/"history.jsonl"
+m.RUNS.mkdir(parents=True)
+(m.RUNS/"run-0001-training-salon-color-premium").mkdir()
+(m.RUNS/"run-0002-training-barberia-contemporanea").mkdir()
+first=m.choose_brief()["slug"]
+(m.RUNS/f"run-0003-training-{first}").mkdir()
+second=m.choose_brief()["slug"]
+print(json.dumps({
+  "first":first,
+  "second":second,
+  "officialCount":len(m.training_history()),
+  "attempts":m.training_attempts()
+}))
+`, [dir]);
+    assert.equal(result.officialCount, 0);
+    assert.equal(result.attempts.length, 3);
+    assert.notEqual(result.first, 'salon-color-premium');
+    assert.notEqual(result.first, 'barberia-contemporanea');
+    assert.notEqual(result.second, result.first);
+  } finally {
+    rmSync(dir, { recursive:true, force:true });
+  }
+});
+
 test('design lab learns Codex quota reset and adds a safety margin', () => {
   const result = python(`
 reset=m.parse_usage_reset_epoch("ERROR: You've hit your usage limit. Please try again at Sep 29th, 2026 12:55 AM.")
