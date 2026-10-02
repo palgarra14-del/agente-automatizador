@@ -18,7 +18,7 @@ test('Vercel deploys the control center but skips unrelated orchestrator changes
     'package.json',
     'package-lock.json'
   ]) assert.ok(config.ignoreCommand.includes(path));
-  assert.doesNotMatch(config.ignoreCommand, /\bsrc\b|\bscripts\b|\btest\b/);
+  for (const unrelated of [' src/', ' scripts/', ' test/']) assert.equal(config.ignoreCommand.includes(unrelated), false);
 });
 
 test('ignored build command fails open to a real build when previous deployment sha is unavailable', () => {
