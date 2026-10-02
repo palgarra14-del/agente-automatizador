@@ -511,6 +511,30 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+$('pinChangeForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const pin = $('newPin').value;
+  const confirmPin = $('confirmPin').value;
+  if (pin !== confirmPin) {
+    toast('Los PIN no coinciden');
+    return;
+  }
+  const button = $('changePinBtn');
+  button.disabled = true;
+  button.textContent = 'Cambiando…';
+  try {
+    await api('/api/change-pin', {method:'POST', body:JSON.stringify({pin})});
+    $('newPin').value = '';
+    $('confirmPin').value = '';
+    toast('PIN actualizado');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Cambiar PIN';
+  }
+});
+
 $('refreshBtn').addEventListener('click', refresh);
 $('restartServiceBtn').addEventListener('click', async () => {
   const button = $('restartServiceBtn');
