@@ -148,7 +148,7 @@ jobs:
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
     needs: [route, admit, recover]
-    if: always() && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped') && (needs.recover.result == 'success' || needs.recover.result == 'skipped')
+    if: always() && github.event_name != 'push' && needs.route.outputs.active == 'true' && (needs.admit.result == 'success' || needs.admit.result == 'skipped') && (needs.recover.result == 'success' || needs.recover.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
