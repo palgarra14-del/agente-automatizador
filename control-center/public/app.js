@@ -115,6 +115,17 @@ function renderAttention(data) {
     items.push({severity:'warn', title:'Cambios locales sin commit', detail:'El checkout principal tiene cambios locales; conviene revisarlos antes de mezclar más trabajo.', action:'top'});
   }
 
+  const runners = data.runnerTelemetry || {};
+  if (Number.isFinite(runners.msiTotal) && runners.msiTotal > 0 && runners.msiOnline < runners.msiTotal) {
+    items.push({
+      severity:runners.msiOnline === 0 ? 'bad' : 'warn',
+      title:'Capacidad MSI degradada',
+      detail:runners.msiOnline + '/' + runners.msiTotal + ' runners pesados online' +
+        (runners.auxiliaryOnline ? ' · runner auxiliar online: ' + runners.auxiliaryOnline : ''),
+      action:'runnerList'
+    });
+  }
+
   for (const row of rows) {
     if (row.record?.pendingApproval) {
       items.push({
@@ -238,9 +249,9 @@ function renderInfrastructure(data) {
   const runners = data.runnerTelemetry || {};
   const rows = runners.runners || [];
   $('runnerSummary').innerHTML =
-    '<div class="infra-kpi"><strong>'+esc(String(runners.online ?? 0))+'/'+esc(String(runners.total ?? 0))+'</strong><span>runners online</span></div>'+
-    '<div class="infra-kpi"><strong>'+esc(String(runners.busy ?? 0))+'</strong><span>ocupados</span></div>'+
-    '<div class="infra-kpi"><strong>'+esc(String(runners.free ?? 0))+'</strong><span>libres</span></div>';
+    '<div class="infra-kpi"><strong>'+esc(String(runners.msiOnline ?? 0))+'/'+esc(String(runners.msiTotal ?? 0))+'</strong><span>MSI online</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(runners.msiBusy ?? 0))+'</strong><span>MSI ocupados</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(runners.msiFree ?? 0))+'</strong><span>MSI libres</span></div>';
   $('runnerList').innerHTML = rows.length ? rows.map((runner) =>
     '<div class="runner-row"><span class="dot '+(runner.status === 'online' ? 'good' : 'bad')+'"></span>'+
     '<strong>'+esc(runner.name || 'runner')+'</strong>'+
@@ -270,7 +281,7 @@ function renderStats(data) {
   const corePct = data.githubRateLimit?.core?.remainingPercent;
   const values = [
     [data.service?.active ? 'ONLINE' : 'OFFLINE','Servicio'],
-    [(runners.online ?? '—') + '/' + (runners.total ?? '—'),'Runners'],
+    [(runners.msiOnline ?? '—') + '/' + (runners.msiTotal ?? '—'),'Runners MSI'],
     [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
     [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];
