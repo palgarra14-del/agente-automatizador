@@ -92,16 +92,25 @@ test('WSL guardian supervises the three configured local Actions runners without
     assert.match(guardian, new RegExp(`runner_watch "\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
   }
   assert.match(guardian, /runner_listener_pid/);
+  assert.match(guardian, /runner_worker_active/);
+  assert.match(guardian, /listener_elapsed_seconds/);
+  assert.match(guardian, /runner_reported_offline/);
+  assert.match(guardian, /recycle_stale_offline_listener/);
+  assert.doesNotMatch(guardian, /recycle_stale_idle_listener/);
   assert.match(guardian, /\/proc\/\[0-9\]\*/);
   assert.match(guardian, /readlink "\$process\/cwd"/);
+  assert.match(guardian, /readlink "\$process\/exe"/);
   assert.match(guardian, /Runner\.Listener/);
-  assert.doesNotMatch(guardian, /runner_worker_active/);
-  assert.doesNotMatch(guardian, /listener_elapsed_seconds/);
-  assert.doesNotMatch(guardian, /recycle_stale_idle_listener/);
-  assert.doesNotMatch(guardian, /Runner\.Worker/);
-  assert.doesNotMatch(guardian, /ps -o etimes=/);
-  assert.doesNotMatch(guardian, /kill -TERM "\$pid"/);
-  assert.doesNotMatch(guardian, /kill -KILL "\$pid"/);
+  assert.match(guardian, /Runner\.Worker/);
+  assert.match(guardian, /ps -o etimes=/);
+  assert.match(guardian, /"\$elapsed" -ge 7200/);
+  assert.match(guardian, /elapsed % 300/);
+  assert.match(guardian, /gh api "repos\/palgarra14-del\/agente-automatizador\/actions\/runners\?per_page=100"/);
+  assert.match(guardian, /grep -Fx "\$runner_name offline"/);
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1/);
+  assert.match(guardian, /kill -TERM "\$pid"/);
+  assert.match(guardian, /kill -KILL "\$pid"/);
+  assert.match(guardian, /runner_worker_active "\$runner" && return 1/);
   assert.match(guardian, /run\.sh/);
   assert.match(guardian, /\[ ! -L "\$runner" \]/);
   assert.match(guardian, /\[ ! -L "\$runner\/\.runner" \]/);
@@ -121,10 +130,11 @@ test('WSL guardian supervises the three configured local Actions runners without
   }
 });
 
-test('WSL guardian never recycles a live listener merely because it is old or briefly between job assignment and worker spawn', () => {
+test('WSL guardian recycles only GitHub-confirmed offline listeners and fails safe when status is unavailable', () => {
   const guardian = renderWslGuardianScript();
-  assert.match(guardian, /if \[ -n "\$pid" \]; then[\s\S]*launch_pid=""[\s\S]*sleep 10[\s\S]*continue/);
-  assert.doesNotMatch(guardian, /etimes|7200|Runner\.Worker|kill -TERM|kill -KILL/);
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*sleep 2[\s\S]*runner_worker_active "\$runner" && return 1[\s\S]*runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*kill -TERM/);
+  assert.match(guardian, /statuses=.*gh api/);
+  assert.match(guardian, /\[ -n "\$statuses" \] \|\| return 1/);
 });
 
 test('WSL wakeup sync is idempotent and status is ownership-bound', async () => {
