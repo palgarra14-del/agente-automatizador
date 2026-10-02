@@ -93,6 +93,12 @@ export const WSL_MANAGED_RUNNER_DIRECTORIES = Object.freeze([
   'actions-runner-agente-2',
   'actions-runner-agente-3'
 ]);
+const WSL_MANAGED_RUNNER_NAMES = Object.freeze([
+  'MSI-WSL-agent',
+  'MSI-WSL-agent-2',
+  'MSI-WSL-agent-3'
+]);
+const WSL_RUNNER_REPOSITORY = 'palgarra14-del/agente-automatizador';
 
 export function renderWslGuardianScript() {
   return [
@@ -140,15 +146,26 @@ export function renderWslGuardianScript() {
     '  printf "%s\\n" "$elapsed"',
     '}',
     '',
-    'recycle_stale_idle_listener() {',
+    'runner_reported_offline() {',
+    '  runner_name="$1"',
+    `  statuses="$(/usr/bin/gh api "repos/${WSL_RUNNER_REPOSITORY}/actions/runners?per_page=100" --template '{{range .runners}}{{printf "%s %s\\n" .name .status}}{{end}}' 2>/dev/null || true)"`,
+    '  [ -n "$statuses" ] || return 1',
+    '  printf "%s\\n" "$statuses" | /usr/bin/grep -Fx "$runner_name offline" >/dev/null 2>&1',
+    '}',
+    '',
+    'recycle_stale_offline_listener() {',
     '  runner="$1"',
-    '  pid="$2"',
+    '  runner_name="$2"',
+    '  pid="$3"',
     '  elapsed="$(listener_elapsed_seconds "$pid" || true)"',
     '  [ -n "$elapsed" ] || return 1',
     '  [ "$elapsed" -ge 7200 ] || return 1',
+    '  [ $((elapsed % 300)) -lt 10 ] || return 1',
     '  runner_worker_active "$runner" && return 1',
+    '  runner_reported_offline "$runner_name" || return 1',
     '  /usr/bin/sleep 2',
     '  runner_worker_active "$runner" && return 1',
+    '  runner_reported_offline "$runner_name" || return 1',
     '  /bin/kill -TERM "$pid" 2>/dev/null || true',
     '  for attempt in 1 2 3 4 5; do',
     '    /bin/kill -0 "$pid" 2>/dev/null || return 0',
@@ -160,6 +177,7 @@ export function renderWslGuardianScript() {
     '',
     'runner_watch() {',
     '  runner="$1"',
+    '  runner_name="$2"',
     '  listener="$runner/bin/Runner.Listener"',
     '  launcher="$runner/run.sh"',
     '  [ -d "$runner" ] || return 0',
@@ -175,7 +193,7 @@ export function renderWslGuardianScript() {
     '    pid="$(runner_listener_pid "$runner" || true)"',
     '    if [ -n "$pid" ]; then',
     '      launch_pid=""',
-    '      if recycle_stale_idle_listener "$runner" "$pid"; then',
+    '      if recycle_stale_offline_listener "$runner" "$runner_name" "$pid"; then',
     '        /usr/bin/sleep 2',
     '        continue',
     '      fi',
@@ -192,7 +210,7 @@ export function renderWslGuardianScript() {
     '  done',
     '}',
     '',
-    ...WSL_MANAGED_RUNNER_DIRECTORIES.map((directory) => `runner_watch "$HOME/${directory}" &`),
+    ...WSL_MANAGED_RUNNER_DIRECTORIES.map((directory, index) => `runner_watch "$HOME/${directory}" "${WSL_MANAGED_RUNNER_NAMES[index]}" &`),
     'exec /usr/bin/sleep infinity',
     ''
   ].join('\n');

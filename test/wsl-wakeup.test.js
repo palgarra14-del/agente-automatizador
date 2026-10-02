@@ -94,7 +94,9 @@ test('WSL guardian supervises the three configured local Actions runners without
   assert.match(guardian, /runner_listener_pid/);
   assert.match(guardian, /runner_worker_active/);
   assert.match(guardian, /listener_elapsed_seconds/);
-  assert.match(guardian, /recycle_stale_idle_listener/);
+  assert.match(guardian, /runner_reported_offline/);
+  assert.match(guardian, /recycle_stale_offline_listener/);
+  assert.doesNotMatch(guardian, /recycle_stale_idle_listener/);
   assert.match(guardian, /\/proc\/\[0-9\]\*/);
   assert.match(guardian, /readlink "\$process\/cwd"/);
   assert.match(guardian, /readlink "\$process\/exe"/);
@@ -102,6 +104,10 @@ test('WSL guardian supervises the three configured local Actions runners without
   assert.match(guardian, /Runner\.Worker/);
   assert.match(guardian, /ps -o etimes=/);
   assert.match(guardian, /"\$elapsed" -ge 7200/);
+  assert.match(guardian, /elapsed % 300/);
+  assert.match(guardian, /gh api "repos\/palgarra14-del\/agente-automatizador\/actions\/runners\?per_page=100"/);
+  assert.match(guardian, /grep -Fx "\$runner_name offline"/);
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1/);
   assert.match(guardian, /kill -TERM "\$pid"/);
   assert.match(guardian, /kill -KILL "\$pid"/);
   assert.match(guardian, /runner_worker_active "\$runner" && return 1/);
@@ -122,6 +128,13 @@ test('WSL guardian supervises the three configured local Actions runners without
     const syntax = spawnSync('/bin/sh', ['-n'], { input: guardian, encoding: 'utf8' });
     assert.equal(syntax.status, 0, syntax.stderr);
   }
+});
+
+test('WSL guardian recycles only GitHub-confirmed offline listeners and fails safe when status is unavailable', () => {
+  const guardian = renderWslGuardianScript();
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*sleep 2[\s\S]*runner_worker_active "\$runner" && return 1[\s\S]*runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*kill -TERM/);
+  assert.match(guardian, /statuses=.*gh api/);
+  assert.match(guardian, /\[ -n "\$statuses" \] \|\| return 1/);
 });
 
 test('WSL wakeup sync is idempotent and status is ownership-bound', async () => {
