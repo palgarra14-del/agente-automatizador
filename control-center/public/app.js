@@ -245,6 +245,39 @@ function renderMission(data) {
   }).join('');
 }
 
+function renderDesignLab(data) {
+  const lab = data.designLab || {};
+  const state = lab.state || 'unknown';
+  const cls = state === 'running' || state === 'completed' || state === 'qa_ready'
+    ? 'good'
+    : state === 'failed' ? 'bad' : 'warn';
+  const bits = [
+    lab.latestRun ? lab.latestRun : null,
+    lab.business ? lab.business : null,
+    lab.qaPass === true ? 'QA PASS' : lab.qaPass === false ? 'QA FAIL' : null,
+    lab.emergencyRenderer ? 'renderer emergencia' : null,
+    lab.provider ? 'builder ' + lab.provider + (lab.model ? '/' + lab.model : '') : null
+  ].filter(Boolean);
+  const learning = [
+    Number.isFinite(lab.completedRuns) ? lab.completedRuns + ' runs oficiales' : null,
+    lab.weakestDimension ? 'foco: ' + lab.weakestDimension : null,
+    Number.isFinite(lab.qaPassRate) ? 'QA histórico ' + Math.round(lab.qaPassRate * 100) + '%' : null
+  ].filter(Boolean).join(' · ');
+  const quota = lab.quotaActive
+    ? 'Cuota alojada en cooldown · retry ' + duration(lab.quotaRetryInSeconds)
+    : 'Sin cooldown alojado registrado';
+  $('designLabPanel').innerHTML =
+    '<div class="design-lab-head"><div><p class="eyebrow">DESIGN LAB</p><h3>Entrenamiento de calidad web</h3></div>'+
+    '<span class="badge '+cls+'">'+esc(state)+'</span></div>'+
+    '<div class="design-lab-grid">'+
+      '<div><span>Último ciclo</span><strong>'+esc(bits.join(' · ') || 'Sin runs')+'</strong></div>'+
+      '<div><span>Aprendizaje</span><strong>'+esc(learning || 'Aún sin resumen')+'</strong></div>'+
+      '<div><span>Disponibilidad</span><strong>'+esc(quota)+'</strong></div>'+
+    '</div>'+
+    (lab.deferredReason ? '<div class="fallback-line">Review diferido: '+esc(lab.deferredReason)+'</div>' : '')+
+    '<button class="mini" data-design-lab-run>Ejecutar ciclo</button>';
+}
+
 function renderInfrastructure(data) {
   const runners = data.runnerTelemetry || {};
   const rows = runners.runners || [];
@@ -458,6 +491,7 @@ function render(data) {
   lastData = data;
   renderStats(data);
   renderMission(data);
+  renderDesignLab(data);
   renderInfrastructure(data);
   renderAttention(data);
   renderQueueView(data);
@@ -551,6 +585,7 @@ $('taskForm').addEventListener('submit', async (event) => {
 
 document.addEventListener('click', async (event) => {
   const wake = event.target.closest('[data-wake]');
+  const designLabRun = event.target.closest('[data-design-lab-run]');
   const retry = event.target.closest('[data-retry]');
   const approve = event.target.closest('[data-approve]');
   const reject = event.target.closest('[data-reject]');
@@ -568,6 +603,12 @@ document.addEventListener('click', async (event) => {
   }
   if (cancel && !globalThis.confirm('Cancelar esta tarea? El workflow se detendra de forma gobernada y quedara registrado.')) return;
   try {
+    if (designLabRun) {
+      designLabRun.disabled = true;
+      await api('/api/run-design-lab',{method:'POST',body:'{}'});
+      toast('Ciclo de Design Lab iniciado');
+      setTimeout(refresh, 1500);
+    }
     if (wake) {
       wake.disabled = true;
       await api('/api/wake',{method:'POST',body:JSON.stringify({lane:wake.dataset.wake})});
@@ -600,6 +641,7 @@ document.addEventListener('click', async (event) => {
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
+    if (designLabRun) designLabRun.disabled = false;
     if (wake) wake.disabled = false;
     if (retry) retry.disabled = false;
     if (cancel) cancel.disabled = false;
