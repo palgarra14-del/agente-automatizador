@@ -247,6 +247,21 @@ def history():
 def completed_history():
     return [entry for entry in history() if isinstance(entry.get("categoryScores"),dict)]
 
+def next_run_number(entries=None):
+    highest=0
+    for entry in (history() if entries is None else entries):
+        match=re.match(r"^run-(\d+)-",str(entry.get("runId","")))
+        if match:
+            highest=max(highest,int(match.group(1)))
+    if RUNS.exists():
+        for path in RUNS.iterdir():
+            if not path.is_dir():
+                continue
+            match=re.match(r"^run-(\d+)-",path.name)
+            if match:
+                highest=max(highest,int(match.group(1)))
+    return highest+1
+
 def concept_tokens(value):
     import re
     return {token for token in re.findall(r"[a-z0-9áéíóúüñ]+", str(value).lower()) if len(token) >= 4}
@@ -1506,9 +1521,11 @@ def main():
     training_ready,_,qualified_at=training_mastery_candidate(entries)
     phase="holdout" if training_ready else "training"
     brief=choose_holdout(entries,qualified_at) if phase=="holdout" else choose_brief()
-    run_id=f"run-{len(entries)+1:04d}-{phase}-{brief['slug']}"
+    run_number=next_run_number(entries)
+    run_id=f"run-{run_number:04d}-{phase}-{brief['slug']}"
     run_dir=RUNS/run_id
-    if run_dir.exists(): shutil.rmtree(run_dir)
+    if run_dir.exists():
+        raise RuntimeError("design_lab_run_collision:" + run_id)
     run_dir.mkdir(parents=True)
     print(f"design_lab_run={run_id}")
     print(f"design_lab_business={brief['business']}")
