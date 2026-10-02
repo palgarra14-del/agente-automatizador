@@ -854,12 +854,13 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
     section{{padding:72px 0;border-top:1px solid var(--line)}} .section-kicker{{font-size:.76rem;text-transform:uppercase;letter-spacing:.15em;color:var(--accent);font-weight:800}}
     h2{{font-size:clamp(2rem,5vw,4.2rem);line-height:.98;letter-spacing:-.045em;margin:12px 0 28px;max-width:14ch}}
     .ledger{{display:grid;grid-template-columns:1fr 1.15fr;border-top:1px solid var(--ink)}} .ledger-row{{display:contents}} .ledger-row>*{{padding:22px 0;border-bottom:1px solid var(--line)}} .ledger-row strong{{padding-right:30px}} .ledger-row p{{margin:0;color:var(--muted)}}
-    .signal{{display:grid;grid-template-columns:1fr 2fr;gap:7vw;align-items:end}} .signal-line{{height:12px;background:var(--accent);margin-bottom:12px}} .signal p{{font-size:clamp(1.25rem,2.7vw,2rem);line-height:1.25;margin:0}}
-    .cta-panel{{display:grid;grid-template-columns:1.25fr .75fr;gap:6vw;align-items:end;background:var(--ink);color:var(--paper);padding:clamp(30px,6vw,70px)}}
-    .cta-panel h2{{margin-top:0}} .cta-panel p{{color:color-mix(in srgb,var(--paper) 72%,transparent)}} .cta-panel .primary{{background:var(--paper);color:var(--ink)}} footer{{padding:28px 0 36px;color:var(--muted);font-size:.9rem}}
+    .signal-section{{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.6fr);gap:7vw;align-items:end;width:min(1180px,calc(100% - 40px));margin:auto}}
+    .signal-line{{height:12px;background:var(--accent);margin-bottom:12px}} .signal-section>p{{font-size:clamp(1.25rem,2.7vw,2rem);line-height:1.25;margin:0}}
+    .cta-panel{{display:grid;grid-template-columns:1.25fr .75fr;gap:6vw;align-items:end;background:var(--ink);color:var(--paper);padding:clamp(30px,6vw,70px);position:relative;overflow:hidden}}
+    .cta-panel h2{{margin-top:0}} .cta-panel p{{color:color-mix(in srgb,var(--paper) 72%,transparent)}} .cta-panel .primary{{background:var(--paper);color:var(--ink)}} .cta-rule{{position:absolute;left:clamp(30px,6vw,70px);right:clamp(30px,6vw,70px);bottom:18px;height:8px;background:var(--accent)}} footer{{padding:28px 0 36px;color:var(--muted);font-size:.9rem}}
     body[data-layout="offset-ledger"] .hero{{grid-template-columns:minmax(300px,.82fr) minmax(0,1.18fr)}} body[data-layout="offset-ledger"] .hero-copy{{order:2}} body[data-layout="offset-ledger"] .hero-mark{{order:1;aspect-ratio:1/1}}
     body[data-layout="quiet-poster"] .hero{{grid-template-columns:1fr;position:relative}} body[data-layout="quiet-poster"] .hero-copy{{max-width:860px;z-index:1}} body[data-layout="quiet-poster"] .hero-mark{{position:absolute;right:0;width:min(35vw,430px);opacity:.78}}
-    @media(max-width:780px){{.shell{{width:min(100% - 28px,680px)}} .hero,.signal,.cta-panel{{grid-template-columns:1fr}} .hero{{min-height:auto;padding:46px 0 58px;gap:34px}} .hero-copy{{order:1!important}} .hero-mark{{order:2!important;position:relative!important;width:100%!important;aspect-ratio:16/10!important;opacity:1!important}} .ledger{{grid-template-columns:1fr}} .ledger-row{{display:block;border-bottom:1px solid var(--line);padding:18px 0}} .ledger-row>*{{display:block;border:0;padding:3px 0}} section{{padding:54px 0}} .cta-panel{{padding:30px 22px}} .primary{{width:100%;justify-content:center;min-height:52px}}}}
+    @media(max-width:780px){{.shell{{width:min(100% - 28px,680px)}} .hero,.cta-panel{{grid-template-columns:1fr}} .signal-section{{display:flex;flex-direction:column;gap:28px;width:min(100% - 28px,680px)}} .hero{{min-height:auto;padding:46px 0 58px;gap:34px}} .hero-copy{{order:1!important}} .hero-mark{{order:2!important;position:relative!important;width:100%!important;aspect-ratio:16/10!important;opacity:1!important}} .ledger{{grid-template-columns:1fr}} .ledger-row{{display:block;border-bottom:1px solid var(--line);padding:18px 0}} .ledger-row>*{{display:block;border:0;padding:3px 0}} section{{padding:54px 0}} .cta-panel{{padding:30px 22px 48px}} .cta-rule{{left:22px;right:22px;bottom:18px}} .primary{{width:100%;justify-content:center;min-height:52px}}}}
   </style>
 </head>
 <body data-layout="{layout}">
@@ -885,16 +886,15 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
         </div>
       </div>
     </section>
-    <section>
-      <div class="shell signal">
-        <div><p class="section-kicker">Identidad</p><div class="signal-line" data-design-signature="linea-material"></div></div>
-        <p>Una presencia digital sobria y reconocible, construida para que el contacto principal no compita con elementos decorativos.</p>
-      </div>
+    <section class="signal-section">
+      <div><p class="section-kicker">Identidad</p><div class="signal-line" data-design-signature="linea-material"></div></div>
+      <p>Una presencia digital sobria y reconocible, construida para que el contacto principal no compita con elementos decorativos.</p>
     </section>
     <section id="contacto">
       <div class="shell cta-panel" data-design-signature="bloque-contacto">
         <div><p class="section-kicker">Contacto directo</p><h2>Hablemos de lo que necesitas.</h2><p>{safe['category']}</p></div>
         <div><a class="primary" href="tel:{safe['phone']}">{safe['cta']}</a><p><a href="mailto:{safe['email']}">{safe['email']}</a></p></div>
+        <div class="cta-rule" data-design-signature="cierre-material"></div>
       </div>
     </section>
   </main>
