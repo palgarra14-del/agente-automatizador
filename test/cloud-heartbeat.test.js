@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, heartbeatObservationOrder, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -12,6 +12,28 @@ test('heartbeat does not retry non-recoverable control failures blindly', () => 
   const state=classifyLaneObservation({lane:'callflow',error:'security_policy_violation'});
   assert.equal(state.state,'blocked');
   assert.equal(state.runnable,false);
+});
+
+test('heartbeat defers lanes it could not observe within the cycle budget', () => {
+  const state=classifyLaneObservation({lane:'website-pilot',observationSkipped:true});
+  assert.deepEqual(state,{
+    lane:'website-pilot',
+    state:'deferred',
+    runnable:false,
+    reason:'observation_budget',
+    operatorRequested:false
+  });
+});
+
+test('heartbeat observes business lanes before self unless the operator explicitly requested self', () => {
+  assert.deepEqual(
+    heartbeatObservationOrder(['self','website-pilot','leadfinder','callflow']),
+    ['callflow','leadfinder','website-pilot','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(['self','website-pilot','leadfinder','callflow'],new Set(['self'])),
+    ['self','callflow','leadfinder','website-pilot']
+  );
 });
 
 test('heartbeat fills all runner capacity with business before self', () => {
