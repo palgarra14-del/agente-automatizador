@@ -38,7 +38,7 @@ const mime = {
 async function ensureToken() {
   try {
     const value = (await readFile(tokenFile, 'utf8')).trim();
-    if (value.length >= 12) return value;
+    if (value.length >= 5 && value.length <= 128) return value;
   } catch { /* token file does not exist yet */ }
   await mkdir(dirname(tokenFile), { recursive: true, mode: 0o700 });
   const value = randomBytes(12).toString('base64url');
