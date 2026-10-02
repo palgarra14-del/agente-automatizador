@@ -425,6 +425,35 @@ print(json.dumps({"meta":meta,"audit":audit,"intentKeys":sorted(intent.keys()),"
   }
 });
 
+test('emergency renderer rotates deterministic layout and palette across preserved run attempts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-emergency-variants-'));
+  try {
+    const brief = {
+      slug: 'pintura-decoracion',
+      business: 'Materia Pintura',
+      category: 'Pintura y decoración',
+      brief: 'Estudio local de pintura interior y acabados decorativos. Objetivo: pedir presupuesto.'
+    };
+    const result = python(`
+from pathlib import Path
+brief=json.loads(sys.argv[2])
+root=Path(sys.argv[1])
+values=[]
+for number in (595,596,597):
+    run=root/f"run-{number:04d}-training-pintura-decoracion"
+    run.mkdir()
+    meta=m.build_emergency_site(run,brief,"no_edit_candidate_available")
+    values.append({"layout":meta["layout"],"variant":meta["variant"],"paletteIndex":meta["paletteIndex"]})
+print(json.dumps(values))
+`, [dir, JSON.stringify(brief)]);
+    assert.deepEqual(result.map(item => item.variant), [595,596,597]);
+    assert.equal(new Set(result.map(item => item.layout)).size, 3);
+    assert.equal(new Set(result.map(item => item.paletteIndex)).size, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('visual review unavailability is explicitly deferred instead of recorded as a failed training run', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-review-defer-'));
   try {
