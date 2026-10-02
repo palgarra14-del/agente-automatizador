@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { quickTunnelExpired } from './tunnel-policy.mjs';
 
 const binary = process.env.CLOUDFLARED_BIN || join(homedir(), '.local', 'bin', 'cloudflared');
 const target = process.env.AGENT_CONTROL_TARGET || 'http://127.0.0.1:8787';
@@ -66,9 +67,16 @@ async function publishLocatorWithRetry(url) {
 
 const child = spawn(binary, ['tunnel', '--url', target, '--no-autoupdate'], { stdio:['ignore','pipe','pipe'] });
 let saved = false;
+let restartingExpiredTunnel = false;
 const handle = async (chunk) => {
   const text = chunk.toString();
   process.stdout.write(text);
+  if (!restartingExpiredTunnel && quickTunnelExpired(text)) {
+    restartingExpiredTunnel = true;
+    console.error('AGENT_CONTROL_TUNNEL_EXPIRED=1');
+    child.kill('SIGTERM');
+    return;
+  }
   if (saved) return;
   const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
   if (!match) return;
