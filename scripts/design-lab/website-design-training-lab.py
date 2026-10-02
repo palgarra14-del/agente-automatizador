@@ -894,7 +894,7 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
       <div class="shell cta-panel" data-design-signature="bloque-contacto">
         <div><p class="section-kicker">Contacto directo</p><h2>Hablemos de lo que necesitas.</h2><p>{safe['category']}</p></div>
         <div><a class="primary" href="tel:{safe['phone']}">{safe['cta']}</a><p><a href="mailto:{safe['email']}">{safe['email']}</a></p></div>
-        <div class="cta-rule" data-design-signature="cierre-material" aria-hidden="true"></div>
+        <div class="cta-rule" data-design-signature="cierre-material"></div>
       </div>
     </section>
   </main>
