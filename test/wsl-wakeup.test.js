@@ -111,7 +111,12 @@ test('WSL guardian supervises the three configured local Actions runners without
   assert.match(guardian, /\[ ! -L "\$listener" \]/);
   assert.match(guardian, /\[ ! -L "\$launcher" \]/);
   assert.match(guardian, /sleep 10/);
-  assert.match(guardian, /sleep 5/);
+  assert.match(guardian, /launch_pid=""/);
+  assert.match(guardian, /kill -0 "\$launch_pid"/);
+  assert.match(guardian, /\(cd "\$runner" && "\$launcher"\) >\/dev\/null 2>&1 &/);
+  assert.match(guardian, /launch_pid="\$!"/);
+  assert.doesNotMatch(guardian, /exec "\$launcher"/);
+  assert.match(guardian, /sleep 2/);
   assert.doesNotMatch(guardian, /token|secret|password|credential/i);
   if (process.platform !== 'win32') {
     const syntax = spawnSync('/bin/sh', ['-n'], { input: guardian, encoding: 'utf8' });
