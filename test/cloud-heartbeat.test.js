@@ -14,26 +14,26 @@ test('heartbeat does not retry non-recoverable control failures blindly', () => 
   assert.equal(state.runnable,false);
 });
 
-test('heartbeat prioritizes two business lanes and keeps one spare slot for self', () => {
+test('heartbeat fills all runner capacity with business before self', () => {
   const plan=planHeartbeat([
     {lane:'self',hasWork:true},
     {lane:'website-pilot',hasWork:true},
     {lane:'leadfinder',hasWork:true},
     {lane:'callflow',hasWork:true}
   ]);
-  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder','self']);
-  assert.deepEqual(plan.deferred,[{lane:'website-pilot',priority:'business',reason:'business_capacity'}]);
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder','website-pilot']);
+  assert.deepEqual(plan.deferred,[{lane:'self',priority:'maintenance',reason:'global_capacity'}]);
 });
 
-test('active business work consumes capacity and suppresses unnecessary self expansion', () => {
+test('active business work leaves the last runner for waiting business before self', () => {
   const plan=planHeartbeat([
     {lane:'callflow',active:true},
     {lane:'leadfinder',active:true},
     {lane:'website-pilot',hasWork:true},
     {lane:'self',hasWork:true}
   ]);
-  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['self']);
-  assert.equal(plan.deferred.find((item)=>item.lane==='website-pilot').reason,'business_capacity');
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['website-pilot']);
+  assert.equal(plan.deferred.find((item)=>item.lane==='self').reason,'global_capacity');
 });
 
 test('active lane is never dispatched twice', () => {
@@ -42,6 +42,21 @@ test('active lane is never dispatched twice', () => {
     {lane:'leadfinder',hasWork:true}
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['leadfinder']);
+});
+
+test('waiting business asks a running self lane to yield at the next safe checkpoint', () => {
+  const plan=planHeartbeat([
+    {lane:'self',active:true},
+    {lane:'leadfinder',active:true},
+    {lane:'website-pilot',active:true},
+    {lane:'callflow',hasWork:true}
+  ]);
+  assert.deepEqual(plan.dispatch,[]);
+  assert.deepEqual(plan.yieldCandidates,[{
+    id:'running:self',
+    lane:'self',
+    reason:'yield_at_next_safe_checkpoint_for_business_work'
+  }]);
 });
 
 
