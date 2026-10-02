@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { heartbeatObservationOrder, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { heartbeatObservationOrder, heartbeatRunLane, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 
 const execFileAsync = promisify(execFile);
@@ -42,12 +42,17 @@ async function openOperatorIssues() {
 }
 
 async function activeLanes(lanes) {
-  const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status'],{timeout:15_000});
+  const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status,displayTitle,event'],{timeout:15_000});
   if (!runs.ok) return new Set();
   let parsed;
   try { parsed=JSON.parse(runs.stdout); } catch { return new Set(); }
   const active = new Set();
   for (const item of parsed.filter((run) => run.status !== 'completed')) {
+    const dispatchedLane=heartbeatRunLane(item,lanes);
+    if (dispatchedLane) {
+      active.add(dispatchedLane);
+      continue;
+    }
     const jobs=await run('gh',['run','view',String(item.databaseId),'--repo',repo,'--json','jobs','--jq','.jobs[].name'],{timeout:15_000});
     for (const lane of lanes) {
       if (jobs.stdout.includes(`(${lane})`)) active.add(lane);
