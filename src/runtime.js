@@ -9,6 +9,7 @@ const literalImagePattern = /^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,511}$/;
 const relativePathPattern = /^[A-Za-z0-9._/-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const recipeLabel = 'engineering-orchestrator.runtime.recipe-sha256';
+const DEFAULT_DOCKER_PROBE_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 
 function boundedText(value, label, max = 1_000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max || /[\0\r\n]/.test(value)) throw new Error(`${label}_invalid`);
@@ -112,6 +113,17 @@ async function dockerProbe(runner, dockerBinary, environment) {
   return { available: true, version: result.stdout.trim() || 'available' };
 }
 
+async function dockerProbeWithRetry(runner, dockerBinary, environment, retryDelaysMs, sleep) {
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    const probe = await dockerProbe(runner, dockerBinary, environment);
+    if (probe.available) return { ...probe, attempts };
+    if (attempts > retryDelaysMs.length) return { ...probe, attempts };
+    await sleep(retryDelaysMs[attempts - 1]);
+  }
+}
+
 async function inspectImage(runner, dockerBinary, image, environment, expectedRecipeFingerprint = null) {
   const result = await dockerCommand(runner, dockerBinary, ['image', 'inspect', image, '--format', '{{.Id}}'], { environment, timeoutMs: 15_000, maxOutputBytes: 8_192 });
   if (result.exitCode !== 0 || !result.stdout.trim()) return { available: false };
@@ -208,15 +220,29 @@ export async function syncProjectRuntimes(projects, {
   dockerBinary = 'docker',
   pullTimeoutMs = 180_000,
   buildTimeoutMs = 300_000,
+  dockerProbeRetryDelaysMs = DEFAULT_DOCKER_PROBE_RETRY_DELAYS_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   runtimeRecipes,
   repositoryRoot = process.cwd()
 } = {}) {
   if (!Number.isInteger(pullTimeoutMs) || pullTimeoutMs < 1_000 || pullTimeoutMs > 600_000) throw new Error('runtime_pull_timeout_invalid');
   if (!Number.isInteger(buildTimeoutMs) || buildTimeoutMs < 1_000 || buildTimeoutMs > 900_000) throw new Error('runtime_build_timeout_invalid');
+  if (!Array.isArray(dockerProbeRetryDelaysMs) ||
+      dockerProbeRetryDelaysMs.length > 5 ||
+      dockerProbeRetryDelaysMs.some((delay) => !Number.isInteger(delay) || delay < 0 || delay > 30_000)) {
+    throw new Error('runtime_docker_probe_retry_delays_invalid');
+  }
+  if (typeof sleep !== 'function') throw new Error('runtime_docker_probe_sleep_invalid');
   const normalizedRecipes = await activeRuntimeRecipes(runtimeRecipes, repositoryRoot);
   const recipes = recipeMap(normalizedRecipes);
   const images = configuredImages(projects, recipes);
-  const probe = await dockerProbe(commandRunner, dockerBinary, environment);
+  const probe = await dockerProbeWithRetry(
+    commandRunner,
+    dockerBinary,
+    environment,
+    dockerProbeRetryDelaysMs,
+    sleep
+  );
   if (!probe.available) throw new Error('docker_runtime_unavailable');
 
   const status = [];
