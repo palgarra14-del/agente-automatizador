@@ -6,6 +6,12 @@ import { homedir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import {
+  deriveControlHealth,
+  summarizeGithubRateLimit,
+  summarizeLaneRuns,
+  summarizeRunners
+} from './telemetry.mjs';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +24,34 @@ const tokenFile = process.env.AGENT_CONTROL_TOKEN_FILE || join(homedir(), '.conf
 const marker = '<!-- agent-request:v1 -->';
 const cloudStatusCache = new Map();
 const cloudStatusCacheMs = 45_000;
+const telemetryCache = new Map();
+
+async function cachedTelemetry(key, ttlMs, loader) {
+  const now = Date.now();
+  const existing = telemetryCache.get(key);
+  if (existing?.value !== undefined && now - existing.at < ttlMs) return existing.value;
+  if (existing?.pending) return existing.pending;
+  const pending = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      telemetryCache.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .catch((error) => {
+      if (existing?.value !== undefined) {
+        telemetryCache.set(key, { at: existing.at, value: existing.value, error: String(error?.message || error) });
+        return existing.value;
+      }
+      throw error;
+    });
+  telemetryCache.set(key, { ...(existing || {}), pending });
+  return pending;
+}
+
+function telemetryAgeMs(key) {
+  const entry = telemetryCache.get(key);
+  return entry?.at ? Math.max(0, Date.now() - entry.at) : null;
+}
 
 const laneScopes = Object.freeze({
   self: ['src', 'scripts', 'config', 'test', '.github', 'README.md', 'package.json'],
@@ -124,17 +158,41 @@ function requestFromIssue(issue) {
 }
 
 async function getOpenTasks() {
-  const result = await run('gh', ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '60',
-    '--json', 'number,title,body,createdAt,updatedAt,url']);
-  const issues = parseJsonOutput(result, []);
-  return issues.map((issue) => ({ ...issue, request: requestFromIssue(issue) }))
-    .filter((issue) => issue.request?.projectId);
+  return cachedTelemetry('tasks', 30_000, async () => {
+    const result = await run('gh', ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '60',
+      '--json', 'number,title,body,createdAt,updatedAt,url']);
+    const issues = parseJsonOutput(result, []);
+    return issues.map((issue) => ({ ...issue, request: requestFromIssue(issue) }))
+      .filter((issue) => issue.request?.projectId);
+  });
 }
 
 async function getRuns() {
-  const result = await run('gh', ['run', 'list', '--repo', repo, '--workflow', 'agent-cloud.yml', '--limit', '30',
-    '--json', 'databaseId,status,conclusion,event,createdAt,updatedAt,displayTitle,url,headSha']);
-  return parseJsonOutput(result, []);
+  return cachedTelemetry('runs', 15_000, async () => {
+    const result = await run('gh', ['run', 'list', '--repo', repo, '--workflow', 'agent-cloud.yml', '--limit', '40',
+      '--json', 'databaseId,status,conclusion,event,createdAt,updatedAt,displayTitle,url,headSha']);
+    return parseJsonOutput(result, []);
+  });
+}
+
+async function getRunners() {
+  return cachedTelemetry('runners', 30_000, async () => {
+    const result = await run('gh', ['api', `repos/${repo}/actions/runners?per_page=100`], { timeout: 12_000 });
+    const payload = parseJsonOutput(result, { runners: [] });
+    return {
+      runners: Array.isArray(payload.runners) ? payload.runners : [],
+      error: result.ok ? null : (result.stderr || 'runner_telemetry_unavailable')
+    };
+  });
+}
+
+async function getGithubRateLimit() {
+  return cachedTelemetry('github-rate-limit', 30_000, async () => {
+    const result = await run('gh', ['api', 'rate_limit'], { timeout: 12_000 });
+    if (!result.ok) return { resources: {}, error: result.stderr || 'rate_limit_unavailable' };
+    const payload = parseJsonOutput(result, { resources: {} });
+    return { ...payload, error: null };
+  });
 }
 
 async function getQueue() {
@@ -373,17 +431,31 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, git, queue, tasks, runs, processSnapshot, logs] = await Promise.all([
-    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getProcessSnapshot(), getLogs(70)
+  const [service, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs] = await Promise.all([
+    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70)
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
   const workActivity = getWorkActivity(processSnapshot.rows);
   const cloudOperations = await getCloudOperations(workActivity);
+  const laneTelemetry = summarizeLaneRuns(runs);
+  const runnerTelemetry = summarizeRunners(runnerSource.runners);
+  const githubRateLimit = summarizeGithubRateLimit(rateLimitSource);
+  const controlHealth = deriveControlHealth({ service, queue, runnerTelemetry, rateLimit: githubRateLimit, laneTelemetry });
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
     service, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations,
+    laneTelemetry,
+    runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
+    githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
+    controlHealth,
+    telemetry: {
+      tasksAgeMs: telemetryAgeMs('tasks'),
+      runsAgeMs: telemetryAgeMs('runs'),
+      runnersAgeMs: telemetryAgeMs('runners'),
+      rateLimitAgeMs: telemetryAgeMs('github-rate-limit')
+    },
     host: { online: true, agentRoot, repo }
   };
 }

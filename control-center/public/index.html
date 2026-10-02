@@ -43,6 +43,31 @@
 
     <section id="stats" class="stats"></section>
 
+    <section id="missionControl" class="card mission-control">
+      <div class="section-title mission-title">
+        <div><p class="eyebrow">MISSION CONTROL</p><h2>Estado real del agente</h2><p id="missionMeta" class="section-sub">Calculando salud reciente…</p></div>
+        <span id="missionScore" class="mission-score">—</span>
+      </div>
+      <div id="missionGrid" class="mission-grid"></div>
+    </section>
+
+    <section class="two-col infra-section">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">CAPACIDAD</p><h2>Runners del MSI</h2></div>
+        </div>
+        <div id="runnerSummary" class="infra-summary"></div>
+        <div id="runnerList" class="runner-list"></div>
+      </article>
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">GITHUB</p><h2>Presupuesto API</h2></div>
+          <span id="infraFreshness" class="counter">—</span>
+        </div>
+        <div id="githubBudget" class="budget-list"></div>
+      </article>
+    </section>
+
     <section id="attentionCard" class="card">
       <div class="section-title">
         <div><p class="eyebrow">ATENCIÓN</p><h2>Qué necesita tu intervención</h2></div>
@@ -200,7 +225,7 @@
 
   <nav class="bottom-nav">
     <button data-jump="top">Inicio</button>
-    <button data-jump="lanes">Carriles</button>
+    <button data-jump="missionControl">Mando</button>
     <button data-jump="taskForm">Nueva tarea</button>
   </nav>
 
