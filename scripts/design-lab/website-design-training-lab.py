@@ -250,14 +250,14 @@ def completed_history():
 def next_run_number(entries=None):
     highest=0
     for entry in (history() if entries is None else entries):
-        match=re.match(r"^run-(\\d+)-",str(entry.get("runId","")))
+        match=re.match(r"^run-(\d+)-",str(entry.get("runId","")))
         if match:
             highest=max(highest,int(match.group(1)))
     if RUNS.exists():
         for path in RUNS.iterdir():
             if not path.is_dir():
                 continue
-            match=re.match(r"^run-(\\d+)-",path.name)
+            match=re.match(r"^run-(\d+)-",path.name)
             if match:
                 highest=max(highest,int(match.group(1)))
     return highest+1
