@@ -386,6 +386,8 @@ print(json.dumps({"meta":meta,"audit":audit,"intentKeys":sorted(intent.keys()),"
     assert.equal(result.audit.pass, true, JSON.stringify(result.audit));
     assert.equal(result.audit.metrics.actionablePhoneCta, true);
     assert.equal(result.html.includes('data-design-signature'), true);
+    assert.equal(result.html.includes('class="signal-section"'), true);
+    assert.equal(result.html.includes('data-design-signature="cierre-material"'), true);
     assert.equal(result.html.includes('testimonios'), true);
     assert.deepEqual(result.intentKeys, [
       'antiTemplateRisks','compositionStrategy','concept','intendedEmotion','mobileStrategy',
