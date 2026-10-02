@@ -10,7 +10,7 @@ import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
-import { runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
+import { cloudRateLimitDeferral, runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
 import { schedulerYieldRequested } from './scheduler-yield.js';
 
@@ -264,34 +264,54 @@ try {
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
       } else if (action === 'cloud-prepare') {
-        if (autonomousSelfImprovement) {
-          // The self drain re-checks cooldowns, budgets and active work under the
-          // governed execution lease. Avoid a duplicate Cloud State read here.
-          console.log(JSON.stringify({ queue: null, hasExecutionWork: true }, null, 2));
-        } else {
-          const prepared = await activeStore.withGlobalLease(async () => {
-            await queue.ingestAdmissionIntents();
-            const queueResult = await queue.tick();
-            const queueWork = await queue.hasExecutionWork();
-            return { queueResult, hasExecutionWork: Boolean(queueWork) };
-          });
+        try {
+          if (autonomousSelfImprovement) {
+            // The self drain re-checks cooldowns, budgets and active work under the
+            // governed execution lease. Avoid a duplicate Cloud State read here.
+            console.log(JSON.stringify({ queue: null, hasExecutionWork: true }, null, 2));
+          } else {
+            const prepared = await activeStore.withGlobalLease(async () => {
+              await queue.ingestAdmissionIntents();
+              const queueResult = await queue.tick();
+              const queueWork = await queue.hasExecutionWork();
+              return { queueResult, hasExecutionWork: Boolean(queueWork) };
+            });
+            console.log(JSON.stringify({
+              queue: view(prepared.queueResult),
+              hasExecutionWork: prepared.hasExecutionWork
+            }, null, 2));
+          }
+        } catch (error) {
+          const deferral = cloudRateLimitDeferral(error, { phase: 'cloud_prepare' });
+          if (!deferral) throw error;
           console.log(JSON.stringify({
-            queue: view(prepared.queueResult),
-            hasExecutionWork: prepared.hasExecutionWork
+            queue: null,
+            hasExecutionWork: false,
+            ...deferral
           }, null, 2));
         }
       } else if (action === 'cloud-repair') {
         const snapshot = await activeStore.readSnapshot({ repair: true });
         console.log(JSON.stringify({ generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration }, null, 2));
       } else if (action === 'cloud-recover') {
-        // Repair/validate once, then recover admissions in the same process so the
-        // verified lineage prefix can be reused by the subsequent store.load().
-        const snapshot = await activeStore.readSnapshot({ repair: true });
-        const recovery = await queue.recoverAdmissionIntents();
-        console.log(JSON.stringify({
-          repair: { generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration },
-          recovery
-        }, null, 2));
+        try {
+          // Repair/validate once, then recover admissions in the same process so the
+          // verified lineage prefix can be reused by the subsequent store.load().
+          const snapshot = await activeStore.readSnapshot({ repair: true });
+          const recovery = await queue.recoverAdmissionIntents();
+          console.log(JSON.stringify({
+            repair: { generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration },
+            recovery
+          }, null, 2));
+        } catch (error) {
+          const deferral = cloudRateLimitDeferral(error, { phase: 'cloud_recover' });
+          if (!deferral) throw error;
+          console.log(JSON.stringify({
+            repair: null,
+            recovery: null,
+            ...deferral
+          }, null, 2));
+        }
       } else if (action === 'cloud-status') {
         const cloudState = await activeStore.load();
         const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
