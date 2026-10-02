@@ -354,6 +354,33 @@ print(json.dumps({"good":m.identity_continuity_from_qa(good),"bad":m.identity_co
   assert.ok(result.bad.observations.some(item => item.startsWith('signature_identity_hero_heavy_desktop')));
 });
 
+test('run numbering preserves deferred evidence and advances beyond both history and existing run directories', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-run-number-'));
+  try {
+    const result = python(`
+from pathlib import Path
+root=Path(sys.argv[1])
+m.RUNS=root/"runs"
+m.RUNS.mkdir(parents=True)
+(m.RUNS/"run-0012-training-a").mkdir()
+(m.RUNS/"run-0015-training-b").mkdir()
+entries=[
+ {"runId":"run-0009-training-a"},
+ {"runId":"run-0014-training-b"},
+ {"runId":"malformed"}
+]
+print(json.dumps({
+ "next":m.next_run_number(entries),
+ "existingBefore":sorted(path.name for path in m.RUNS.iterdir())
+}))
+`, [dir]);
+    assert.equal(result.next, 16);
+    assert.deepEqual(result.existingBefore, ['run-0012-training-a','run-0015-training-b']);
+  } finally {
+    rmSync(dir, { recursive:true, force:true });
+  }
+});
+
 test('design lab learns Codex quota reset and adds a safety margin', () => {
   const result = python(`
 reset=m.parse_usage_reset_epoch("ERROR: You've hit your usage limit. Please try again at Sep 29th, 2026 12:55 AM.")
