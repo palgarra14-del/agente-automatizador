@@ -14,8 +14,11 @@ PLAYBOOK=STATE/"playbook.md"
 LATEST=STATE/"offline-learning-latest.json"
 JOURNAL=STATE/"offline-learning.jsonl"
 STAMP=STATE/"offline-learning-last-run.txt"
+FAILURE_STAMP=STATE/"offline-learning-last-failure.txt"
 LOCK=STATE/"offline-learning.lock"
-MIN_INTERVAL=int(os.environ.get("OFFLINE_LEARNING_INTERVAL_SECONDS","3600"))
+MIN_INTERVAL=max(60,int(os.environ.get("OFFLINE_LEARNING_INTERVAL_SECONDS","3600")))
+FAILURE_RETRY_SECONDS=max(60,int(os.environ.get("OFFLINE_LEARNING_FAILURE_RETRY_SECONDS","3600")))
+PROVIDER_TIMEOUT_SECONDS=min(180,max(20,int(os.environ.get("OFFLINE_LEARNING_PROVIDER_TIMEOUT_SECONDS","90"))))
 
 SCHEMA={
   "type":"object",
@@ -59,6 +62,12 @@ def completed_runs():
         except Exception:
             pass
     return rows
+
+def failure_cooldown_active():
+    if not FAILURE_STAMP.exists(): return False
+    try: last=float(FAILURE_STAMP.read_text().strip())
+    except Exception: return False
+    return time.time()-last < FAILURE_RETRY_SECONDS
 
 def due():
     if not STAMP.exists(): return True
@@ -118,6 +127,9 @@ def main():
         except BlockingIOError:
             print("offline_learning_status=already_running")
             return
+        if failure_cooldown_active():
+            print("offline_learning_status=failure_cooldown")
+            return
         if not due():
             print("offline_learning_status=not_due")
             return
@@ -128,8 +140,15 @@ def main():
             return
         playbook=PLAYBOOK.read_text(encoding="utf-8",errors="ignore") if PLAYBOOK.exists() else ""
         try:
-            result=generate_structured(prompt_for(summary,evidence,playbook),SCHEMA,cwd=STATE,timeout=210)
+            result=generate_structured(
+              prompt_for(summary,evidence,playbook),
+              SCHEMA,
+              cwd=STATE,
+              providers=("ollama","antigravity"),
+              timeout=PROVIDER_TIMEOUT_SECONDS
+            )
         except ProviderUnavailable as exc:
+            FAILURE_STAMP.write_text(str(time.time()),encoding="utf-8")
             print("offline_learning_status=no_provider")
             print("offline_learning_error="+str(exc)[:1000])
             return
@@ -145,6 +164,8 @@ def main():
         with JOURNAL.open("a",encoding="utf-8") as f:
             f.write(json.dumps(record,ensure_ascii=False)+"\n")
         STAMP.write_text(str(time.time()),encoding="utf-8")
+        try: FAILURE_STAMP.unlink()
+        except FileNotFoundError: pass
         print("offline_learning_status=completed")
         print("offline_learning_provider="+result["provider"])
         print("offline_learning_result="+json.dumps(result["value"],ensure_ascii=False))
