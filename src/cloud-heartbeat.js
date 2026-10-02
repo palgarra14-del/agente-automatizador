@@ -4,14 +4,27 @@ const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generati
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
 
-export function heartbeatObservationOrder(lanes = [], operatorLanes = []) {
+export function heartbeatObservationOrder(lanes = [], operatorLanes = [], rotation = 0) {
   const operator = operatorLanes instanceof Set ? operatorLanes : new Set(operatorLanes ?? []);
   const rank = new Map(HEARTBEAT_LANE_ORDER.map((lane, index) => [lane, index]));
-  return [...lanes].sort((left, right) =>
-    Number(operator.has(right)) - Number(operator.has(left)) ||
+  const ordered = [...lanes].sort((left, right) =>
     (rank.get(left) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right) ?? Number.MAX_SAFE_INTEGER) ||
     String(left).localeCompare(String(right))
   );
+  const operatorFirst = ordered.filter((lane) => operator.has(lane));
+  const ordinary = ordered.filter((lane) => !operator.has(lane));
+  const self = ordinary.filter((lane) => lane === 'self');
+  const business = ordinary.filter((lane) => lane !== 'self');
+  const numericRotation = Number.isFinite(Number(rotation)) ? Math.trunc(Number(rotation)) : 0;
+  const offset = business.length
+    ? ((numericRotation % business.length) + business.length) % business.length
+    : 0;
+  return [
+    ...operatorFirst,
+    ...business.slice(offset),
+    ...business.slice(0, offset),
+    ...self
+  ];
 }
 
 export function heartbeatRunLane(run, lanes = []) {

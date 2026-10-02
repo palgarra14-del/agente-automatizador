@@ -81,7 +81,8 @@ const active=await activeLanes(lanes);
 const operatorLanes=new Set(operatorRequestedLanes(await openOperatorIssues(),config));
 const observations=[];
 const observationStartedAt=Date.now();
-for (const lane of heartbeatObservationOrder(lanes,operatorLanes)) {
+const observationRotation = Math.floor(Date.now() / 60_000);
+for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRotation)) {
   if (active.has(lane)) {
     observations.push(await observeLane(lane,active,operatorLanes,1_000));
     continue;
