@@ -161,6 +161,27 @@
       </article>
     </section>
 
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">SEGURIDAD</p><h2>Cambiar PIN de acceso</h2></div>
+      </div>
+      <form id="pinChangeForm">
+        <div class="form-row">
+          <label>Nuevo PIN
+            <input id="newPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          </label>
+          <label>Repetir PIN
+            <input id="confirmPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          </label>
+        </div>
+        <div class="composer-actions">
+          <span>La sesión se renovará automáticamente al cambiarlo.</span>
+          <button id="changePinBtn" class="ghost" type="submit">Cambiar PIN</button>
+        </div>
+      </form>
+    </section>
+
     <section class="two-col">
       <article class="card">
         <div class="section-title">
