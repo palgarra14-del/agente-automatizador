@@ -426,15 +426,21 @@ def ollama_ready():
     except Exception:
         return False
 
-def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None):
+def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None,num_predict=700):
     if not ollama_ready():
         raise ProviderUnavailable("ollama_unavailable")
+    try:
+        predict_limit=int(num_predict)
+    except (TypeError,ValueError):
+        raise ProviderUnavailable("ollama_num_predict_invalid")
+    if predict_limit < 64 or predict_limit > 8192:
+        raise ProviderUnavailable("ollama_num_predict_invalid")
     payload={
       "model":str(model or OLLAMA_MODEL),
       "prompt":prompt,
       "stream":False,
       "format":schema,
-      "options":{"temperature":0.1,"num_predict":700}
+      "options":{"temperature":0.1,"num_predict":predict_limit}
     }
     request=urllib.request.Request(
       OLLAMA_URL+"/api/generate",
