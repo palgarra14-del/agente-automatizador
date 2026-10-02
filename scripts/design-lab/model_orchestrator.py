@@ -1184,8 +1184,37 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
     }
 
 
+def _tree_edit_fingerprint(cwd):
+    root = Path(cwd).resolve()
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink() or ".git" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        try:
+            size = path.stat().st_size
+            digest.update(str(size).encode("ascii"))
+            digest.update(b"\0")
+            with path.open("rb") as handle:
+                if size <= 2_000_000:
+                    digest.update(handle.read())
+                else:
+                    digest.update(handle.read(65_536))
+                    handle.seek(max(0, size - 65_536))
+                    digest.update(handle.read(65_536))
+        except OSError as exc:
+            raise ProviderUnavailable("edit_workspace_fingerprint_failed:" + str(exc)) from exc
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _workspace_edit_fingerprint(cwd):
-    workdir = str(Path(cwd).resolve())
+    root = Path(cwd).resolve()
+    if not (root / ".git").exists():
+        return _tree_edit_fingerprint(root)
+    workdir = str(root)
     try:
         status = subprocess.run(
             ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],

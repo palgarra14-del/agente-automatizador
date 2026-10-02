@@ -362,6 +362,67 @@ print(json.dumps({"iso":m.datetime.fromtimestamp(reset,m.LOCAL_TZ).isoformat()})
   assert.equal(result.iso, '2026-09-29T01:00:00+02:00');
 });
 
+test('emergency local renderer creates a deterministic QA-safe site without inventing external evidence', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-emergency-'));
+  try {
+    const brief = {
+      slug: 'pintura-decoracion',
+      business: 'Materia Pintura',
+      category: 'Pintura y decoración',
+      brief: 'Estudio local de pintura interior y acabados decorativos. Objetivo: pedir presupuesto. Sin proyectos o testimonios inventados.'
+    };
+    const result = python(`
+from pathlib import Path
+brief=json.loads(sys.argv[2])
+root=Path(sys.argv[1])
+(root/"brief.txt").write_text(json.dumps({**brief,"syntheticContact":m.SYNTHETIC_CONTACT}),encoding="utf-8")
+meta=m.build_emergency_site(root,brief,"no_edit_candidate_available")
+audit=m.static_quality_audit(root)
+intent=json.loads((root/"design-intent.json").read_text())
+print(json.dumps({"meta":meta,"audit":audit,"intentKeys":sorted(intent.keys()),"html":(root/"index.html").read_text()}))
+`, [dir, JSON.stringify(brief)]);
+    assert.equal(result.meta.provider, 'local');
+    assert.equal(result.meta.emergencyRenderer, true);
+    assert.equal(result.audit.pass, true, JSON.stringify(result.audit));
+    assert.equal(result.audit.metrics.actionablePhoneCta, true);
+    assert.equal(result.html.includes('data-design-signature'), true);
+    assert.equal(result.html.includes('testimonios'), true);
+    assert.deepEqual(result.intentKeys, [
+      'antiTemplateRisks','compositionStrategy','concept','intendedEmotion','mobileStrategy',
+      'primaryAction','primaryMessage','signatureVisualDevice','typographyStrategy'
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('visual review unavailability is explicitly deferred instead of recorded as a failed training run', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-review-defer-'));
+  try {
+    const result = python(`
+from pathlib import Path
+root=Path(sys.argv[1])
+m.STATE=root
+m.antigravity_authenticated=lambda: False
+m.active_usage_cooldown=lambda *args,**kwargs: None
+def unavailable(*args,**kwargs):
+    raise m.ProviderUnavailable("no_visual_candidate_available")
+m.run_role_structured=unavailable
+qa={"pass":True}
+try:
+    m.review_site(root,{"business":"X","category":"Y","brief":"Z"},root/"d.png",root/"t.png",root/"m.png","initial",qa)
+    print(json.dumps({"deferred":False}))
+except m.VisualReviewDeferred as exc:
+    print(json.dumps({"deferred":True,"reason":str(exc),"marker":(root/"review-initial-deferred.txt").exists()}))
+`, [dir]);
+    assert.equal(result.deferred, true);
+    assert.match(result.reason, /visual_review_unavailable/);
+    assert.equal(result.marker, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('static design audit rejects template-breaking technical defects', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-audit-'));
   try {

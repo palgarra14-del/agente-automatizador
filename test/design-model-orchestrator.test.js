@@ -234,6 +234,43 @@ print(json.dumps({"args":captured["args"]}))
   assert.ok(!result.args.includes('--dangerously-skip-permissions'));
 });
 
+test('non-git design workspaces use a deterministic tree fingerprint that detects edits', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root=Path(tempfile.mkdtemp())
+(root/"brief.txt").write_text("brief",encoding="utf-8")
+before=m._workspace_edit_fingerprint(root)
+(root/"index.html").write_text("<main>ok</main>",encoding="utf-8")
+after=m._workspace_edit_fingerprint(root)
+print(json.dumps({"different":before!=after,"stable":after==m._workspace_edit_fingerprint(root)}))
+`);
+  assert.equal(result.different, true);
+  assert.equal(result.stable, true);
+});
+
+test('Ollama structured generation rejects unsafe token budgets before any network request', () => {
+  const result = python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("r",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.ollama_ready=lambda: True
+blocked=[]
+for value in (0,9000,"bad"):
+    try:
+        m.ollama_structured("x",{"type":"object"},num_predict=value)
+        blocked.append(False)
+    except m.ProviderUnavailable as exc:
+        blocked.append("ollama_num_predict_invalid" in str(exc))
+print(json.dumps(blocked))
+`);
+  assert.deepEqual(result, [true, true, true]);
+});
+
 test('experimental visual reviews cannot qualify for mastery', () => {
   const result = python(`
 import importlib.util,json,sys

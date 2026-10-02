@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import json, os, re, shutil, subprocess, sys, time, textwrap
+import hashlib, json, os, re, shutil, subprocess, sys, time, textwrap
+from html import escape
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -41,6 +42,17 @@ SYNTHETIC_CONTACT = {"phone": "+34000000000", "email": "demo@example.invalid"}
 LOCAL_QA = (REPO / "scripts/design-lab/local-qa.mjs") if (REPO / "scripts/design-lab/local-qa.mjs").exists() else (STATE / "local-qa.mjs")
 OFFLINE_LEARNING = REPO / "scripts/design-lab/offline-learning.py"
 SCORE_WEIGHTS = {"identity":0.15,"hierarchy":0.15,"typography":0.12,"composition":0.15,"authenticity":0.10,"conversion":0.13,"mobile":0.10,"polish":0.10}
+
+
+class VisualReviewDeferred(RuntimeError):
+    pass
+
+EMERGENCY_PALETTES = (
+    {"paper":"#f2eee6","ink":"#17191b","muted":"#67645f","accent":"#a54432","soft":"#ddd4c6"},
+    {"paper":"#e9eef0","ink":"#102126","muted":"#597077","accent":"#1f6f78","soft":"#c9d8dc"},
+    {"paper":"#f4f0e8","ink":"#272019","muted":"#75685e","accent":"#7b5938","soft":"#dfd2c1"},
+    {"paper":"#eef0e8","ink":"#182117","muted":"#657060","accent":"#486444","soft":"#d4dccd"},
+)
 
 BRIEFS = [
   {
@@ -785,6 +797,138 @@ def codex_base(cwd):
       "--cd", str(cwd), "--skip-git-repo-check", "--ephemeral", "--color", "never"
     ]
 
+def _emergency_cta_label(category):
+    value=str(category or "").lower()
+    if "peluquer" in value or "barber" in value:
+        return "Llamar para reservar"
+    if "dental" in value:
+        return "Llamar para pedir cita"
+    if any(token in value for token in ("reforma","pintura","fontaner")):
+        return "Llamar para pedir presupuesto"
+    if "arquitect" in value or "interior" in value:
+        return "Solicitar una conversación"
+    return "Hablar con el negocio"
+
+
+def build_emergency_site(run_dir, brief, failure_trace=""):
+    seed=int(hashlib.sha256((str(brief.get("slug",""))+"|"+str(brief.get("business",""))).encode("utf-8")).hexdigest()[:8],16)
+    palette=EMERGENCY_PALETTES[seed % len(EMERGENCY_PALETTES)]
+    layouts=("editorial-split","offset-ledger","quiet-poster")
+    layout=layouts[(seed // len(EMERGENCY_PALETTES)) % len(layouts)]
+    business=str(brief.get("business") or "Negocio local").strip()
+    category=str(brief.get("category") or "Servicio local").strip()
+    supplied=str(brief.get("brief") or "").strip()
+    factual_intro=(supplied.split(".")[0].strip() + ".") if supplied else category + "."
+    phone=str(SYNTHETIC_CONTACT["phone"])
+    email=str(SYNTHETIC_CONTACT["email"])
+    cta=_emergency_cta_label(category)
+    monogram="".join(word[0] for word in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+",business)[:2]).upper() or "•"
+    safe={
+      "business":escape(business),
+      "category":escape(category),
+      "intro":escape(factual_intro),
+      "phone":escape(phone,quote=True),
+      "email":escape(email,quote=True),
+      "cta":escape(cta),
+      "monogram":escape(monogram),
+    }
+    html=f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="{safe['category']}: contacto directo y presentación clara.">
+  <title>{safe['business']} · {safe['category']}</title>
+  <style>
+    :root{{--paper:{palette['paper']};--ink:{palette['ink']};--muted:{palette['muted']};--accent:{palette['accent']};--soft:{palette['soft']};--line:color-mix(in srgb,var(--ink) 20%,transparent)}}
+    *{{box-sizing:border-box}} html{{scroll-behavior:smooth}} body{{margin:0;background:var(--paper);color:var(--ink);font:16px/1.55 Arial,Helvetica,sans-serif}}
+    a{{color:inherit}} a:focus-visible{{outline:3px solid var(--accent);outline-offset:4px}}
+    .shell{{width:min(1180px,calc(100% - 40px));margin:auto}} header{{display:flex;justify-content:space-between;align-items:center;padding:22px 0;border-bottom:1px solid var(--line)}}
+    .brand{{font-weight:800;letter-spacing:-.02em}} .contact-link{{font-weight:700;text-underline-offset:5px}}
+    .hero{{min-height:76vh;display:grid;grid-template-columns:minmax(0,1.12fr) minmax(280px,.88fr);gap:7vw;align-items:center;padding:68px 0 76px}}
+    .eyebrow{{text-transform:uppercase;letter-spacing:.16em;font-size:.75rem;font-weight:800;color:var(--accent);margin:0 0 22px}}
+    h1{{font-size:clamp(3rem,8vw,7.4rem);line-height:.88;letter-spacing:-.07em;margin:0;max-width:9ch}} .lead{{font-size:clamp(1.08rem,2vw,1.35rem);max-width:36rem;color:var(--muted);margin:28px 0 30px}}
+    .primary{{display:inline-flex;min-height:50px;align-items:center;padding:0 20px;background:var(--ink);color:var(--paper);text-decoration:none;font-weight:800}}
+    .hero-mark{{aspect-ratio:4/5;border:1px solid var(--line);display:grid;place-items:center;position:relative;background:var(--soft);overflow:hidden}}
+    .hero-mark strong{{font-size:clamp(5rem,14vw,11rem);letter-spacing:-.09em;color:var(--accent)}} .hero-mark:after{{content:"";position:absolute;inset:12%;border-top:2px solid var(--ink);border-bottom:2px solid var(--ink);transform:rotate(-7deg)}}
+    section{{padding:72px 0;border-top:1px solid var(--line)}} .section-kicker{{font-size:.76rem;text-transform:uppercase;letter-spacing:.15em;color:var(--accent);font-weight:800}}
+    h2{{font-size:clamp(2rem,5vw,4.2rem);line-height:.98;letter-spacing:-.045em;margin:12px 0 28px;max-width:14ch}}
+    .ledger{{display:grid;grid-template-columns:1fr 1.15fr;border-top:1px solid var(--ink)}} .ledger-row{{display:contents}} .ledger-row>*{{padding:22px 0;border-bottom:1px solid var(--line)}} .ledger-row strong{{padding-right:30px}} .ledger-row p{{margin:0;color:var(--muted)}}
+    .signal{{display:grid;grid-template-columns:1fr 2fr;gap:7vw;align-items:end}} .signal-line{{height:12px;background:var(--accent);margin-bottom:12px}} .signal p{{font-size:clamp(1.25rem,2.7vw,2rem);line-height:1.25;margin:0}}
+    .cta-panel{{display:grid;grid-template-columns:1.25fr .75fr;gap:6vw;align-items:end;background:var(--ink);color:var(--paper);padding:clamp(30px,6vw,70px)}}
+    .cta-panel h2{{margin-top:0}} .cta-panel p{{color:color-mix(in srgb,var(--paper) 72%,transparent)}} .cta-panel .primary{{background:var(--paper);color:var(--ink)}} footer{{padding:28px 0 36px;color:var(--muted);font-size:.9rem}}
+    body[data-layout="offset-ledger"] .hero{{grid-template-columns:minmax(300px,.82fr) minmax(0,1.18fr)}} body[data-layout="offset-ledger"] .hero-copy{{order:2}} body[data-layout="offset-ledger"] .hero-mark{{order:1;aspect-ratio:1/1}}
+    body[data-layout="quiet-poster"] .hero{{grid-template-columns:1fr;position:relative}} body[data-layout="quiet-poster"] .hero-copy{{max-width:860px;z-index:1}} body[data-layout="quiet-poster"] .hero-mark{{position:absolute;right:0;width:min(35vw,430px);opacity:.78}}
+    @media(max-width:780px){{.shell{{width:min(100% - 28px,680px)}} .hero,.signal,.cta-panel{{grid-template-columns:1fr}} .hero{{min-height:auto;padding:46px 0 58px;gap:34px}} .hero-copy{{order:1!important}} .hero-mark{{order:2!important;position:relative!important;width:100%!important;aspect-ratio:16/10!important;opacity:1!important}} .ledger{{grid-template-columns:1fr}} .ledger-row{{display:block;border-bottom:1px solid var(--line);padding:18px 0}} .ledger-row>*{{display:block;border:0;padding:3px 0}} section{{padding:54px 0}} .cta-panel{{padding:30px 22px}} .primary{{width:100%;justify-content:center;min-height:52px}}}}
+  </style>
+</head>
+<body data-layout="{layout}">
+  <header class="shell"><div class="brand">{safe['business']}</div><a class="contact-link" href="#contacto">Contacto</a></header>
+  <main>
+    <div class="shell hero">
+      <div class="hero-copy">
+        <p class="eyebrow">{safe['category']}</p>
+        <h1>{safe['business']}</h1>
+        <p class="lead">{safe['intro']}</p>
+        <a class="primary" href="tel:{safe['phone']}">{safe['cta']}</a>
+      </div>
+      <div class="hero-mark" data-design-signature="monograma-tensionado" aria-hidden="true"><strong>{safe['monogram']}</strong></div>
+    </div>
+    <section>
+      <div class="shell">
+        <p class="section-kicker">Una decisión clara</p>
+        <h2>Menos ruido. Más fácil empezar.</h2>
+        <div class="ledger" data-design-signature="ledger-editorial">
+          <div class="ledger-row"><strong>Qué encontrarás aquí</strong><p>{safe['intro']}</p></div>
+          <div class="ledger-row"><strong>Siguiente paso</strong><p>Cuéntanos qué necesitas y usa el contacto directo para iniciar la conversación.</p></div>
+          <div class="ledger-row"><strong>Sin atajos</strong><p>Esta presentación evita testimonios, cifras o promesas que no estén respaldadas por la información disponible.</p></div>
+        </div>
+      </div>
+    </section>
+    <section>
+      <div class="shell signal">
+        <div><p class="section-kicker">Identidad</p><div class="signal-line" data-design-signature="linea-material"></div></div>
+        <p>Una presencia digital sobria y reconocible, construida para que el contacto principal no compita con elementos decorativos.</p>
+      </div>
+    </section>
+    <section id="contacto">
+      <div class="shell cta-panel" data-design-signature="bloque-contacto">
+        <div><p class="section-kicker">Contacto directo</p><h2>Hablemos de lo que necesitas.</h2><p>{safe['category']}</p></div>
+        <div><a class="primary" href="tel:{safe['phone']}">{safe['cta']}</a><p><a href="mailto:{safe['email']}">{safe['email']}</a></p></div>
+      </div>
+    </section>
+  </main>
+  <footer class="shell">{safe['business']} · {safe['category']}</footer>
+</body>
+</html>
+"""
+    intent={
+      "concept":f"{layout}: claridad editorial para {business}",
+      "intendedEmotion":"confianza serena y claridad",
+      "primaryMessage":f"{business} presenta su actividad sin afirmaciones no verificadas",
+      "primaryAction":cta,
+      "signatureVisualDevice":"monograma tensionado, ledger lineal y bloque de contacto oscuro",
+      "typographyStrategy":"escala editorial fuerte con tipografía de sistema y contraste de tamaños",
+      "compositionStrategy":f"{layout} con alternancia entre gran escala, ledger y ruptura de ritmo",
+      "mobileStrategy":"apilado temprano, CTA a ancho completo y arte convertido en franja horizontal",
+      "antiTemplateRisks":"evitar tarjetas repetidas, gradientes decorativos, glassmorphism, testimonios y cifras inventadas"
+    }
+    (run_dir/"index.html").write_text(html,encoding="utf-8")
+    (run_dir/"design-intent.json").write_text(json.dumps(intent,ensure_ascii=False,indent=2),encoding="utf-8")
+    metadata={
+      "candidate":None,
+      "provider":"local",
+      "model":"deterministic-emergency-v1",
+      "routingScore":None,
+      "fallbackErrors":[str(failure_trace)[-1200:]] if failure_trace else [],
+      "elapsedSeconds":0.0,
+      "emergencyRenderer":True,
+      "layout":layout
+    }
+    (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+    return metadata
+
+
 def build_site(run_dir, brief):
     playbook = PLAYBOOK.read_text(encoding="utf-8")
     brief_payload={**brief,"syntheticContact":SYNTHETIC_CONTACT}
@@ -860,8 +1004,26 @@ Brief: {brief['brief']}
         return elapsed, 0 if success else 2
     except ProviderUnavailable as exc:
         elapsed=time.monotonic()-started
-        out.write_text(str(exc),encoding="utf-8")
-        return elapsed, 70
+        trace=str(exc)
+        partial_site=(
+          (run_dir/"index.html").exists() or
+          (run_dir/"design-intent.json").exists() or
+          any(run_dir.rglob("*.css")) or
+          any(run_dir.rglob("*.js")) or
+          any(run_dir.rglob("*.svg"))
+        )
+        if "candidate_failed_after_workspace_change" in trace or partial_site:
+            out.write_text(trace,encoding="utf-8")
+            return elapsed, 70
+        metadata=build_emergency_site(run_dir,brief,trace)
+        metadata["elapsedSeconds"]=round(elapsed,2)
+        (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+        out.write_text(json.dumps({
+          "status":"emergency_local_renderer",
+          "cause":trace[-1200:],
+          "layout":metadata["layout"]
+        },ensure_ascii=False,indent=2),encoding="utf-8")
+        return elapsed, 0
 
 def serve_and_capture(run_dir, suffix):
     server_log=(run_dir/f"server-{suffix}.log").open("w",encoding="utf-8")
@@ -1188,21 +1350,25 @@ If your runtime cannot inspect these files, do not guess: return IMPROVE and inc
             if "usage limit" in trace.lower() or "try again at" in trace.lower():
                 register_usage_cooldown(trace)
                 disabled_providers={"codex"}
-            elif advisory is None:
-                raise RuntimeError(f"review_failed:{label}:{trace}")
             if advisory is None:
-                raise RuntimeError("codex_usage_limit")
+                (run_dir/f"review-{label}-deferred.txt").write_text(trace,encoding="utf-8")
+                raise VisualReviewDeferred("visual_review_unavailable:" + trace)
             routed=advisory
             review=routed["value"]
             authority="experimental_antigravity_visual"
     else:
         if advisory is None:
-            routed=run_role_structured(
-              "visual_review",prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
-              images=[desktop,tablet,mobile],
-              disabled_providers={"codex","ollama"},
-              require_premium=True
-            )
+            try:
+                routed=run_role_structured(
+                  "visual_review",prompt,REVIEW_SCHEMA,cwd=run_dir,timeout=240,
+                  images=[desktop,tablet,mobile],
+                  disabled_providers={"codex","ollama"},
+                  require_premium=True
+                )
+            except ProviderUnavailable as exc:
+                trace=str(exc)
+                (run_dir/f"review-{label}-deferred.txt").write_text(trace,encoding="utf-8")
+                raise VisualReviewDeferred("visual_review_unavailable:" + trace) from exc
         else:
             routed=advisory
         review=routed["value"]
@@ -1490,6 +1656,11 @@ def main():
             subprocess.run(["systemctl","--user","disable","--now","engineering-orchestrator-design-lab.timer"],check=False)
         print("design_lab_result="+json.dumps(record,ensure_ascii=False))
         print("design_lab_mastery="+str(mastered).lower())
+    except VisualReviewDeferred as e:
+        print("design_lab_status=visual_review_deferred")
+        print("design_lab_review_reason="+str(e)[:500])
+        print("design_lab_run_path="+str(run_dir))
+        return
     except Exception as e:
         if str(e) == "codex_usage_limit":
             print("design_lab_status=codex_usage_limited")
