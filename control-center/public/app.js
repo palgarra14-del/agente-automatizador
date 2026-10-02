@@ -36,6 +36,17 @@ function duration(seconds) {
   if (value < 86400) return Math.ceil(value / 3600) + ' h';
   return Math.ceil(value / 86400) + ' d';
 }
+function durationMs(ms) {
+  const value = Math.max(0, Number(ms) || 0);
+  return duration(value / 1000);
+}
+function pctClass(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 'warn';
+  if (n <= 5) return 'bad';
+  if (n <= 20) return 'warn';
+  return 'good';
+}
 function toast(text) {
   $('toast').textContent = text;
   $('toast').classList.add('show');
@@ -184,19 +195,89 @@ function laneState(data, lane) {
   return {state:'en espera', detail:issues.length ? issues.length + ' tarea(s) abierta(s)' : 'Sin trabajo pendiente', cls:'warn'};
 }
 
+function laneReliability(data, lane) {
+  return data.laneTelemetry?.lanes?.[lane] || null;
+}
+
+function renderMission(data) {
+  const health = data.controlHealth || {};
+  const business = data.laneTelemetry?.business || {};
+  $('missionScore').textContent = Number.isFinite(health.score) ? health.score + '/100' : '—';
+  $('missionScore').className = 'mission-score ' + statusClass(
+    health.state === 'strong' || health.state === 'good' ? 'success' :
+      health.state === 'critical' ? 'failure' : 'warning'
+  );
+  $('missionMeta').textContent = (business.healthy ?? 0) + '/' + (business.total ?? 3) + ' carriles comerciales recientes · ' +
+    (health.reasons?.length ? health.reasons.join(' · ') : 'sin alertas sistémicas');
+
+  $('missionGrid').innerHTML = Object.keys(laneNames).map((lane) => {
+    const live = laneState(data, lane);
+    const telemetry = laneReliability(data, lane);
+    const current = telemetry?.current;
+    const rate = telemetry?.successRate;
+    const lastSuccess = telemetry?.lastSuccessAt;
+    const runLabel = current ? ('Run ' + current.id + ' · ' + current.status) :
+      (telemetry?.latest ? ('Último run ' + telemetry.latest.id + ' · ' + (telemetry.latest.conclusion || telemetry.latest.status)) : 'Sin runs recientes');
+    const details = [
+      Number.isFinite(rate) ? 'Éxito reciente ' + rate + '%' : null,
+      lastSuccess ? 'Último OK hace ' + age(lastSuccess) : null,
+      Number.isFinite(telemetry?.avgSuccessDurationMs) ? 'Media ' + durationMs(telemetry.avgSuccessDurationMs) : null,
+      telemetry?.recentFailures ? telemetry.recentFailures + ' fallo(s) en ventana' : null
+    ].filter(Boolean).join(' · ');
+    return '<article class="mission-lane">'+
+      '<div class="item-top"><strong>'+esc(laneNames[lane])+'</strong><span class="badge '+live.cls+'">'+esc(live.state)+'</span></div>'+
+      '<div class="mission-run">'+esc(runLabel)+'</div>'+
+      '<div class="meta">'+esc(live.detail)+'</div>'+
+      '<div class="mission-kpis">'+esc(details || 'Aún sin muestra suficiente')+'</div>'+
+      '<button class="mini mission-wake" data-wake="'+lane+'">Reactivar</button>'+
+    '</article>';
+  }).join('');
+}
+
+function renderInfrastructure(data) {
+  const runners = data.runnerTelemetry || {};
+  const rows = runners.runners || [];
+  $('runnerSummary').innerHTML =
+    '<div class="infra-kpi"><strong>'+esc(String(runners.online ?? 0))+'/'+esc(String(runners.total ?? 0))+'</strong><span>runners online</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(runners.busy ?? 0))+'</strong><span>ocupados</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(runners.free ?? 0))+'</strong><span>libres</span></div>';
+  $('runnerList').innerHTML = rows.length ? rows.map((runner) =>
+    '<div class="runner-row"><span class="dot '+(runner.status === 'online' ? 'good' : 'bad')+'"></span>'+
+    '<strong>'+esc(runner.name || 'runner')+'</strong>'+
+    '<span>'+esc(runner.busy ? 'ocupado' : (runner.status === 'online' ? 'libre' : runner.status))+'</span></div>'
+  ).join('') : '<div class="meta">Telemetría de runners no disponible.</div>';
+
+  const rate = data.githubRateLimit || {};
+  const cards = [['REST / core',rate.core],['GraphQL',rate.graphql]];
+  $('githubBudget').innerHTML = cards.map(([label,value]) => {
+    if (!value) return '<div class="budget-row"><div><strong>'+esc(label)+'</strong><span>sin datos</span></div></div>';
+    return '<div class="budget-row"><div><strong>'+esc(label)+'</strong><span>'+esc(String(value.remaining))+' / '+esc(String(value.limit))+' restantes</span></div>'+
+      '<div class="budget-meter"><i class="'+pctClass(value.remainingPercent)+'" style="width:'+Math.max(2,value.remainingPercent)+'%"></i></div>'+
+      '<b class="'+pctClass(value.remainingPercent)+'">'+esc(String(value.remainingPercent))+'%</b>'+
+      (Number.isFinite(value.resetInSeconds) ? '<small>reset '+duration(value.resetInSeconds)+'</small>' : '')+
+      '</div>';
+  }).join('');
+  const freshness = data.telemetry || {};
+  const ages = [freshness.runsAgeMs,freshness.runnersAgeMs,freshness.rateLimitAgeMs].filter(Number.isFinite);
+  $('infraFreshness').textContent = ages.length ? 'Telemetría cacheada hace ' + durationMs(Math.max(...ages)) : 'Telemetría en vivo';
+}
+
 function renderStats(data) {
   const records = data.queue?.records || [];
   const active = records.filter((r) => activeStates.has(r.status)).length;
-  const latestRun = data.runs?.[0];
+  const runners = data.runnerTelemetry || {};
+  const business = data.laneTelemetry?.business || {};
+  const corePct = data.githubRateLimit?.core?.remainingPercent;
   const values = [
     [data.service?.active ? 'ONLINE' : 'OFFLINE','Servicio'],
-    [String(active),'Activas'],
-    [String(data.tasks?.length || 0),'Issues abiertas'],
-    [latestRun?.status || '—','Último workflow']
+    [(runners.online ?? '—') + '/' + (runners.total ?? '—'),'Runners'],
+    [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
+    [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];
   $('stats').innerHTML = values.map(([v,l]) => '<div class="stat"><div class="value">'+esc(v)+'</div><div class="label">'+esc(l)+'</div></div>').join('');
   $('heroTitle').textContent = data.service?.active ? 'El agente está accesible' : 'El servicio del agente está parado';
-  $('heroSub').textContent = (data.git?.branch || 'sin rama') + ' · ' + (data.git?.commit || 'sin commit') + (data.git?.dirty ? ' · cambios locales' : '') + ' · ' + data.latencyMs + ' ms';
+  $('heroSub').textContent = (data.git?.branch || 'sin rama') + ' · ' + (data.git?.commit || 'sin commit') + (data.git?.dirty ? ' · cambios locales' : '') +
+    ' · snapshot ' + data.latencyMs + ' ms · ' + active + ' tarea(s) activas';
   $('liveDot').className = data.service?.active ? 'good' : 'bad';
   $('liveText').textContent = data.service?.active ? 'MSI online' : 'Servicio parado';
 }
@@ -356,14 +437,17 @@ function renderRuns(data) {
     const state = r.status === 'completed' ? (r.conclusion || r.status) : r.status;
     const retry = ['failure','cancelled','timed_out'].includes(r.conclusion)
       ? '<button class="mini" data-retry="'+r.databaseId+'">Reintentar fallos</button>' : '';
-    return '<div class="item"><div class="item-top"><strong>Run '+r.databaseId+'</strong><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div>'+
-      '<div class="meta">'+esc(r.event)+' · hace '+age(r.updatedAt)+' · <a target="_blank" href="'+esc(r.url)+'">GitHub</a></div>'+retry+'</div>';
+    const title = r.displayTitle || ('Run ' + r.databaseId);
+    return '<div class="item"><div class="item-top"><strong>'+esc(title)+'</strong><span class="badge '+statusClass(state)+'">'+esc(state)+'</span></div>'+
+      '<div class="meta">#'+esc(String(r.databaseId))+' · '+esc(r.event)+' · hace '+age(r.updatedAt)+' · <a target="_blank" href="'+esc(r.url)+'">GitHub</a></div>'+retry+'</div>';
   }).join('');
 }
 
 function render(data) {
   lastData = data;
   renderStats(data);
+  renderMission(data);
+  renderInfrastructure(data);
   renderAttention(data);
   renderQueueView(data);
   renderLanes(data);
