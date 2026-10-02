@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   boundedRateLimitRetrySeconds,
   cloudRetryUnitName,
+  laneRateLimitRetrySeconds,
+  rateLimitRetryStaggerSeconds,
   scheduleCloudRateLimitRetry
 } from '../scripts/schedule-cloud-retry.js';
 
@@ -13,6 +15,23 @@ test('rate-limit retry delay adds reset padding and stays bounded', () => {
   assert.equal(boundedRateLimitRetrySeconds(10 * 60 * 60 * 1000), 7_200);
   assert.throws(() => boundedRateLimitRetrySeconds(-1), /cloud_retry_delay_invalid/);
   assert.throws(() => boundedRateLimitRetrySeconds('nope'), /cloud_retry_delay_invalid/);
+});
+
+test('rate-limit retries are staggered by lane with business ahead of self', () => {
+  assert.equal(rateLimitRetryStaggerSeconds('callflow'), 0);
+  assert.equal(rateLimitRetryStaggerSeconds('leadfinder'), 15);
+  assert.equal(rateLimitRetryStaggerSeconds('website-pilot'), 30);
+  assert.equal(rateLimitRetryStaggerSeconds('self'), 60);
+  assert.equal(laneRateLimitRetrySeconds(159_933, 'callflow'), 165);
+  assert.equal(laneRateLimitRetrySeconds(159_933, 'leadfinder'), 180);
+  assert.equal(laneRateLimitRetrySeconds(159_933, 'website-pilot'), 195);
+  assert.equal(laneRateLimitRetrySeconds(159_933, 'self'), 225);
+});
+
+test('lane staggering remains bounded at the global retry cap', () => {
+  assert.equal(laneRateLimitRetrySeconds(10 * 60 * 60 * 1000, 'self'), 7_200);
+  assert.equal(rateLimitRetryStaggerSeconds('safe-extra-lane'), 45);
+  assert.throws(() => rateLimitRetryStaggerSeconds('../escape'), /cloud_retry_lane_invalid/);
 });
 
 test('rate-limit retry unit is lane-scoped and rejects unsafe lane names', () => {
@@ -54,12 +73,12 @@ test('rate-limit retry schedules one allowlisted gh workflow dispatch without em
     ghBin: '/usr/bin/gh'
   });
   assert.equal(result.scheduled, true);
-  assert.equal(result.delaySeconds, 66);
+  assert.equal(result.delaySeconds, 96);
   const run = calls.find(([command]) => command === 'systemd-run');
   assert.ok(run);
   const serialized = run[1].join(' ');
   assert.match(serialized, /--unit=agent-cloud-retry-website-pilot/);
-  assert.match(serialized, /--on-active=66s/);
+  assert.match(serialized, /--on-active=96s/);
   assert.match(serialized, /\/usr\/bin\/gh workflow run agent-cloud\.yml --repo palgarra14-del\/agente-automatizador -f lane=website-pilot/);
   assert.doesNotMatch(serialized, /token|secret|authorization/i);
 });
