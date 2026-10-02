@@ -14,6 +14,13 @@ export function heartbeatObservationOrder(lanes = [], operatorLanes = []) {
   );
 }
 
+export function heartbeatRunLane(run, lanes = []) {
+  if (run?.event !== 'workflow_dispatch') return null;
+  const match = /^Agent Cloud Worker \(([a-z0-9-]{1,80})\)$/.exec(String(run?.displayTitle ?? ''));
+  if (!match) return null;
+  return new Set((lanes ?? []).map(String)).has(match[1]) ? match[1] : null;
+}
+
 export function operatorRequestedLanes(issues = [], config = {}) {
   const allowedActors = new Set((config.allowedActors ?? []).map(String));
   const projectToLane = new Map();
