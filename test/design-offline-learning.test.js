@@ -22,7 +22,7 @@ sys.path.insert(0,base)
 spec=importlib.util.spec_from_file_location("offline_learning",${JSON.stringify(offline)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 root.mkdir(parents=True,exist_ok=True)
-m.HISTORY.write_text("\n".join([
+m.HISTORY.write_text("\\n".join([
  json.dumps({"runId":"r1","briefSlug":"a","finalScore":8.5,"minCategory":8.0,"categoryScores":{"polish":8.0},"deliveryWithin10Min":True}),
  json.dumps({"runId":"r2","briefSlug":"b","finalScore":8.7,"minCategory":8.2,"categoryScores":{"polish":8.1},"deliveryWithin10Min":True})
 ]),encoding="utf-8")
