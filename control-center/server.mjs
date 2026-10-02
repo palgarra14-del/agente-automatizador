@@ -46,8 +46,15 @@ async function ensureToken() {
   return value;
 }
 
-const accessToken = await ensureToken();
-const sessionValue = createHmac('sha256', accessToken).update('agent-control-session-v1').digest('base64url');
+let accessToken = await ensureToken();
+function deriveSessionValue(token) {
+  return createHmac('sha256', token).update('agent-control-session-v1').digest('base64url');
+}
+let sessionValue = deriveSessionValue(accessToken);
+
+function setSessionCookie(res) {
+  res.setHeader('set-cookie', `agent_session=${encodeURIComponent(sessionValue)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
 
 function equalText(a, b) {
   const aa = Buffer.from(String(a ?? ''));
@@ -446,6 +453,17 @@ async function restartAgentService() {
   return { restarted: true, active: active.stdout === 'active' };
 }
 
+
+async function changeAccessPin(input) {
+  const pin = String(input?.pin ?? '').trim();
+  if (pin.length < 5 || pin.length > 128 || /[\r\n\0]/.test(pin)) throw new Error('pin_invalid');
+  await mkdir(dirname(tokenFile), { recursive:true, mode:0o700 });
+  await writeFile(tokenFile, pin + '\n', { mode:0o600 });
+  accessToken = pin;
+  sessionValue = deriveSessionValue(pin);
+  return { changed:true };
+}
+
 async function approveTask(input) {
   const issue = Number(input.issueNumber);
   const decision = input.decision === 'reject' ? 'reject' : 'approve';
@@ -503,7 +521,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/login') {
       const input = await bodyJson(req);
       if (!equalText(input.pin, accessToken)) return sendJson(res, 401, { error: 'pin_incorrecto' });
-      res.setHeader('set-cookie', `agent_session=${encodeURIComponent(sessionValue)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`);
+      setSessionCookie(res);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -516,6 +534,11 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, await wakeLane(String(input.lane || '')));
     }
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
+    if (req.method === 'POST' && url.pathname === '/api/change-pin') {
+      const result = await changeAccessPin(await bodyJson(req));
+      setSessionCookie(res);
+      return sendJson(res, 200, result);
+    }
     if (req.method === 'POST' && url.pathname === '/api/approve') return sendJson(res, 200, await approveTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/retry') return sendJson(res, 200, await retryRun(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/cancel-task') return sendJson(res, 200, await cancelTask(await bodyJson(req)));
