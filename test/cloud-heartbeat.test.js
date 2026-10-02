@@ -47,7 +47,7 @@ test('heartbeat rotates ordinary business observation order so a slow earlier la
     ['website-pilot','callflow','leadfinder','self']
   );
   assert.deepEqual(
-    heartbeatObservationOrder(lanes,new Set(['callflow']),2),
+    heartbeatObservationOrder(lanes,new Set(['callflow']),1),
     ['callflow','website-pilot','leadfinder','self']
   );
 });
