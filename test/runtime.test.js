@@ -18,17 +18,21 @@ function projects() {
   ];
 }
 
-function fixture({ dockerAvailable = true, present = [], pullFails = false, pullPersists = true, buildFails = false, buildPersists = true } = {}) {
+function fixture({ dockerAvailable = true, dockerProbeFailures = 0, present = [], pullFails = false, pullPersists = true, buildFails = false, buildPersists = true } = {}) {
   const images = new Map(present.map((entry) => typeof entry === 'string'
     ? [entry, { id: `sha256:${'a'.repeat(64)}`, recipeFingerprint: null }]
     : [entry.image, { id: entry.id ?? `sha256:${'a'.repeat(64)}`, recipeFingerprint: entry.recipeFingerprint ?? null }]));
   const calls = [];
+  let probeCount = 0;
   const runner = async (command, args, options) => {
     calls.push({ command, args: [...args], options });
     assert.equal(command, 'docker');
-    if (args[0] === 'version') return dockerAvailable
-      ? { exitCode: 0, stdout: '29.0.0\n', stderr: '' }
-      : { exitCode: 1, stdout: '', stderr: 'unavailable' };
+    if (args[0] === 'version') {
+      probeCount += 1;
+      return dockerAvailable && probeCount > dockerProbeFailures
+        ? { exitCode: 0, stdout: '29.0.0\n', stderr: '' }
+        : { exitCode: 1, stdout: '', stderr: 'unavailable' };
+    }
     if (args[0] === 'image' && args[1] === 'inspect') {
       const image = images.get(args[2]);
       if (!image) return { exitCode: 1, stdout: '', stderr: 'missing' };
@@ -130,15 +134,53 @@ test('runtime sync performs no pull when configured images are already present',
 test('runtime sync fails closed when Docker or a managed pull is unavailable', async () => {
   const unavailable = fixture({ dockerAvailable: false });
   await assert.rejects(
-    syncProjectRuntimes(projects(), { environment: { PATH: '/usr/bin:/bin' }, commandRunner: unavailable.runner, runtimeRecipes: EMPTY_RECIPES }),
+    syncProjectRuntimes(projects(), {
+      environment: { PATH: '/usr/bin:/bin' },
+      commandRunner: unavailable.runner,
+      runtimeRecipes: EMPTY_RECIPES,
+      dockerProbeRetryDelaysMs: [0, 0],
+      sleep: async () => {}
+    }),
     /docker_runtime_unavailable/
   );
+  assert.equal(unavailable.calls.filter((call) => call.args[0] === 'version').length, 3);
 
   const failingPull = fixture({ pullFails: true });
   await assert.rejects(
     syncProjectRuntimes(projects(), { environment: { PATH: '/usr/bin:/bin' }, commandRunner: failingPull.runner, runtimeRecipes: EMPTY_RECIPES }),
     /runtime_image_pull_failed:node:22-bookworm-slim@sha256:/
   );
+});
+
+test('runtime sync retries only transient Docker probe unavailability before continuing', async () => {
+  const f = fixture({ dockerProbeFailures: 2, present: [PINNED, LOCAL] });
+  const sleeps = [];
+  const result = await syncProjectRuntimes(projects(), {
+    environment: { PATH: '/usr/bin:/bin' },
+    commandRunner: f.runner,
+    runtimeRecipes: EMPTY_RECIPES,
+    dockerProbeRetryDelaysMs: [5, 10],
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.docker.available, true);
+  assert.equal(result.docker.attempts, 3);
+  assert.deepEqual(sleeps, [5, 10]);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'version').length, 3);
+});
+
+test('runtime sync validates Docker probe retry policy before touching Docker', async () => {
+  const f = fixture();
+  await assert.rejects(
+    syncProjectRuntimes(projects(), {
+      environment: { PATH: '/usr/bin:/bin' },
+      commandRunner: f.runner,
+      runtimeRecipes: EMPTY_RECIPES,
+      dockerProbeRetryDelaysMs: [31_000]
+    }),
+    /runtime_docker_probe_retry_delays_invalid/
+  );
+  assert.equal(f.calls.length, 0);
 });
 
 test('runtime sync verifies a successful pull actually made the exact image inspectable', async () => {
