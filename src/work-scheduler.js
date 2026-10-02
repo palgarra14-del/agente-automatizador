@@ -59,7 +59,8 @@ export function planWork(items = [], {
   running = [],
   maxHeavy = 3,
   maxBusinessHeavy = 3,
-  maxSelfHeavy = 1
+  maxSelfHeavy = 1,
+  reserveForExternal = 0
 } = {}) {
   if (!Number.isInteger(maxHeavy) || maxHeavy < 1) throw new Error('max_heavy_invalid');
   if (!Number.isInteger(maxBusinessHeavy) || maxBusinessHeavy < 1 || maxBusinessHeavy > maxHeavy) {
@@ -67,6 +68,9 @@ export function planWork(items = [], {
   }
   if (!Number.isInteger(maxSelfHeavy) || maxSelfHeavy < 0 || maxSelfHeavy > maxHeavy) {
     throw new Error('max_self_heavy_invalid');
+  }
+  if (!Number.isInteger(reserveForExternal) || reserveForExternal < 0 || reserveForExternal > maxHeavy) {
+    throw new Error('external_reserve_invalid');
   }
 
   const normalizedRunning = running.map(normalizeWork);
@@ -83,6 +87,15 @@ export function planWork(items = [], {
     }
     if (!item.heavy) {
       selected.push(item);
+      continue;
+    }
+    if (
+      reserveForExternal > 0 &&
+      item.lane === 'self' &&
+      item.band === 'maintenance' &&
+      heavy >= maxHeavy - reserveForExternal
+    ) {
+      deferred.push({ item, reason: 'external_priority_capacity' });
       continue;
     }
     if (heavy >= maxHeavy) {
@@ -108,22 +121,30 @@ export function planWork(items = [], {
     reason === 'global_capacity' &&
     (item.band === 'operator' || BUSINESS_LANES.has(item.lane))
   );
-  const yieldCandidates = waitingPriorityWork
+  const externalCapacityPressure = reserveForExternal > 0 && heavy > maxHeavy - reserveForExternal;
+  const yieldReason = waitingPriorityWork
+    ? (waitingPriorityWork.item.band === 'operator'
+        ? 'yield_at_next_safe_checkpoint_for_operator_work'
+        : 'yield_at_next_safe_checkpoint_for_business_work')
+    : (externalCapacityPressure ? 'yield_at_next_safe_checkpoint_for_external_priority_work' : null);
+  const yieldCandidates = yieldReason
     ? normalizedRunning
-        .filter((item) => item.lane === 'self' && item.heavy)
+        .filter((item) =>
+          item.lane === 'self' &&
+          item.heavy &&
+          (waitingPriorityWork || item.band === 'maintenance')
+        )
         .sort((a, b) => scoreWork(a) - scoreWork(b) || a.createdAtMs - b.createdAtMs)
         .map((item) => ({
           id: item.id,
           lane: item.lane,
-          reason: waitingPriorityWork.item.band === 'operator'
-            ? 'yield_at_next_safe_checkpoint_for_operator_work'
-            : 'yield_at_next_safe_checkpoint_for_business_work'
+          reason: yieldReason
         }))
     : [];
 
   return {
     version: 1,
-    limits: { maxHeavy, maxBusinessHeavy, maxSelfHeavy },
+    limits: { maxHeavy, maxBusinessHeavy, maxSelfHeavy, reserveForExternal },
     running: normalizedRunning,
     selected,
     deferred,
@@ -141,6 +162,7 @@ export function schedulingPolicySnapshot() {
       'operator work outranks autonomous work',
       'business throughput outranks self-improvement',
       'self-improvement consumes only spare capacity after runnable business work',
+      'critical external verification may reserve spare capacity from maintenance only',
       'human gates never block independent runnable work',
       'running work yields only at a safe checkpoint'
     ]
