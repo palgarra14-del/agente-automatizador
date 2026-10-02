@@ -284,8 +284,8 @@ root=Path(tempfile.mkdtemp())
 m.STATE=root/"state"; m.PROVIDER_SLOT_DIR=m.STATE/"slots"
 m.ollama_structured=lambda *args,**kwargs: {
  "files":[
-   {"path":"index.html","content":"<!doctype html><html lang=\\\"es\\\"><main>Local</main></html>"},
-   {"path":"design-intent.json","content":"{\\\"concept\\\":\\\"local\\\"}"}
+   {"path":"index.html","content":'<!doctype html><html lang="es"><main>Local</main></html>'},
+   {"path":"design-intent.json","content":'{"concept":"local"}'}
  ],
  "summary":"built locally"
 }
