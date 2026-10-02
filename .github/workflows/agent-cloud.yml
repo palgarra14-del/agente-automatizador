@@ -233,12 +233,23 @@ jobs:
           timeout --signal=TERM --kill-after=30s 30m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
           cat "$RESULT_FILE"
           CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
+          RATE_LIMIT_RETRY_MS="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); const value=result.stopReason === "rate_limited" && Number.isFinite(result.limits?.retryAfterMs) ? Math.max(0, Math.round(result.limits.retryAfterMs)) : null; process.stdout.write(value === null ? "" : String(value));' "$RESULT_FILE")"
           AUTONOMOUS_FAILED="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.stopReason === "autonomous_failure" ? "true" : "false");' "$RESULT_FILE")"
           echo "continue=$CONTINUE" >> "$GITHUB_OUTPUT"
+          echo "rate_limit_retry_ms=$RATE_LIMIT_RETRY_MS" >> "$GITHUB_OUTPUT"
           if [[ "$AUTONOMOUS_FAILED" == "true" ]]; then
             echo "::error::autonomous self-maintenance failed; inspect the drain result"
             exit 1
           fi
+
+      - name: Schedule exact rate-limit continuation
+        if: steps.drain.outputs.rate_limit_retry_ms != ''
+        shell: bash
+        env:
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+          AGENT_RATE_LIMIT_RETRY_MS: ${{ steps.drain.outputs.rate_limit_retry_ms }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/schedule-cloud-retry.js
 
       - name: Continue same lane while governed work remains
         if: steps.drain.outputs.continue == 'true'
