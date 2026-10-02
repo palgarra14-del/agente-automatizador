@@ -34,10 +34,14 @@ test('temporary quota-outage mode pins every cloud job to the private local runn
   assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
 });
 
-test('trusted main updates wake the cloud worker without requiring a manual dispatch', () => {
+test('trusted main updates wake only the lightweight router and never consume a heavy self runner', () => {
   assert.match(workflow, /push:\n\s+branches: \[main\]/);
   assert.match(workflow, /github\.event_name == 'push'/);
   assert.doesNotMatch(workflow, /push:\n\s+branches: \[(?!main\])/);
+  const cloudOnceStart = workflow.indexOf('  cloud-once:');
+  assert.ok(cloudOnceStart > 0);
+  const cloudOnce = workflow.slice(cloudOnceStart);
+  assert.match(cloudOnce, /if: always\(\) && github\.event_name != 'push'/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
