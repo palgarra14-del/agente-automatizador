@@ -13,7 +13,14 @@ test('GitHub watchdog routing honors operator global and per-lane pauses', () =>
   assert.match(workflow, /AGENT_GLOBAL_PAUSE: \$\{\{ vars\.AGENT_GLOBAL_PAUSE \}\}/);
   assert.match(workflow, /AGENT_PAUSED_LANES: \$\{\{ vars\.AGENT_PAUSED_LANES \}\}/);
   assert.match(workflow, /active: \$\{\{ steps\.route\.outputs\.active \}\}/);
-  assert.match(workflow, /Operator pause prevented this cloud wakeup/);
+  assert.match(workflow, /Operator pause or rate-limit cooldown prevented this cloud wakeup/);
+});
+
+test('GitHub scheduled watchdog skips a lane while its exact local rate-limit retry timer is active', () => {
+  assert.match(workflow, /AGENT_CLOUD_EVENT_NAME.*schedule/);
+  assert.match(workflow, /systemctl --user is-active --quiet "agent-cloud-retry-\$SCHEDULE_LANE\.timer"/);
+  assert.match(workflow, /scheduled watchdog skipped because an exact rate-limit retry is already pending/);
+  assert.match(workflow, /SCHEDULE_LANE=.*lanes\.length !== 1/);
 });
 
 test('MSI heartbeat reads the same durable operator controls before dispatching', () => {
