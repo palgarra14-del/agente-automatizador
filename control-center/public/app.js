@@ -11,6 +11,7 @@ const priorityNames = {high:'Alta', normal:'Normal', low:'Baja'};
 const priorityOrder = {high:0, normal:1, low:2};
 let loading = false;
 let lastData = null;
+let deferredInstallPrompt = null;
 
 function esc(value='') {
   return String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -701,6 +702,32 @@ $('pinChangeForm').addEventListener('submit', async (event) => {
 });
 
 $('refreshBtn').addEventListener('click', refresh);
+
+globalThis.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  $('installAppBtn')?.classList.remove('hidden');
+});
+
+globalThis.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  $('installAppBtn')?.classList.add('hidden');
+  toast('Agent Control instalado');
+});
+
+$('installAppBtn')?.addEventListener('click', async () => {
+  if (deferredInstallPrompt) {
+    const prompt = deferredInstallPrompt;
+    deferredInstallPrompt = null;
+    $('installAppBtn').classList.add('hidden');
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice?.outcome !== 'accepted') $('installAppBtn').classList.remove('hidden');
+    return;
+  }
+  const isiOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  toast(isiOS ? 'Safari: Compartir → Añadir a pantalla de inicio' : 'Usa el menú del navegador → Instalar app');
+});
 
 $('pauseAllBtn').addEventListener('click', async () => {
   if (!globalThis.confirm('Pausar nuevas ejecuciones? Los trabajos que ya estén en curso podrán terminar de forma segura.')) return;

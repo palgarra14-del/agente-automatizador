@@ -6,9 +6,12 @@
   <meta name="theme-color" content="#08111f">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Agent Control">
+  <meta name="application-name" content="Agent Control">
   <title>Agent Control</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -38,7 +41,7 @@
         <h2 id="heroTitle">Comprobando el agente…</h2>
         <p id="heroSub">Esperando telemetría del MSI.</p>
       </div>
-      <div class="hero-actions"><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
+      <div class="hero-actions"><button id="installAppBtn" class="primary hidden">Instalar app</button><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
     </section>
 
     <section id="stats" class="stats"></section>
