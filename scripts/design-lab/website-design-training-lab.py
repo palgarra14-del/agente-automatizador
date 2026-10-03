@@ -880,14 +880,29 @@ def _emergency_cta_label(category):
         return "Solicitar una conversación"
     return "Hablar con el negocio"
 
+def _prior_brief_attempt_count(run_dir, brief_slug, current_number):
+    parent=Path(run_dir).parent
+    count=0
+    if not parent.exists():
+        return count
+    for path in parent.iterdir():
+        if not path.is_dir():
+            continue
+        match=re.match(r"^run-(\d+)-training-(.+)$",path.name)
+        if not match or match.group(2) != brief_slug:
+            continue
+        if int(match.group(1)) < current_number:
+            count+=1
+    return count
 
 def build_emergency_site(run_dir, brief, failure_trace=""):
     seed=int(hashlib.sha256((str(brief.get("slug",""))+"|"+str(brief.get("business",""))).encode("utf-8")).hexdigest()[:8],16)
     run_match=re.match(r"^run-(\d+)-",Path(run_dir).name)
     variant=int(run_match.group(1)) if run_match else 0
-    palette_index=(seed + variant) % len(EMERGENCY_PALETTES)
+    brief_variant_index=_prior_brief_attempt_count(run_dir,str(brief.get("slug","")),variant) if run_match else 0
+    palette_index=(seed + brief_variant_index) % len(EMERGENCY_PALETTES)
     palette=EMERGENCY_PALETTES[palette_index]
-    layout=EMERGENCY_LAYOUTS[((seed // len(EMERGENCY_PALETTES)) + variant) % len(EMERGENCY_LAYOUTS)]
+    layout=EMERGENCY_LAYOUTS[((seed // len(EMERGENCY_PALETTES)) + brief_variant_index) % len(EMERGENCY_LAYOUTS)]
     business=str(brief.get("business") or "Negocio local").strip()
     category=str(brief.get("category") or "Servicio local").strip()
     supplied=str(brief.get("brief") or "").strip()
@@ -998,6 +1013,7 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
       "emergencyRenderer":True,
       "layout":layout,
       "variant":variant,
+      "briefVariantIndex":brief_variant_index,
       "paletteIndex":palette_index
     }
     (run_dir/"model-route-build.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
