@@ -81,10 +81,17 @@ jobs:
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
           node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
+          if [[ "$AGENT_CLOUD_EVENT_NAME" == "schedule" && "$LANES" != "[]" ]]; then
+            SCHEDULE_LANE="$(node -e 'const lanes=JSON.parse(process.argv[1]); if (lanes.length !== 1) process.exit(2); process.stdout.write(lanes[0]);' "$LANES")"
+            if systemctl --user is-active --quiet "agent-cloud-retry-$SCHEDULE_LANE.timer"; then
+              echo "::notice::$SCHEDULE_LANE scheduled watchdog skipped because an exact rate-limit retry is already pending"
+              LANES="[]"
+            fi
+          fi
           if [[ "$LANES" == "[]" ]]; then
             echo 'active=false' >> "$GITHUB_OUTPUT"
             echo 'lanes=["self"]' >> "$GITHUB_OUTPUT"
-            echo "::notice::Operator pause prevented this cloud wakeup"
+            echo "::notice::Operator pause or rate-limit cooldown prevented this cloud wakeup"
           else
             echo 'active=true' >> "$GITHUB_OUTPUT"
             echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
