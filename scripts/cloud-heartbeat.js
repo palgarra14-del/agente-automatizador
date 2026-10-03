@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { heartbeatObservationOrder, heartbeatRunLane, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 
 const execFileAsync = promisify(execFile);
@@ -35,6 +36,22 @@ async function run(command,args,options={}) {
 
 async function loadConfig() {
   return JSON.parse(await readFile(new URL('../config/issue-queue.json', import.meta.url),'utf8'));
+}
+
+async function githubVariable(name) {
+  const result = await run('gh', ['api', `repos/${repo}/actions/variables/${name}`, '--jq', '.value'], { timeout: 8_000 });
+  return result.ok ? result.stdout : '';
+}
+
+async function loadOperatorControl(lanes) {
+  const [globalValue, pausedValue] = await Promise.all([
+    githubVariable('AGENT_GLOBAL_PAUSE'),
+    githubVariable('AGENT_PAUSED_LANES')
+  ]);
+  return {
+    globalPause: globalPauseEnabled(globalValue),
+    pausedLanes: parsePausedLanes(pausedValue, lanes)
+  };
 }
 
 async function openOperatorIssues() {
@@ -76,7 +93,24 @@ async function observeLane(lane,active,operatorLanes,peekTimeoutMs=timeoutMs) {
 }
 
 const config=await loadConfig();
-const lanes=(config.cloudLanes ?? []).map((lane) => lane.id);
+const allLanes=(config.cloudLanes ?? []).map((lane) => lane.id);
+const operatorControl=await loadOperatorControl(allLanes);
+const lanes=operatorControl.globalPause
+  ? []
+  : allLanes.filter((lane) => !operatorControl.pausedLanes.includes(lane));
+if (!lanes.length) {
+  console.log(JSON.stringify({
+    version:1,
+    dispatch:[],
+    deferred:[],
+    yieldCandidates:[],
+    yieldRequests:[],
+    dryRun,
+    dispatched:[],
+    operatorControl
+  },null,2));
+  process.exit(0);
+}
 const active=await activeLanes(lanes);
 const operatorLanes=new Set(operatorRequestedLanes(await openOperatorIssues(),config));
 const observations=[];
@@ -121,5 +155,5 @@ for (const item of plan.dispatch) {
   dispatched.push({...item,ok:result.ok,dryRun:false,error:result.ok?null:(result.stderr||result.stdout)});
 }
 
-console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched},null,2));
+console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched,operatorControl},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;
