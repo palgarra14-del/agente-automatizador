@@ -53,6 +53,7 @@ EMERGENCY_PALETTES = (
     {"paper":"#f4f0e8","ink":"#272019","muted":"#75685e","accent":"#7b5938","soft":"#dfd2c1"},
     {"paper":"#eef0e8","ink":"#182117","muted":"#657060","accent":"#486444","soft":"#d4dccd"},
 )
+EMERGENCY_LAYOUTS=("editorial-split","offset-ledger","quiet-poster")
 
 BRIEFS = [
   {
@@ -274,6 +275,33 @@ def training_attempts():
             continue
         attempts.append({"runNumber":int(match.group(1)),"briefSlug":match.group(2)})
     return sorted(attempts,key=lambda item:item["runNumber"])
+
+def _run_number(value):
+    match=re.match(r"^run-(\d+)-",str(value or ""))
+    return int(match.group(1)) if match else 0
+
+def deferred_emergency_coverage():
+    pairs=set()
+    valid_slugs={brief["slug"] for brief in BRIEFS}
+    if RUNS.exists():
+        for path in RUNS.iterdir():
+            if not path.is_dir():
+                continue
+            match=re.match(r"^run-(\d+)-training-(.+)$",path.name)
+            if not match or match.group(2) not in valid_slugs:
+                continue
+            if not (path/"review-initial-deferred.txt").exists():
+                continue
+            route_path=path/"model-route-build.json"
+            try:
+                route=json.loads(route_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            layout=route.get("layout")
+            if route.get("emergencyRenderer") is True and layout in EMERGENCY_LAYOUTS:
+                pairs.add((match.group(2),layout))
+    target=len(BRIEFS)*len(EMERGENCY_LAYOUTS)
+    return {"count":len(pairs),"target":target,"complete":len(pairs)>=target}
 
 def concept_tokens(value):
     import re
@@ -714,13 +742,17 @@ def choose_brief():
     attempts=training_attempts()
     if not all_training and not attempts:
         return BRIEFS[0]
-    weakest=weakest_dimension(official or all_training)
-    if attempts:
+    latest_completed=max((_run_number(entry.get("runId")) for entry in all_training),default=0)
+    deferred_mode=bool(attempts and attempts[-1]["runNumber"] > latest_completed)
+    if deferred_mode:
         recent_slugs={item["briefSlug"] for item in attempts[-2:]}
-        rotation_index=len(attempts)
-    else:
-        recent_slugs={entry.get("briefSlug") for entry in all_training[-2:]}
-        rotation_index=len(all_training)
+        counts={}
+        for item in attempts:
+            counts[item["briefSlug"]]=counts.get(item["briefSlug"],0)+1
+        candidates=[brief for brief in BRIEFS if brief["slug"] not in recent_slugs] or BRIEFS
+        return min(candidates,key=lambda brief:(counts.get(brief["slug"],0),brief["slug"]))
+    weakest=weakest_dimension(official or all_training)
+    recent_slugs={entry.get("briefSlug") for entry in all_training[-2:]}
     candidates=[]
     if weakest:
         candidates=[
@@ -730,7 +762,7 @@ def choose_brief():
     if not candidates:
         candidates=[brief for brief in BRIEFS if brief["slug"] not in recent_slugs] or BRIEFS
     candidates=sorted(candidates,key=lambda brief: brief["slug"])
-    return candidates[rotation_index % len(candidates)]
+    return candidates[len(all_training) % len(candidates)]
 
 def last_failed_holdout_at(entries):
     failed=[entry for entry in entries if entry.get("phase")=="holdout" and official_evidence(entry) and not record_passes(entry) and entry.get("completedAt")]
@@ -855,8 +887,7 @@ def build_emergency_site(run_dir, brief, failure_trace=""):
     variant=int(run_match.group(1)) if run_match else 0
     palette_index=(seed + variant) % len(EMERGENCY_PALETTES)
     palette=EMERGENCY_PALETTES[palette_index]
-    layouts=("editorial-split","offset-ledger","quiet-poster")
-    layout=layouts[((seed // len(EMERGENCY_PALETTES)) + variant) % len(layouts)]
+    layout=EMERGENCY_LAYOUTS[((seed // len(EMERGENCY_PALETTES)) + variant) % len(EMERGENCY_LAYOUTS)]
     business=str(brief.get("business") or "Negocio local").strip()
     category=str(brief.get("category") or "Servicio local").strip()
     supplied=str(brief.get("brief") or "").strip()
@@ -1524,6 +1555,12 @@ def main():
     quota_not_before=active_usage_cooldown()
     if quota_not_before:
         maybe_run_offline_learning()
+        coverage=deferred_emergency_coverage()
+        if coverage["complete"]:
+            print("design_lab_status=visual_review_backlog_ready")
+            print("design_lab_deferred_coverage="+str(coverage["count"])+"/"+str(coverage["target"]))
+            print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
+            return
         if antigravity_authenticated():
             print("design_lab_status=codex_quota_using_antigravity")
             print("design_lab_quota_not_before="+datetime.fromtimestamp(quota_not_before,LOCAL_TZ).isoformat())
