@@ -206,6 +206,20 @@ async function getService() {
   return { active: active.stdout === 'active', enabled: enabled.stdout === 'enabled', detail: active.stderr || null };
 }
 
+async function getAutonomy() {
+  const [heartbeat, heartbeatEnabled, designLabTimer] = await Promise.all([
+    run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-cloud-heartbeat.timer'], { cwd:'/', timeout:4_000 }),
+    run('systemctl', ['--user', 'is-enabled', 'engineering-orchestrator-cloud-heartbeat.timer'], { cwd:'/', timeout:4_000 }),
+    run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-design-lab.timer'], { cwd:'/', timeout:4_000 })
+  ]);
+  return {
+    heartbeatActive: heartbeat.stdout === 'active',
+    heartbeatEnabled: heartbeatEnabled.stdout === 'enabled',
+    designLabTimerActive: designLabTimer.stdout === 'active',
+    heartbeatIntervalSeconds: 120
+  };
+}
+
 async function getGit() {
   const branch = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
   const commit = await run('git', ['rev-parse', '--short=12', 'HEAD']);
@@ -431,8 +445,8 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs] = await Promise.all([
-    getService(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70)
+  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs] = await Promise.all([
+    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70)
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
@@ -445,7 +459,7 @@ async function snapshot() {
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations,
+    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations,
     laneTelemetry,
     runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
     githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
