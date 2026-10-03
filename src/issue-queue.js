@@ -594,7 +594,7 @@ export function workflowFailureSummary(workflow) {
 }
 
 export class GitHubIssueChannel {
-  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 30_000 } = {}) {
+  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 12_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 || requestTimeoutMs > 120_000) throw new Error('issue channel requestTimeoutMs must be between 1000 and 120000');
     this.token = token;
@@ -619,11 +619,21 @@ export class GitHubIssueChannel {
 
   async request(path, options = {}) {
     const method = String(options.method ?? 'GET').toUpperCase();
-    const retryDelaysMs = method === 'GET' ? [250, 750] : [];
+    const retryDelaysMs = method === 'GET' ? [150, 500] : [];
+    const deadlineAt = Date.now() + this.requestTimeoutMs;
     let lastError = null;
     for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('github_issue_queue_request_cancelled');
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) throw new Error('github_issue_queue_request_timeout', { cause: lastError ?? undefined });
+      const attemptsRemaining = retryDelaysMs.length - attempt + 1;
+      const reservedBackoffMs = retryDelaysMs.slice(attempt).reduce((sum, value) => sum + value, 0);
+      const availableAttemptMs = Math.max(1, remainingMs - reservedBackoffMs);
+      const attemptTimeoutMs = method === 'GET'
+        ? Math.max(1, Math.min(4_000, Math.floor(availableAttemptMs / attemptsRemaining)))
+        : remainingMs;
       const timeoutController = new globalThis.AbortController();
-      const timeout = setTimeout(() => timeoutController.abort(new Error('github_issue_queue_request_timeout')), this.requestTimeoutMs);
+      const timeout = setTimeout(() => timeoutController.abort(new Error('github_issue_queue_request_timeout')), attemptTimeoutMs);
       const timeoutSignal = timeoutController.signal;
       const signal = options.signal ? globalThis.AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
       try {
@@ -647,7 +657,9 @@ export class GitHubIssueChannel {
       } finally {
         clearTimeout(timeout);
       }
-      await new Promise((resolveSleep) => setTimeout(resolveSleep, retryDelaysMs[attempt]));
+      const delayMs = retryDelaysMs[attempt];
+      if (Date.now() + delayMs >= deadlineAt) throw new Error('github_issue_queue_request_timeout', { cause: lastError ?? undefined });
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, delayMs));
     }
     throw lastError ?? new Error('github_issue_queue_request_failed');
   }
@@ -2388,6 +2400,12 @@ export class SupervisedIssueQueue {
   }
 }
 
+export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs) {
+  if (!Number.isInteger(failureStreak) || failureStreak < 1) throw new Error('issue_queue_failure_streak_invalid');
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
+  return Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
+}
+
 export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
   if (!queue || typeof queue.claimWatcherLease !== 'function' || typeof queue.releaseWatcherLease !== 'function') {
     throw new Error('watchIssueQueue requires a lease-capable queue');
@@ -2397,14 +2415,19 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
   let operationError = null;
+  let failureStreak = 0;
   try {
     while (!signal?.aborted) {
       if (beforeTick && await beforeTick() === false) break;
       if (signal?.aborted) break;
+      let sleepMs = pollIntervalMs;
       try {
         const result = await queue.tick();
+        failureStreak = 0;
         await onTick?.(result);
       } catch (error) {
+        failureStreak += 1;
+        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs);
         await onError?.(error);
       }
       if (signal?.aborted) break;
@@ -2418,7 +2441,7 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
           signal?.removeEventListener?.('abort', finish);
           resolveSleep();
         };
-        timer = setTimeout(finish, pollIntervalMs);
+        timer = setTimeout(finish, sleepMs);
         if (signal) {
           if (signal.aborted) return finish();
           signal.addEventListener?.('abort', finish, { once: true });

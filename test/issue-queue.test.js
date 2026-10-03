@@ -35,6 +35,7 @@ import {
   workflowApprovalFingerprint,
   workflowBindingFingerprint,
   workflowFailureSummary,
+  issueQueueFailureBackoffMs,
   watchIssueQueue
 } from '../src/issue-queue.js';
 
@@ -2223,6 +2224,15 @@ test('watcher survives a transient queue error and processes a later tick', asyn
   assert.deepEqual(observed, [{ status: 'awaiting_start_approval', issueNumber: 41 }]);
 });
 
+test('issue queue watcher retries transient failures sooner than the normal poll while backing off safely', () => {
+  assert.equal(issueQueueFailureBackoffMs(1, 15_000), 1_000);
+  assert.equal(issueQueueFailureBackoffMs(2, 15_000), 2_000);
+  assert.equal(issueQueueFailureBackoffMs(3, 15_000), 4_000);
+  assert.equal(issueQueueFailureBackoffMs(4, 15_000), 8_000);
+  assert.equal(issueQueueFailureBackoffMs(5, 15_000), 15_000);
+  assert.equal(issueQueueFailureBackoffMs(9, 30_000), 16_000);
+});
+
 test('watch loop removes abort listeners after ordinary poll sleeps', async () => {
   let calls = 0;
   const signal = {
@@ -2344,6 +2354,28 @@ test('GitHubIssueChannel combines caller cancellation with its own request deadl
     deadlineChannel.request('/repos/x/y/issues'),
     /github_issue_queue_request_timeout/
   );
+
+  let attempts = 0;
+  const budgetChannel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    requestTimeoutMs: 1_000,
+    fetchImpl: async (_url, options = {}) => new Promise((_resolve, reject) => {
+      attempts += 1;
+      const signal = options.signal;
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    })
+  });
+  budgetChannel.requestTimeoutMs = 700;
+  const startedAt = Date.now();
+  await assert.rejects(
+    budgetChannel.request('/repos/x/y/issues'),
+    /github_issue_queue_request_timeout/
+  );
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(attempts >= 2 && attempts <= 3, `expected bounded retries, got ${attempts}`);
+  assert.ok(elapsedMs < 1_100, `total request budget was exceeded: ${elapsedMs}ms`);
 });
 
 test('approval fingerprints bind exact dry-run, project/control context, and all persisted workflow evidence', () => {
