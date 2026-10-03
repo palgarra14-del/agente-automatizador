@@ -40,8 +40,20 @@ export function buildAcademicReminders({
   }
   const reminders = [];
 
+  // A source cannot safely identify an obligation in conflicting subjects.
+  const ambiguousSignalIds = new Set();
+  const signalSubjectsById = new Map();
   for (const signal of signals) {
     if (typeof signal?.id !== 'string' || !signal.id.trim()) continue;
+    const subjectId = signal.subjectId ?? null;
+    if (signalSubjectsById.has(signal.id) && signalSubjectsById.get(signal.id) !== subjectId) {
+      ambiguousSignalIds.add(signal.id);
+    }
+    signalSubjectsById.set(signal.id, subjectId);
+  }
+  for (const signal of signals) {
+    if (typeof signal?.id !== 'string' || !signal.id.trim()) continue;
+    if (ambiguousSignalIds.has(signal.id)) continue;
     const dates = Array.isArray(signal?.dates) ? signal.dates : [];
     for (const date of new Set(dates)) {
       const remaining = daysUntil(today, date);

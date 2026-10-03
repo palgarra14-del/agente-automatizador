@@ -125,6 +125,23 @@ test('coursework and schedule changes remind only the day before', () => {
   assert.deepEqual(reminders.map((item) => item.kind).sort(), ['coursework', 'schedule_change']);
 });
 
+test('conflicting signal subjects suppress reminders regardless of record order', () => {
+  const signal = { id: 'conflicting', subjectId: '34670', kind: 'assessment', dates: ['2026-10-01'] };
+  const other = { ...signal, id: 'other' };
+  for (const subjectId of ['34156', undefined, null, '']) {
+    const conflicting = { ...signal, subjectId };
+    for (const records of [[signal, conflicting], [conflicting, signal]]) {
+      const signals = [...records, other, { ...other }];
+      const snapshot = structuredClone(signals);
+      const reminders = buildAcademicReminders({ today: '2026-09-30', signals });
+      assert.deepEqual(reminders.map((item) => [item.id, item.subjectId]), [
+        ['reminder:signal:other:2026-10-01:assessment-soon', '34670']
+      ], `conflicting subject: ${String(subjectId)}`);
+      assert.deepEqual(signals, snapshot);
+    }
+  }
+});
+
 test('mandatory attendance sessions remind only the day before with a stable identity', () => {
   const signal = {
     id: 'uv-mail:required-session',
