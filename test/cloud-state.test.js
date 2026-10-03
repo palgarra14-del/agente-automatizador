@@ -1394,16 +1394,78 @@ test('a lost claim-create response never becomes authority by rereading the clai
   await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
 });
 
-test('bootstrap crash after claim but before authority leaves no state authority and cannot auto-recover', async () => {
+test('explicit repair quarantines an orphan deterministic claim without adopting its state', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.loseNextClaimResponse();
+
+  await assert.rejects(() => publishMarker(store, 'orphan-candidate'), /generation_election_failed/);
+  const orphanClaimSha = fake.tagSha(store.generationClaimTag(1));
+  assert.ok(orphanClaimSha);
+  assert.equal(fake.tagSha(stateTag), null);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => publishMarker(fresh, 'still-blocked-before-repair'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), null);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.generation, 0);
+  assert.equal(repaired.authorityGeneration, 0);
+  assert.equal(repaired.state.marker, undefined);
+
+  const authoritativeSha = await publishMarker(fresh, 'recovered-after-quarantine');
+  assert.notEqual(authoritativeSha, orphanClaimSha);
+  assert.equal(fake.tagSha(store.generationClaimTag(1)), orphanClaimSha);
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'recovered-after-quarantine');
+
+  const recoveryWrites = fake.refWrites().filter((entry) =>
+    entry.body?.ref?.startsWith(`refs/tags/${fresh.claimPrefix}recovery/0/1/`)
+  );
+  assert.equal(recoveryWrites.length, 1);
+  assert.equal(recoveryWrites[0].body.sha, authoritativeSha);
+});
+
+test('repair recovery never treats a foreign deterministic claim as authoritative', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const foreignSha = fake.makeStateCommit({
+    generation: 1,
+    state: blankState('foreign-claim'),
+    version: 2
+  });
+  fake.forceTag(store.generationClaimTag(1), foreignSha);
+
+  await assert.rejects(() => publishMarker(store, 'ours-before-repair'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), null);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await fresh.readSnapshot({ repair: true });
+  const ours = await publishMarker(fresh, 'ours-after-repair');
+
+  assert.notEqual(ours, foreignSha);
+  assert.equal(fake.tagSha(store.generationClaimTag(1)), foreignSha);
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'ours-after-repair');
+});
+
+test('bootstrap crash after claim but before authority stays closed until explicit repair quarantines it', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   fake.failNextAnyStatusWrite(500, (body) => body.context.includes('/g/'));
   await assert.rejects(() => publishMarker(store, 'uncertain'), /partial_publication/);
+  const orphanClaimSha = fake.tagSha(store.generationClaimTag(1));
+  assert.ok(orphanClaimSha);
   assert.equal(fake.tagSha(stateTag), null);
+
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   assert.equal((await fresh.load()).marker, undefined);
-  assert.equal((await fresh.readSnapshot({ repair: true })).authoritySha, null);
-  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+  await assert.rejects(() => publishMarker(fresh, 'still-blocked'), /generation_election_failed/);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.authoritySha, null);
+  const recoveredSha = await publishMarker(fresh, 'recovered');
+  assert.notEqual(recoveredSha, orphanClaimSha);
+  assert.equal(fake.tagSha(store.generationClaimTag(1)), orphanClaimSha);
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'recovered');
 });
 
 test('established crash after claim but before authority leaves the prior authority intact', async () => {
