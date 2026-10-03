@@ -86,6 +86,11 @@ function requestBody(req) {
   return JSON.stringify(req.body);
 }
 
+export function responseHeaderAllowed(name) {
+  const key = String(name || '').toLowerCase();
+  return !['content-length', 'content-encoding', 'transfer-encoding', 'connection', 'set-cookie', 'location'].includes(key);
+}
+
 function sendOffline(res) {
   const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#08111f"><title>Agent Control</title><style>body{margin:0;background:#08111f;color:#eef4ff;font:16px system-ui;display:grid;place-items:center;min-height:100vh;padding:24px;box-sizing:border-box}.card{max-width:520px;background:#111d31;border:1px solid #293b58;border-radius:22px;padding:28px;box-shadow:0 24px 80px #0007}h1{margin:0 0 10px;font-size:26px}p{color:#b8c7dd;line-height:1.5}button{border:0;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}</style></head><body><main class="card"><h1>MSI no accesible ahora</h1><p>El enlace remoto estable funciona, pero el túnel local no está respondiendo. Si el MSI está encendido, vuelve a intentarlo en unos segundos.</p><button onclick="location.reload()">Reintentar</button></main></body></html>`;
   res.statusCode = 503;
@@ -109,10 +114,8 @@ export default async function handler(req, res) {
     });
 
     res.statusCode = response.status;
-    const blockedResponse = new Set(['content-length', 'transfer-encoding', 'connection']);
     for (const [name, value] of response.headers.entries()) {
-      const key = name.toLowerCase();
-      if (blockedResponse.has(key) || key === 'set-cookie' || key === 'location') continue;
+      if (!responseHeaderAllowed(name)) continue;
       res.setHeader(name, value);
     }
 
