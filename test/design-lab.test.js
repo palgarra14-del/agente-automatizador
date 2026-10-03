@@ -395,11 +395,11 @@ counts={}
 for number in range(1,25):
     brief=m.choose_brief()
     slug=brief["slug"]
-    seed=int(m.hashlib.sha256((slug+"|"+brief["business"]).encode("utf-8")).hexdigest()[:8],16)
-    layout=m.EMERGENCY_LAYOUTS[((seed//len(m.EMERGENCY_PALETTES))+number)%len(m.EMERGENCY_LAYOUTS)]
-    pairs.append((slug,layout))
+    run=m.RUNS/f"run-{number:04d}-training-{slug}"
+    run.mkdir()
+    meta=m.build_emergency_site(run,brief,"no_edit_candidate_available")
+    pairs.append((slug,meta["layout"]))
     counts[slug]=counts.get(slug,0)+1
-    (m.RUNS/f"run-{number:04d}-training-{slug}").mkdir()
 print(json.dumps({
   "officialCount":len(m.training_history()),
   "counts":counts,
