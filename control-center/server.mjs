@@ -214,7 +214,8 @@ async function setRepoVariable(name, value) {
 }
 
 async function wakeHeartbeat() {
-  await run('systemctl', ['--user', 'start', 'engineering-orchestrator-cloud-heartbeat.service'], { cwd:'/', timeout: 15_000 });
+  const result = await run('systemctl', ['--user', 'start', '--no-block', 'engineering-orchestrator-cloud-heartbeat.service'], { cwd:'/', timeout: 5_000 });
+  if (!result.ok) throw new Error(`heartbeat_wakeup_failed:${result.stderr || 'systemctl_failed'}`);
 }
 
 async function setGlobalPause(input) {

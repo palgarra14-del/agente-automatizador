@@ -28,6 +28,7 @@ test('Control Center exposes governed pause controls without arbitrary shell acc
   assert.match(server, /\/api\/control\/global/);
   assert.match(server, /\/api\/control\/lane/);
   assert.match(server, /gh', \['variable', 'set'/);
+  assert.match(server, /systemctl', \['--user', 'start', '--no-block', 'engineering-orchestrator-cloud-heartbeat\.service'\]/);
   assert.doesNotMatch(server, /\/api\/shell|\/api\/exec|child_process.*req\.body/);
   assert.match(html, /id="pauseAllBtn"/);
   assert.match(html, /id="resumeAllBtn"/);
