@@ -62,11 +62,12 @@ export function buildAcademicReminders({
     }
   }
 
-  // Conflicting status or deadline evidence makes the obligation ambiguous.
+  // Conflicting status, deadline or subject evidence makes the obligation ambiguous.
   const ambiguousAssignmentIds = new Set(assignments
     .filter((assignment) => assignment?.status !== 'open')
     .map((assignment) => assignment?.id));
   const deadlinesById = new Map();
+  const subjectsById = new Map();
   for (const assignment of assignments) {
     if (typeof assignment?.id !== 'string' || !assignment.id.trim()) continue;
     const deadline = madridDay(assignment.dueAt) ? Date.parse(assignment.dueAt) : null;
@@ -74,6 +75,11 @@ export function buildAcademicReminders({
       ambiguousAssignmentIds.add(assignment.id);
     }
     deadlinesById.set(assignment.id, deadline);
+    const subjectId = assignment.subjectId ?? null;
+    if (subjectsById.has(assignment.id) && subjectsById.get(assignment.id) !== subjectId) {
+      ambiguousAssignmentIds.add(assignment.id);
+    }
+    subjectsById.set(assignment.id, subjectId);
   }
   for (const assignment of assignments) {
     if (typeof assignment?.id !== 'string' || !assignment.id.trim()) continue;
