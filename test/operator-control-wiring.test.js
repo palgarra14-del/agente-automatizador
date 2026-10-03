@@ -24,6 +24,12 @@ test('MSI heartbeat reads the same durable operator controls before dispatching'
   assert.match(heartbeat, /pausedLanes\.includes\(lane\)/);
 });
 
+test('MSI heartbeat respects exact rate-limit retry timers instead of waking a lane early', () => {
+  assert.match(heartbeat, /agent-cloud-retry-\$\{lane\}\.timer/);
+  assert.match(heartbeat, /rateLimitCooldown:true/);
+  assert.match(heartbeat, /rateLimitCooldown:\[\.\.\.cooldown\]/);
+});
+
 test('Control Center exposes governed pause controls without arbitrary shell access', () => {
   assert.match(server, /\/api\/control\/global/);
   assert.match(server, /\/api\/control\/lane/);

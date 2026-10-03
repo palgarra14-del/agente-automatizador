@@ -25,6 +25,28 @@ test('heartbeat defers lanes it could not observe within the cycle budget', () =
   });
 });
 
+test('heartbeat defers a lane while its exact rate-limit retry timer is pending', () => {
+  const state=classifyLaneObservation({
+    lane:'leadfinder',
+    rateLimitCooldown:true,
+    hasWork:true,
+    operatorRequested:true
+  });
+  assert.deepEqual(state,{
+    lane:'leadfinder',
+    state:'deferred',
+    runnable:false,
+    reason:'rate_limit_cooldown',
+    operatorRequested:true
+  });
+  const plan=planHeartbeat([
+    {lane:'leadfinder',rateLimitCooldown:true,hasWork:true,operatorRequested:true},
+    {lane:'callflow',hasWork:true}
+  ],{maxHeavy:2,maxBusinessHeavy:2,maxSelfHeavy:1});
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow']);
+  assert.equal(plan.classified.find((item)=>item.lane==='leadfinder').reason,'rate_limit_cooldown');
+});
+
 test('heartbeat observes business lanes before self unless the operator explicitly requested self', () => {
   assert.deepEqual(
     heartbeatObservationOrder(['self','website-pilot','leadfinder','callflow']),
