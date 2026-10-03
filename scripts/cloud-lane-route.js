@@ -35,10 +35,30 @@ function trustedRouting(config) {
   return { lanes: [...laneIds], projectToLane };
 }
 
+function issueLane(issueBody, projectToLane) {
+  if (typeof issueBody !== 'string') return null;
+  const markerIndex = issueBody.indexOf(REQUEST_MARKER);
+  if (markerIndex < 0 || issueBody.slice(0, markerIndex).trim()) return null;
+  try {
+    const request = JSON.parse(issueBody.slice(markerIndex + REQUEST_MARKER.length).trim());
+    const projectId = request?.projectId;
+    if (typeof projectId !== 'string') return null;
+    return projectToLane.get(projectId) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function trueValue(value) {
+  return value === true || String(value ?? '').trim().toLowerCase() === 'true';
+}
+
 export function routeCloudLanes({
   eventName,
   eventAction = '',
   issueBody = '',
+  previousIssueBody = '',
+  issueBodyWasEdited = false,
   requestedLane = '',
   schedule = '',
   config,
@@ -64,22 +84,23 @@ export function routeCloudLanes({
   if (eventName === 'workflow_dispatch') return controlled(lanes);
   if (eventName === 'push') return [];
   if (!['issues', 'issue_comment'].includes(eventName)) return controlled(lanes);
-  if (eventName === 'issues' && eventAction !== 'opened') return controlled(lanes);
-  if (typeof issueBody !== 'string') return controlled(lanes);
 
-  const markerIndex = issueBody.indexOf(REQUEST_MARKER);
-  if (markerIndex < 0 || issueBody.slice(0, markerIndex).trim()) return controlled(lanes);
+  const currentLane = issueLane(issueBody, projectToLane);
+  if (eventName === 'issue_comment') return controlled(currentLane ? [currentLane] : lanes);
 
-  let request;
-  try {
-    request = JSON.parse(issueBody.slice(markerIndex + REQUEST_MARKER.length).trim());
-  } catch {
-    return controlled(lanes);
+  if (eventAction === 'opened' || eventAction === 'reopened') {
+    return controlled(currentLane ? [currentLane] : lanes);
   }
-  const projectId = request?.projectId;
-  if (typeof projectId !== 'string') return controlled(lanes);
-  const lane = projectToLane.get(projectId);
-  return controlled(lane ? [lane] : lanes);
+  if (eventAction !== 'edited') return controlled(lanes);
+
+  if (!trueValue(issueBodyWasEdited)) {
+    return controlled(currentLane ? [currentLane] : lanes);
+  }
+
+  const previousLane = issueLane(previousIssueBody, projectToLane);
+  if (!previousLane) return controlled(lanes);
+  if (!currentLane) return controlled([previousLane]);
+  return controlled([...new Set([previousLane, currentLane])]);
 }
 
 function main() {
@@ -91,6 +112,8 @@ function main() {
     eventName: process.env.AGENT_CLOUD_EVENT_NAME ?? '',
     eventAction: process.env.AGENT_CLOUD_EVENT_ACTION ?? '',
     issueBody: process.env.AGENT_CLOUD_ISSUE_BODY ?? '',
+    previousIssueBody: process.env.AGENT_CLOUD_PREVIOUS_ISSUE_BODY ?? '',
+    issueBodyWasEdited: process.env.AGENT_CLOUD_ISSUE_BODY_WAS_EDITED ?? '',
     requestedLane: process.env.AGENT_CLOUD_REQUESTED_LANE ?? '',
     schedule: process.env.AGENT_CLOUD_SCHEDULE ?? '',
     globalPause: process.env.AGENT_GLOBAL_PAUSE ?? '',

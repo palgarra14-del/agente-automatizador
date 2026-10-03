@@ -54,10 +54,59 @@ test('issue events route a valid request to exactly its configured owning lane',
   assert.deepEqual(routeCloudLanes({ eventName: 'issue_comment', issueBody: body('callflow'), config }), ['callflow']);
 });
 
-test('issue edits and reopens conservatively wake every lane so prior ownership can invalidate', () => {
+test('issue edits and reopens target only lanes that can own current or prior governed state', () => {
   const all = ['self', 'website-pilot', 'leadfinder', 'callflow'];
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'edited', issueBody: body('self'), config }), all);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'reopened', issueBody: body('callflow'), config }), all);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('self'),
+    issueBodyWasEdited: false,
+    config
+  }), ['self']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('self'),
+    previousIssueBody: body('self'),
+    issueBodyWasEdited: true,
+    config
+  }), ['self']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('callflow'),
+    previousIssueBody: body('leadfinder'),
+    issueBodyWasEdited: true,
+    config
+  }), ['leadfinder', 'callflow']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: 'request removed',
+    previousIssueBody: body('callflow'),
+    issueBodyWasEdited: true,
+    config
+  }), ['callflow']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('callflow'),
+    previousIssueBody: 'ambiguous previous body',
+    issueBodyWasEdited: true,
+    config
+  }), all);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'reopened',
+    issueBody: body('callflow'),
+    config
+  }), ['callflow']);
 });
 
 test('ambiguous or malformed event bodies fall back to every trusted lane', () => {
