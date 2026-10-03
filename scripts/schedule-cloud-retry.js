@@ -85,15 +85,27 @@ export async function scheduleCloudRateLimitRetry({
   const unit = cloudRetryUnitName(safeLane);
   const timerUnit = `${unit}.timer`;
 
-  if (await timerActive(exec, timerUnit)) {
-    return {
-      version: 1,
-      lane: safeLane,
-      scheduled: false,
-      alreadyPending: true,
-      delaySeconds,
-      fallback: null
-    };
+  const alreadyPending = await timerActive(exec, timerUnit);
+  if (alreadyPending) {
+    try {
+      await exec(
+        'systemctl',
+        ['--user', 'stop', timerUnit, `${unit}.service`],
+        { timeout: 3_000, maxBuffer: 64_000 }
+      );
+      // Transient units created with --collect disappear asynchronously once
+      // stopped. Give systemd a bounded moment to release the stable lane name.
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 500));
+    } catch {
+      return {
+        version: 1,
+        lane: safeLane,
+        scheduled: false,
+        alreadyPending: true,
+        delaySeconds,
+        fallback: 'existing_timer'
+      };
+    }
   }
 
   const args = [
@@ -120,7 +132,7 @@ export async function scheduleCloudRateLimitRetry({
       version: 1,
       lane: safeLane,
       scheduled: true,
-      alreadyPending: false,
+      alreadyPending,
       delaySeconds,
       fallback: null
     };

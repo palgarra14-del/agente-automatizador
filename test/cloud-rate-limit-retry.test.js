@@ -39,12 +39,14 @@ test('rate-limit retry unit is lane-scoped and rejects unsafe lane names', () =>
   assert.throws(() => cloudRetryUnitName('../escape'), /cloud_retry_lane_invalid/);
 });
 
-test('existing lane timer deduplicates another delayed dispatch', async () => {
+test('a newer rate-limit window replaces an older pending lane timer', async () => {
   const calls = [];
   const exec = async (command, args) => {
     calls.push([command, args]);
-    if (command === 'systemctl') return { stdout: 'active\n', stderr: '' };
-    throw new Error('systemd-run must not be called');
+    if (command === 'systemctl' && args.includes('is-active')) return { stdout: 'active\n', stderr: '' };
+    if (command === 'systemctl' && args.includes('stop')) return { stdout: '', stderr: '' };
+    if (command === 'systemd-run') return { stdout: '', stderr: '' };
+    throw new Error('unexpected command');
   };
   const result = await scheduleCloudRateLimitRetry({
     lane: 'website-pilot',
@@ -52,9 +54,35 @@ test('existing lane timer deduplicates another delayed dispatch', async () => {
     exec,
     home: '/home/tester'
   });
-  assert.equal(result.scheduled, false);
+  assert.equal(result.scheduled, true);
   assert.equal(result.alreadyPending, true);
-  assert.equal(calls.length, 1);
+  assert.equal(result.delaySeconds, 96);
+  assert.equal(calls.filter(([command]) => command === 'systemctl').length, 2);
+  const replacement = calls.find(([command]) => command === 'systemd-run');
+  assert.ok(replacement);
+  assert.match(replacement[1].join(' '), /--on-active=96s/);
+});
+
+test('an existing timer is preserved if systemd refuses the safe replacement stop', async () => {
+  const exec = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) return { stdout: 'active\n', stderr: '' };
+    if (command === 'systemctl' && args.includes('stop')) throw new Error('stop denied');
+    throw new Error('systemd-run must not be called');
+  };
+  const result = await scheduleCloudRateLimitRetry({
+    lane: 'leadfinder',
+    retryAfterMs: 61_000,
+    exec,
+    home: '/home/tester'
+  });
+  assert.deepEqual(result, {
+    version: 1,
+    lane: 'leadfinder',
+    scheduled: false,
+    alreadyPending: true,
+    delaySeconds: 81,
+    fallback: 'existing_timer'
+  });
 });
 
 test('rate-limit retry schedules one allowlisted gh workflow dispatch without embedding credentials', async () => {

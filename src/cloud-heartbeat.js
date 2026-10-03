@@ -66,10 +66,13 @@ export function classifyLaneObservation(observation) {
   const lane = observation?.lane;
   if (!lane) throw new Error('lane_observation_invalid');
   const operatorRequested = observation.operatorRequested === true;
+  if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active', operatorRequested };
+  if (observation.rateLimitCooldown === true) {
+    return { lane, state:'deferred', runnable:false, reason:'rate_limit_cooldown', operatorRequested };
+  }
   if (observation.observationSkipped === true) {
     return { lane, state:'deferred', runnable:false, reason:'observation_budget', operatorRequested };
   }
-  if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active', operatorRequested };
   if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected', operatorRequested };
   if (observation.error && RECOVERABLE.test(String(observation.error))) {
     return { lane, state:'recovery', runnable:true, reason:'recoverable_control_error', operatorRequested };

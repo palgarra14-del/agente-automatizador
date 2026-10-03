@@ -63,6 +63,14 @@ async function openOperatorIssues() {
   try { return JSON.parse(result.stdout); } catch { return []; }
 }
 
+async function rateLimitCooldownLanes(lanes) {
+  const states = await Promise.all(lanes.map(async (lane) => {
+    const result = await run('systemctl', ['--user', 'is-active', `agent-cloud-retry-${lane}.timer`], { timeout: 3_000 });
+    return result.ok && ['active', 'activating'].includes(result.stdout) ? lane : null;
+  }));
+  return new Set(states.filter(Boolean));
+}
+
 async function activeLanes(lanes) {
   const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status,displayTitle,event'],{timeout:15_000});
   if (!runs.ok) return new Set();
@@ -83,9 +91,10 @@ async function activeLanes(lanes) {
   return active;
 }
 
-async function observeLane(lane,active,operatorLanes,peekTimeoutMs=timeoutMs) {
+async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=timeoutMs) {
   const operatorRequested = operatorLanes.has(lane);
   if (active.has(lane)) return {lane,active:true,operatorRequested};
+  if (cooldown.has(lane)) return {lane,active:false,operatorRequested,rateLimitCooldown:true};
   const result=await run(cli,['src/cli.js','inbox','cloud-peek','--lane',lane],{timeout:peekTimeoutMs});
   if (result.timedOut) return {lane,active:false,operatorRequested,observationSkipped:true};
   if (!result.ok) return {lane,active:false,operatorRequested,error:result.stderr || result.stdout || 'cloud_peek_failed'};
@@ -111,14 +120,18 @@ if (!lanes.length) {
   },null,2));
   process.exit(0);
 }
-const active=await activeLanes(lanes);
-const operatorLanes=new Set(operatorRequestedLanes(await openOperatorIssues(),config));
+const [active, cooldown, operatorIssues] = await Promise.all([
+  activeLanes(lanes),
+  rateLimitCooldownLanes(lanes),
+  openOperatorIssues()
+]);
+const operatorLanes=new Set(operatorRequestedLanes(operatorIssues,config));
 const observations=[];
 const observationStartedAt=Date.now();
 const observationRotation = Math.floor(Date.now() / 60_000);
 for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRotation)) {
   if (active.has(lane)) {
-    observations.push(await observeLane(lane,active,operatorLanes,1_000));
+    observations.push(await observeLane(lane,active,cooldown,operatorLanes,1_000));
     continue;
   }
   const remainingMs=observationBudgetMs-(Date.now()-observationStartedAt);
@@ -131,7 +144,7 @@ for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRota
     });
     continue;
   }
-  observations.push(await observeLane(lane,active,operatorLanes,Math.min(timeoutMs,remainingMs)));
+  observations.push(await observeLane(lane,active,cooldown,operatorLanes,Math.min(timeoutMs,remainingMs)));
 }
 
 const maxHeavy=Number(process.env.AGENT_MAX_HEAVY || 3);
@@ -155,5 +168,5 @@ for (const item of plan.dispatch) {
   dispatched.push({...item,ok:result.ok,dryRun:false,error:result.ok?null:(result.stderr||result.stdout)});
 }
 
-console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched,operatorControl},null,2));
+console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched,operatorControl,rateLimitCooldown:[...cooldown]},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;
