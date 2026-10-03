@@ -358,6 +358,7 @@ export class GitHubStateStore extends JsonStore {
     this.epochSealContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/seal`;
     this.epochNextContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/next`;
     this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/g/`;
+    this.claimRecoveryContextPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/claim-recovery/`;
     this.claimPrefix = `${CLAIM_NAMESPACE}/${this.ledgerDigest}/`;
     this.ledgerRootTreeSha = null;
   }
@@ -1615,9 +1616,99 @@ export class GitHubStateStore extends JsonStore {
     return `${this.claimPrefix}${epoch}/${generation}`;
   }
 
-  async claimGenerationStrict(generation, candidateSha) {
-    const target = assertSha(candidateSha);
+  generationClaimRecoveryContext(generation) {
+    const epoch = epochForGeneration(generation);
+    return `${this.claimRecoveryContextPrefix}${epoch}/${generation}`;
+  }
+
+  generationClaimRecoveryDescription(orphanClaimSha, parentSha, statusAnchorSha) {
+    return `o=${assertSha(orphanClaimSha)};p=${assertSha(parentSha)};a=${assertSha(statusAnchorSha)}`;
+  }
+
+  async readGenerationClaimRecovery(registration, generation) {
+    const context = this.generationClaimRecoveryContext(generation);
+    const laneRoot = await this.laneRootCommit();
+    if (!laneRoot) return null;
+    const status = await this.readStatusContext(laneRoot.sha, context);
+    if (!status) return null;
+    if (status.context.toLowerCase() !== context.toLowerCase() ||
+        status.state !== 'success' ||
+        (status.target_url !== null && status.target_url !== undefined) ||
+        typeof status.description !== 'string') {
+      throw new Error('cloud_state_generation_claim_recovery_invalid');
+    }
+    const match = /^o=([a-f0-9]{40});p=([a-f0-9]{40});a=([a-f0-9]{40})$/i.exec(status.description);
+    if (!match) throw new Error('cloud_state_generation_claim_recovery_invalid');
+    const statusAnchorSha = assertSha(registration.statusAnchorSha, 'cloud_state_epoch_anchor_invalid');
+    if (assertSha(match[3], 'cloud_state_generation_claim_recovery_invalid') !== statusAnchorSha) {
+      throw new Error('cloud_state_generation_claim_recovery_invalid');
+    }
+    return {
+      orphanClaimSha: assertSha(match[1], 'cloud_state_generation_claim_recovery_invalid'),
+      parentSha: assertSha(match[2], 'cloud_state_generation_claim_recovery_invalid'),
+      statusAnchorSha
+    };
+  }
+
+  async quarantineGenerationClaim(registration, generation, parentSha) {
     const claimTag = this.generationClaimTag(generation);
+    const orphanClaimSha = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
+    if (!orphanClaimSha) return null;
+
+    const expectedParentSha = assertSha(parentSha);
+    const expectedDescription = this.generationClaimRecoveryDescription(
+      orphanClaimSha, expectedParentSha, registration.statusAnchorSha
+    );
+    const before = await this.readGenerationClaimRecovery(registration, generation);
+    if (before) {
+      if (before.orphanClaimSha === orphanClaimSha && before.parentSha === expectedParentSha) return before;
+      throw new Error('cloud_state_generation_claim_recovery_conflict');
+    }
+
+    const context = this.generationClaimRecoveryContext(generation);
+    const laneRoot = await this.laneRootCommit();
+    if (!laneRoot) throw new Error('cloud_state_generation_claim_recovery_invalid');
+    let postError = null;
+    try {
+      await this.request(`/statuses/${laneRoot.sha}`, {
+        method: 'POST',
+        body: { state: 'success', context, description: expectedDescription }
+      });
+    } catch (error) {
+      postError = error;
+    }
+
+    const after = await this.readGenerationClaimRecovery(registration, generation);
+    if (after?.orphanClaimSha === orphanClaimSha && after?.parentSha === expectedParentSha) return after;
+    if (after) throw new Error('cloud_state_generation_claim_recovery_conflict', { cause: postError ?? undefined });
+    if (postError) throw postError;
+    throw new Error('cloud_state_generation_claim_recovery_append_failed');
+  }
+
+  async quarantineNextGenerationClaim(evidence, parentSha, parentGeneration) {
+    if (!Number.isSafeInteger(parentGeneration) || parentGeneration < 0) {
+      throw new Error('cloud_state_generation_invalid');
+    }
+    const generation = parentGeneration + 1;
+    const registration = evidence.registrationByEpoch.get(epochForGeneration(generation)) ?? null;
+    if (!registration) return null;
+    const authorities = registration === evidence.activeRegistration
+      ? evidence.activeAuthorities
+      : await this.readEpochAuthorities(registration);
+    if (authorities.some((record) => record.generation >= generation)) return null;
+    return this.quarantineGenerationClaim(registration, generation, parentSha);
+  }
+
+  recoveryGenerationClaimTag(generation, nonce) {
+    const epoch = epochForGeneration(generation);
+    if (typeof nonce !== 'string' || !/^[a-f0-9]{32}$/i.test(nonce)) {
+      throw new Error('cloud_state_generation_claim_recovery_nonce_invalid');
+    }
+    return `${this.claimPrefix}${epoch}/${generation}/recovery/${nonce.toLowerCase()}`;
+  }
+
+  async createGenerationClaimStrict(claimTag, candidateSha) {
+    const target = assertSha(candidateSha);
     let created;
     try {
       created = await this.request('/git/refs', {
@@ -1635,6 +1726,25 @@ export class GitHubStateStore extends JsonStore {
     const observed = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
     if (observed !== target) throw new Error('cloud_state_generation_claim_unproven');
     return claimTag;
+  }
+
+  async claimGenerationStrict(generation, candidateSha, { registration = null, parentSha = null } = {}) {
+    const claimTag = this.generationClaimTag(generation);
+    try {
+      return await this.createGenerationClaimStrict(claimTag, candidateSha);
+    } catch (error) {
+      if (!registration || !parentSha || error?.cause?.message !== 'cloud_state_conflict') throw error;
+      const observedClaimSha = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
+      if (!observedClaimSha) throw error;
+      const recovery = await this.readGenerationClaimRecovery(registration, generation);
+      const expectedParentSha = assertSha(parentSha);
+      if (!recovery || recovery.orphanClaimSha !== observedClaimSha || recovery.parentSha !== expectedParentSha) {
+        throw error;
+      }
+      const nonce = randomUUID().replaceAll('-', '');
+      const recoveryClaimTag = this.recoveryGenerationClaimTag(generation, nonce);
+      return this.createGenerationClaimStrict(recoveryClaimTag, candidateSha);
+    }
   }
 
   async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities, lineageEnvelope, { beforeCommit = null } = {}) {
@@ -1925,6 +2035,7 @@ export class GitHubStateStore extends JsonStore {
         const currentBaseSha = await this.baseBranchSha();
         const relation = await this.compareCommits(registration.anchorSha, currentBaseSha);
         if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+        if (repair) await this.quarantineNextGenerationClaim(evidence, registration.anchorSha, 0);
         return this.snapshotFrom(null, null, null, null, null);
       }
       if (stateSha !== registration.anchorSha) throw new Error('cloud_state_unproven_state_advance');
@@ -1934,6 +2045,7 @@ export class GitHubStateStore extends JsonStore {
         throw new Error('cloud_state_epoch_registration_invalid');
       }
       await this.validateLegacyMigrationHead(stateSha, legacyEnvelope);
+      if (repair) await this.quarantineNextGenerationClaim(evidence, stateSha, legacyEnvelope.generation);
       return this.snapshotFrom(stateSha, null, null, legacyEnvelope, null);
     }
 
@@ -1970,6 +2082,7 @@ export class GitHubStateStore extends JsonStore {
       if (!repair) throw new Error('cloud_state_rollback');
       await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
     if (stateSha !== authority.stateSha) {
@@ -1978,6 +2091,7 @@ export class GitHubStateStore extends JsonStore {
         if (!repair) throw new Error('cloud_state_rollback');
         await revalidateSealedFallback();
         const repaired = await this.repairAllRefs(refs, authority.stateSha);
+        await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
         return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
       }
       if (relation === 'ahead') throw new Error('cloud_state_unproven_state_advance');
@@ -1991,9 +2105,11 @@ export class GitHubStateStore extends JsonStore {
     if (repair && (checkpointSha !== authority.stateSha || witnessSha !== authority.stateSha)) {
       await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
     await revalidateSealedFallback();
+    if (repair) await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
     return this.snapshotFrom(stateSha, checkpointSha, witnessSha, authorityEnvelope, authority);
   }
 
@@ -2146,7 +2262,7 @@ export class GitHubStateStore extends JsonStore {
 
     await this.validateLineageAnchor(envelope);
     try {
-      await this.claimGenerationStrict(generation, commitSha);
+      await this.claimGenerationStrict(generation, commitSha, { registration, parentSha });
     } catch (error) {
       throw new Error('cloud_state_generation_election_failed', { cause: error });
     }

@@ -1394,28 +1394,90 @@ test('a lost claim-create response never becomes authority by rereading the clai
   await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
 });
 
-test('bootstrap crash after claim but before authority leaves no state authority and cannot auto-recover', async () => {
+test('bootstrap crash after claim recovers only after governed quarantine repair', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   fake.failNextAnyStatusWrite(500, (body) => body.context.includes('/g/'));
   await assert.rejects(() => publishMarker(store, 'uncertain'), /partial_publication/);
   assert.equal(fake.tagSha(stateTag), null);
+
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   assert.equal((await fresh.load()).marker, undefined);
-  assert.equal((await fresh.readSnapshot({ repair: true })).authoritySha, null);
-  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+  await assert.rejects(() => publishMarker(fresh, 'retry-before-repair'), /generation_election_failed/);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.authoritySha, null);
+  const recovered = await publishMarker(fresh, 'recovered');
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'recovered');
+  assert.notEqual(fake.tagSha(fresh.generationClaimTag(1)), recovered);
+  assert.ok(fake.refWrites().some((entry) =>
+    typeof entry.body?.ref === 'string' && entry.body.ref.includes('/1/recovery/') && entry.body.sha === recovered
+  ));
 });
 
-test('established crash after claim but before authority leaves the prior authority intact', async () => {
+test('established crash after claim preserves prior authority and recovers after explicit repair', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const first = await publishMarker(store, 'one');
   fake.failNextAnyStatusWrite(500, (body) => body.context.endsWith('/0/2'));
   await assert.rejects(() => publishMarker(store, 'two'), /partial_publication/);
   assert.equal(fake.tagSha(stateTag), first);
+
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   assert.equal((await fresh.load()).marker, 'one');
-  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+  await assert.rejects(() => publishMarker(fresh, 'retry-before-repair'), /generation_election_failed/);
+  assert.equal((await fresh.readSnapshot({ repair: true })).state.marker, 'one');
+  const recovered = await publishMarker(fresh, 'two-recovered');
+  const final = await storeFor(fake, { ownerId: 'github:3:1' }).readSnapshot();
+  assert.equal(final.state.marker, 'two-recovered');
+  assert.equal(final.generation, 2);
+  assert.equal(final.authoritySha, recovered);
+});
+
+test('mismatched quarantine proof cannot authorize recovery claim election', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  fake.precreateNextClaim();
+  await assert.rejects(() => publishMarker(store, 'attacker-blocked'), /generation_election_failed/);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  const root = await fresh.readRootEvidence();
+  const registration = root.registrationByEpoch.get(0);
+  const orphanClaimSha = fake.tagSha(fresh.generationClaimTag(2));
+  const laneRoot = await fresh.laneRootCommit();
+  fake.forceStatus(
+    laneRoot.sha,
+    fresh.generationClaimRecoveryContext(2),
+    fresh.generationClaimRecoveryDescription(orphanClaimSha, fake.mainSha, registration.statusAnchorSha)
+  );
+
+  assert.equal((await fresh.load()).marker, 'one');
+  await assert.rejects(() => publishMarker(fresh, 'still-blocked'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), first);
+});
+
+test('recovery-claim creation race fails closed without changing canonical authority', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  fake.failNextAnyStatusWrite(500, (body) => body.context.endsWith('/0/2'));
+  await assert.rejects(() => publishMarker(store, 'two'), /partial_publication/);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await fresh.readSnapshot({ repair: true });
+  const originalCreateClaim = fresh.createGenerationClaimStrict.bind(fresh);
+  fresh.createGenerationClaimStrict = async (claimTag, candidateSha) => {
+    if (claimTag.includes('/recovery/')) {
+      throw new Error('cloud_state_generation_claim_failed', { cause: new Error('cloud_state_conflict') });
+    }
+    return originalCreateClaim(claimTag, candidateSha);
+  };
+
+  await assert.rejects(() => publishMarker(fresh, 'race-lost'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), first);
+  const check = await storeFor(fake, { ownerId: 'github:3:1' }).readSnapshot();
+  assert.equal(check.state.marker, 'one');
 });
 
 test('state-ref publication failure after authority is recoverable from canonical authority', async () => {
