@@ -4,6 +4,7 @@ import {
   proxyTarget,
   resetLocatorCache,
   resolveTunnelOrigin,
+  responseHeaderAllowed,
   validateTunnelOrigin
 } from '../api/control-proxy.mjs';
 
@@ -45,4 +46,12 @@ test('stable control proxy preserves path and query while removing its internal 
     'https://fresh-control.trycloudflare.com'
   );
   assert.equal(target.toString(), 'https://fresh-control.trycloudflare.com/api/status?refresh=1');
+});
+
+test('stable control proxy strips transport encoding after fetch has decoded the upstream body', () => {
+  for (const header of ['content-encoding', 'content-length', 'transfer-encoding', 'connection']) {
+    assert.equal(responseHeaderAllowed(header), false);
+  }
+  assert.equal(responseHeaderAllowed('content-type'), true);
+  assert.equal(responseHeaderAllowed('cache-control'), true);
 });
