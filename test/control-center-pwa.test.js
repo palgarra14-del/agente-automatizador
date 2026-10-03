@@ -45,7 +45,7 @@ test('Control Center advertises install metadata and native install prompt', () 
 
 test('service worker precaches install assets and evicts obsolete caches', () => {
   for (const asset of ['/manifest.webmanifest','/icon-192.png','/icon-512.png','/icon-maskable-512.png','/apple-touch-icon.png']) {
-    assert.match(sw, new RegExp(asset.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
+    assert.match(sw, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   assert.match(sw, /caches\.keys\(\)/);
   assert.match(sw, /caches\.delete/);
