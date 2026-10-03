@@ -87,7 +87,11 @@ export function diffUvNotifications(previousState, current) {
   if (!Array.isArray(current)) throw new Error('uv_notifications_current_invalid');
   if (!previousState) return [];
   const seen = new Set((previousState.notifications ?? []).map((item) => item.id));
-  return current.filter((item) => !seen.has(item.id) && !item.expired);
+  return current.filter((item) => {
+    if (seen.has(item.id) || item.expired) return false;
+    seen.add(item.id);
+    return true;
+  });
 }
 
 export function createUvNotificationState(notifications, capturedAt) {

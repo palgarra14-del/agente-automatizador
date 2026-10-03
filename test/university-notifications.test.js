@@ -73,6 +73,25 @@ test('first scan is baseline only; later only new non-expired notifications surf
   assert.deepEqual(diffUvNotifications(state, next).map((item) => item.id), ['c']);
 });
 
+test('repeated notification rows surface each new non-expired alert only once', () => {
+  const title = '2026-27 Anàlisi matemàtica II Gr.B-T (34156) contenido nuevo';
+  const current = parseUvNotifications({ text: [
+    'Notificaciones',
+    title,
+    title,
+    '2026-27 Estructuras de datos y algoritmos Gr.A-T (34670) contenido nuevo',
+    'Vence el 20 de septiembre de 2026: Entrega (34156)',
+    'Vence el 20 de septiembre de 2026: Entrega (34156)'
+  ].join('\n') }, courses, { today: '2026-09-27' });
+  const snapshot = structuredClone(current);
+  assert.equal(current.length, 5);
+  assert.deepEqual(diffUvNotifications(null, current), []);
+  assert.deepEqual(diffUvNotifications({ notifications: [] }, current), [current[0], current[2]]);
+  const previous = createUvNotificationState([current[0]], '2026-09-26T17:00:00Z');
+  assert.deepEqual(diffUvNotifications(previous, current), [current[2]]);
+  assert.deepEqual(current, snapshot);
+});
+
 test('code-less deadlines require a matching assignment from a current course', () => {
   const page = { text: [
     'Notificaciones',
