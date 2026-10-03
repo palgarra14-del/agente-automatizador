@@ -132,6 +132,8 @@ test('routing job receives event data but no secrets or write credentials', () =
   assert.match(route, /AGENT_CLOUD_EVENT_ACTION: \$\{\{ github\.event\.action \}\}/);
   assert.match(route, /AGENT_CLOUD_SCHEDULE: \$\{\{ github\.event\.schedule \}\}/);
   assert.match(route, /AGENT_CLOUD_ISSUE_BODY: \$\{\{ github\.event\.issue\.body \}\}/);
+  assert.match(route, /AGENT_CLOUD_PREVIOUS_ISSUE_BODY: \$\{\{ github\.event\.changes\.body\.from \}\}/);
+  assert.match(route, /AGENT_CLOUD_ISSUE_BODY_WAS_EDITED: \$\{\{ github\.event\.changes\.body != null \}\}/);
   assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
 

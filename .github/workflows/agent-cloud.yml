@@ -72,6 +72,8 @@ jobs:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
           AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
+          AGENT_CLOUD_PREVIOUS_ISSUE_BODY: ${{ github.event.changes.body.from }}
+          AGENT_CLOUD_ISSUE_BODY_WAS_EDITED: ${{ github.event.changes.body != null }}
           AGENT_CLOUD_REQUESTED_LANE: ${{ inputs.lane }}
           AGENT_CLOUD_SCHEDULE: ${{ github.event.schedule }}
           AGENT_GLOBAL_PAUSE: ${{ vars.AGENT_GLOBAL_PAUSE }}
