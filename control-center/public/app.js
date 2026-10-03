@@ -197,6 +197,21 @@ function laneState(data, lane) {
       cls: 'good'
     };
   }
+  const telemetry = data.laneTelemetry?.lanes?.[lane];
+  if (telemetry?.current) {
+    return {
+      state: 'trabajando',
+      detail: 'Run ' + telemetry.current.id + ' · ' + telemetry.current.status,
+      cls: 'good'
+    };
+  }
+  if (lane === 'self' && data.autonomy?.heartbeatActive && data.service?.active) {
+    return {
+      state: 'autónomo',
+      detail: 'Vigilancia continua · heartbeat cada ' + (data.autonomy.heartbeatIntervalSeconds || 120) + ' s',
+      cls: 'good'
+    };
+  }
   const issues = (data.tasks || []).filter((t) => t.request?.projectId === lane);
   const records = issues.map((t) => queueRecord(data, t.number)).filter(Boolean);
   const live = records.find((r) => activeStates.has(r.status));
@@ -279,18 +294,22 @@ function renderStats(data) {
   const runners = data.runnerTelemetry || {};
   const business = data.laneTelemetry?.business || {};
   const corePct = data.githubRateLimit?.core?.remainingPercent;
+  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.msiOnline || 0) > 0;
   const values = [
-    [data.service?.active ? 'ONLINE' : 'OFFLINE','Servicio'],
+    [autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE'),'Agente'],
     [(runners.msiOnline ?? '—') + '/' + (runners.msiTotal ?? '—'),'Runners MSI'],
     [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
     [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];
   $('stats').innerHTML = values.map(([v,l]) => '<div class="stat"><div class="value">'+esc(v)+'</div><div class="label">'+esc(l)+'</div></div>').join('');
-  $('heroTitle').textContent = data.service?.active ? 'El agente está accesible' : 'El servicio del agente está parado';
+  $('heroTitle').textContent = autonomous
+    ? 'Agente autónomo activo'
+    : (data.service?.active ? 'Agente online, autonomía degradada' : 'El servicio del agente está parado');
   $('heroSub').textContent = (data.git?.branch || 'sin rama') + ' · ' + (data.git?.commit || 'sin commit') + (data.git?.dirty ? ' · cambios locales' : '') +
-    ' · snapshot ' + data.latencyMs + ' ms · ' + active + ' tarea(s) activas';
-  $('liveDot').className = data.service?.active ? 'good' : 'bad';
-  $('liveText').textContent = data.service?.active ? 'MSI online' : 'Servicio parado';
+    ' · heartbeat ' + (data.autonomy?.heartbeatActive ? 'cada ' + (data.autonomy.heartbeatIntervalSeconds || 120) + ' s' : 'no disponible') +
+    ' · ' + active + ' tarea(s) activas';
+  $('liveDot').className = autonomous ? 'good' : (data.service?.active ? 'warn' : 'bad');
+  $('liveText').textContent = autonomous ? 'Autonomía activa' : (data.service?.active ? 'Online con vigilancia degradada' : 'Servicio parado');
 }
 
 function renderLanes(data) {
