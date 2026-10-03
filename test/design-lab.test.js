@@ -381,7 +381,7 @@ print(json.dumps({
   }
 });
 
-test('deferred run directories rotate briefs without becoming official training evidence', () => {
+test('deferred outage exploration balances every brief without becoming official training evidence', () => {
   const dir = mkdtempSync(join(tmpdir(), 'design-lab-deferred-briefs-'));
   try {
     const result = python(`
@@ -390,23 +390,60 @@ root=Path(sys.argv[1])
 m.RUNS=root/"runs"
 m.HISTORY=root/"history.jsonl"
 m.RUNS.mkdir(parents=True)
-(m.RUNS/"run-0001-training-salon-color-premium").mkdir()
-(m.RUNS/"run-0002-training-barberia-contemporanea").mkdir()
-first=m.choose_brief()["slug"]
-(m.RUNS/f"run-0003-training-{first}").mkdir()
-second=m.choose_brief()["slug"]
+pairs=[]
+counts={}
+for number in range(1,25):
+    brief=m.choose_brief()
+    slug=brief["slug"]
+    run=m.RUNS/f"run-{number:04d}-training-{slug}"
+    run.mkdir()
+    meta=m.build_emergency_site(run,brief,"no_edit_candidate_available")
+    pairs.append((slug,meta["layout"]))
+    counts[slug]=counts.get(slug,0)+1
 print(json.dumps({
-  "first":first,
-  "second":second,
   "officialCount":len(m.training_history()),
-  "attempts":m.training_attempts()
+  "counts":counts,
+  "uniquePairs":len(set(pairs)),
+  "briefCount":len(m.BRIEFS)
 }))
 `, [dir]);
     assert.equal(result.officialCount, 0);
-    assert.equal(result.attempts.length, 3);
-    assert.notEqual(result.first, 'salon-color-premium');
-    assert.notEqual(result.first, 'barberia-contemporanea');
-    assert.notEqual(result.second, result.first);
+    assert.equal(Object.keys(result.counts).length, result.briefCount);
+    assert.ok(Object.values(result.counts).every(value => value === 3), JSON.stringify(result.counts));
+    assert.equal(result.uniquePairs, 24);
+  } finally {
+    rmSync(dir, { recursive:true, force:true });
+  }
+});
+
+test('deferred emergency coverage stops only after all brief-layout pairs exist', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'design-lab-coverage-'));
+  try {
+    const result = python(`
+from pathlib import Path
+root=Path(sys.argv[1])
+m.RUNS=root/"runs"
+m.RUNS.mkdir(parents=True)
+number=1
+paths=[]
+for brief in m.BRIEFS:
+    for layout in m.EMERGENCY_LAYOUTS:
+        run=m.RUNS/f"run-{number:04d}-training-{brief['slug']}"
+        run.mkdir()
+        (run/"review-initial-deferred.txt").write_text("visual unavailable",encoding="utf-8")
+        (run/"model-route-build.json").write_text(json.dumps({
+          "emergencyRenderer":True,
+          "layout":layout
+        }),encoding="utf-8")
+        paths.append(run)
+        number+=1
+full=m.deferred_emergency_coverage()
+(paths[-1]/"review-initial-deferred.txt").unlink()
+partial=m.deferred_emergency_coverage()
+print(json.dumps({"full":full,"partial":partial}))
+`, [dir]);
+    assert.deepEqual(result.full, { count:24, target:24, complete:true });
+    assert.deepEqual(result.partial, { count:23, target:24, complete:false });
   } finally {
     rmSync(dir, { recursive:true, force:true });
   }
