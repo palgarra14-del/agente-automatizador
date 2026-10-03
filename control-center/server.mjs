@@ -12,6 +12,7 @@ import {
   summarizeLaneRuns,
   summarizeRunners
 } from './telemetry.mjs';
+import { globalPauseEnabled, parsePausedLanes, serializePausedLanes } from '../src/operator-control.js';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -184,6 +185,56 @@ async function getRunners() {
       error: result.ok ? null : (result.stderr || 'runner_telemetry_unavailable')
     };
   });
+}
+
+async function getRepoVariable(name) {
+  const result = await run('gh', ['api', `repos/${repo}/actions/variables/${name}`, '--jq', '.value'], { timeout: 8_000 });
+  if (result.ok) return result.stdout;
+  if (/HTTP 404|Not Found/i.test(result.stderr)) return '';
+  return '';
+}
+
+async function getRemoteControl() {
+  const lanes = Object.keys(laneScopes);
+  const [globalValue, pausedValue] = await Promise.all([
+    getRepoVariable('AGENT_GLOBAL_PAUSE'),
+    getRepoVariable('AGENT_PAUSED_LANES')
+  ]);
+  return {
+    globalPaused: globalPauseEnabled(globalValue),
+    pausedLanes: parsePausedLanes(pausedValue, lanes),
+    mode: globalPauseEnabled(globalValue) ? 'paused' : 'autonomous'
+  };
+}
+
+async function setRepoVariable(name, value) {
+  const result = await run('gh', ['variable', 'set', name, '--repo', repo, '--body', String(value)], { timeout: 15_000 });
+  if (!result.ok) throw new Error(`control_variable_update_failed:${result.stderr || name}`);
+  return true;
+}
+
+async function wakeHeartbeat() {
+  await run('systemctl', ['--user', 'start', 'engineering-orchestrator-cloud-heartbeat.service'], { cwd:'/', timeout: 15_000 });
+}
+
+async function setGlobalPause(input) {
+  const paused = input?.paused === true;
+  await setRepoVariable('AGENT_GLOBAL_PAUSE', paused ? 'true' : 'false');
+  if (!paused) await wakeHeartbeat();
+  return { ...(await getRemoteControl()), changed: true };
+}
+
+async function setLanePause(input) {
+  const lane = String(input?.lane || '').trim();
+  if (!Object.hasOwn(laneScopes, lane)) throw new Error('lane_invalid');
+  const paused = input?.paused === true;
+  const current = await getRemoteControl();
+  const lanes = new Set(current.pausedLanes);
+  if (paused) lanes.add(lane);
+  else lanes.delete(lane);
+  await setRepoVariable('AGENT_PAUSED_LANES', serializePausedLanes([...lanes]) || '-');
+  if (!paused && !current.globalPaused) await wakeHeartbeat();
+  return { ...(await getRemoteControl()), lane, changed: true };
 }
 
 async function getGithubRateLimit() {
@@ -445,8 +496,8 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs] = await Promise.all([
-    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70)
+  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs, remoteControl] = await Promise.all([
+    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70), getRemoteControl()
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
@@ -459,7 +510,7 @@ async function snapshot() {
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations,
+    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations, remoteControl,
     laneTelemetry,
     runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
     githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
@@ -620,6 +671,8 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, await wakeLane(String(input.lane || '')));
     }
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
+    if (req.method === 'POST' && url.pathname === '/api/control/global') return sendJson(res, 200, await setGlobalPause(await bodyJson(req)));
+    if (req.method === 'POST' && url.pathname === '/api/control/lane') return sendJson(res, 200, await setLanePause(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/change-pin') {
       const result = await changeAccessPin(await bodyJson(req));
       setSessionCookie(res);

@@ -43,6 +43,17 @@
 
     <section id="stats" class="stats"></section>
 
+    <section id="remoteControl" class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">CONTROL REMOTO</p><h2>Gobierna la autonomía desde cualquier parte</h2><p id="controlNote" class="section-sub">Leyendo estado de control…</p></div>
+        <span id="controlMode" class="badge warn">cargando</span>
+      </div>
+      <div class="hero-actions">
+        <button id="pauseAllBtn" class="danger">Pausar nuevas ejecuciones</button>
+        <button id="resumeAllBtn" class="primary">Reanudar todo</button>
+      </div>
+    </section>
+
     <section id="missionControl" class="card mission-control">
       <div class="section-title mission-title">
         <div><p class="eyebrow">MISSION CONTROL</p><h2>Estado real del agente</h2><p id="missionMeta" class="section-sub">Calculando salud reciente…</p></div>
@@ -225,6 +236,7 @@
 
   <nav class="bottom-nav">
     <button data-jump="top">Inicio</button>
+    <button data-jump="remoteControl">Control</button>
     <button data-jump="missionControl">Mando</button>
     <button data-jump="taskForm">Nueva tarea</button>
   </nav>

@@ -68,7 +68,9 @@ main{max-width:1180px;margin:0 auto;padding:20px;display:grid;gap:18px}
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px;background:var(--muted)}
 .dot.good{background:var(--good)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
 .lane p{color:var(--muted);font-size:12px;line-height:1.45;margin-top:8px;min-height:34px}
-.lane button{width:100%;margin-top:12px}
+.lane-actions{display:grid;gap:8px;margin-top:12px}
+.lane-actions button{width:100%;margin-top:0}
+.lane button{width:100%;margin-top:0}
 .composer form{display:grid;gap:14px}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .brief-fields{display:grid;gap:12px}

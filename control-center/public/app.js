@@ -190,11 +190,19 @@ function renderQueueView(data) {
 }
 function laneState(data, lane) {
   const worker = (data.workActivity || []).find((item) => item.lane === lane);
+  const paused = data.remoteControl?.globalPaused || (data.remoteControl?.pausedLanes || []).includes(lane);
   if (worker) {
     return {
-      state: 'trabajando',
-      detail: worker.action + ' · proceso ' + worker.pid + ' · ' + worker.elapsed + (worker.backend ? ' · ' + worker.backend : ''),
-      cls: 'good'
+      state: paused ? 'terminando · pausado' : 'trabajando',
+      detail: worker.action + ' · proceso ' + worker.pid + ' · ' + worker.elapsed + (worker.backend ? ' · ' + worker.backend : '') + (paused ? ' · no se lanzarán nuevas ejecuciones' : ''),
+      cls: paused ? 'warn' : 'good'
+    };
+  }
+  if (paused) {
+    return {
+      state: 'pausado',
+      detail: data.remoteControl?.globalPaused ? 'Pausa global activa' : 'Pausa manual del carril',
+      cls: 'warn'
     };
   }
   const telemetry = data.laneTelemetry?.lanes?.[lane];
@@ -244,6 +252,7 @@ function renderMission(data) {
     const lastSuccess = telemetry?.lastSuccessAt;
     const runLabel = current ? ('Run ' + current.id + ' · ' + current.status) :
       (telemetry?.latest ? ('Último run ' + telemetry.latest.id + ' · ' + (telemetry.latest.conclusion || telemetry.latest.status)) : 'Sin runs recientes');
+    const paused = data.remoteControl?.globalPaused || (data.remoteControl?.pausedLanes || []).includes(lane);
     const details = [
       Number.isFinite(rate) ? 'Éxito reciente ' + rate + '%' : null,
       lastSuccess ? 'Último OK hace ' + age(lastSuccess) : null,
@@ -255,7 +264,9 @@ function renderMission(data) {
       '<div class="mission-run">'+esc(runLabel)+'</div>'+
       '<div class="meta">'+esc(live.detail)+'</div>'+
       '<div class="mission-kpis">'+esc(details || 'Aún sin muestra suficiente')+'</div>'+
-      '<button class="mini mission-wake" data-wake="'+lane+'">Reactivar</button>'+
+      (paused
+        ? '<button class="mini mission-wake" disabled>Pausado</button>'
+        : '<button class="mini mission-wake" data-wake="'+lane+'">Reactivar</button>')+
     '</article>';
   }).join('');
 }
@@ -288,37 +299,67 @@ function renderInfrastructure(data) {
   $('infraFreshness').textContent = ages.length ? 'Telemetría cacheada hace ' + durationMs(Math.max(...ages)) : 'Telemetría en vivo';
 }
 
+function renderRemoteControl(data) {
+  const control = data.remoteControl || {};
+  const paused = control.pausedLanes || [];
+  const globalPaused = control.globalPaused === true;
+  const partial = !globalPaused && paused.length > 0;
+  $('controlMode').textContent = globalPaused ? 'PAUSADO' : (partial ? 'PARCIAL' : 'AUTÓNOMO');
+  $('controlMode').className = 'badge ' + (globalPaused || partial ? 'warn' : 'good');
+  $('controlNote').textContent = globalPaused
+    ? 'No se lanzarán nuevas ejecuciones. Los trabajos que ya estaban en curso pueden terminar de forma segura.'
+    : (partial
+      ? 'Carriles pausados: ' + paused.map((lane) => laneNames[lane] || lane).join(', ') + '. El resto sigue autónomo.'
+      : 'Todos los carriles pueden trabajar de forma autónoma. Puedes pausar sin matar tareas a medias.');
+  $('pauseAllBtn').disabled = globalPaused;
+  $('resumeAllBtn').disabled = !globalPaused && paused.length === 0;
+}
+
 function renderStats(data) {
   const records = data.queue?.records || [];
   const active = records.filter((r) => activeStates.has(r.status)).length;
   const runners = data.runnerTelemetry || {};
   const business = data.laneTelemetry?.business || {};
   const corePct = data.githubRateLimit?.core?.remainingPercent;
-  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.msiOnline || 0) > 0;
+  const operatorPaused = data.remoteControl?.globalPaused === true;
+  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.msiOnline || 0) > 0 && !operatorPaused;
   const values = [
-    [autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE'),'Agente'],
+    [operatorPaused ? 'PAUSADO' : (autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE')),'Agente'],
     [(runners.msiOnline ?? '—') + '/' + (runners.msiTotal ?? '—'),'Runners MSI'],
     [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
     [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];
   $('stats').innerHTML = values.map(([v,l]) => '<div class="stat"><div class="value">'+esc(v)+'</div><div class="label">'+esc(l)+'</div></div>').join('');
-  $('heroTitle').textContent = autonomous
-    ? 'Agente autónomo activo'
-    : (data.service?.active ? 'Agente online, autonomía degradada' : 'El servicio del agente está parado');
+  $('heroTitle').textContent = operatorPaused
+    ? 'Autonomía pausada por ti'
+    : (autonomous
+      ? 'Agente autónomo activo'
+      : (data.service?.active ? 'Agente online, autonomía degradada' : 'El servicio del agente está parado'));
   $('heroSub').textContent = (data.git?.branch || 'sin rama') + ' · ' + (data.git?.commit || 'sin commit') + (data.git?.dirty ? ' · cambios locales' : '') +
     ' · heartbeat ' + (data.autonomy?.heartbeatActive ? 'cada ' + (data.autonomy.heartbeatIntervalSeconds || 120) + ' s' : 'no disponible') +
     ' · ' + active + ' tarea(s) activas';
   $('liveDot').className = autonomous ? 'good' : (data.service?.active ? 'warn' : 'bad');
-  $('liveText').textContent = autonomous ? 'Autonomía activa' : (data.service?.active ? 'Online con vigilancia degradada' : 'Servicio parado');
+  $('liveText').textContent = operatorPaused ? 'Pausa manual activa' : (autonomous ? 'Autonomía activa' : (data.service?.active ? 'Online con vigilancia degradada' : 'Servicio parado'));
 }
 
 function renderLanes(data) {
+  const globalPaused = data.remoteControl?.globalPaused === true;
+  const pausedLanes = new Set(data.remoteControl?.pausedLanes || []);
   $('lanes').innerHTML = Object.keys(laneNames).map((lane) => {
     const s = laneState(data, lane);
+    const lanePaused = pausedLanes.has(lane);
+    const pauseButton = globalPaused
+      ? '<button class="ghost" disabled>Pausa global activa</button>'
+      : (lanePaused
+        ? '<button class="primary" data-lane-pause="'+lane+'" data-paused="false">Reanudar carril</button>'
+        : '<button class="ghost" data-lane-pause="'+lane+'" data-paused="true">Pausar carril</button>');
+    const wakeButton = globalPaused || lanePaused
+      ? '<button disabled>Reactivar / comprobar · pausado</button>'
+      : '<button data-wake="'+lane+'">Reactivar / comprobar</button>';
     return '<article class="lane">'+
       '<div class="lane-head"><h3><span class="dot '+s.cls+'"></span>'+esc(laneNames[lane])+'</h3><span class="badge '+s.cls+'">'+esc(s.state)+'</span></div>'+
       '<p>'+esc(s.detail)+'</p>'+
-      '<button data-wake="'+lane+'">Reactivar / comprobar</button>'+
+      '<div class="lane-actions">'+wakeButton+pauseButton+'</div>'+
     '</article>';
   }).join('');
 }
@@ -476,6 +517,7 @@ function renderRuns(data) {
 function render(data) {
   lastData = data;
   renderStats(data);
+  renderRemoteControl(data);
   renderMission(data);
   renderInfrastructure(data);
   renderAttention(data);
@@ -574,6 +616,7 @@ document.addEventListener('click', async (event) => {
   const approve = event.target.closest('[data-approve]');
   const reject = event.target.closest('[data-reject]');
   const cancel = event.target.closest('[data-cancel-workflow]');
+  const lanePause = event.target.closest('[data-lane-pause]');
   const jump = event.target.closest('[data-jump]');
   if (jump) {
     const id = jump.dataset.jump;
@@ -616,12 +659,20 @@ document.addEventListener('click', async (event) => {
       toast('Cancelacion solicitada para la tarea #' + cancel.dataset.cancelIssue);
       setTimeout(refresh, 1000);
     }
+    if (lanePause) {
+      lanePause.disabled = true;
+      const paused = lanePause.dataset.paused === 'true';
+      await api('/api/control/lane',{method:'POST',body:JSON.stringify({lane:lanePause.dataset.lanePause,paused})});
+      toast(paused ? 'Carril pausado de forma segura' : 'Carril reanudado');
+      setTimeout(refresh, 700);
+    }
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
     if (wake) wake.disabled = false;
     if (retry) retry.disabled = false;
     if (cancel) cancel.disabled = false;
+    if (lanePause) lanePause.disabled = false;
   }
 });
 
@@ -650,6 +701,39 @@ $('pinChangeForm').addEventListener('submit', async (event) => {
 });
 
 $('refreshBtn').addEventListener('click', refresh);
+
+$('pauseAllBtn').addEventListener('click', async () => {
+  if (!globalThis.confirm('Pausar nuevas ejecuciones? Los trabajos que ya estén en curso podrán terminar de forma segura.')) return;
+  const button = $('pauseAllBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/global', {method:'POST', body:JSON.stringify({paused:true})});
+    toast('Autonomía pausada');
+    await refresh();
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('resumeAllBtn').addEventListener('click', async () => {
+  const button = $('resumeAllBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/global', {method:'POST', body:JSON.stringify({paused:false})});
+    for (const lane of (lastData?.remoteControl?.pausedLanes || [])) {
+      await api('/api/control/lane', {method:'POST', body:JSON.stringify({lane,paused:false})});
+    }
+    toast('Autonomía reanudada');
+    setTimeout(refresh, 500);
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $('restartServiceBtn').addEventListener('click', async () => {
   const button = $('restartServiceBtn');
   button.disabled = true;

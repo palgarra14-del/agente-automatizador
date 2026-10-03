@@ -88,3 +88,30 @@ test('trusted routing configuration rejects duplicate or invalid ownership', () 
     config: { cloudLanes: [] }
   }), /config_invalid/);
 });
+
+test('operator pause state is enforced for manual, scheduled and issue wakeups', () => {
+  assert.deepEqual(routeCloudLanes({
+    eventName:'workflow_dispatch',
+    requestedLane:'leadfinder',
+    pausedLanes:'leadfinder',
+    config
+  }), []);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'schedule',
+    schedule:'47 * * * *',
+    pausedLanes:'leadfinder',
+    config
+  }), ['callflow']);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'issues',
+    eventAction:'opened',
+    issueBody:body('callflow'),
+    globalPause:'true',
+    config
+  }), []);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'workflow_dispatch',
+    pausedLanes:'self,website-pilot',
+    config
+  }), ['leadfinder','callflow']);
+});

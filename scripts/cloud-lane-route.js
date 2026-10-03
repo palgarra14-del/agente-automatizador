@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyOperatorControl, globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const DEFAULT_CONFIG_PATH = resolve('config/issue-queue.json');
@@ -34,38 +35,51 @@ function trustedRouting(config) {
   return { lanes: [...laneIds], projectToLane };
 }
 
-export function routeCloudLanes({ eventName, eventAction = '', issueBody = '', requestedLane = '', schedule = '', config } = {}) {
+export function routeCloudLanes({
+  eventName,
+  eventAction = '',
+  issueBody = '',
+  requestedLane = '',
+  schedule = '',
+  config,
+  globalPause = false,
+  pausedLanes = ''
+} = {}) {
   const { lanes, projectToLane } = trustedRouting(config);
+  const controlled = (selected) => applyOperatorControl(selected, {
+    globalPause: globalPauseEnabled(globalPause),
+    pausedLanes: parsePausedLanes(pausedLanes, lanes)
+  });
   if (eventName === 'workflow_dispatch' && requestedLane) {
     if (!VALID_LANE_ID.test(requestedLane) || !lanes.includes(requestedLane)) {
       throw new Error('cloud_lane_route_requested_lane_invalid');
     }
-    return [requestedLane];
+    return controlled([requestedLane]);
   }
   if (eventName === 'schedule') {
     const lane = SCHEDULE_LANES[schedule];
     if (!lane || !lanes.includes(lane)) throw new Error('cloud_lane_route_schedule_invalid');
-    return [lane];
+    return controlled([lane]);
   }
-  if (eventName === 'workflow_dispatch') return lanes;
+  if (eventName === 'workflow_dispatch') return controlled(lanes);
   if (eventName === 'push') return [];
-  if (!['issues', 'issue_comment'].includes(eventName)) return lanes;
-  if (eventName === 'issues' && eventAction !== 'opened') return lanes;
-  if (typeof issueBody !== 'string') return lanes;
+  if (!['issues', 'issue_comment'].includes(eventName)) return controlled(lanes);
+  if (eventName === 'issues' && eventAction !== 'opened') return controlled(lanes);
+  if (typeof issueBody !== 'string') return controlled(lanes);
 
   const markerIndex = issueBody.indexOf(REQUEST_MARKER);
-  if (markerIndex < 0 || issueBody.slice(0, markerIndex).trim()) return lanes;
+  if (markerIndex < 0 || issueBody.slice(0, markerIndex).trim()) return controlled(lanes);
 
   let request;
   try {
     request = JSON.parse(issueBody.slice(markerIndex + REQUEST_MARKER.length).trim());
   } catch {
-    return lanes;
+    return controlled(lanes);
   }
   const projectId = request?.projectId;
-  if (typeof projectId !== 'string') return lanes;
+  if (typeof projectId !== 'string') return controlled(lanes);
   const lane = projectToLane.get(projectId);
-  return lane ? [lane] : lanes;
+  return controlled(lane ? [lane] : lanes);
 }
 
 function main() {
@@ -79,6 +93,8 @@ function main() {
     issueBody: process.env.AGENT_CLOUD_ISSUE_BODY ?? '',
     requestedLane: process.env.AGENT_CLOUD_REQUESTED_LANE ?? '',
     schedule: process.env.AGENT_CLOUD_SCHEDULE ?? '',
+    globalPause: process.env.AGENT_GLOBAL_PAUSE ?? '',
+    pausedLanes: process.env.AGENT_PAUSED_LANES ?? '',
     config
   });
   process.stdout.write(JSON.stringify(lanes));

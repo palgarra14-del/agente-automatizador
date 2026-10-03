@@ -48,7 +48,7 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
   const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
-  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.route\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
   assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit, recover\][\s\S]*needs\.admit\.result[\s\S]*needs\.recover\.result/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);

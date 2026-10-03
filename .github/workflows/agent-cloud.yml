@@ -45,7 +45,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 5
     outputs:
-      active: ${{ steps.wakeup.outputs.active }}
+      active: ${{ steps.route.outputs.active }}
       lanes: ${{ steps.route.outputs.lanes }}
     steps:
       - name: Checkout trusted main
@@ -74,10 +74,19 @@ jobs:
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
           AGENT_CLOUD_REQUESTED_LANE: ${{ inputs.lane }}
           AGENT_CLOUD_SCHEDULE: ${{ github.event.schedule }}
+          AGENT_GLOBAL_PAUSE: ${{ vars.AGENT_GLOBAL_PAUSE }}
+          AGENT_PAUSED_LANES: ${{ vars.AGENT_PAUSED_LANES }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
-          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
-          echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
+          if [[ "$LANES" == "[]" ]]; then
+            echo 'active=false' >> "$GITHUB_OUTPUT"
+            echo 'lanes=["self"]' >> "$GITHUB_OUTPUT"
+            echo "::notice::Operator pause prevented this cloud wakeup"
+          else
+            echo 'active=true' >> "$GITHUB_OUTPUT"
+            echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+          fi
 
   admit:
     name: admit cloud event (${{ matrix.lane }})
