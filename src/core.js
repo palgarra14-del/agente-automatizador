@@ -10,6 +10,7 @@ import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
+import { planBrowserQaAutocorrection } from './browser-qa-autocorrection.js';
 
 export const RunStatus = Object.freeze({
   CREATED: 'created',
@@ -2033,6 +2034,43 @@ export class WorkflowEngine {
     const plan = createWorkflowPlan({ ...input, project, registry: this.registry, specialistRegistry: this.specialistRegistry, now: () => new Date(this.now()).toISOString(), nowMs: this.now() });
     await this.store.mutate((data) => { data.workflows ??= {}; data.workflows[plan.id] = plan; });
     return plan;
+  }
+
+  async createBrowserQaAutocorrection({ sourceWorkflowId, request, evidence } = {}) {
+    if (typeof sourceWorkflowId !== 'string' || !sourceWorkflowId.trim()) throw new Error('browser_qa_autocorrection_source_id_invalid');
+    return this.store.mutate((data) => {
+      data.workflows ??= {};
+      data.browserQaAutocorrections ??= {};
+      const sourceWorkflow = data.workflows[sourceWorkflowId];
+      if (!sourceWorkflow) throw new Error('browser_qa_autocorrection_source_not_found');
+      const existingRecord = data.browserQaAutocorrections[sourceWorkflowId] ?? null;
+      const sourceIsCorrection = Object.values(data.browserQaAutocorrections).some((record) => record?.correctionWorkflowId === sourceWorkflowId);
+      const decision = planBrowserQaAutocorrection({ sourceWorkflow, request, evidence, existingRecord, sourceIsCorrection });
+      if (decision.status !== 'create') return decision;
+      const project = this.projects.get(decision.workflowInput.projectId);
+      if (!project) throw new Error('browser_qa_autocorrection_project_not_found');
+      const createdAtMs = this.now();
+      const correctionWorkflow = createWorkflowPlan({
+        ...decision.workflowInput,
+        project,
+        registry: this.registry,
+        specialistRegistry: this.specialistRegistry,
+        now: () => new Date(createdAtMs).toISOString(),
+        nowMs: createdAtMs
+      });
+      data.workflows[correctionWorkflow.id] = correctionWorkflow;
+      data.browserQaAutocorrections[sourceWorkflowId] = {
+        sourceWorkflowId,
+        correctionWorkflowId: correctionWorkflow.id,
+        projectId: sourceWorkflow.projectId,
+        evidenceFingerprint: decision.evidenceFingerprint,
+        deterministicDefectFingerprint: decision.defectFingerprint,
+        requestFingerprint: decision.requestFingerprint,
+        sourceBinding: decision.binding,
+        createdAt: new Date(createdAtMs).toISOString()
+      };
+      return { status: 'created', correctionWorkflow: JSON.parse(JSON.stringify(correctionWorkflow)), record: JSON.parse(JSON.stringify(data.browserQaAutocorrections[sourceWorkflowId])) };
+    });
   }
 
   async get(id) { return (await this.store.load()).workflows?.[id]; }
