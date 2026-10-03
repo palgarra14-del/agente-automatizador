@@ -107,7 +107,7 @@ jobs:
   recover:
     name: recover cloud admissions (${{ matrix.lane }})
     needs: route
-    if: needs.route.outputs.active == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: needs.route.outputs.active == 'true' && github.event_name == 'schedule'
     permissions:
       contents: write
       issues: read
@@ -120,9 +120,9 @@ jobs:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, agent-local]
-    # Allow Cloud State repair plus admission recovery to finish on large histories.
-    # The recovery command itself remains hard-bounded to 20 minutes below.
-    timeout-minutes: 30
+    # Scheduled repair is a safety net, not a gate for heartbeat-dispatched work.
+    # Keep it short so a slow control-plane recovery cannot monopolize a runner.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
@@ -133,7 +133,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: timeout --signal=TERM --kill-after=30s 20m node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
+        shell: bash
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=10s 2m node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
+          RECOVERY_EXIT="$?"
+          set -e
+          case "$RECOVERY_EXIT" in
+            0) ;;
+            124|137|143)
+              echo "::notice::$AGENT_CLOUD_LANE scheduled recovery timed out; normal drain recovery remains available"
+              ;;
+            *) exit "$RECOVERY_EXIT" ;;
+          esac
 
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
@@ -229,7 +241,7 @@ jobs:
               ;;
             124|137|143)
               printf '%s\n' '{"version":1,"iterations":[],"stopReason":"supervisor_timeout","remainingWork":true,"continuationRecommended":true,"elapsedMs":1500000,"limits":{"supervisorTimeoutMs":1500000}}' > "$RESULT_FILE"
-              echo "::notice::$AGENT_CLOUD_LANE drain hit supervisor timeout; scheduling governed continuation"
+              echo "::notice::$AGENT_CLOUD_LANE drain hit supervisor timeout; MSI heartbeat will resume the lane"
               ;;
             *)
               cat "$RESULT_FILE" || true
@@ -256,36 +268,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/schedule-cloud-retry.js
 
-      - name: Continue same lane while governed work remains
+      - name: Leave bounded continuation to MSI heartbeat
         if: steps.drain.outputs.continue == 'true'
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: |
-          node --input-type=module <<'NODE'
-          const lane = process.env.AGENT_CLOUD_LANE ?? '';
-          const repository = process.env.GITHUB_REPOSITORY ?? '';
-          const token = process.env.GITHUB_TOKEN ?? '';
-          if (!/^[a-z0-9-]{1,80}$/.test(lane)) throw new Error('cloud_continuation_lane_invalid');
-          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('cloud_continuation_repository_invalid');
-          if (!token) throw new Error('cloud_continuation_token_missing');
-          const response = await fetch(
-            `https://api.github.com/repos/${repository}/actions/workflows/agent-cloud.yml/dispatches`,
-            {
-              method: 'POST',
-              headers: {
-                Accept: 'application/vnd.github+json',
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'User-Agent': 'agente-automatizador-cloud-continuation',
-                'X-GitHub-Api-Version': '2022-11-28'
-              },
-              body: JSON.stringify({ ref: 'main', inputs: { lane } })
-            }
-          );
-          if (response.status !== 204) {
-            throw new Error(`cloud_continuation_dispatch_failed:${response.status}`);
-          }
-          NODE
+        run: echo "::notice::$AGENT_CLOUD_LANE still has governed work; MSI heartbeat will wake it again without recursive dispatch"

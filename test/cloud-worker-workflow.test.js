@@ -175,12 +175,13 @@ test('cloud worker fuses scheduled repair with admission recovery and keeps clou
   const recovery = workflow.slice(recoverJobStart, cloudOnceStart);
   assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
-  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\)/);
+  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && github\.event_name == 'schedule'/);
   assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
-  assert.match(recovery, /timeout-minutes: 30/);
-  assert.match(recovery, /timeout --signal=TERM --kill-after=30s 20m node src\/cli\.js inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /timeout-minutes: 5/);
+  assert.match(recovery, /timeout --signal=TERM --kill-after=10s 2m node src\/cli\.js inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /124\|137\|143[\s\S]*scheduled recovery timed out; normal drain recovery remains available/);
   assert.doesNotMatch(recovery, /inbox cloud-repair --lane/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
@@ -244,7 +245,7 @@ test('production cloud execution uses the bounded drain while retaining cloud-on
 });
 
 test('autonomous cloud work keeps model billing disabled and confines cross-repo auth to the orchestrator boundary', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 5);
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 4);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
   assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 0);
@@ -266,9 +267,9 @@ test('autonomous cloud work keeps model billing disabled and confines cross-repo
 
 test('GitHub rate limits schedule one delayed lane retry without holding a runner', () => {
   const retryStart = workflow.indexOf('- name: Schedule exact rate-limit continuation');
-  const continuationStart = workflow.indexOf('- name: Continue same lane while governed work remains');
-  assert.ok(retryStart > 0 && continuationStart > retryStart);
-  const retry = workflow.slice(retryStart, continuationStart);
+  const heartbeatStart = workflow.indexOf('- name: Leave bounded continuation to MSI heartbeat');
+  assert.ok(retryStart > 0 && heartbeatStart > retryStart);
+  const retry = workflow.slice(retryStart, heartbeatStart);
   assert.match(workflow, /rate_limit_retry_ms=\$RATE_LIMIT_RETRY_MS/);
   assert.match(retry, /if: steps\.drain\.outputs\.rate_limit_retry_ms != ''/);
   assert.match(retry, /AGENT_RATE_LIMIT_RETRY_MS: \$\{\{ steps\.drain\.outputs\.rate_limit_retry_ms \}\}/);
@@ -276,15 +277,13 @@ test('GitHub rate limits schedule one delayed lane retry without holding a runne
   assert.doesNotMatch(retry, /GITHUB_TOKEN|secrets\./);
 });
 
-test('cloud continuation dispatch is lane-scoped and only follows an explicit drain recommendation', () => {
-  assert.match(workflow, /- name: Continue same lane while governed work remains/);
+test('cloud continuation is delegated to the MSI heartbeat without recursive workflow dispatch', () => {
+  assert.match(workflow, /- name: Leave bounded continuation to MSI heartbeat/);
   assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
-  assert.match(workflow, /GITHUB_REPOSITORY: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
-  assert.match(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
-  assert.match(workflow, /JSON\.stringify\(\{ ref: 'main', inputs: \{ lane \} \}\)/);
-  assert.match(workflow, /response\.status !== 204/);
-  assert.doesNotMatch(workflow, /inputs: \{ lane: process\.env\./);
+  assert.match(workflow, /MSI heartbeat will wake it again without recursive dispatch/);
+  assert.doesNotMatch(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
+  assert.doesNotMatch(workflow, /cloud_continuation_dispatch_failed/);
 });
 
 test('cloud worker has no merge or production deployment command surface', () => {
@@ -293,9 +292,9 @@ test('cloud worker has no merge or production deployment command surface', () =>
 
 test('autonomous self-maintenance failures cannot masquerade as a successful cloud drain', () => {
   const drainStart = workflow.indexOf('- name: Drain governed cloud work continuously');
-  const continuationStart = workflow.indexOf('- name: Continue same lane while governed work remains');
-  assert.ok(drainStart > 0 && continuationStart > drainStart);
-  const drain = workflow.slice(drainStart, continuationStart);
+  const heartbeatStart = workflow.indexOf('- name: Leave bounded continuation to MSI heartbeat');
+  assert.ok(drainStart > 0 && heartbeatStart > drainStart);
+  const drain = workflow.slice(drainStart, heartbeatStart);
   assert.match(drain, /result\.stopReason === "autonomous_failure"/);
   assert.match(drain, /AUTONOMOUS_FAILED=/);
   assert.match(drain, /::error::autonomous self-maintenance failed/);
@@ -322,11 +321,12 @@ test('cloud drain supervisor timeout yields to a governed continuation instead o
   assert.match(drain, /"continuationRecommended":true/);
   assert.match(drain, /supervisorTimeoutMs":1500000/);
   assert.match(drain, /exit "\$DRAIN_EXIT"/);
-  assert.match(drain, /drain hit supervisor timeout; scheduling governed continuation/);
+  assert.match(drain, /drain hit supervisor timeout; MSI heartbeat will resume the lane/);
 });
 
-test('scheduled self-maintenance wakes hourly while active work still chains immediately', () => {
+test('scheduled watchdogs remain as fallback while active work is resumed by the MSI heartbeat', () => {
   for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
   assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
-  assert.match(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
+  assert.match(workflow, /MSI heartbeat will wake it again without recursive dispatch/);
+  assert.doesNotMatch(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
 });
