@@ -63,18 +63,20 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     // Conflicting years cannot establish current-course membership.
     if (years.length > 1) continue;
     const year = years[0] ?? null;
-    const deadline = title.match(/(\d{1,2}) de ([a-záéíóú]+) de (20\d{2})/i);
-    let dueDate = null;
-    if (deadline) {
+    const deadlines = [...title.matchAll(/(\d{1,2}) de ([a-záéíóú]+) de (20\d{2})/gi)];
+    const dueDates = deadlines.map((deadline) => {
       const months = { enero:0,febrero:1,marzo:2,abril:3,mayo:4,junio:5,julio:6,agosto:7,septiembre:8,octubre:9,noviembre:10,diciembre:11 };
       const month = months[deadline[2].toLowerCase()];
-      if (!Number.isInteger(month)) continue;
+      if (!Number.isInteger(month)) return null;
       const day = Number(deadline[1]);
       const parsed = new Date(Date.UTC(Number(deadline[3]), month, day, 12));
       // Date.UTC normalizes impossible days into a different month.
-      if (parsed.getUTCMonth() !== month || parsed.getUTCDate() !== day) continue;
-      dueDate = parsed.toISOString().slice(0,10);
-    }
+      if (parsed.getUTCMonth() !== month || parsed.getUTCDate() !== day) return null;
+      return parsed.toISOString().slice(0,10);
+    });
+    // Every explicit date must be valid and agree before determining expiry.
+    if (dueDates.includes(null) || new Set(dueDates).size > 1) continue;
+    const dueDate = dueDates[0] ?? null;
     const currentYear = code ? subjects.get(code) : null;
     const codedBelongs = Boolean(code && currentYear !== undefined && (!year || year === currentYear));
     const matchedAssignment = !code && /^(Vence|Venciment)\b/i.test(title)

@@ -240,6 +240,33 @@ test('invalid explicit notification dates fail closed without suppressing valid 
   }
 });
 
+test('conflicting notification dates fail closed regardless of order', () => {
+  const validTitle = 'Vence el 28 de septiembre de 2026: Práctica de árboles';
+  const repeatedTitle = 'Vence el 28 de septiembre de 2026: Práctica de árboles (28 de septiembre de 2026)';
+  for (const otherDate of ['20 de septiembre de 2026', '29 de septiembre de 2026', '31 de septiembre de 2026']) {
+    for (const dates of [[otherDate, '28 de septiembre de 2026'], ['28 de septiembre de 2026', otherDate]]) {
+      for (const coded of [false, true]) {
+        const page = { text: [
+          'Notificaciones',
+          `Vence el ${dates[0]}: Ejercicios Tema 1 (${dates[1]})${coded ? ' (34670)' : ''}`,
+          validTitle,
+          repeatedTitle
+        ].join('\n') };
+        const parsed = parseUvNotifications(page, courses, {
+          today: '2026-09-27',
+          assignments: [
+            { subjectId: '34670', title: 'Ejercicios Tema 1' },
+            { subjectId: '34156', title: 'Práctica de árboles' }
+          ]
+        });
+        assert.deepEqual(parsed.map((item) => item.title), [validTitle, repeatedTitle]);
+        assert.deepEqual(parsed.map((item) => item.dueDate), ['2026-09-28', '2026-09-28']);
+        assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+      }
+    }
+  }
+});
+
 test('code-less deadlines fail closed when multiple assignments match regardless of order', () => {
   const page = { text: [
     'Notificaciones',
