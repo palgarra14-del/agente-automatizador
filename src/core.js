@@ -1247,7 +1247,10 @@ export function normalizeBusinessBrief(value) {
   const commercialPackage = version === 2
     ? normalizeWebsiteCommercialPackage(value.commercialPackage, { required: true })
     : null;
-  if (!Array.isArray(value.services) || value.services.length < 1 || value.services.length > 20) throw new Error('businessBrief.services must contain between 1 and 20 items');
+  const minimumServices = commercialPackage === 'demo' ? 0 : 1;
+  if (!Array.isArray(value.services) || value.services.length < minimumServices || value.services.length > 20) {
+    throw new Error(`businessBrief.services must contain between ${minimumServices} and 20 items`);
+  }
   const services = value.services.map((service, index) => {
     if (typeof service === 'string') return { name: boundedText(service, `businessBrief.services[${index}]`, { required: true, max: 120 }), description: null };
     assertObjectKeys(service, new Set(['name', 'description']), `businessBrief.services[${index}]`);
@@ -1262,7 +1265,7 @@ export function normalizeBusinessBrief(value) {
     businessName: boundedText(value.businessName, 'businessBrief.businessName', { required: true, max: 120 }),
     category: boundedText(value.category, 'businessBrief.category', { required: true, max: 120 }),
     summary: boundedText(value.summary, 'businessBrief.summary', { max: 1_200 }) || null,
-    locations: boundedTextList(value.locations, 'businessBrief.locations', { required: true, min: 1, max: 12, itemMax: 120 }),
+    locations: boundedTextList(value.locations, 'businessBrief.locations', { required: commercialPackage !== 'demo', min: commercialPackage === 'demo' ? 0 : 1, max: 12, itemMax: 120 }),
     services,
     contact: normalizeOptionalContact(value.contact ?? {}),
     brand: normalizeBrand(value.brand ?? {}),
@@ -1270,6 +1273,74 @@ export function normalizeBusinessBrief(value) {
     facts: boundedTextList(value.facts ?? [], 'businessBrief.facts', { max: 40, itemMax: 400 }),
     contentRestrictions: boundedTextList(value.contentRestrictions ?? [], 'businessBrief.contentRestrictions', { max: 30, itemMax: 300 }),
     assets: normalizeBusinessAssets(value.assets ?? {})
+  });
+}
+
+export function businessBriefFromCallflowDemoBrief(value) {
+  assertObjectKeys(
+    value,
+    new Set(['version', 'source', 'lead', 'commercialEvidence', 'demo', 'missingBusinessFacts', 'constraints']),
+    'callflowBrief'
+  );
+  if (value.version !== 'website-pilot-brief-v1') throw new Error('callflowBrief.version must be website-pilot-brief-v1');
+  if (value.source !== 'callflow') throw new Error('callflowBrief.source must be callflow');
+
+  const lead = value.lead ?? {};
+  assertObjectKeys(
+    lead,
+    new Set(['callflowId', 'leadFinderId', 'businessName', 'city', 'niche', 'phone', 'existingWebsite', 'websiteDiscoveryStatus']),
+    'callflowBrief.lead'
+  );
+  const evidence = value.commercialEvidence ?? {};
+  assertObjectKeys(
+    evidence,
+    new Set(['salesFit', 'salesSegment', 'opportunityScore', 'leadScore', 'websiteQuality', 'reasonToCall', 'primaryPitchReason']),
+    'callflowBrief.commercialEvidence'
+  );
+  const demo = value.demo ?? {};
+  assertObjectKeys(
+    demo,
+    new Set(['type', 'defaultScope', 'objective', 'primaryCta', 'existingBookingPlatform', 'preserveExistingBooking', 'existingWebsiteReference']),
+    'callflowBrief.demo'
+  );
+
+  const businessName = boundedText(lead.businessName, 'callflowBrief.lead.businessName', { required: true, max: 120 });
+  const category = boundedText(lead.niche, 'callflowBrief.lead.niche', { required: true, max: 120 });
+  const city = boundedText(lead.city, 'callflowBrief.lead.city', { max: 120 });
+  const phone = boundedText(lead.phone, 'callflowBrief.lead.phone', { max: 80 });
+  const existingWebsite = boundedText(lead.existingWebsite, 'callflowBrief.lead.existingWebsite', { max: 240 });
+  const missingFacts = boundedTextList(value.missingBusinessFacts ?? [], 'callflowBrief.missingBusinessFacts', { max: 30, itemMax: 160 });
+  const constraints = boundedTextList(value.constraints ?? [], 'callflowBrief.constraints', { max: 30, itemMax: 300 });
+  const bookingPlatform = boundedText(demo.existingBookingPlatform, 'callflowBrief.demo.existingBookingPlatform', { max: 80 });
+  if (demo.preserveExistingBooking !== undefined && typeof demo.preserveExistingBooking !== 'boolean') {
+    throw new Error('callflowBrief.demo.preserveExistingBooking must be a boolean');
+  }
+
+  const requiredFeatures = bookingPlatform
+    ? [`Mantener ${bookingPlatform} como sistema de reservas cuando se facilite su URL real; no inventar el enlace.`]
+    : [];
+  const missingRestrictions = missingFacts.map((fact) => `Dato no verificado: ${fact}. No inventarlo ni presentarlo como hecho real.`);
+
+  return normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'demo',
+    businessName,
+    category,
+    locations: city ? [city] : [],
+    services: [],
+    contact: {
+      ...(phone ? { phone } : {}),
+      ...(existingWebsite ? { website: existingWebsite } : {})
+    },
+    website: {
+      language: 'es',
+      primaryGoal: phone ? 'llamada' : 'contacto',
+      requiredPages: ['home'],
+      requiredFeatures
+    },
+    facts: [],
+    contentRestrictions: [...new Set([...constraints, ...missingRestrictions])],
+    assets: {}
   });
 }
 
@@ -1329,9 +1400,13 @@ function websiteBlueprintPages(brief, profileId) {
   const hasMediaPage = pages.some((page) => /(galer|portfolio|look|inspir)/.test(page.id));
   const baseProfileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
   const packageLimit = brief?.commercialPackage ? websiteCommercialPackageLimits[brief.commercialPackage] : null;
-  const profileSections = packageLimit
+  const hasVerifiedServices = Array.isArray(brief?.services) && brief.services.length > 0;
+  const hasVerifiedFacts = Array.isArray(brief?.facts) && brief.facts.length > 0;
+  const profileSections = (packageLimit
     ? baseProfileSections.filter((section) => section !== 'faq').slice(0, packageLimit.maxSectionsPerPage)
-    : baseProfileSections;
+    : baseProfileSections)
+    .filter((section) => section !== 'services' || hasVerifiedServices)
+    .filter((section) => section !== 'experience' || brief?.commercialPackage !== 'demo' || hasVerifiedFacts);
 
   return pages.map((page) => {
     let sections;
@@ -1496,8 +1571,17 @@ function evidenceFingerprint(value) {
 
 function normalizeWorkflowInput(profile, input) {
   if (profile === 'website-build') {
-    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => key !== 'businessBrief')) throw new Error('website-build requires input.businessBrief and no unknown workflow input fields');
-    return { businessBrief: normalizeBusinessBrief(input.businessBrief) };
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('website-build requires input.businessBrief or input.callflowBrief');
+    }
+    const keys = Object.keys(input);
+    if (keys.length !== 1 || !['businessBrief', 'callflowBrief'].includes(keys[0])) {
+      throw new Error('website-build requires exactly one of input.businessBrief or input.callflowBrief and no unknown workflow input fields');
+    }
+    const businessBrief = keys[0] === 'callflowBrief'
+      ? businessBriefFromCallflowDemoBrief(input.callflowBrief)
+      : normalizeBusinessBrief(input.businessBrief);
+    return { businessBrief };
   }
   if (input !== undefined && input !== null) throw new Error(`Workflow input is not supported for profile: ${profile}`);
   return null;
