@@ -60,7 +60,8 @@ function scoreMaterial(material, signal) {
         reasons.unshift('misma práctica');
       }
     } else {
-      score -= 220;
+      // Explicit topic mismatches cannot be outweighed by practice/solution bonuses.
+      return null;
     }
   }
   if (/problema|ejercicio|\bejer\w*|\bpr(?:actica)?\s*[-_. ]?\d+/.test(lower)) {

@@ -63,6 +63,25 @@ test('preparation never crosses subject boundaries or prefers unrelated admin re
   assert.ok(resources.every((item) => item.id !== 'm4'));
 });
 
+test('focused preparation excludes other topics even when scoring bonuses favor them', () => {
+  const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
+  const general = { id: 'general', subjectId: '34670', title: 'Apuntes generales' };
+  for (const title of ['Ejer2eda resueltos', 'Tema 2 ejercicios resueltos', 'Pr2 soluciones']) {
+    const unrelated = { id: 'unrelated', subjectId: '34670', title };
+    assert.deepEqual(recommendAcademicPreparation(signal, [unrelated]), [], title);
+    assert.deepEqual(
+      recommendAcademicPreparation(signal, [unrelated, general]).map((item) => item.id),
+      ['general'],
+      title
+    );
+    assert.deepEqual(
+      recommendAcademicPreparation(signal, [unrelated, ...materials]).map((item) => item.id),
+      ['m1', 'm2', 'm3'],
+      title
+    );
+  }
+});
+
 test('preparation requires explicit course identities before matching materials', () => {
   const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
   const ambiguousIds = [undefined, null, '', '   ', {}, [], true, 34670];
