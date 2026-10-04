@@ -43,13 +43,19 @@ export function cloudRateLimitDeferral(error, { phase = 'cloud_control' } = {}) 
   };
 }
 
-function causedByWorkflowDeadline(error) {
+export function cloudControlErrorChain(error, maxDepth = 6) {
+  const messages = [];
   let current = error;
-  for (let depth = 0; current && depth < 8; depth += 1) {
-    if (current?.message === 'workflow_deadline_cap_exceeded') return true;
+  for (let depth = 0; current && depth < maxDepth; depth += 1) {
+    const message = String(current?.message ?? '').trim();
+    if (message) messages.push(message);
     current = current?.cause ?? null;
   }
-  return false;
+  return messages;
+}
+
+function causedByWorkflowDeadline(error) {
+  return cloudControlErrorChain(error, 8).includes('workflow_deadline_cap_exceeded');
 }
 
 export async function runCloudDrainWithRecovery({
@@ -95,8 +101,10 @@ export async function runCloudDrainWithRecovery({
       const evidence = {
         attempt: attempt + 1,
         error: error.message,
+        causes: cloudControlErrorChain(error),
         repaired: false,
         repairError: null,
+        repairCauses: [],
         generation: null,
         authorityGeneration: null,
         ...(deadlineExhausted ? { deadlineExhausted: true } : {}),
@@ -148,6 +156,7 @@ export async function runCloudDrainWithRecovery({
         } catch (repairError) {
           if (!recoverableCloudControlError(repairError)) throw repairError;
           evidence.repairError = repairError.message;
+          evidence.repairCauses = cloudControlErrorChain(repairError);
         }
       }
 
