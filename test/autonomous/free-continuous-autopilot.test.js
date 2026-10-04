@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AutonomousSelfImprovement } from '../../src/self-improvement.js';
+import { AUTONOMOUS_PROJECT_POLICIES, AutonomousSelfImprovement } from '../../src/self-improvement.js';
 
 const CURRENT = 'b'.repeat(40);
 const OLD = 'a'.repeat(40);
@@ -73,4 +73,12 @@ test('self autopilot caps speculative starts at 6 per day and still bypasses the
     }]
   }));
   assert.equal(await advanced.hasWork(), true);
+});
+
+
+test('autonomous filler budgets favor explicit queued work over speculative cycles', () => {
+  assert.equal(AUTONOMOUS_PROJECT_POLICIES.self.maxStartsPer24h, 6);
+  assert.equal(AUTONOMOUS_PROJECT_POLICIES.leadfinder.maxStartsPer24h, 12);
+  assert.equal(AUTONOMOUS_PROJECT_POLICIES.callflow.maxStartsPer24h, 12);
+  assert.equal(AUTONOMOUS_PROJECT_POLICIES['website-pilot'].maxStartsPer24h, 12);
 });
