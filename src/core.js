@@ -3438,6 +3438,7 @@ export class WorkflowEngine {
         step.evidence = { ...step.evidence, phase: 'preview-observed', preview: safeJson(preview) };
       });
       evidence = plan.steps.find((step) => step.id === next.id).evidence;
+      if (previewRequired && preview.state === 'QUOTA') return this.stopPublication(id, next.id, 'workflow_publication_preview_quota_exhausted', { blocked: true, phase: 'preview-quota', patch: { preview } });
       if (previewRequired && preview.state === 'ERROR') return this.stopPublication(id, next.id, 'workflow_publication_preview_failed', { blocked: false, phase: 'preview-failed', patch: { preview } });
       if (previewRequired && preview.state === 'NOT_REQUIRED') return this.stopPublication(id, next.id, 'workflow_publication_preview_not_configured', { blocked: false, phase: 'preview-missing', patch: { preview } });
       if (previewRequired && preview.state === 'READY' && plan.profile === 'website-build' && (typeof preview.url !== 'string' || !preview.url)) return this.stopPublication(id, next.id, 'workflow_publication_preview_invalid', { blocked: false, phase: 'preview-invalid', patch: { preview } });
@@ -6870,8 +6871,26 @@ export class GitHubAdapter {
       const normalized = vercelStatuses.map((status) => ({
         context: status.context,
         state: status.state,
+        description: status.description ?? null,
         targetUrl: status.target_url ?? null
       }));
+      const quotaStatus = vercelStatuses.find((status) =>
+        ['error', 'failure'].includes(String(status.state ?? '').toLowerCase()) &&
+        /deployment rate limited|api-deployments-free-per-day|retry in 24 hours/i.test(String(status.description ?? ''))
+      );
+      if (quotaStatus) {
+        return {
+          provider: 'vercel',
+          source: 'github-commit-statuses',
+          state: 'QUOTA',
+          ok: false,
+          reason: 'vercel_preview_quota_exhausted',
+          retryAfterMs: 24 * 60 * 60 * 1000,
+          commitSha,
+          branch,
+          statuses: normalized
+        };
+      }
       if (vercelStatuses.some((status) => ['error', 'failure'].includes(String(status.state ?? '').toLowerCase()))) {
         return { provider: 'vercel', source: 'github-commit-statuses', state: 'ERROR', ok: false, commitSha, branch, statuses: normalized };
       }
@@ -7089,7 +7108,7 @@ export class VercelDeploymentProvider {
     const startedAt = this.now();
     for (;;) {
       const latest = await this.latest(project, context);
-      if (['READY', 'ERROR', 'INACTIVE', 'INVALID', 'NOT_CONFIGURED'].includes(latest.state)) return { ...latest, durationMs: this.now() - startedAt };
+      if (['READY', 'ERROR', 'QUOTA', 'INACTIVE', 'INVALID', 'NOT_CONFIGURED'].includes(latest.state)) return { ...latest, durationMs: this.now() - startedAt };
       if (this.now() - startedAt >= timeoutMs) return { ...latest, state: 'TIMEOUT', ok: false, durationMs: this.now() - startedAt };
       await this.sleep(pollIntervalMs);
     }
