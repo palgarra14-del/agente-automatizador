@@ -76,6 +76,21 @@ test('generic assessment can fall back to exam material when no topic is known',
   assert.equal(resources[0].id, 'e1');
 });
 
+test('preparation skips unidentifiable resources without displacing valid study material', () => {
+  const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
+  for (const id of [undefined, null, '', '   ', 42, true, {}, []]) {
+    const inputs = [{ ...materials[0], id }, ...materials];
+    const snapshot = structuredClone(inputs);
+    assert.deepEqual(
+      recommendAcademicPreparation(signal, inputs).map((item) => item.id),
+      ['m1', 'm2', 'm3'],
+      `invalid resource identity: ${String(id)}`
+    );
+    assert.deepEqual(inputs, snapshot);
+    assert.deepEqual(recommendAcademicPreparation(signal, [{ ...materials[0], id }]), []);
+  }
+});
+
 test('preparation skips conflicting resource course identities in either record order', () => {
   const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
   for (const subjectId of ['34156', undefined, null, '', '   ', 34670]) {
