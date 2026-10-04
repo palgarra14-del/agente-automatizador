@@ -35,6 +35,23 @@ test('preparation does not mistake word endings for session markers', () => {
   assert.deepEqual(resources.map((item) => item.id), ['m1', 'practice']);
 });
 
+test('preparation does not truncate longer topic numbers into the assessment focus', () => {
+  const signal = { subjectId: '34670', title: 'Test Tema 10', kind: 'assessment' };
+  const matching = [
+    { id: 'theory', subjectId: '34670', title: 'Tema 10' },
+    { id: 'practice', subjectId: '34670', title: 'Ejer10eda' }
+  ];
+  for (const title of ['Tema 100', 'Ejer101eda', 'Pr1000', 'Sesión 100']) {
+    const unrelated = { id: 'unrelated', subjectId: '34670', title };
+    assert.deepEqual(recommendAcademicPreparation(signal, [unrelated]), [], title);
+    assert.deepEqual(
+      recommendAcademicPreparation(signal, [unrelated, ...matching]).map((item) => item.id),
+      ['theory', 'practice'],
+      title
+    );
+  }
+});
+
 test('preparation never crosses subject boundaries or prefers unrelated admin resources', () => {
   const resources = recommendAcademicPreparation({
     subjectId: '34670',

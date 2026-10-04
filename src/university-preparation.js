@@ -16,7 +16,7 @@ function focusNumbers(signal) {
 }
 
 function materialNumber(title) {
-  const match = fold(title).match(/\b(?:tema|ejer(?:cicios?)?|pr(?:actica)?|seminario|sesion|s)\s*[-_. ]?(\d{1,2})/);
+  const match = fold(title).match(/\b(?:tema|ejer(?:cicios?)?|pr(?:actica)?|seminario|sesion|s)\s*[-_. ]?(\d+)/);
   return match ? Number(match[1]) : null;
 }
 
