@@ -40,12 +40,17 @@ export function buildAcademicReminders({
   }
   const reminders = [];
 
-  // A source cannot safely identify an obligation with conflicting subjects or dates.
+  // A source cannot safely identify an obligation with conflicting subjects, dates or kinds.
   const ambiguousSignalIds = new Set();
   const signalSubjectsById = new Map();
   const signalDatesById = new Map();
+  const signalKindsById = new Map();
   for (const signal of signals) {
     if (typeof signal?.id !== 'string' || !signal.id.trim()) continue;
+    if (signalKindsById.has(signal.id) && signalKindsById.get(signal.id) !== signal.kind) {
+      ambiguousSignalIds.add(signal.id);
+    }
+    signalKindsById.set(signal.id, signal.kind);
     const subjectId = signal.subjectId ?? null;
     if (signalSubjectsById.has(signal.id) && signalSubjectsById.get(signal.id) !== subjectId) {
       ambiguousSignalIds.add(signal.id);

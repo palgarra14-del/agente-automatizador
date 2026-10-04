@@ -160,6 +160,25 @@ test('conflicting signal dates fail closed while equivalent date sets still remi
   }
 });
 
+test('conflicting signal kinds fail closed without suppressing unrelated reminders', () => {
+  const signal = { id: 'conflicting', kind: 'assessment', dates: ['2026-10-02'] };
+  const other = { ...signal, id: 'other' };
+  for (const kind of ['coursework', 'schedule_change', 'required_session', 'academic_notice', undefined, null, '']) {
+    const conflicting = { ...signal, kind };
+    for (const records of [[signal, conflicting], [conflicting, signal]]) {
+      const signals = [...records, other, { ...other }];
+      const snapshot = structuredClone(signals);
+      for (const today of ['2026-09-30', '2026-10-01']) {
+        const reminders = buildAcademicReminders({ today, signals });
+        assert.deepEqual(reminders.map((item) => item.id), [
+          'reminder:signal:other:2026-10-02:assessment-soon'
+        ], `conflicting kind: ${String(kind)}, today: ${today}`);
+      }
+      assert.deepEqual(signals, snapshot);
+    }
+  }
+});
+
 test('mandatory attendance sessions remind only the day before with a stable identity', () => {
   const signal = {
     id: 'uv-mail:required-session',
