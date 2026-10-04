@@ -76,7 +76,7 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
       dueDate = parsed.toISOString().slice(0,10);
     }
     const currentYear = code ? subjects.get(code) : null;
-    const codedBelongs = Boolean(code && currentYear !== undefined && (!year || !currentYear || year === currentYear));
+    const codedBelongs = Boolean(code && currentYear !== undefined && (!year || year === currentYear));
     const matchedAssignment = !code && /^(Vence|Venciment)\b/i.test(title)
       ? matchingAssignment(title, assignments)
       : null;

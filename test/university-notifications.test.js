@@ -90,6 +90,23 @@ test('a matching current assignment gives a code-less deadline its real subject'
   assert.equal(parsed[0].expired, false);
 });
 
+test('coded notifications reject explicit academic years when the course year is unknown', () => {
+  const titles = [
+    '2025-26 Análisis Matemático II (34156) contenido nuevo',
+    '2026-27 Análisis Matemático II (34156) contenido nuevo',
+    'Análisis Matemático II (34156) contenido nuevo',
+    '2026-27 Estructuras de datos y algoritmos (34670) contenido nuevo'
+  ];
+  for (const name of [undefined, null, '', 'Análisis Matemático II']) {
+    const parsed = parseUvNotifications({ text: ['Notificaciones', ...titles].join('\n') }, [
+      { code: '34156', name },
+      courses[1]
+    ], { today: '2026-09-27' });
+    assert.deepEqual(parsed.map((item) => item.title), titles.slice(2));
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+  }
+});
+
 test('code-less deadlines reject explicit years that do not match their assigned course', () => {
   const titles = [
     'Vence el 28 de septiembre de 2026: Ejercicios Tema 1 2025-26',
