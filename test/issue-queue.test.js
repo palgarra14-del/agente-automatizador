@@ -35,6 +35,7 @@ import {
   workflowApprovalFingerprint,
   workflowBindingFingerprint,
   workflowFailureSummary,
+  githubRateLimitRetryAfterMs,
   issueQueueFailureBackoffMs,
   watchIssueQueue
 } from '../src/issue-queue.js';
@@ -2231,6 +2232,15 @@ test('issue queue watcher retries transient failures sooner than the normal poll
   assert.equal(issueQueueFailureBackoffMs(4, 15_000), 8_000);
   assert.equal(issueQueueFailureBackoffMs(5, 15_000), 15_000);
   assert.equal(issueQueueFailureBackoffMs(9, 30_000), 16_000);
+  assert.equal(issueQueueFailureBackoffMs(1, 15_000, 90_000), 90_000);
+  assert.equal(issueQueueFailureBackoffMs(1, 15_000, 24 * 60 * 60 * 1_000), 6 * 60 * 60 * 1_000);
+});
+
+test('GitHub rate limit headers produce a bounded retry delay', () => {
+  const headers = (values) => ({ get: (name) => values[name] ?? null });
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'retry-after': '12' }) }, 0), 12_000);
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '120' }) }, 100_000), 21_000);
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '10', 'x-ratelimit-reset': '120' }) }, 100_000), null);
 });
 
 test('watch loop removes abort listeners after ordinary poll sleeps', async () => {
@@ -2309,6 +2319,32 @@ test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment
   assert.equal(calls[0].options.headers.Authorization.includes('ghp_fixtureSecret'), true);
   assert.equal(calls[2].options.method, 'POST');
   assert.equal(JSON.parse(calls[2].options.body).body, 'status');
+});
+
+test('GitHubIssueChannel surfaces rate-limit delay without rapid GET retries', async () => {
+  let calls = 0;
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => name === 'retry-after' ? '90' : null },
+        json: async () => ({})
+      };
+    }
+  });
+  await assert.rejects(
+    channel.request('/repos/x/y/issues'),
+    (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.retryAfterMs, 90_000);
+      return true;
+    }
+  );
+  assert.equal(calls, 1);
 });
 
 test('GitHubIssueChannel combines caller cancellation with its own request deadline', async () => {
