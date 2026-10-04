@@ -1228,14 +1228,16 @@ test('bounded directory inspection is deterministic and consumes no Codex client
   assert.equal(clientConstructions, 0);
   assert.deepEqual(result.result.inspectionEvidence.relevantPaths, ['assets/site.js', 'test/website.test.js']);
 
+  const oversizedFiles = Array.from({ length: 31 }, (_, index) => ({
+    path: `assets/file-${index}.js`,
+    content: '',
+    sha256: 'a'.repeat(64),
+    bytes: 0
+  }));
   const oversized = {
-    ...repositoryContext,
-    files: Array.from({ length: 31 }, (_, index) => ({
-      path: `assets/file-${index}.js`,
-      content: '',
-      sha256: 'a'.repeat(64),
-      bytes: 0
-    }))
+    version: 1,
+    files: oversizedFiles,
+    fingerprint: createHash('sha256').update(JSON.stringify(oversizedFiles.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex')
   };
   assert.equal(executor.deterministicInspectionContext({
     skill: 'code.inspect',
