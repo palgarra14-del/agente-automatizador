@@ -3031,7 +3031,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(browserVerification.status, WorkflowStepStatus.COMPLETED);
   assert.equal(browserVerification.evidence.browserQaEvidence.status, 'pass');
   assert.equal(browserVerification.evidence.browserQaEvidence.publishedCommitSha, commitHead);
-  assert.equal(browserVerification.evidence.browserQaEvidence.previewUrl, previewUrl);
+  assert.equal(browserVerification.evidence.browserQaEvidence.previewUrl, `${previewUrl}/`);
   assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
 
   waiting = await instance.approve(created.id, 'visual-verification');
