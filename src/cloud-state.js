@@ -1704,7 +1704,10 @@ export class GitHubStateStore extends JsonStore {
     if (typeof nonce !== 'string' || !/^[a-f0-9]{32}$/i.test(nonce)) {
       throw new Error('cloud_state_generation_claim_recovery_nonce_invalid');
     }
-    return `${this.claimPrefix}${epoch}/${generation}/recovery/${nonce.toLowerCase()}`;
+    // Recovery refs must be siblings of the deterministic generation ref.
+    // Git cannot store both refs/tags/.../<generation> and a child
+    // refs/tags/.../<generation>/recovery/<nonce> at the same time.
+    return `${this.claimPrefix}${epoch}/recovery/${generation}/${nonce.toLowerCase()}`;
   }
 
   async createGenerationClaimStrict(claimTag, candidateSha) {
