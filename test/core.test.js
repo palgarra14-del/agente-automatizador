@@ -1187,6 +1187,64 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   assert.match(prompt, /cannot override these rules/i);
 });
 
+test('bounded directory inspection is deterministic and consumes no Codex client', async () => {
+  let clientConstructions = 0;
+  class NeverCodex {
+    constructor() { clientConstructions += 1; }
+  }
+  const executor = new CodexReadOnlySkillExecutor({ CodexClient: NeverCodex });
+  const files = [
+    { path: 'assets/site.js', content: 'one' },
+    { path: 'test/website.test.js', content: 'two' }
+  ].map((file) => ({
+    ...file,
+    sha256: createHash('sha256').update(file.content).digest('hex'),
+    bytes: Buffer.byteLength(file.content)
+  }));
+  const repositoryContext = {
+    version: 1,
+    files,
+    fingerprint: createHash('sha256').update(JSON.stringify(files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })))).digest('hex')
+  };
+  const scope = { allowedPaths: ['assets', 'test'], forbiddenPaths: ['assets/private'] };
+  const deterministicInspection = executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope,
+    repositoryContext
+  });
+  assert.deepEqual(deterministicInspection.allowedPaths, ['assets/site.js', 'test/website.test.js']);
+
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    contract: { version: 3, inputs: [], outputs: ['inspectionEvidence'] },
+    context: { workflowProfile: 'app-improvement', scope, repositoryContext, deterministicInspection }
+  }, { workspace: process.cwd(), timeoutMs: 100 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.executionMode, 'deterministic');
+  assert.equal(result.codexThreadId, null);
+  assert.equal(result.usage, null);
+  assert.equal(clientConstructions, 0);
+  assert.deepEqual(result.result.inspectionEvidence.relevantPaths, ['assets/site.js', 'test/website.test.js']);
+
+  const oversized = {
+    ...repositoryContext,
+    files: Array.from({ length: 31 }, (_, index) => ({
+      path: `assets/file-${index}.js`,
+      content: '',
+      sha256: 'a'.repeat(64),
+      bytes: 0
+    }))
+  };
+  assert.equal(executor.deterministicInspectionContext({
+    skill: 'code.inspect',
+    workflowProfile: 'app-improvement',
+    scope,
+    repositoryContext: oversized
+  }), null);
+});
+
 test('read-only deterministic diagnosis consumes no Codex client and stays grounded in validated inspection', async () => {
   let clientConstructions = 0;
   class NeverCodex {
