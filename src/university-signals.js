@@ -127,10 +127,12 @@ function scopeRelevantBody(body, course) {
     .split(/(?<=[.!?])\s+/)
     .filter((sentence) => {
       // Dates cannot be safely attributed within a sentence mixing group scopes.
-      const groups = sentence.matchAll(/\b(?:subgrup|grup)o?s?\s+([A-Z])?-?P(\d+)\b/gi);
-      for (const explicit of groups) {
-        const prefix = explicit[1]?.toUpperCase() ?? theoryPrefix;
-        if (!prefix || !practicalGroups.includes(prefix + '-P' + explicit[2])) return false;
+      const groups = sentence.matchAll(/\b(?:subgrup|grup)o?s?\s+([A-Z]?-?P\d+\b(?:\s*(?:,\s*(?:(?:y|i)\s+)?|(?:y|i)\s+)[A-Z]?-?P\d+\b)*)/gi);
+      for (const group of groups) {
+        for (const explicit of group[1].matchAll(/\b([A-Z])?-?P(\d+)\b/gi)) {
+          const prefix = explicit[1]?.toUpperCase() ?? theoryPrefix;
+          if (!prefix || !practicalGroups.includes(prefix + '-P' + explicit[2])) return false;
+        }
       }
       return true;
     })

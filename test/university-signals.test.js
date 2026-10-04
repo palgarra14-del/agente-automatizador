@@ -273,6 +273,26 @@ test('plural practical-group labels preserve only confirmed own-group reminders'
   }
 });
 
+test('practical-group lists require every listed group to be confirmed', () => {
+  for (const list of ['B-P2 y B-P3', 'B-P3 y B-P2', 'P2, P3', 'P2 i P3', 'P2 y P3']) {
+    for (const practicalGroups of [[], ['B-P2'], ['B-P2', 'B-P3']]) {
+      const signal = alertToAcademicSignal({
+        id: 'uv-mail:group-list',
+        subject: 'Entregas de prácticas',
+        body: `Los grupos ${list} entregan el 2-10. El grupo B-P2 entrega el 3-10.`,
+        course: { theoryGroup: 'B-T', practicalGroups }
+      }, { capturedAt: '2026-09-27T16:00:00Z' });
+      assert.deepEqual(signal.dates, practicalGroups.length === 2
+        ? ['2026-10-02', '2026-10-03']
+        : practicalGroups.length ? ['2026-10-03'] : [], list);
+      assert.equal(buildAcademicReminders({ today: '2026-10-01', signals: [signal] }).length,
+        practicalGroups.length === 2 ? 1 : 0, list);
+      assert.equal(buildAcademicReminders({ today: '2026-10-02', signals: [signal] }).length,
+        practicalGroups.length ? 1 : 0, list);
+    }
+  }
+});
+
 test('merge keeps future obligations while expiring stale undated mail', () => {
   const state = mergeAcademicSignals({
     version: 4,
