@@ -987,7 +987,17 @@ class ChromeCdpBrowser {
         const method = String(requestData.method ?? '').toUpperCase();
         const url = new URL(requestData.url);
         const isDocument = params.resourceType === 'Document';
-        const isMainDocument = isDocument && (mainFrameId ? params.frameId === mainFrameId : browserQaDocumentUrlMatches(url, pagePlan.url));
+        if (
+          isDocument &&
+          !mainFrameId &&
+          params.frameId &&
+          browserQaDocumentUrlMatches(url, pagePlan.url)
+        ) mainFrameId = params.frameId;
+        const isMainDocument = isDocument && (
+          mainFrameId
+            ? params.frameId === mainFrameId
+            : browserQaDocumentUrlMatches(url, pagePlan.url)
+        );
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
           if (isMainDocument) {
             interceptionFailure = interceptionFailure ?? new Error(`browser_qa_document_method_forbidden:${method || 'UNKNOWN'}`);
