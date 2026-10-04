@@ -92,7 +92,19 @@ export function recommendAcademicPreparation(signal, materials, { limit = 3 } = 
   if (!Array.isArray(materials)) throw new Error('academic_preparation_materials_invalid');
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('academic_preparation_limit_invalid');
 
+  // Conflicting course evidence cannot establish which course owns a resource.
+  const subjectsById = new Map();
+  const ambiguousIds = new Set();
+  for (const material of materials) {
+    const subjectId = typeof material?.subjectId === 'string' ? clean(material.subjectId) : null;
+    if (subjectsById.has(material?.id) && subjectsById.get(material?.id) !== subjectId) {
+      ambiguousIds.add(material?.id);
+    }
+    subjectsById.set(material?.id, subjectId);
+  }
+
   let candidates = materials
+    .filter((material) => !ambiguousIds.has(material?.id))
     .map((material) => scoreMaterial(material, signal))
     .filter((item) => item && item.score > 0)
     .sort((a, b) => b.score - a.score || a.material.title.localeCompare(b.material.title, 'es'));

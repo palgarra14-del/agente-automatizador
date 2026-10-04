@@ -75,3 +75,20 @@ test('generic assessment can fall back to exam material when no topic is known',
   ], { limit: 1 });
   assert.equal(resources[0].id, 'e1');
 });
+
+test('preparation skips conflicting resource course identities in either record order', () => {
+  const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
+  for (const subjectId of ['34156', undefined, null, '', '   ', 34670]) {
+    const conflicting = { ...materials[0], subjectId };
+    for (const records of [[materials[0], conflicting], [conflicting, materials[0]]]) {
+      const inputs = [...records, materials[1], { ...materials[1] }, materials[2]];
+      const snapshot = structuredClone(inputs);
+      assert.deepEqual(
+        recommendAcademicPreparation(signal, inputs).map((item) => item.id),
+        ['m2', 'm3'],
+        `conflicting course: ${String(subjectId)}`
+      );
+      assert.deepEqual(inputs, snapshot);
+    }
+  }
+});
