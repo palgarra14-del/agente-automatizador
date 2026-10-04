@@ -8,9 +8,9 @@ mkdir -p "$UNIT_DIR"
 cat > "$DROP_IN" <<'EOF'
 [Service]
 Environment=OLLAMA_KEEP_ALIVE=30s
-MemoryHigh=4G
-MemoryMax=5G
-MemorySwapMax=768M
+MemoryHigh=3G
+MemoryMax=4G
+MemorySwapMax=512M
 OOMPolicy=stop
 Restart=always
 RestartSec=15s
