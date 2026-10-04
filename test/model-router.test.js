@@ -240,16 +240,20 @@ m.COPILOT_MAX_AI_CREDITS=1
 captured={}
 def fake_run(args,**kwargs):
     captured["args"]=args
+    captured["input"]=kwargs.get("input_text")
     return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
 m._run=fake_run
 value=m.copilot_structured(
-  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  "x"*200000,{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
   cwd=tempfile.mkdtemp(),model="auto"
 )
-print(json.dumps({"value":value,"args":captured["args"]}))
+print(json.dumps({"value":value,"args":captured["args"],"inputBytes":len(captured["input"].encode("utf-8"))}))
 os.unlink(path)
 `);
   assert.equal(result.value.ok,true);
+  assert.ok(result.inputBytes > 200000);
+  assert.ok(!result.args.includes('-p'));
+  assert.ok(!result.args.some((arg) => typeof arg === 'string' && arg.length > 10000));
   assert.ok(result.args.includes('--max-ai-credits'));
   assert.ok(result.args.includes('1'));
   assert.ok(result.args.includes('--mode'));
