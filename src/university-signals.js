@@ -69,7 +69,7 @@ export function extractAcademicDates(value, capturedAt) {
   const dates = new Set();
   const monthPattern = Object.keys(MONTHS).join('|');
   const named = new RegExp(
-    "\\b(\\d{1,2})\\s+(?:de\\s+|d['’])(" + monthPattern + ')(?:\\s+de\\s+(\\d+))?',
+    "\\b(\\d{1,2})\\s+(?:de\\s+|d['’])(" + monthPattern + ')(?:\\s+del?\\s+(\\d+))?',
     'gi'
   );
   for (const match of text.matchAll(named)) {
