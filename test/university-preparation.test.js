@@ -164,7 +164,7 @@ test('preparation skips conflicting resource course identities in either record 
 
 test('preparation rejects conflicting resource titles while retaining equivalent duplicates', () => {
   const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
-  for (const title of ['Tema 2', 'Guía docente', undefined, null, '', '   ']) {
+  for (const title of ['Tema 2', 'Guía docente', undefined, null, '', '   ', ['tema1']]) {
     const conflicting = { ...materials[0], title };
     for (const records of [[materials[0], conflicting], [conflicting, materials[0]]]) {
       const inputs = [...records, materials[1], { ...materials[1], title: '  Ejer1eda\n ' }, materials[2]];

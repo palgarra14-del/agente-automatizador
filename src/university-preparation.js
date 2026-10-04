@@ -107,7 +107,7 @@ export function recommendAcademicPreparation(signal, materials, { limit = 3 } = 
       ambiguousIds.add(material?.id);
     }
     subjectsById.set(material?.id, subjectId);
-    const title = clean(material?.title);
+    const title = typeof material?.title === 'string' ? clean(material.title) : null;
     if (titlesById.has(material?.id) && titlesById.get(material?.id) !== title) {
       ambiguousIds.add(material?.id);
     }
