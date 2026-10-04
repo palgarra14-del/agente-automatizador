@@ -51,9 +51,9 @@ test('new operator revision bypasses an old billing suspension but same revision
   assert.equal(await current.hasWork(), false);
 });
 
-test('free autopilot allows up to 24 bounded starts per day and still fails closed at the cap', async () => {
-  const starts = Array.from({ length: 24 }, (_, index) =>
-    new Date(NOW - (24 - index) * 60 * 60 * 1000 + 1_000).toISOString()
+test('self autopilot caps speculative starts at 6 per day and still bypasses the cap for a new operator revision', async () => {
+  const starts = Array.from({ length: 6 }, (_, index) =>
+    new Date(NOW - (6 - index) * 60 * 60 * 1000 + 1_000).toISOString()
   );
   const lastStart = starts.at(-1);
   const capped = subject(baseState({
