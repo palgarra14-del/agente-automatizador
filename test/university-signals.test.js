@@ -274,7 +274,8 @@ test('plural practical-group labels preserve only confirmed own-group reminders'
 });
 
 test('practical-group lists require every listed group to be confirmed', () => {
-  for (const list of ['B-P2 y B-P3', 'B-P3 y B-P2', 'P2, P3', 'P2 i P3', 'P2 y P3']) {
+  for (const list of ['B-P2 y B-P3', 'B-P3 y B-P2', 'P2, P3', 'P2 i P3', 'P2 y P3',
+    'P2/P3', 'P3/P2', 'B-P2 / B-P3', 'B-P3 / B-P2']) {
     for (const practicalGroups of [[], ['B-P2'], ['B-P2', 'B-P3']]) {
       const signal = alertToAcademicSignal({
         id: 'uv-mail:group-list',
