@@ -181,8 +181,20 @@ export function mergeAcademicSignals(previousState, alerts, { capturedAt } = {})
     if (!signal?.id || !signal?.activeUntil || signal.activeUntil < currentDay) continue;
     map.set(signal.id, signal);
   }
+  const currentEvidence = new Map();
+  const ambiguousIds = new Set();
   for (const alert of alerts) {
     const signal = alertToAcademicSignal(alert, { capturedAt });
+    // Preserve conflicts before merging can hide them from reminder validation.
+    const evidence = JSON.stringify([signal.subjectId, signal.kind, signal.dates]);
+    if (currentEvidence.has(signal.id) && currentEvidence.get(signal.id) !== evidence) {
+      ambiguousIds.add(signal.id);
+    }
+    currentEvidence.set(signal.id, evidence);
+    if (ambiguousIds.has(signal.id)) {
+      map.delete(signal.id);
+      continue;
+    }
     if (signal.activeUntil >= currentDay) map.set(signal.id, signal);
     else map.delete(signal.id);
   }

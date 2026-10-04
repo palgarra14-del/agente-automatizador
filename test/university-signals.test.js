@@ -368,3 +368,30 @@ test('attention view hides distant obligations until they approach', () => {
   });
   assert.deepEqual(attention.map((item) => item.id), ['soon']);
 });
+
+test('conflicting duplicate alerts cannot become reminders through last-record wins', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  const alert = {
+    id: 'uv-mail:conflicting',
+    subject: 'Test Tema 1',
+    body: 'El test será el 2-10-2026.',
+    course: { subjectId: '34670', shortName: 'EDA' }
+  };
+  const other = { ...alert, id: 'uv-mail:other' };
+  const previous = mergeAcademicSignals(null, [alert, other], { capturedAt });
+  for (const conflicting of [
+    { ...alert, body: 'El test será el 3-10-2026.' },
+    { ...alert, subject: 'Entrega Tema 1' },
+    { ...alert, course: { subjectId: '34156', shortName: 'Análisis II' } }
+  ]) {
+    for (const records of [[alert, conflicting], [conflicting, alert]]) {
+      const alerts = [...records, alert, other, { ...other }];
+      const snapshot = structuredClone({ previous, alerts });
+      const state = mergeAcademicSignals(previous, alerts, { capturedAt });
+      assert.deepEqual(state.signals.map((signal) => signal.id), ['uv-mail:other']);
+      assert.deepEqual(buildAcademicReminders({ today: '2026-10-01', signals: state.signals })
+        .map((reminder) => reminder.id), ['reminder:signal:uv-mail:other:2026-10-02:assessment-soon']);
+      assert.deepEqual({ previous, alerts }, snapshot);
+    }
+  }
+});
