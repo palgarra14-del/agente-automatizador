@@ -90,6 +90,28 @@ test('a matching current assignment gives a code-less deadline its real subject'
   assert.equal(parsed[0].expired, false);
 });
 
+test('notifications with conflicting course codes fail closed regardless of code order', () => {
+  const validTitle = '2026-27 Análisis Matemático II (34156) contenido nuevo';
+  const repeatedTitle = '2026-27 Análisis Matemático II (34156) aviso para (34156)';
+  for (const otherCode of ['34670', '34653']) {
+    for (const codes of [['34156', otherCode], [otherCode, '34156']]) {
+      const page = { text: [
+        'Notificaciones',
+        `Vence el 28 de septiembre de 2026: Ejercicios Tema 1 (${codes[0]}) (${codes[1]})`,
+        validTitle,
+        repeatedTitle
+      ].join('\n') };
+      const parsed = parseUvNotifications(page, courses, {
+        today: '2026-09-27',
+        assignments: [{ subjectId: '34156', title: 'Ejercicios Tema 1' }]
+      });
+      assert.deepEqual(parsed.map((item) => item.title), [validTitle, repeatedTitle]);
+      assert.deepEqual(parsed.map((item) => item.subjectId), ['34156', '34156']);
+      assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+    }
+  }
+});
+
 test('first scan is baseline only; later only new non-expired notifications surface', () => {
   const current = [
     { id: 'a', title: 'old', subjectId: '34156', dueDate: null, expired: false },

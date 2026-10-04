@@ -55,7 +55,10 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     const title = clean(body[i]);
     if (!title || /^hace\b/i.test(title) || /^Seleccione\b/i.test(title)) continue;
     if (/^(Página Principal|Área personal|Mis cursos|Cursos archivados|Más)$/i.test(title)) continue;
-    const code = title.match(/\((\d{5})\)/)?.[1] ?? null;
+    const codes = [...new Set([...title.matchAll(/\((\d{5})\)/g)].map((match) => match[1]))];
+    // Multiple distinct course codes cannot establish one notification's subject.
+    if (codes.length > 1) continue;
+    const code = codes[0] ?? null;
     const year = title.match(/\b(20\d{2}-\d{2})\b/)?.[1] ?? null;
     const deadline = title.match(/(\d{1,2}) de ([a-záéíóú]+) de (20\d{2})/i);
     let dueDate = null;
