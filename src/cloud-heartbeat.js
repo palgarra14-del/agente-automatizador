@@ -4,11 +4,16 @@ const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generati
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
 const HEARTBEAT_EXECUTION_MODES = new Set(['cloud','local-primary']);
+const CONTROL_AUTH_UNAVAILABLE = /github_cli_auth_required|GitHub issue queue request failed: (?:401|403)|bad credentials|requires authentication|token[^\n]{0,80}invalid/i;
 
 export function heartbeatExecutionMode(value = 'cloud') {
   const mode = String(value || 'cloud').trim().toLowerCase();
   if (!HEARTBEAT_EXECUTION_MODES.has(mode)) throw new Error('heartbeat_execution_mode_invalid');
   return mode;
+}
+
+export function heartbeatControlAuthUnavailable(error) {
+  return CONTROL_AUTH_UNAVAILABLE.test(String(error ?? ''));
 }
 
 export function localCloudUnitName(lane) {
@@ -82,6 +87,9 @@ export function classifyLaneObservation(observation) {
   if (observation.active) return { lane, state:'running', runnable:false, reason:'already_active', operatorRequested };
   if (observation.rateLimitCooldown === true) {
     return { lane, state:'deferred', runnable:false, reason:'rate_limit_cooldown', operatorRequested };
+  }
+  if (observation.controlUnavailable === true) {
+    return { lane, state:'deferred', runnable:false, reason:'local_control_auth_unavailable', operatorRequested };
   }
   if (observation.observationSkipped === true) {
     return { lane, state:'deferred', runnable:false, reason:'observation_budget', operatorRequested };
