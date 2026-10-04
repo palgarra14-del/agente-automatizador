@@ -108,6 +108,24 @@ test('preparation skips unidentifiable resources without displacing valid study 
   }
 });
 
+test('preparation skips unusable titles without blocking valid recommendations', () => {
+  const signal = { subjectId: '34670', title: 'Examen parcial', kind: 'assessment' };
+  const valid = { id: 'valid', subjectId: '34670', title: 'Lectura complementaria' };
+  for (const title of [undefined, null, '', '   ', 42, true, {}, []]) {
+    const invalid = { id: 'invalid', subjectId: '34670', title };
+    assert.deepEqual(recommendAcademicPreparation(signal, [invalid]), [], String(title));
+    for (const inputs of [[valid, invalid], [invalid, valid]]) {
+      const snapshot = structuredClone(inputs);
+      assert.deepEqual(
+        recommendAcademicPreparation(signal, inputs).map((item) => item.id),
+        ['valid'],
+        String(title)
+      );
+      assert.deepEqual(inputs, snapshot);
+    }
+  }
+});
+
 test('preparation skips conflicting resource course identities in either record order', () => {
   const signal = { subjectId: '34670', title: 'Test Tema 1', kind: 'assessment' };
   for (const subjectId of ['34156', undefined, null, '', '   ', 34670]) {

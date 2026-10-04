@@ -32,6 +32,8 @@ function kind(title) {
 function scoreMaterial(material, signal) {
   // Recommendations and deduplication require an explicit resource identity.
   if (typeof material?.id !== 'string' || !clean(material.id)) return null;
+  // A missing or coerced title cannot establish useful preparation content.
+  if (typeof material.title !== 'string' || !clean(material.title)) return null;
   // Missing or coerced identities cannot establish that a resource belongs to the course.
   if (typeof signal?.subjectId !== 'string' || !clean(signal.subjectId)) return null;
   if (typeof material?.subjectId !== 'string' || !clean(material.subjectId)) return null;
