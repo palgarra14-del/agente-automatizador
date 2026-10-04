@@ -228,6 +228,33 @@ test('business brief normalization is bounded, deterministic, and safe for websi
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], unknown: true }), /unknown fields/);
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: [], services: ['S'] }), /locations must contain between 1 and 12 items/);
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], assets: { logoPath: '../secret.txt' } }), /relative path/);
+
+  const essential = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte']
+  });
+  assert.equal(essential.commercialPackage, 'essential');
+  assert.deepEqual(essential.website.requiredPages, ['home']);
+  assert.throws(() => normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte'],
+    website: { requiredPages: ['home', 'servicios'] }
+  }), /exceeds commercial package scope/);
+  assert.throws(() => normalizeBusinessBrief({
+    version: 2,
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte']
+  }), /commercialPackage/);
 });
 
 test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {
@@ -274,6 +301,44 @@ test('website-build refuses to start unless test, typecheck, lint, and build are
     }),
     /website-build requires configured quality commands: build/
   );
+});
+
+test('website planner rejects plans that exceed the confirmed commercial package', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-package-scope-'));
+  const configured = managedProject('website-package-scope', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const invalidPlan = websitePlanFixture({
+    pages: [{
+      slug: '/',
+      title: 'Inicio',
+      purpose: 'Demo comercial esencial.',
+      sections: ['Hero', 'Servicios', 'Galería', 'Experiencia', 'FAQ', 'Contacto']
+    }]
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute() { return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: invalidPlan } }; }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Protect Essential scope',
+    input: { businessBrief: businessBrief({
+      version: 2,
+      commercialPackage: 'essential',
+      website: { language: 'es', primaryGoal: 'contacto', requiredPages: ['home'], requiredFeatures: [] }
+    }) }
+  });
+
+  const failed = await instance.run(created.id);
+  const requirements = failed.steps.find((step) => step.id === 'requirements');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.error, 'website_plan_context_invalid');
+  assert.match(requirements.evidence.error, /commercial_package_section_scope_exceeded/);
 });
 
 test('website planner fails cleanly when SEO location is not supplied by the business brief', async () => {

@@ -1193,12 +1193,33 @@ function normalizeBrand(value = {}) {
   };
 }
 
-function normalizeWebsiteIntent(value = {}) {
+const websiteCommercialPackageLimits = Object.freeze({
+  demo: Object.freeze({ maxPages: 1, maxSectionsPerPage: 5 }),
+  essential: Object.freeze({ maxPages: 1, maxSectionsPerPage: 5 }),
+  professional: Object.freeze({ maxPages: 8, maxSectionsPerPage: 8 })
+});
+
+function normalizeWebsiteCommercialPackage(value, { required = false } = {}) {
+  const normalized = boundedText(value, 'businessBrief.commercialPackage', { required, max: 32 });
+  if (!normalized) return null;
+  if (!Object.prototype.hasOwnProperty.call(websiteCommercialPackageLimits, normalized)) {
+    throw new Error('businessBrief.commercialPackage must be demo, essential, or professional');
+  }
+  return normalized;
+}
+
+function normalizeWebsiteIntent(value = {}, commercialPackage = null) {
   assertObjectKeys(value, new Set(['language', 'primaryGoal', 'requiredPages', 'requiredFeatures']), 'businessBrief.website');
+  const defaultPages = commercialPackage === 'demo' || commercialPackage === 'essential'
+    ? ['home']
+    : ['home', 'services', 'contact'];
+  const requiredPages = boundedTextList(value.requiredPages ?? defaultPages, 'businessBrief.website.requiredPages', { min: 1, max: 20, itemMax: 80 });
+  const limit = commercialPackage ? websiteCommercialPackageLimits[commercialPackage] : null;
+  if (limit && requiredPages.length > limit.maxPages) throw new Error('businessBrief.website.requiredPages exceeds commercial package scope');
   return {
     language: boundedText(value.language ?? 'es', 'businessBrief.website.language', { required: true, max: 32 }),
     primaryGoal: boundedText(value.primaryGoal ?? 'contact', 'businessBrief.website.primaryGoal', { required: true, max: 120 }),
-    requiredPages: boundedTextList(value.requiredPages ?? ['home', 'services', 'contact'], 'businessBrief.website.requiredPages', { min: 1, max: 20, itemMax: 80 }),
+    requiredPages,
     requiredFeatures: boundedTextList(value.requiredFeatures ?? [], 'businessBrief.website.requiredFeatures', { max: 30, itemMax: 160 })
   };
 }
@@ -1219,8 +1240,13 @@ function normalizeBusinessAssets(value = {}) {
 }
 
 export function normalizeBusinessBrief(value) {
-  assertObjectKeys(value, new Set(['version', 'businessName', 'category', 'summary', 'locations', 'services', 'contact', 'brand', 'website', 'facts', 'contentRestrictions', 'assets']), 'businessBrief');
-  if (value.version !== undefined && value.version !== 1) throw new Error('businessBrief.version must be 1');
+  assertObjectKeys(value, new Set(['version', 'commercialPackage', 'businessName', 'category', 'summary', 'locations', 'services', 'contact', 'brand', 'website', 'facts', 'contentRestrictions', 'assets']), 'businessBrief');
+  const version = value.version ?? 1;
+  if (![1, 2].includes(version)) throw new Error('businessBrief.version must be 1 or 2');
+  if (version === 1 && value.commercialPackage !== undefined) throw new Error('businessBrief.commercialPackage requires businessBrief.version 2');
+  const commercialPackage = version === 2
+    ? normalizeWebsiteCommercialPackage(value.commercialPackage, { required: true })
+    : null;
   if (!Array.isArray(value.services) || value.services.length < 1 || value.services.length > 20) throw new Error('businessBrief.services must contain between 1 and 20 items');
   const services = value.services.map((service, index) => {
     if (typeof service === 'string') return { name: boundedText(service, `businessBrief.services[${index}]`, { required: true, max: 120 }), description: null };
@@ -1231,7 +1257,8 @@ export function normalizeBusinessBrief(value) {
     };
   });
   return safeJson({
-    version: 1,
+    version,
+    ...(commercialPackage ? { commercialPackage } : {}),
     businessName: boundedText(value.businessName, 'businessBrief.businessName', { required: true, max: 120 }),
     category: boundedText(value.category, 'businessBrief.category', { required: true, max: 120 }),
     summary: boundedText(value.summary, 'businessBrief.summary', { max: 1_200 }) || null,
@@ -1239,7 +1266,7 @@ export function normalizeBusinessBrief(value) {
     services,
     contact: normalizeOptionalContact(value.contact ?? {}),
     brand: normalizeBrand(value.brand ?? {}),
-    website: normalizeWebsiteIntent(value.website ?? {}),
+    website: normalizeWebsiteIntent(value.website ?? {}, commercialPackage),
     facts: boundedTextList(value.facts ?? [], 'businessBrief.facts', { max: 40, itemMax: 400 }),
     contentRestrictions: boundedTextList(value.contentRestrictions ?? [], 'businessBrief.contentRestrictions', { max: 30, itemMax: 300 }),
     assets: normalizeBusinessAssets(value.assets ?? {})
@@ -1300,7 +1327,11 @@ function websiteBlueprintPages(brief, profileId) {
   const hasServicesPage = pages.some((page) => /servic/.test(page.id));
   const hasContactPage = pages.some((page) => /contact/.test(page.id));
   const hasMediaPage = pages.some((page) => /(galer|portfolio|look|inspir)/.test(page.id));
-  const profileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
+  const baseProfileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
+  const packageLimit = brief?.commercialPackage ? websiteCommercialPackageLimits[brief.commercialPackage] : null;
+  const profileSections = packageLimit
+    ? baseProfileSections.filter((section) => section !== 'faq').slice(0, packageLimit.maxSectionsPerPage)
+    : baseProfileSections;
 
   return pages.map((page) => {
     let sections;
@@ -1389,10 +1420,15 @@ export function websiteBlueprintForBrief(businessBrief) {
       }))
     : [];
 
+  const commercialScope = businessBrief.commercialPackage
+    ? { package: businessBrief.commercialPackage, ...websiteCommercialPackageLimits[businessBrief.commercialPackage] }
+    : null;
+
   return safeJson({
     version: 1,
     profileId,
     sourceBriefFingerprint: evidenceFingerprint({ businessBrief }),
+    ...(commercialScope ? { commercialScope } : {}),
     pages,
     requiredFeatures,
     contentSources: {
@@ -5854,6 +5890,13 @@ function validateWebsitePlanContext(websitePlan, businessBrief) {
   const normalized = normalizeWebsitePlan(websitePlan);
   if (normalized.seo.primaryLocation && !businessBrief.locations.includes(normalized.seo.primaryLocation)) {
     throw new Error('website_plan_primary_location_not_supplied_by_brief');
+  }
+  const packageLimit = businessBrief?.commercialPackage ? websiteCommercialPackageLimits[businessBrief.commercialPackage] : null;
+  if (packageLimit) {
+    if (normalized.pages.length > packageLimit.maxPages) throw new Error('website_plan_commercial_package_page_scope_exceeded');
+    if (normalized.pages.some((page) => page.sections.length > packageLimit.maxSectionsPerPage)) {
+      throw new Error('website_plan_commercial_package_section_scope_exceeded');
+    }
   }
   return normalized;
 }
