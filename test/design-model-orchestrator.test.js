@@ -76,6 +76,50 @@ print(json.dumps({
   assert.equal(result.bulk, 'ollama-qwen-3b');
 });
 
+test('7B local fallback is blocked when the MSI lacks safe memory headroom', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.COST_POLICY="free_only"
+m.available_memory_mb=lambda: 6400
+print(json.dumps({
+  "seven":m.candidate_available("ollama-qwen-7b"),
+  "three":m.candidate_available("ollama-qwen-3b"),
+  "localPatch":m.rank_candidates("local_patch")[0]["candidate"],
+  "offline":m.rank_candidates("offline_analysis")[0]["candidate"]
+}))
+`);
+  assert.equal(result.seven, false);
+  assert.equal(result.three, true);
+  assert.equal(result.localPatch, 'ollama-qwen-3b');
+  assert.equal(result.offline, 'ollama-qwen-3b');
+});
+
+test('7B local fallback remains available when measured headroom is sufficient', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.COST_POLICY="free_only"
+m.available_memory_mb=lambda: 8000
+print(json.dumps({
+  "seven":m.candidate_available("ollama-qwen-7b"),
+  "localPatch":m.rank_candidates("local_patch")[0]["candidate"]
+}))
+`);
+  assert.equal(result.seven, true);
+  assert.equal(result.localPatch, 'ollama-qwen-7b');
+});
+
 test('allow_all does not unlock paid models without explicit second gate', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile
