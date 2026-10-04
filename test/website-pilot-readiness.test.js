@@ -42,7 +42,8 @@ test('website pilot is registered for the full governed website-build workflow',
     goal: 'Build a professional local-business pilot',
     input: {
       businessBrief: {
-        version: 1,
+        version: 2,
+        commercialPackage: 'essential',
         businessName: 'Negocio Piloto',
         category: 'Servicios',
         locations: ['Madrid'],

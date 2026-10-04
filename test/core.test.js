@@ -36,6 +36,7 @@ import {
   imageIsPinned,
   loadProjects,
   maskSecrets,
+  normalizeBusinessBrief,
   nonRetryableModelFailureCode,
   policy,
   runCommand,
@@ -1407,6 +1408,34 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   ].sort());
   assert.equal(beauty.forbiddenClaims[0].value, 'No inventar precios.');
   assert.equal(beauty.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
+
+  const essentialBrief = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte'],
+    website: { primaryGoal: 'contacto', requiredPages: ['home'], requiredFeatures: [] }
+  });
+  const essentialBlueprint = websiteBlueprintForBrief(essentialBrief);
+  assert.deepEqual(essentialBlueprint.commercialScope, { package: 'essential', maxPages: 1, maxSectionsPerPage: 5 });
+  assert.deepEqual(essentialBlueprint.pages.map((page) => page.route), ['/']);
+  assert.ok(essentialBlueprint.pages[0].sections.length <= 5);
+  assert.equal(essentialBlueprint.pages[0].sections.includes('contact'), true);
+
+  const professionalBrief = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'professional',
+    businessName: 'Salón Profesional',
+    category: 'Peluquería',
+    locations: ['Madrid'],
+    services: ['Corte'],
+    website: { requiredPages: ['home', 'servicios', 'contacto'], requiredFeatures: [] }
+  });
+  const professionalBlueprint = websiteBlueprintForBrief(professionalBrief);
+  assert.deepEqual(professionalBlueprint.commercialScope, { package: 'professional', maxPages: 8, maxSectionsPerPage: 8 });
+  assert.deepEqual(professionalBlueprint.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
 
   const serialized = JSON.stringify(beauty).toLowerCase();
   for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'tel:', '€']) {
