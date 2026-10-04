@@ -68,8 +68,9 @@ export function extractAcademicDates(value, capturedAt) {
   const text = clean(value).toLowerCase();
   const dates = new Set();
   const monthPattern = Object.keys(MONTHS).join('|');
+  // A trailing clock time is not a bare explicit year.
   const named = new RegExp(
-    "\\b(\\d{1,2})\\s+(?:de\\s+|d['’])(" + monthPattern + ')(?:\\s+(?:del?\\s+)?(\\d+))?',
+    "\\b(\\d{1,2})\\s+(?:de\\s+|d['’])(" + monthPattern + ')(?:\\s+(?:del?\\s+)?(?!(?:[01]?\\d|2[0-3]):[0-5]\\d\\b)(\\d+))?',
     'gi'
   );
   for (const match of text.matchAll(named)) {

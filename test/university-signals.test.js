@@ -70,6 +70,25 @@ test('named dates reject unsupported explicit years without inventing assessment
   }
 });
 
+test('a time after a named date does not hide an upcoming assessment reminder', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  for (const month of ['de octubre', 'd’octubre']) {
+    for (const time of ['09:30', '9:30', '12:00', '20:26']) {
+      const body = `El test: 2 ${month} ${time}.`;
+      const signal = alertToAcademicSignal({
+        id: 'uv-mail:assessment-time', subject: 'Test Tema 1', body
+      }, { capturedAt });
+      assert.deepEqual(signal.dates, ['2026-10-02'], body);
+      const reminders = buildAcademicReminders({ today: '2026-09-30', signals: [signal] });
+      assert.deepEqual(reminders.map(({ date, daysRemaining }) => ({ date, daysRemaining })),
+        [{ date: '2026-10-02', daysRemaining: 2 }], body);
+      assert.deepEqual(extractAcademicDates(
+        `El test: 2 ${month} 2025 ${time}.`, capturedAt
+      ), ['2025-10-02'], body);
+    }
+  }
+});
+
 test('named dates preserve years introduced by del without creating false reminders', () => {
   const capturedAt = '2026-09-27T16:00:00Z';
   for (const month of ['de octubre', 'd’octubre']) {
