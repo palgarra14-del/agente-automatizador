@@ -9,7 +9,8 @@ const SELF_COOLDOWN_MS = 30 * 60 * 1000;
 const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_MAX_STARTS_PER_24H = 24;
+const DEFAULT_MAX_STARTS_PER_24H = 12;
+const SELF_MAX_STARTS_PER_24H = 6;
 const MAX_CONSECUTIVE_FAILURE_RETRIES = 3;
 const HISTORY_LIMIT = 20;
 const GAP_MEMORY_LIMIT = 12;
@@ -44,7 +45,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   self: Object.freeze({
     stateKey: SELF_STATE_KEY,
     cooldownMs: SELF_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: SELF_MAX_STARTS_PER_24H,
     goal: AUTONOMOUS_MAINTENANCE_GOAL,
     scope: AUTONOMOUS_MAINTENANCE_SCOPE,
     allowSensitiveImplementation: true
