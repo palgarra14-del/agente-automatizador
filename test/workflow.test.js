@@ -2870,7 +2870,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-e2e-'));
   const configured = managedProject('website-e2e', root, {
     deployment: { provider: 'vercel', projectId: 'prj_website_e2e', teamId: 'team_website_e2e', requirePreviewReady: true },
-    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow', 'visual.review'], deny: [] }
   });
   const manager = new FakeWorkflowWorkspaceManager();
   const brief = businessBrief();
