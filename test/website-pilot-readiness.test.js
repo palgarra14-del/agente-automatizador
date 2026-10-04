@@ -57,6 +57,6 @@ test('website pilot is registered for the full governed website-build workflow',
   assert.match(plan.inputFingerprint, /^[a-f0-9]{64}$/);
   assert.deepEqual(plan.steps.map((step) => step.id), [
     'requirements', 'design', 'implementation', 'dependency-refresh', 'review',
-    'quality', 'release-readiness', 'publication', 'visual-verification'
+    'quality', 'release-readiness', 'publication', 'browser-verification', 'visual-verification'
   ]);
 });
