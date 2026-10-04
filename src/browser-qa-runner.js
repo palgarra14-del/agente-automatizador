@@ -1140,6 +1140,7 @@ class ChromeCdpBrowser {
         const attempted = await evaluateJson(this.connection, sessionId, directNetworkExpression, contextId);
         if (attempted) throw new Error(`browser_qa_direct_network_forbidden:${networkFrameId}`);
       }
+      if (interceptionFailure) throw interceptionFailure;
       if (websocketFailure) throw websocketFailure;
       if (directNetworkFailure) throw directNetworkFailure;
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
