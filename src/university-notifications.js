@@ -59,7 +59,10 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     // Multiple distinct course codes cannot establish one notification's subject.
     if (codes.length > 1) continue;
     const code = codes[0] ?? null;
-    const year = title.match(/\b(20\d{2}-\d{2})\b/)?.[1] ?? null;
+    const years = [...new Set([...title.matchAll(/\b(20\d{2}-\d{2})\b/g)].map((match) => match[1]))];
+    // Conflicting years cannot establish current-course membership.
+    if (years.length > 1) continue;
+    const year = years[0] ?? null;
     const deadline = title.match(/(\d{1,2}) de ([a-záéíóú]+) de (20\d{2})/i);
     let dueDate = null;
     if (deadline) {

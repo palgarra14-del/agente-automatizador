@@ -112,6 +112,27 @@ test('notifications with conflicting course codes fail closed regardless of code
   }
 });
 
+test('notification titles with conflicting academic years fail closed in either order', () => {
+  const validTitle = '2026-27 Análisis Matemático II (34156) contenido nuevo';
+  const repeatedTitle = '2026-27 Análisis Matemático II (34156) aviso de 2026-27';
+  for (const years of [['2026-27', '2025-26'], ['2025-26', '2026-27']]) {
+    for (const coded of [false, true]) {
+      const page = { text: [
+        'Notificaciones',
+        `Vence el 28 de septiembre de 2026: Ejercicios Tema 1 ${years.join(' / ')}${coded ? ' (34156)' : ''}`,
+        validTitle,
+        repeatedTitle
+      ].join('\n') };
+      const parsed = parseUvNotifications(page, courses, {
+        today: '2026-09-27',
+        assignments: [{ subjectId: '34156', title: 'Ejercicios Tema 1' }]
+      });
+      assert.deepEqual(parsed.map((item) => item.title), [validTitle, repeatedTitle]);
+      assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+    }
+  }
+});
+
 test('first scan is baseline only; later only new non-expired notifications surface', () => {
   const current = [
     { id: 'a', title: 'old', subjectId: '34156', dueDate: null, expired: false },
