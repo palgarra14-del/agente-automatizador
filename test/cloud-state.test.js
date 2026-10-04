@@ -1411,7 +1411,7 @@ test('bootstrap crash after claim recovers only after governed quarantine repair
   assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'recovered');
   assert.notEqual(fake.tagSha(fresh.generationClaimTag(1)), recovered);
   assert.ok(fake.refWrites().some((entry) =>
-    typeof entry.body?.ref === 'string' && entry.body.ref.includes('/1/recovery/') && entry.body.sha === recovered
+    typeof entry.body?.ref === 'string' && entry.body.ref.includes('/recovery/1/') && entry.body.sha === recovered
   ));
 });
 
@@ -1432,6 +1432,17 @@ test('established crash after claim preserves prior authority and recovers after
   assert.equal(final.state.marker, 'two-recovered');
   assert.equal(final.generation, 2);
   assert.equal(final.authoritySha, recovered);
+});
+
+test('recovery claim refs are siblings, never children, of deterministic generation refs', () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const deterministic = store.generationClaimTag(316);
+  const recovery = store.recoveryGenerationClaimTag(316, '0123456789abcdef0123456789abcdef');
+
+  assert.equal(recovery.includes('/recovery/316/'), true);
+  assert.equal(recovery.startsWith(`${deterministic}/`), false);
+  assert.notEqual(recovery, deterministic);
 });
 
 test('mismatched quarantine proof cannot authorize recovery claim election', async () => {
