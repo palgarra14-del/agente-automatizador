@@ -2402,6 +2402,20 @@ test('GitHub preview observer falls back to trusted Vercel commit statuses only 
   assert.equal(failed.state, 'ERROR');
   assert.equal(failed.ok, false);
 
+  const quota = await makeAdapter([
+    {
+      context: 'Vercel',
+      state: 'failure',
+      description: 'Deployment rate limited — retry in 24 hours.',
+      target_url: 'https://vercel.com/team?upgradeToPro=build-rate-limit'
+    }
+  ]).previewDeployment(configured, { commitSha: sha, branch });
+  assert.equal(quota.state, 'QUOTA');
+  assert.equal(quota.ok, false);
+  assert.equal(quota.reason, 'vercel_preview_quota_exhausted');
+  assert.equal(quota.retryAfterMs, 24 * 60 * 60 * 1000);
+  assert.equal(quota.statuses[0].description, 'Deployment rate limited — retry in 24 hours.');
+
   const building = await makeAdapter([
     { context: 'Vercel – primary', state: 'success', target_url: 'https://vercel.com/team/project/ok' },
     { context: 'Vercel – secondary', state: 'pending', target_url: 'https://vercel.com/team/project/pending' }
