@@ -5981,6 +5981,7 @@ function deterministicInspectionBinding({ skill, workflowProfile, scope, reposit
   const allowedRoots = [...normalizedScope.allowedPaths].sort();
   const contextPaths = [...repositoryContextPathSet({ repositoryContext })].sort();
   if (!contextPaths.length || contextPaths.length > deterministicInspectionMaxFiles) return null;
+  if (allowedRoots.some((root) => !contextPaths.some((path) => pathIsWithinRoot(path, root)))) return null;
   if (contextPaths.some((path) =>
     !pathMatchesAnyRoot(path, allowedRoots) ||
     pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths)
