@@ -127,7 +127,7 @@ function scopeRelevantBody(body, course) {
     .split(/(?<=[.!?])\s+/)
     .filter((sentence) => {
       // Dates cannot be safely attributed within a sentence mixing group scopes.
-      const groups = sentence.matchAll(/\b(?:subgrupo|grupo)\s+([A-Z])?-?P(\d+)\b/gi);
+      const groups = sentence.matchAll(/\b(?:subgrup|grup)o?\s+([A-Z])?-?P(\d+)\b/gi);
       for (const explicit of groups) {
         const prefix = explicit[1]?.toUpperCase() ?? theoryPrefix;
         if (!prefix || !practicalGroups.includes(prefix + '-P' + explicit[2])) return false;
