@@ -1008,6 +1008,7 @@ export class SupervisedIssueQueue {
     this.operatorBranch = operatorBranch;
     this.executionEnabled = executionEnabled;
     this.now = now;
+    this.parkedScanOffset = 0;
   }
 
   ownsProject(projectId) {
@@ -2324,7 +2325,7 @@ export class SupervisedIssueQueue {
       }
     }
     let parkedResult = null;
-    const maxParkedScans = 20;
+    const parkedScanBudget = 3;
     const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
     const activeEntries = Object.entries(state.requests ?? {})
       .filter(([key, record]) =>
@@ -2338,9 +2339,13 @@ export class SupervisedIssueQueue {
     const activeKeys = new Set(activeEntries.map(([key]) => key));
     const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
     const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
-    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
-      ? []
-      : allParkedEntries.slice(0, maxParkedScans);
+    let parkedEntries = [];
+    if (allParkedEntries.length > 0 && !(runnableEntries.length > 0 && allParkedEntries.length > parkedScanBudget)) {
+      const count = Math.min(parkedScanBudget, allParkedEntries.length);
+      const offset = this.parkedScanOffset % allParkedEntries.length;
+      parkedEntries = Array.from({ length: count }, (_value, index) => allParkedEntries[(offset + index) % allParkedEntries.length]);
+      this.parkedScanOffset = (offset + count) % allParkedEntries.length;
+    }
     for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||

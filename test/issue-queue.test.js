@@ -682,9 +682,49 @@ test('cloud queue bounds approval-gated scans so a large parked backlog cannot m
   };
 
   const result = await queue.tick();
-  assert.equal(scans, 20);
+  assert.equal(scans, 3);
   assert.equal(result.issueNumber, 1);
   assert.equal(result.status, 'awaiting_start_approval');
+});
+
+test('cloud queue rotates bounded approval scans so parked requests are not starved', async () => {
+  const records = {};
+  for (let number = 1; number <= 5; number += 1) {
+    records[`palgarra14-del/agente-automatizador#${number}`] = {
+      issueNumber: number, issueId: 5000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    };
+  }
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 5000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  await queue.tick();
+  assert.deepEqual(seen, [1, 2, 3]);
+  seen.length = 0;
+  await queue.tick();
+  assert.deepEqual(seen, [4, 5, 1]);
 });
 
 test('execution work detection ignores approvals and rejects invalid execution mode', async () => {
