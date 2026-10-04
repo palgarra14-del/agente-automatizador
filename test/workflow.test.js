@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
+import { browserQaFingerprint } from '../src/browser-qa.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
@@ -81,10 +82,10 @@ function stableLocalGit(overrides = {}) {
   };
 }
 
-async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge, now } = {}) {
+async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge, browserQaCoordinator, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, browserQaCoordinator, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function fixtureEvidenceFingerprint(value) {
@@ -775,7 +776,7 @@ test('app-improvement dry-run discloses future reviewed publication without exec
 test('website-build dry-run exposes the full governed factory path with zero project or external writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-dry-run-'));
   const configured = managedProject('website-build-dry-run', root, {
-    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow', 'visual.review'], deny: [] }
   });
   let gitCalls = 0;
   let workerCalls = 0;
@@ -802,10 +803,12 @@ test('website-build dry-run exposes the full governed factory path with zero pro
   });
   const dryRun = await instance.run(created.id, { dryRun: true });
   assert.equal(dryRun.dryRun, true);
-  assert.equal(dryRun.plannedSteps.length, 9);
+  assert.equal(dryRun.plannedSteps.length, 10);
   assert.deepEqual(dryRun.plannedSteps.map((step) => step.id), [
-    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'release-readiness', 'publication', 'visual-verification'
+    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'release-readiness', 'publication', 'browser-verification', 'visual-verification'
   ]);
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'browser-verification').specialist, 'visual-reviewer');
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'browser-verification').specialistAuthority, 'network-read');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialist, 'requirements-engineer');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialistAuthority, 'workspace-read');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'visual-verification').specialist, 'human-supervisor');
@@ -2937,6 +2940,23 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     preview: { provider: 'vercel', state: 'READY', ok: true, environment: 'preview', url: previewUrl },
     onCommit: (nextHead) => { head = nextHead; }
   });
+  const browserQaCoordinator = {
+    async verify(request) {
+      const base = {
+        workflowId: request.workflowId,
+        websiteBlueprintFingerprint: request.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: request.reviewedChangeSetFingerprint,
+        publishedCommitSha: request.publishedCommitSha,
+        previewUrl: request.previewUrl,
+        acceptanceSchemaVersion: request.acceptanceSchemaVersion,
+        requestFingerprint: request.requestFingerprint,
+        status: 'pass',
+        deterministicDefects: [],
+        observations: []
+      };
+      return { evidence: { ...base, evidenceFingerprint: browserQaFingerprint(base) } };
+    }
+  };
   const commandCalls = [];
   const instance = await engine({
     projects: new Map([[configured.id, configured]]),
@@ -2945,6 +2965,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     skillExecutor,
     codingWorker,
     publicationBridge,
+    browserQaCoordinator,
     runner: async (_project, name) => { commandCalls.push(name); return { name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' }; }
   });
 
@@ -3006,6 +3027,11 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(publication.evidence.preview.state, 'READY');
   assert.equal(publication.evidence.preview.url, previewUrl);
   assert.equal(publication.evidence.preview.commitSha, commitHead);
+  const browserVerification = waiting.steps.find((step) => step.id === 'browser-verification');
+  assert.equal(browserVerification.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(browserVerification.evidence.browserQaEvidence.status, 'pass');
+  assert.equal(browserVerification.evidence.browserQaEvidence.publishedCommitSha, commitHead);
+  assert.equal(browserVerification.evidence.browserQaEvidence.previewUrl, previewUrl);
   assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
 
   waiting = await instance.approve(created.id, 'visual-verification');
