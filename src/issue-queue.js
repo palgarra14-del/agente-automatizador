@@ -232,10 +232,18 @@ function pathList(value, label) {
   }))].sort();
 }
 
+function requestPriorityRank(value) {
+  if (value === 'high') return 0;
+  if (value === 'low') return 2;
+  return 1;
+}
+
 export function normalizeIssueRequest(value) {
-  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'scope', 'input']), 'agent request');
+  assertObjectKeys(value, new Set(['version', 'projectId', 'profile', 'goal', 'priority', 'scope', 'input']), 'agent request');
   if (value.version !== 1) throw new Error('agent request version must be 1');
   if (!['app-improvement', 'website-build'].includes(value.profile)) throw new Error('issue queue profile must be app-improvement or website-build');
+  const priority = value.priority === undefined || value.priority === null || value.priority === '' ? 'normal' : value.priority;
+  if (!['low', 'normal', 'high'].includes(priority)) throw new Error('agent request priority must be low, normal, or high');
   if (!value.scope || typeof value.scope !== 'object' || Array.isArray(value.scope)) throw new Error('agent request scope is required');
   const scope = value.scope;
   assertObjectKeys(scope, new Set(['allowedPaths', 'forbiddenPaths']), 'agent request scope');
@@ -254,6 +262,7 @@ export function normalizeIssueRequest(value) {
     version: 1,
     projectId: boundedString(value.projectId, 'agent request projectId', { required: true, max: 80 }),
     profile: value.profile,
+    priority,
     goal: maskSecrets(boundedString(value.goal, 'agent request goal', { required: true, max: 1_000 })),
     scope: {
       allowedPaths,
@@ -398,12 +407,20 @@ function compactDryRun(dryRun) {
   };
 }
 
-function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {}) {
+function githubMention(login) {
+  return typeof login === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)
+    ? `@${login}`
+    : null;
+}
+
+function startApprovalMessage(workflow, dryRun, token, { recovered = false, notifyLogin = null } = {}) {
   const summary = compactDryRun(dryRun);
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? 'Agent dry-run approval instruction recovered. No Codex call, project write, Git write, PR creation, or deployment was performed.'
       : 'Agent dry-run prepared. No Codex call, project write, Git write, PR creation, or deployment was performed.',
+    mention ? `${mention} — manual action required.` : null,
     '',
     `Workflow: \`${workflow.id}\``,
     `Project/profile: \`${workflow.projectId}\` / \`${workflow.profile}\``,
@@ -415,14 +432,16 @@ function startApprovalMessage(workflow, dryRun, token, { recovered = false } = {
     '',
     'To reject this request, post exactly:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
-function workflowApprovalMessage(workflow, step, token, { recovered = false } = {}) {
+function workflowApprovalMessage(workflow, step, token, { recovered = false, notifyLogin = null } = {}) {
+  const mention = githubMention(notifyLogin);
   return [
     recovered
       ? `Agent workflow approval instruction recovered for step \`${step.id}\` (skill \`${step.skill}\`).`
       : `Agent workflow is awaiting explicit approval for step \`${step.id}\` (skill \`${step.skill}\`).`,
+    mention ? `${mention} — manual action required.` : null,
     `Current workflow status: \`${workflow.status}\`.`,
     '',
     'Evidence bound to this approval fingerprint:',
@@ -433,7 +452,7 @@ function workflowApprovalMessage(workflow, step, token, { recovered = false } = 
     '',
     'Reject with:',
     `\`${rejectionInstruction(token)}\``
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
 const requestStatuses = new Set(['admitted', 'initializing', 'awaiting_start_approval', 'running', 'awaiting_workflow_approval', 'completed', 'failed', 'blocked', 'rejected']);
@@ -575,7 +594,7 @@ export function workflowFailureSummary(workflow) {
 }
 
 export class GitHubIssueChannel {
-  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 30_000 } = {}) {
+  constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 12_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
     if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 || requestTimeoutMs > 120_000) throw new Error('issue channel requestTimeoutMs must be between 1000 and 120000');
     this.token = token;
@@ -599,24 +618,50 @@ export class GitHubIssueChannel {
   }
 
   async request(path, options = {}) {
-    const timeoutSignal = globalThis.AbortSignal.timeout(this.requestTimeoutMs);
-    const signal = options.signal
-      ? globalThis.AbortSignal.any([options.signal, timeoutSignal])
-      : timeoutSignal;
-    let response;
-    try {
-      response = await this.fetch(`https://api.github.com${path}`, {
-        ...options,
-        signal,
-        headers: { ...this.headers(), ...(options.headers ?? {}) }
-      });
-      if (!response.ok) throw new Error(`GitHub issue queue request failed: ${response.status}`);
-      if (response.status === 204) return null;
-      return await response.json();
-    } catch (error) {
-      if (timeoutSignal.aborted) throw new Error('github_issue_queue_request_timeout', { cause: error });
-      throw error;
+    const method = String(options.method ?? 'GET').toUpperCase();
+    const retryDelaysMs = method === 'GET' ? [150, 500] : [];
+    const deadlineAt = Date.now() + this.requestTimeoutMs;
+    let lastError = null;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('github_issue_queue_request_cancelled');
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) throw new Error('github_issue_queue_request_timeout', { cause: lastError ?? undefined });
+      const attemptsRemaining = retryDelaysMs.length - attempt + 1;
+      const reservedBackoffMs = retryDelaysMs.slice(attempt).reduce((sum, value) => sum + value, 0);
+      const availableAttemptMs = Math.max(1, remainingMs - reservedBackoffMs);
+      const attemptTimeoutMs = method === 'GET'
+        ? Math.max(1, Math.min(4_000, Math.floor(availableAttemptMs / attemptsRemaining)))
+        : remainingMs;
+      const timeoutController = new globalThis.AbortController();
+      const timeout = setTimeout(() => timeoutController.abort(new Error('github_issue_queue_request_timeout')), attemptTimeoutMs);
+      const timeoutSignal = timeoutController.signal;
+      const signal = options.signal ? globalThis.AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+      try {
+        const response = await this.fetch(`https://api.github.com${path}`, {
+          ...options, signal, headers: { ...this.headers(), ...(options.headers ?? {}) }
+        });
+        if (!response.ok) {
+          const error = new Error(`GitHub issue queue request failed: ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
+        if (response.status === 204) return null;
+        return await response.json();
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        lastError = timeoutSignal.aborted ? new Error('github_issue_queue_request_timeout', { cause: error }) : error;
+        const status = Number(error?.status ?? 0);
+        const transient = timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
+          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? ''));
+        if (!transient || attempt >= retryDelaysMs.length) throw lastError;
+      } finally {
+        clearTimeout(timeout);
+      }
+      const delayMs = retryDelaysMs[attempt];
+      if (Date.now() + delayMs >= deadlineAt) throw new Error('github_issue_queue_request_timeout', { cause: lastError ?? undefined });
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, delayMs));
     }
+    throw lastError ?? new Error('github_issue_queue_request_failed');
   }
 
   async openIssues({ perPage = 100, maxPages = 5 } = {}) {
@@ -1595,7 +1640,7 @@ export class SupervisedIssueQueue {
       lastProcessedCommentId: 0
     };
     await this.saveRecord(key, initialized);
-    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token));
+    await this.post(issue.number, startApprovalMessage(workflow, dryRun, token, { notifyLogin: issue.user?.login ?? null }));
     return initialized;
   }
 
@@ -1695,7 +1740,7 @@ export class SupervisedIssueQueue {
     const already = record.status === 'awaiting_workflow_approval' && record.pendingApproval?.fingerprint === token;
     let approvalMessage = null;
     if (!already) {
-      try { approvalMessage = workflowApprovalMessage(workflow, step, token); }
+      try { approvalMessage = workflowApprovalMessage(workflow, step, token, { notifyLogin: record.author }); }
       catch (error) {
         return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
       }
@@ -1754,7 +1799,7 @@ export class SupervisedIssueQueue {
     return next;
   }
 
-  async processExisting(issue, parsed, record) {
+  async processExisting(issue, parsed, record, { deadlineCapAt = null } = {}) {
     const key = this.requestKey(issue);
     if (['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) return record;
     const currentRequest = await this.revalidateCurrentRequest(issue, record);
@@ -1898,7 +1943,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'start_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent start approval became stale because the workflow plan changed. Create a new request.');
             }
-            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true });
+            recoveredMessage = startApprovalMessage(workflow, dryRun, expected, { recovered: true, notifyLogin: record.author });
           } else {
             const targetStep = workflow.steps.find((candidate) => candidate.id === record.pendingApproval.stepId);
             if (!stepNeedsHumanApproval(targetStep)) {
@@ -1917,7 +1962,7 @@ export class SupervisedIssueQueue {
               const next = { ...record, status: 'blocked', reason: 'workflow_approval_stale', updatedAt: this.now(), pendingApproval: null, activeApproval: null };
               return this.finalizeTerminal(issue, key, next, 'Agent workflow approval became stale because the persisted evidence changed.');
             }
-            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true }); }
+            try { recoveredMessage = workflowApprovalMessage(workflow, targetStep, expected, { recovered: true, notifyLogin: record.author }); }
             catch (error) {
               return this.blockRequestRevalidation(issue, key, record, `approval_evidence_unpublishable:${maskSecrets(error.message)}`);
             }
@@ -2028,7 +2073,10 @@ export class SupervisedIssueQueue {
               const recoveredApproval = await this.revalidateActiveApproval(issue, key, record);
               if (!recoveredApproval.ok) return recoveredApproval.record;
               if (!this.executionEnabled) return this.executionDeferred(record);
-              const result = await this.workflowEngine.run(record.workflowId);
+              const result = await this.workflowEngine.run(
+                record.workflowId,
+                deadlineCapAt === null ? {} : { deadlineCapAt }
+              );
               return this.settleWorkflow(issue, key, record, result);
             }
             if (appliedState) {
@@ -2060,7 +2108,10 @@ export class SupervisedIssueQueue {
           return this.finalizeTerminal(issue, key, next, `Agent request rejected by \`${latestDecision.actor}\` before workflow approval. No further execution will occur.`);
         }
         if (latestDecision?.decision !== 'approve') return record;
-        await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId, { externalApprovalFingerprint: record.pendingApproval.fingerprint });
+        await this.workflowEngine.approve(record.workflowId, record.pendingApproval.stepId, {
+          externalApprovalFingerprint: record.pendingApproval.fingerprint,
+          ...(deadlineCapAt === null ? {} : { deadlineCapAt })
+        });
         record = await this.saveRecord(key, {
           ...record,
           status: 'running',
@@ -2078,7 +2129,7 @@ export class SupervisedIssueQueue {
         const activeWorkflowApproval = await this.revalidateActiveApproval(issue, key, record);
         if (!activeWorkflowApproval.ok) return activeWorkflowApproval.record;
         if (!this.executionEnabled) return this.executionDeferred(record);
-        const result = await this.workflowEngine.run(record.workflowId);
+        const result = await this.workflowEngine.run(record.workflowId, deadlineCapAt === null ? {} : { deadlineCapAt });
         return this.settleWorkflow(issue, key, record, result);
       }
     }
@@ -2088,7 +2139,10 @@ export class SupervisedIssueQueue {
       if (!active.ok) return active.record;
     }
 
-    const workflow = await this.workflowEngine.get(record.workflowId);
+    const workflow = await this.workflowEngine.get(
+      record.workflowId,
+      deadlineCapAt === null ? {} : { deadlineCapAt }
+    );
     if (!workflow) {
       const next = { ...record, status: 'blocked', reason: 'workflow_missing', updatedAt: this.now(), pendingApproval: null };
       return this.finalizeTerminal(issue, key, next, 'Agent workflow state is missing. Manual inspection is required; no continuation was attempted.');
@@ -2124,7 +2178,7 @@ export class SupervisedIssueQueue {
             updatedAt: this.now()
           };
           await this.saveRecord(key, next);
-          if (!already) await this.post(issue.number, `Agent start authorization is missing or stale. Approve the current dry-run with exactly:\n\`${approvalInstruction(expectedStart)}\``);
+          if (!already) await this.post(issue.number, [`Agent start authorization is missing or stale.`, `${githubMention(record.author) ?? 'Authorized operator'} — manual action required.`, 'Approve the current dry-run with exactly:', `\`${approvalInstruction(expectedStart)}\``].join('\n'));
           return next;
         }
         record = await this.saveRecord(key, {
@@ -2142,24 +2196,33 @@ export class SupervisedIssueQueue {
         if (!recoveredStart.ok) return recoveredStart.record;
       }
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.run(workflow.id, this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {});
+      const result = await this.workflowEngine.run(workflow.id, {
+        ...(this.workflowIsPristine(workflow) ? { refreshPristineDeadline: true } : {}),
+        ...(deadlineCapAt === null ? {} : { deadlineCapAt })
+      });
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.RUNNING) {
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.resume(workflow.id);
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        deadlineCapAt === null ? {} : { deadlineCapAt }
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     if (workflow.status === WorkflowStepStatus.BLOCKED &&
         workflow.steps?.some((step) => step.status === WorkflowStepStatus.BLOCKED && ['workflow_publication_ci_timeout', 'workflow_publication_preview_timeout'].includes(step.error))) {
       if (!this.executionEnabled) return this.executionDeferred(record);
-      const result = await this.workflowEngine.resume(workflow.id);
+      const result = await this.workflowEngine.resume(
+        workflow.id,
+        deadlineCapAt === null ? {} : { deadlineCapAt }
+      );
       return this.settleWorkflow(issue, key, record, result);
     }
     return this.settleWorkflow(issue, key, record, workflow);
   }
 
-  async processIssue(issue) {
+  async processIssue(issue, { deadlineCapAt = null } = {}) {
     if (!Number.isInteger(issue?.number) || !issue.id || issue.state !== 'open' || issue.pull_request) return null;
     if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) return null;
     let parsed;
@@ -2185,7 +2248,9 @@ export class SupervisedIssueQueue {
     }
     const key = this.requestKey(issue);
     const existing = await this.getRecord(key);
-    return existing ? this.processExisting(issue, parsed, existing) : this.initializeIssue(issue, parsed);
+    return existing
+      ? this.processExisting(issue, parsed, existing, { deadlineCapAt })
+      : this.initializeIssue(issue, parsed);
   }
 
   async hasWork() {
@@ -2221,7 +2286,10 @@ export class SupervisedIssueQueue {
     return false;
   }
 
-  async tick() {
+  async tick({ deadlineCapAt = null } = {}) {
+    if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) {
+      throw new Error('issue_queue_deadline_invalid');
+    }
     let notificationError = null;
     const state = await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
@@ -2238,10 +2306,25 @@ export class SupervisedIssueQueue {
         notificationError ??= error;
       }
     }
-    for (const [key, record] of Object.entries(state.requests ?? {})) {
-      if (!key.startsWith(keyPrefix) ||
-          !this.ownsRecord(record) ||
-          ['completed', 'failed', 'blocked', 'rejected'].includes(record.status)) continue;
+    let parkedResult = null;
+    const maxParkedScans = 20;
+    const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
+    const activeEntries = Object.entries(state.requests ?? {})
+      .filter(([key, record]) =>
+        key.startsWith(keyPrefix) &&
+        this.ownsRecord(record) &&
+        !['completed', 'failed', 'blocked', 'rejected'].includes(record.status)
+      )
+      .sort(([, left], [, right]) =>
+        requestPriorityRank(left?.request?.priority) - requestPriorityRank(right?.request?.priority)
+      );
+    const activeKeys = new Set(activeEntries.map(([key]) => key));
+    const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
+    const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
+    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
+      ? []
+      : allParkedEntries.slice(0, maxParkedScans);
+    for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
           issue.state !== 'open' ||
@@ -2259,16 +2342,34 @@ export class SupervisedIssueQueue {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) {
         return this.blockRequestRevalidation(issue, key, record, 'request_marker_removed');
       }
-      const activeResult = await this.processIssue(issue);
-      if (activeResult) return activeResult;
+      const activeResult = await this.processIssue(issue, { deadlineCapAt });
+      if (!activeResult) continue;
+      if (['awaiting_start_approval', 'awaiting_workflow_approval', 'execution_deferred'].includes(activeResult.status)) {
+        parkedResult ??= activeResult;
+        continue;
+      }
+      return activeResult;
     }
     if (this.includedProjectIds !== null) {
       if (notificationError) throw notificationError;
-      return null;
+      return parkedResult;
     }
-    const issues = await this.channel.openIssues();
+    const issues = (await this.channel.openIssues())
+      .map((issue, index) => {
+        let priority = 'normal';
+        if (typeof issue.body === 'string' && issue.body.includes(ISSUE_REQUEST_MARKER)) {
+          try { priority = parseIssueRequestBody(issue.body).request.priority; } catch { /* invalid requests retain normal scheduling priority until validation */ }
+        }
+        return { issue, index, priority };
+      })
+      .sort((left, right) =>
+        requestPriorityRank(left.priority) - requestPriorityRank(right.priority) || left.index - right.index
+      )
+      .map(({ issue }) => issue);
     let remoteOperatorRevision = null;
     for (const issue of issues) {
+      const issueKey = this.requestKey(issue);
+      if (activeKeys.has(issueKey)) continue;
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
       let routingRequest = null;
       try { routingRequest = parseIssueRequestBody(issue.body).request; }
@@ -2276,7 +2377,7 @@ export class SupervisedIssueQueue {
         if (this.includedProjectIds !== null) continue;
       }
       if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
-      const existing = await this.getRecord(this.requestKey(issue));
+      const existing = await this.getRecord(issueKey);
       if (existing && !this.ownsRecord(existing)) continue;
       if (existing && ['completed', 'failed', 'blocked', 'rejected'].includes(existing.status)) continue;
       if (!existing && this.operatorRevision) {
@@ -2291,12 +2392,18 @@ export class SupervisedIssueQueue {
           };
         }
       }
-      const result = await this.processIssue(issue);
+      const result = await this.processIssue(issue, { deadlineCapAt });
       if (result) return result;
     }
     if (notificationError) throw notificationError;
-    return null;
+    return parkedResult;
   }
+}
+
+export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs) {
+  if (!Number.isInteger(failureStreak) || failureStreak < 1) throw new Error('issue_queue_failure_streak_invalid');
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
+  return Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
 }
 
 export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
@@ -2308,14 +2415,19 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
   let operationError = null;
+  let failureStreak = 0;
   try {
     while (!signal?.aborted) {
       if (beforeTick && await beforeTick() === false) break;
       if (signal?.aborted) break;
+      let sleepMs = pollIntervalMs;
       try {
         const result = await queue.tick();
+        failureStreak = 0;
         await onTick?.(result);
       } catch (error) {
+        failureStreak += 1;
+        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs);
         await onError?.(error);
       }
       if (signal?.aborted) break;
@@ -2329,7 +2441,7 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
           signal?.removeEventListener?.('abort', finish);
           resolveSleep();
         };
-        timer = setTimeout(finish, pollIntervalMs);
+        timer = setTimeout(finish, sleepMs);
         if (signal) {
           if (signal.aborted) return finish();
           signal.addEventListener?.('abort', finish, { once: true });

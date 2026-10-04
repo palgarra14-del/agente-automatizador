@@ -228,6 +228,33 @@ test('business brief normalization is bounded, deterministic, and safe for websi
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], unknown: true }), /unknown fields/);
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: [], services: ['S'] }), /locations must contain between 1 and 12 items/);
   assert.throws(() => normalizeBusinessBrief({ businessName: 'X', category: 'Y', locations: ['Z'], services: ['S'], assets: { logoPath: '../secret.txt' } }), /relative path/);
+
+  const essential = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte']
+  });
+  assert.equal(essential.commercialPackage, 'essential');
+  assert.deepEqual(essential.website.requiredPages, ['home']);
+  assert.throws(() => normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte'],
+    website: { requiredPages: ['home', 'servicios'] }
+  }), /exceeds commercial package scope/);
+  assert.throws(() => normalizeBusinessBrief({
+    version: 2,
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte']
+  }), /commercialPackage/);
 });
 
 test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {
@@ -274,6 +301,44 @@ test('website-build refuses to start unless test, typecheck, lint, and build are
     }),
     /website-build requires configured quality commands: build/
   );
+});
+
+test('website planner rejects plans that exceed the confirmed commercial package', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-website-package-scope-'));
+  const configured = managedProject('website-package-scope', root, {
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const invalidPlan = websitePlanFixture({
+    pages: [{
+      slug: '/',
+      title: 'Inicio',
+      purpose: 'Demo comercial esencial.',
+      sections: ['Hero', 'Servicios', 'Galería', 'Experiencia', 'FAQ', 'Contacto']
+    }]
+  });
+  const skillExecutor = {
+    supports: (skill) => skill === 'website.plan',
+    async execute() { return { ok: true, status: 'completed', outputBytes: 1, result: { websitePlan: invalidPlan } }; }
+  };
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, skillExecutor });
+  const created = await instance.create({
+    profile: 'website-build',
+    projectId: configured.id,
+    goal: 'Protect Essential scope',
+    input: { businessBrief: businessBrief({
+      version: 2,
+      commercialPackage: 'essential',
+      website: { language: 'es', primaryGoal: 'contacto', requiredPages: ['home'], requiredFeatures: [] }
+    }) }
+  });
+
+  const failed = await instance.run(created.id);
+  const requirements = failed.steps.find((step) => step.id === 'requirements');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.status, WorkflowStepStatus.FAILED);
+  assert.equal(requirements.error, 'website_plan_context_invalid');
+  assert.match(requirements.evidence.error, /commercial_package_section_scope_exceeded/);
 });
 
 test('website planner fails cleanly when SEO location is not supplied by the business brief', async () => {
@@ -1263,6 +1328,97 @@ test('human checkpoint wait time pauses the workflow execution deadline', async 
   assert.ok(approved.deadlineAt > clock);
 });
 
+test('expired historical workflow pauses fail closed across approve, run, and resume', async () => {
+  for (const action of ['approve', 'run', 'resume']) {
+    let commandCalls = 0;
+    const instance = await engine({
+      runner: async (_project, name) => {
+        commandCalls += 1;
+        return { name, ok: true, exitCode: 0, stdout: '', stderr: '' };
+      }
+    });
+    const created = await instance.create({
+      profile: 'app-improvement',
+      projectId: 'workflow-project',
+      goal: `Recover expired pause via ${action}`,
+      budgets: { timeoutMs: 1_000 }
+    });
+    await instance.update(created.id, (plan) => {
+      completeStep(plan, 'inspect-project');
+      const diagnosis = completeStep(plan, 'diagnose');
+      diagnosis.evidence.result = {
+        diagnosis: {
+          summary: 'fixture diagnosis',
+          cause: 'fixture cause',
+          relevantPaths: ['src/core.js'],
+          recommendedChange: 'fixture bounded change',
+          risks: []
+        }
+      };
+      const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+      checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+      checkpoint.error = null;
+      plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+      plan.pausedAt = plan.deadlineAt + 1;
+    });
+
+    let recovered;
+    if (action === 'approve') recovered = await instance.approve(created.id, 'plan-change');
+    else if (action === 'run') recovered = await instance.run(created.id);
+    else recovered = await instance.resume(created.id);
+
+    const checkpoint = recovered.steps.find((step) => step.id === 'plan-change');
+    assert.equal(recovered.status, WorkflowStepStatus.FAILED, action);
+    assert.equal(recovered.pausedAt, null, action);
+    assert.equal(recovered.result.error, 'workflow_budget_deadline_exceeded', action);
+    assert.equal(recovered.result.stepId, 'plan-change', action);
+    assert.equal(recovered.result.historicalPauseRecovery, true, action);
+    assert.equal(checkpoint.status, WorkflowStepStatus.FAILED, action);
+    assert.equal(checkpoint.error, 'workflow_budget_deadline_exceeded', action);
+    assert.equal(checkpoint.evidence.budgetRecovery.type, 'expired-pause', action);
+    assert.equal(checkpoint.evidence.budgetRecovery.pausedAt, created.deadlineAt + 1, action);
+    assert.equal(checkpoint.evidence.budgetRecovery.deadlineAt, created.deadlineAt, action);
+    assert.equal(commandCalls, 0, action);
+    assert.equal(validateWorkflowPlan(recovered, instance.projects).ok, true, action);
+  }
+});
+
+test('expired-pause recovery does not accept other malformed pause timestamps', async () => {
+  const instance = await engine();
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'Reject unrelated malformed pause',
+    budgets: { timeoutMs: 1_000 }
+  });
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    const diagnosis = completeStep(plan, 'diagnose');
+    diagnosis.evidence.result = {
+      diagnosis: {
+        summary: 'fixture diagnosis',
+        cause: 'fixture cause',
+        relevantPaths: ['src/core.js'],
+        recommendedChange: 'fixture bounded change',
+        risks: []
+      }
+    };
+    const checkpoint = plan.steps.find((step) => step.id === 'plan-change');
+    checkpoint.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    checkpoint.error = null;
+    plan.status = WorkflowStepStatus.AWAITING_APPROVAL;
+    plan.pausedAt = plan.deadlineAt - plan.budgets.timeoutMs - 1;
+  });
+
+  await assert.rejects(
+    instance.approve(created.id, 'plan-change'),
+    /Workflow pausedAt must be null or a valid active-budget pause timestamp/
+  );
+  const unchanged = await instance.get(created.id);
+  assert.equal(unchanged.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(unchanged.steps.find((step) => step.id === 'plan-change').status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
 test('managed workspace clone receives only the workflow remaining time', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-clone-deadline-'));
   const leadfinder = managedProject('leadfinder', root, { commands: { test: 'pnpm test' }, budgets: { commandTimeoutMs: 120_000 } });
@@ -1889,6 +2045,144 @@ test('read-only hard billing failure blocks after one model call without retryin
   assert.equal(calls, 1);
   assert.equal(blocked.modelUsage.calls, 1);
   assert.equal(blocked.modelUsage.entries[0].status, 'failed');
+});
+
+test('executor step start atomically recovers a pre-start orphaned model reservation', async () => {
+  const configured = configFrom({
+    id: 'atomic-model-step-start',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxModelCalls: 6 }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]) });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover pre-start model reservation atomically'
+  });
+
+  const orphan = await instance.reserveWorkflowModelCall(created.id, 'inspect-project');
+  assert.equal(orphan.callId, 'model-call-1');
+
+  const originalUpdate = instance.update.bind(instance);
+  let updateCalls = 0;
+  instance.update = async (...args) => {
+    updateCalls += 1;
+    return originalUpdate(...args);
+  };
+
+  const started = await instance.beginWorkflowExecutorStep(created.id, 'inspect-project', {
+    reserveModel: true,
+    evidence: { workspacePath: configured.workspace }
+  });
+  const plan = await instance.get(created.id);
+  const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(updateCalls, 1);
+  assert.equal(started.callId, 'model-call-2');
+  assert.equal(inspect.status, WorkflowStepStatus.RUNNING);
+  assert.equal(inspect.attempts, 1);
+  assert.equal(inspect.evidence.recoveredInterruptedModelCallId, 'model-call-1');
+  assert.deepEqual(plan.modelUsage.entries.map((entry) => [entry.id, entry.attempt, entry.status]), [
+    ['model-call-1', 1, 'failed'],
+    ['model-call-2', 1, 'started']
+  ]);
+});
+
+test('run recovers an orphaned read-only model reservation without refunding model budget', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-orphaned-readonly-'));
+  const configured = managedProject('orphaned-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const calls = [];
+  const skillExecutor = {
+    supports: (skill) => ['code.inspect', 'code.diagnose'].includes(skill),
+    async execute(request) {
+      calls.push(request.skill);
+      if (request.skill === 'code.inspect') {
+        return {
+          ok: true,
+          status: 'completed',
+          usage: { input_tokens: 10, output_tokens: 4 },
+          outputBytes: 10,
+          result: { inspectionEvidence: { summary: 'recovered inspection', relevantPaths: ['src/core.js'], findings: ['orphan recovery verified'] } }
+        };
+      }
+      return {
+        ok: true,
+        status: 'completed',
+        usage: { input_tokens: 7, output_tokens: 3 },
+        outputBytes: 10,
+        result: { diagnosis: { summary: 'recovered diagnosis', cause: 'orphaned prior model call', relevantPaths: ['src/core.js'], recommendedChange: 'continue safely', risks: [] } }
+      };
+    }
+  };
+  let clock = Date.now();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    skillExecutor,
+    now: () => clock
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover orphaned read-only work',
+    budgets: { timeoutMs: 60_000, maxAttempts: 2 }
+  });
+  await instance.workspaceProject(created.id, configured);
+  const reservation = await instance.reserveWorkflowModelCall(created.id, 'inspect-project');
+  assert.equal(reservation.callId, 'model-call-1');
+  clock = Date.now() + 1_000;
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+    plan.deadlineAt = clock - 1;
+  });
+
+  const waiting = await instance.run(created.id, { deadlineCapAt: clock + 60_000 });
+  const inspect = waiting.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(waiting.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(inspect.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(inspect.attempts, 2);
+  assert.deepEqual(calls, ['code.inspect', 'code.diagnose']);
+  assert.equal(waiting.modelUsage.calls, 3);
+  assert.equal(waiting.modelUsage.unknownUsageCalls, 1);
+  assert.deepEqual(waiting.modelUsage.entries.map((entry) => [entry.skill, entry.status]), [
+    ['code.inspect', 'failed'],
+    ['code.inspect', 'completed'],
+    ['code.diagnose', 'completed']
+  ]);
+  assert.ok(waiting.deadlineAt > clock);
 });
 
 test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
@@ -3016,6 +3310,8 @@ test('app-improvement implementation completes only after critic PASS and normal
     async execute(task, options) {
       assert.equal(task.objective, 'Implement safely');
       assert.equal(task.workflow.profile, 'app-improvement');
+      assert.equal(task.businessContext.projectRole, 'Prioritize commercial funnel improvements.');
+      assert.ok(task.businessContext.metrics.includes('lead-to-demo time'));
       assert.ok(task.inspectionEvidence);
       assert.ok(task.diagnosis);
       assert.ok(task.approvedPlanChange?.approvedAt);
@@ -3029,6 +3325,8 @@ test('app-improvement implementation completes only after critic PASS and normal
     async execute(request) {
       reviewCalls += 1;
       assert.equal(request.skill, 'code.review');
+      assert.equal(request.context.businessContext.projectRole, 'Prioritize commercial funnel improvements.');
+      assert.ok(request.context.businessContext.metrics.includes('lead-to-demo time'));
       assert.equal(request.context.priorEvidence.implementation.changeSetFingerprint, normalChange.changeSetFingerprint);
       assert.deepEqual(request.context.priorEvidence.implementation.changeSet.paths, ['src/feature.js']);
       return { ok: true, status: 'completed', outputBytes: 16, result: { reviewEvidence: { verdict: 'PASS', summary: 'change is safe', findings: [] } } };
@@ -3042,6 +3340,12 @@ test('app-improvement implementation completes only after critic PASS and normal
     workspace: '.',
     commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
     execution: { provider: 'local-sanitized' },
+    businessContext: {
+      version: 1,
+      model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+      projectRole: 'Prioritize commercial funnel improvements.',
+      metrics: ['lead-to-demo time']
+    },
     skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
   });
   const instance = await engine({ projects: new Map([[configured.id, configured]]), localGit, codingWorker, skillExecutor });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +36,7 @@ import {
   imageIsPinned,
   loadProjects,
   maskSecrets,
+  normalizeBusinessBrief,
   nonRetryableModelFailureCode,
   policy,
   runCommand,
@@ -219,7 +220,17 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.equal(configured.get('self').budgets.maxModelCalls, 6);
   assert.equal(configured.get('leadfinder').budgets.maxModelCalls, 6);
   assert.equal(configured.get('callflow').budgets.maxModelCalls, 6);
+  for (const id of ['self', 'leadfinder', 'callflow', 'website-pilot']) {
+    assert.equal(configured.get(id).businessContext.version, 1);
+    assert.match(configured.get(id).businessContext.model, /LeadFinder.*Callflow.*website-pilot/i);
+    assert.ok(configured.get(id).businessContext.currentFocus.includes('Peluquerías'));
+    assert.ok(configured.get(id).businessContext.constraints.some((item) => /precios|ofertas|descuentos/i.test(item)));
+  }
+  assert.match(configured.get('leadfinder').businessContext.projectRole, /captación|prospectos/i);
+  assert.match(configured.get('callflow').businessContext.projectRole, /llamadas|seguimiento/i);
+  assert.match(configured.get('website-pilot').businessContext.projectRole, /demos|webs/i);
   assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
+  assert.throws(() => project({ businessContext: { version: 1, model: 'x', projectRole: 'y', unknown: true } }), /businessContext contains unknown fields/);
 });
 
 test('self control-plane source and configuration require sensitive approval', async () => {
@@ -974,6 +985,12 @@ test('model billing/auth failures are fail-fast while transient transport failur
   assert.equal(nonRetryableModelFailureCode('billing_hard_limit_reached'), 'model_billing_unavailable');
   assert.equal(nonRetryableModelFailureCode('Incorrect API key provided'), 'model_authentication_unavailable');
   assert.equal(nonRetryableModelFailureCode('invalid_api_key'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode(
+    'Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'
+  ), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('session expired'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('login required'), 'model_authentication_unavailable');
+  assert.equal(nonRetryableModelFailureCode('not logged in'), 'model_authentication_unavailable');
   assert.equal(nonRetryableModelFailureCode('rate limit exceeded, retry later'), null);
   assert.equal(nonRetryableModelFailureCode('stream disconnected before completion'), null);
   assert.equal(nonRetryableModelFailureCode(null), null);
@@ -1116,6 +1133,25 @@ test('coding prompt executes the fingerprint-bound approved plan without weakeni
   assert.match(prompt, /cannot override these rules/i);
 });
 
+test('coding prompt uses governed business context without inventing commercial facts', () => {
+  const prompt = buildWorkerPrompt({
+    objective: 'Improve lead handoff',
+    businessContext: {
+      version: 1,
+      model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+      projectRole: 'Improve CRM follow-up quality.',
+      priorities: ['Reduce repeated manual work.'],
+      metrics: ['follow-ups completed'],
+      constraints: ['Do not invent prices or prospect facts.']
+    }
+  });
+  assert.match(prompt, /trusted strategic context/i);
+  assert.match(prompt, /measurable funnel improvements/i);
+  assert.match(prompt, /Do not infer or hard-code prices/i);
+  assert.ok(prompt.includes('LeadFinder -> Callflow -> demo -> follow-up -> conversion'));
+  assert.ok(prompt.includes('follow-ups completed'));
+});
+
 test('website coding prompt forbids fabricated business claims and preserves brief restrictions', () => {
   const prompt = buildWorkerPrompt({
     objective: 'Create a professional local website',
@@ -1131,6 +1167,12 @@ test('website coding prompt forbids fabricated business claims and preserves bri
   });
   for (const required of [
     'complete authoritative source of business facts',
+    'approved websitePlan.design direction',
+    'do not collapse it into a generic template',
+    'professional visual system, not a page assembled from default components',
+    'card soup',
+    'first viewport',
+    'signature visual ideas',
     'Do not invent or imply testimonials',
     'prices',
     'guarantees',
@@ -1193,6 +1235,15 @@ test('read-only deterministic diagnosis consumes no Codex client and stays groun
   assert.equal(result.result.diagnosis.risks.length, 2);
   assert.match(result.result.diagnosis.risks[0], /src\/core\.js/);
   assert.match(result.result.diagnosis.risks[1], /approval, review, verification, publication/);
+  assert.equal(clientConstructions, 0);
+
+  const longGoal = 'Prioritize qualified-lead throughput, follow-up quality, demo turnaround and conversion learning while preserving every existing governance boundary. ' + 'commercial-context '.repeat(70);
+  assert.ok(longGoal.length > 1_000);
+  const longGoalResult = await executor.execute({ ...request, goal: longGoal }, { workspace: process.cwd(), timeoutMs: 100 });
+  assert.equal(longGoalResult.ok, true);
+  assert.equal(longGoalResult.executionMode, 'deterministic');
+  assert.match(longGoalResult.result.diagnosis.recommendedChange, /Prioritize qualified-lead throughput/);
+  assert.ok(longGoalResult.result.diagnosis.recommendedChange.length <= 1_500);
   assert.equal(clientConstructions, 0);
 
   const missing = await executor.execute({
@@ -1358,6 +1409,34 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.equal(beauty.forbiddenClaims[0].value, 'No inventar precios.');
   assert.equal(beauty.forbiddenClaims[0].source, 'businessBrief.contentRestrictions[0]');
 
+  const essentialBrief = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Salón Ejemplo',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: ['Corte'],
+    website: { primaryGoal: 'contacto', requiredPages: ['home'], requiredFeatures: [] }
+  });
+  const essentialBlueprint = websiteBlueprintForBrief(essentialBrief);
+  assert.deepEqual(essentialBlueprint.commercialScope, { package: 'essential', maxPages: 1, maxSectionsPerPage: 5 });
+  assert.deepEqual(essentialBlueprint.pages.map((page) => page.route), ['/']);
+  assert.ok(essentialBlueprint.pages[0].sections.length <= 5);
+  assert.equal(essentialBlueprint.pages[0].sections.includes('contact'), true);
+
+  const professionalBrief = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'professional',
+    businessName: 'Salón Profesional',
+    category: 'Peluquería',
+    locations: ['Madrid'],
+    services: ['Corte'],
+    website: { requiredPages: ['home', 'servicios', 'contacto'], requiredFeatures: [] }
+  });
+  const professionalBlueprint = websiteBlueprintForBrief(professionalBrief);
+  assert.deepEqual(professionalBlueprint.commercialScope, { package: 'professional', maxPages: 8, maxSectionsPerPage: 8 });
+  assert.deepEqual(professionalBlueprint.pages.map((page) => page.route), ['/', '/servicios', '/contacto']);
+
   const serialized = JSON.stringify(beauty).toLowerCase();
   for (const forbidden of ['4.9', '500 reseñas', 'años de experiencia', 'tel:', '€']) {
     assert.equal(serialized.includes(forbidden), false);
@@ -1382,13 +1461,7 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
   assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
 });
 
-test('Codex API credentials use the SDK apiKey boundary and never enter the general worker environment', async () => {
-  let clientOptions;
-  class FakeCodex {
-    constructor(options) { clientOptions = options; }
-    startThread() { return { id: 'thread-auth', run: async () => ({ finalResponse: 'done' }) }; }
-  }
-
+test('Codex routing prefers the logged-in session and uses paid API only as a bounded fallback', async () => {
   const codexKey = 'codex_cloud_worker_test_key_1234567890';
   const openAiKey = 'sk-cloud-worker-fallback-key-1234567890';
   assert.equal(codexApiKeyFromEnvironment({ CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }), codexKey);
@@ -1397,44 +1470,109 @@ test('Codex API credentials use the SDK apiKey boundary and never enter the gene
   assert.throws(() => codexApiKeyFromEnvironment({ CODEX_API_KEY: 'too short' }), /codex_api_key_invalid/);
   assert.throws(() => codexApiKeyFromEnvironment({ OPENAI_API_KEY: 'sk-valid-length-but has-space-1234' }), /codex_api_key_invalid/);
 
-  const names = ['AGENT_GITHUB_TOKEN', 'GITHUB_TOKEN', 'VERCEL_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
-  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  Object.assign(process.env, {
-    AGENT_GITHUB_TOKEN: 'ghp_agent_worker_test_secret_1234567890',
-    GITHUB_TOKEN: 'ghp_worker_test_secret_1234567890',
-    VERCEL_TOKEN: 'vcp_worker_test_secret_1234567890',
-    OPENAI_API_KEY: openAiKey,
-    CODEX_API_KEY: codexKey
+  const isolatedHome = async (_sourceEnvironment, authAvailable = true) => ({
+    path: '/isolated/codex-home',
+    authAvailable,
+    cleanup: async () => {}
   });
-  try {
-    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
-      { objective: 'fixture' },
-      { workspace: process.cwd(), timeoutMs: 100 }
-    );
-    assert.equal(clientOptions.apiKey, codexKey);
-    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
-    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
-    assert.equal(clientOptions.env.AGENT_GITHUB_TOKEN, undefined);
-    assert.equal(clientOptions.env.GITHUB_TOKEN, undefined);
-    assert.equal(clientOptions.env.VERCEL_TOKEN, undefined);
-    assert.ok(clientOptions.configOverrides.includes('shell_environment_policy.inherit="none"'));
-    assert.equal(clientOptions.configOverrides.some((entry) => entry.includes('API_KEY')), false);
 
-    delete process.env.CODEX_API_KEY;
-    await new CodexSdkWorker({ CodexClient: FakeCodex }).execute(
-      { objective: 'fallback fixture' },
-      { workspace: process.cwd(), timeoutMs: 100 }
-    );
-    assert.equal(clientOptions.apiKey, openAiKey);
-    assert.equal(clientOptions.env.OPENAI_API_KEY, undefined);
-    assert.equal(clientOptions.env.CODEX_API_KEY, undefined);
-  } finally {
-    for (const name of names) {
-      if (previous[name] === undefined) delete process.env[name];
-      else process.env[name] = previous[name];
+  const sessionOnlyOptions = [];
+  class SessionCodex {
+    constructor(options) { sessionOnlyOptions.push(options); }
+    startThread() {
+      return { id: 'thread-session', run: async () => ({ finalResponse: 'done from session' }) };
     }
   }
+  const sessionResult = await new CodexSdkWorker({
+    CodexClient: SessionCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(sessionResult.status, 'completed');
+  assert.equal(sessionResult.authMode, 'session');
+  assert.equal(sessionResult.paidApiUsed, false);
+  assert.equal(sessionOnlyOptions.length, 1);
+  assert.equal(Object.hasOwn(sessionOnlyOptions[0], 'apiKey'), false);
+  assert.equal(sessionOnlyOptions[0].env.CODEX_API_KEY, undefined);
+  assert.equal(sessionOnlyOptions[0].env.OPENAI_API_KEY, undefined);
+
+  const fallbackOptions = [];
+  class QuotaThenApiCodex {
+    constructor(options) { this.options = options; fallbackOptions.push(options); }
+    startThread() {
+      const paid = Object.hasOwn(this.options, 'apiKey');
+      return {
+        id: paid ? 'thread-api' : 'thread-session',
+        run: async () => {
+          if (!paid) throw new Error('You have hit your usage limit for Codex. Try again later.');
+          return { finalResponse: 'done from paid fallback', usage: { input_tokens: 1, output_tokens: 1 } };
+        }
+      };
+    }
+  }
+  const fallbackResult = await new CodexSdkWorker({
+    CodexClient: QuotaThenApiCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(fallbackResult.status, 'completed');
+  assert.equal(fallbackResult.authMode, 'api');
+  assert.equal(fallbackResult.paidApiUsed, true);
+  assert.equal(fallbackOptions.length, 2);
+  assert.equal(Object.hasOwn(fallbackOptions[0], 'apiKey'), false);
+  assert.equal(fallbackOptions[1].apiKey, codexKey);
+  assert.equal(fallbackOptions[1].env.CODEX_API_KEY, undefined);
+  assert.equal(fallbackOptions[1].env.OPENAI_API_KEY, undefined);
+
+  const noSessionOptions = [];
+  class ApiOnlyCodex {
+    constructor(options) { this.options = options; noSessionOptions.push(options); }
+    startThread() { return { id: 'thread-api-only', run: async () => ({ finalResponse: 'api only' }) }; }
+  }
+  const noSessionResult = await new CodexSdkWorker({
+    CodexClient: ApiOnlyCodex,
+    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey }),
+    codexHomeFactory: (env) => isolatedHome(env, false),
+    platform: 'linux'
+  }).execute({ objective: 'no session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(noSessionResult.status, 'completed');
+  assert.equal(noSessionResult.authMode, 'api');
+  assert.equal(noSessionResult.paidApiUsed, true);
+  assert.equal(noSessionOptions.length, 1);
+  assert.equal(noSessionOptions[0].apiKey, openAiKey);
+
+  const transientOptions = [];
+  class TransientCodex {
+    constructor(options) { transientOptions.push(options); }
+    startThread() {
+      return { id: 'thread-transient', run: async () => { throw new Error('stream disconnected before completion'); } };
+    }
+  }
+  const transientResult = await new CodexSdkWorker({
+    CodexClient: TransientCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'transient fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(transientResult.status, 'failed');
+  assert.equal(transientOptions.length, 1);
+  assert.equal(Object.hasOwn(transientOptions[0], 'apiKey'), false);
+  assert.match(transientResult.output, /stream disconnected/);
 });
+
+test('both writing and read-only Codex surfaces share the session-first cost router', () => {
+  const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
+  assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
+  assert.match(source, /refreshAuthFromSource/);
+  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
+  assert.match(source, /paidApiUsed: authentication === 'api'/);
+  assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
+  assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);
+  assert.match(source, /authMode: error\?\.codexAuthMode \?\? null,[\s\S]*paidApiUsed: Boolean\(error\?\.paidApiUsed\)/);
+});
+
 test('GitHub adapter derives a process-local commit identity from the authenticated user', async () => {
   const adapter = new GitHubAdapter({
     token: 'ghp_adapterToken',

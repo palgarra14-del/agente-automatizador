@@ -75,7 +75,7 @@
       "budgets": {
         "maxIterations": 3,
         "maxTasks": 10,
-        "maxRuntimeMinutes": 10,
+        "maxRuntimeMinutes": 18,
         "maxModelCalls": 6,
         "maxWorkerAttempts": 2,
         "commandTimeoutMs": 30000,
@@ -102,6 +102,44 @@
           "release.publish-reviewed-workflow"
         ],
         "deny": []
+      },
+      "businessContext": {
+        "version": 1,
+        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "currentFocus": [
+          "Peluquerías",
+          "Barberías",
+          "Pymes locales de servicios"
+        ],
+        "funnel": [
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
+          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
+          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
+          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+        ],
+        "priorities": [
+          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
+          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
+          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
+          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+        ],
+        "metrics": [
+          "leads cualificados generados",
+          "tasa de datos de contacto válidos",
+          "completitud de resultados de llamada",
+          "seguimientos completados",
+          "tiempo de lead a demo/web",
+          "conversión de lead a demo",
+          "conversión de demo a cliente",
+          "retrabajo o defectos de producción"
+        ],
+        "constraints": [
+          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
+          "No inventar hechos sobre prospectos, clientes o negocios.",
+          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+        ],
+        "projectRole": "Mejorar el agente/orquestador compartido para que el embudo comercial funcione de forma desatendida, fiable y con aprendizaje entre proyectos. Las mejoras de infraestructura solo son prioritarias cuando desbloquean o aceleran resultados del negocio."
       }
     },
     {
@@ -210,6 +248,44 @@
           "release.publish-reviewed-workflow"
         ],
         "deny": []
+      },
+      "businessContext": {
+        "version": 1,
+        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "currentFocus": [
+          "Peluquerías",
+          "Barberías",
+          "Pymes locales de servicios"
+        ],
+        "funnel": [
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
+          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
+          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
+          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+        ],
+        "priorities": [
+          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
+          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
+          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
+          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+        ],
+        "metrics": [
+          "leads cualificados generados",
+          "tasa de datos de contacto válidos",
+          "completitud de resultados de llamada",
+          "seguimientos completados",
+          "tiempo de lead a demo/web",
+          "conversión de lead a demo",
+          "conversión de demo a cliente",
+          "retrabajo o defectos de producción"
+        ],
+        "constraints": [
+          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
+          "No inventar hechos sobre prospectos, clientes o negocios.",
+          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+        ],
+        "projectRole": "Mejorar la captación: calidad, cobertura, normalización, deduplicación, priorización y datos accionables de prospectos para reducir llamadas desperdiciadas y alimentar Callflow con mejores leads."
       }
     },
     {
@@ -321,6 +397,44 @@
           "release.publish-reviewed-workflow"
         ],
         "deny": []
+      },
+      "businessContext": {
+        "version": 1,
+        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "currentFocus": [
+          "Peluquerías",
+          "Barberías",
+          "Pymes locales de servicios"
+        ],
+        "funnel": [
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
+          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
+          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
+          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+        ],
+        "priorities": [
+          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
+          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
+          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
+          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+        ],
+        "metrics": [
+          "leads cualificados generados",
+          "tasa de datos de contacto válidos",
+          "completitud de resultados de llamada",
+          "seguimientos completados",
+          "tiempo de lead a demo/web",
+          "conversión de lead a demo",
+          "conversión de demo a cliente",
+          "retrabajo o defectos de producción"
+        ],
+        "constraints": [
+          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
+          "No inventar hechos sobre prospectos, clientes o negocios.",
+          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+        ],
+        "projectRole": "Mejorar la ejecución comercial: priorización de llamadas, registro de resultados, estados, seguimiento y feedback hacia LeadFinder y producción web para aumentar disciplina y aprendizaje del embudo."
       }
     },
     {
@@ -434,6 +548,44 @@
           "release.publish-reviewed-workflow"
         ],
         "deny": []
+      },
+      "businessContext": {
+        "version": 1,
+        "model": "Sistema productizado de captación y entrega de webs para pymes locales en España. LeadFinder identifica y prioriza prospectos; Callflow gestiona llamadas, resultados y seguimiento; website-pilot produce demos y webs orientadas a conversión; self mejora la automatización, fiabilidad e integración del embudo.",
+        "currentFocus": [
+          "Peluquerías",
+          "Barberías",
+          "Pymes locales de servicios"
+        ],
+        "funnel": [
+          "LeadFinder: descubrir, normalizar, deduplicar y priorizar prospectos con datos útiles para contacto.",
+          "Callflow: priorizar llamadas, registrar resultados, programar seguimiento y devolver aprendizaje sobre la calidad de los leads.",
+          "Website pilot: convertir prospectos cualificados y briefs verificados en demos/webs rápidas, profesionales y orientadas a contacto.",
+          "Cierre del bucle: usar resultados de llamadas, seguimiento, demos y clientes para mejorar captación, priorización y producción."
+        ],
+        "priorities": [
+          "Priorizar cambios que mejoren leads cualificados por unidad de tiempo, contactabilidad, calidad del seguimiento, velocidad de demo/web, conversión o reutilización de aprendizajes.",
+          "Si falta un dato necesario para tomar mejores decisiones, preferir instrumentación o captura de datos acotada y segura antes que suposiciones.",
+          "Automatizar traspasos manuales repetitivos y mantener interoperables LeadFinder, Callflow y producción web.",
+          "Evitar refactors especulativos, pulido técnico o trabajo cosmético sin beneficio claro en negocio, throughput, calidad de datos, conversión o fiabilidad."
+        ],
+        "metrics": [
+          "leads cualificados generados",
+          "tasa de datos de contacto válidos",
+          "completitud de resultados de llamada",
+          "seguimientos completados",
+          "tiempo de lead a demo/web",
+          "conversión de lead a demo",
+          "conversión de demo a cliente",
+          "retrabajo o defectos de producción"
+        ],
+        "constraints": [
+          "No asumir ni fijar precios, ofertas, descuentos o condiciones comerciales salvo que estén explícitamente suministrados por datos autorizados de la tarea.",
+          "No inventar hechos sobre prospectos, clientes o negocios.",
+          "No enviar comunicaciones externas, fusionar cambios ni desplegar a producción fuera de las aprobaciones gobernadas existentes.",
+          "Preferir evidencia del repositorio, CRM y workflows frente a intuición; si falta evidencia, mejorar la medición antes que fabricar conclusiones."
+        ],
+        "projectRole": "Mejorar la producción comercial: generar demos y webs rápidas, profesionales, verificables y orientadas a contacto/conversión, reduciendo retrabajo y tiempo desde prospecto cualificado hasta demo utilizable."
       }
     }
   ]

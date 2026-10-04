@@ -10,17 +10,35 @@ const self = projects.projects.find((project) => project.id === 'self');
 const website = projects.projects.find((project) => project.id === 'website-pilot');
 const callflow = projects.projects.find((project) => project.id === 'callflow');
 
-test('cloud worker reacts to owner control-plane events with a scheduled fallback only', () => {
+test('lane-scoped dispatches expose their lane before jobs are materialized', () => {
+  assert.match(workflow, /^run-name: Agent Cloud Worker \(\$\{\{ inputs\.lane \|\| github\.event_name \}\}\)$/m);
+});
+
+test('cloud worker reacts to owner control-plane events and scheduled watchdogs without push-triggered self work', () => {
   assert.match(workflow, /issues:\n\s+types: \[opened, edited, reopened\]/);
   assert.match(workflow, /issue_comment:\n\s+types: \[created\]/);
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /cron: '17 \*\/6 \* \* \*'/);
+  assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+lane:\n\s+description: Trusted cloud lane for bounded continuation\n\s+required: false\n\s+type: string/);
+  for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /^\s*push:/m);
+  assert.doesNotMatch(workflow, /github\.event_name == 'push'/);
   assert.match(workflow, /github\.actor == 'palgarra14-del'/);
   assert.match(workflow, /github\.event\.issue\.pull_request == null/);
   assert.match(workflow, /AGENT_CLOUD_COMMENT_BODY: \$\{\{ github\.event\.comment\.body \}\}/);
   assert.match(workflow, /\.trim\(\)[\s\S]*body\.startsWith\("\/agent "\)/);
+});
+
+test('temporary quota-outage mode pins every cloud job to the private local runner', () => {
+  const localRunner = 'runs-on: [self-hosted, Linux, X64, agent-local]';
+  assert.equal(workflow.split(localRunner).length - 1, 4);
+  assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
+});
+
+test('trusted main updates do not consume a runner for self-maintenance', () => {
+  assert.doesNotMatch(workflow, /^\s*push:/m);
+  assert.doesNotMatch(workflow, /github\.event_name == 'push'/);
+  const route = readFileSync(new URL('../scripts/cloud-lane-route.js', import.meta.url), 'utf8');
+  assert.match(route, /if \(eventName === 'push'\) return \[\];/);
 });
 
 test('cloud worker routes events through trusted main before constructing the lane matrix', () => {
@@ -30,20 +48,21 @@ test('cloud worker routes events through trusted main before constructing the la
   assert.match(workflow, /node scripts\/cloud-lane-route\.js/);
   const routeBlock = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
   assert.doesNotMatch(routeBlock, /actions\/setup-node|npm ci|docker pull/);
-  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.wakeup\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
+  assert.match(workflow, /outputs:\n\s+active: \$\{\{ steps\.route\.outputs\.active \}\}\n\s+lanes: \$\{\{ steps\.route\.outputs\.lanes \}\}/);
   assert.match(workflow, /cloud-once:[\s\S]*needs: \[route, admit, recover\][\s\S]*needs\.admit\.result[\s\S]*needs\.recover\.result/);
   assert.match(workflow, /lane: \$\{\{ fromJSON\(needs\.route\.outputs\.lanes\) \}\}/);
   assert.match(workflow, /group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
   assert.match(workflow, /cancel-in-progress: false/);
-  assert.match(workflow, /timeout-minutes: 35/);
+  assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.match(readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8'), /leaseTtlMs: 45 \* 60 \* 1000/);
   assert.doesNotMatch(workflow, /lane:\s*\$\{\{\s*github\./);
-  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'callflow']);
+  assert.deepEqual(queueConfig.cloudLanes.map((lane) => lane.id), ['self', 'website-pilot', 'leadfinder', 'callflow']);
 });
 
 test('all active lanes have distinct durable namespaces and non-overlapping ownership', () => {
   const selfLane = queueConfig.cloudLanes.find((lane) => lane.id === 'self');
   const websiteLane = queueConfig.cloudLanes.find((lane) => lane.id === 'website-pilot');
+  const leadfinderLane = queueConfig.cloudLanes.find((lane) => lane.id === 'leadfinder');
   const callflowLane = queueConfig.cloudLanes.find((lane) => lane.id === 'callflow');
 
   assert.deepEqual(selfLane, {
@@ -58,6 +77,12 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
     tag: 'agent-cloud-state-website-pilot-v1',
     statePath: '.agent/cloud-state-website-pilot.json'
   });
+  assert.deepEqual(leadfinderLane, {
+    id: 'leadfinder',
+    projectIds: ['leadfinder'],
+    tag: 'agent-cloud-state-leadfinder-v1',
+    statePath: '.agent/cloud-state-leadfinder.json'
+  });
   assert.deepEqual(callflowLane, {
     id: 'callflow',
     projectIds: ['callflow'],
@@ -65,9 +90,9 @@ test('all active lanes have distinct durable namespaces and non-overlapping owne
     statePath: '.agent/cloud-state-callflow.json'
   });
 
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 3);
-  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 3);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.tag)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.map((lane) => lane.statePath)).size, 4);
+  assert.equal(new Set(queueConfig.cloudLanes.flatMap((lane) => lane.projectIds)).size, 4);
 });
 
 test('cloud worker permissions are explicit and exclude deployment or identity authority', () => {
@@ -105,7 +130,10 @@ test('routing job receives event data but no secrets or write credentials', () =
   const route = workflow.slice(routeStart, cloudStart);
   assert.match(route, /AGENT_CLOUD_EVENT_NAME: \$\{\{ github\.event_name \}\}/);
   assert.match(route, /AGENT_CLOUD_EVENT_ACTION: \$\{\{ github\.event\.action \}\}/);
+  assert.match(route, /AGENT_CLOUD_SCHEDULE: \$\{\{ github\.event\.schedule \}\}/);
   assert.match(route, /AGENT_CLOUD_ISSUE_BODY: \$\{\{ github\.event\.issue\.body \}\}/);
+  assert.match(route, /AGENT_CLOUD_PREVIOUS_ISSUE_BODY: \$\{\{ github\.event\.changes\.body\.from \}\}/);
+  assert.match(route, /AGENT_CLOUD_ISSUE_BODY_WAS_EDITED: \$\{\{ github\.event\.changes\.body != null \}\}/);
   assert.doesNotMatch(route, /GITHUB_TOKEN|AGENT_GITHUB_TOKEN|CODEX_API_KEY|OPENAI_API_KEY|secrets\./);
 });
 
@@ -121,30 +149,27 @@ test('cloud worker uses frozen dependencies and the managed Git-enabled runtime 
   assert.ok(workflow.includes(`docker run --rm --entrypoint git ${self.execution.image} --version`));
 });
 
-test('scheduled recovery has the minimum commit-status authority required by Cloud State repair', () => {
+test('scheduled recovery has the minimum commit-status authority required by fused Cloud State repair and admission recovery', () => {
   const recoverStart = workflow.indexOf('  recover:');
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
   assert.ok(recoverStart > 0 && cloudOnceStart > recoverStart);
   const recovery = workflow.slice(recoverStart, cloudOnceStart);
   assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|checks:\s*write/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(recovery, /inbox cloud-repair --lane/);
 });
 
-test('cloud worker runs lightweight control before executable-work preflight', () => {
+test('cloud worker fuses scheduled repair with admission recovery and keeps cloud preflight lean', () => {
   const cloudOnceStart = workflow.indexOf('  cloud-once:');
-  const repairStart = workflow.indexOf('- name: Repair authorized partial cloud state', cloudOnceStart);
-  const controlStart = workflow.indexOf('- name: Run lightweight cloud control tick', cloudOnceStart);
-  const preflightStart = workflow.indexOf('- name: Check lane for executable work', cloudOnceStart);
+  const prepareStart = workflow.indexOf('- name: Prepare cloud control and executable-work preflight', cloudOnceStart);
   const runtimeStart = workflow.indexOf('- name: Prepare exact cloud runtime', cloudOnceStart);
-  const tickStart = workflow.indexOf('- name: Run one governed cloud queue tick', cloudOnceStart);
-  assert.ok(repairStart > cloudOnceStart);
-  assert.ok(controlStart > repairStart);
-  assert.ok(preflightStart > controlStart);
-  assert.ok(runtimeStart > preflightStart);
+  const tickStart = workflow.indexOf('- name: Drain governed cloud work continuously', cloudOnceStart);
+  assert.ok(prepareStart > cloudOnceStart);
+  assert.ok(runtimeStart > prepareStart);
   assert.ok(tickStart > runtimeStart);
-  const control = workflow.slice(controlStart, preflightStart);
-  const preflight = workflow.slice(preflightStart, runtimeStart);
+
+  const prepare = workflow.slice(prepareStart, runtimeStart);
   const admitStart = workflow.indexOf('  admit:');
   const recoverJobStart = workflow.indexOf('  recover:');
   assert.ok(admitStart > 0 && recoverJobStart > admitStart && cloudOnceStart > recoverJobStart);
@@ -152,35 +177,54 @@ test('cloud worker runs lightweight control before executable-work preflight', (
   const recovery = workflow.slice(recoverJobStart, cloudOnceStart);
   assert.match(admit, /timeout-minutes: 10[\s\S]*for _ in \{1\.\.30\}; do node src\/cli\.js inbox cloud-admit --lane "\$AGENT_CLOUD_LANE" && exit 0; sleep 10; done; exit 1/);
   assert.doesNotMatch(admit, /concurrency:|statuses:\s*write|sleep 30|\{1\.\.90\}/);
-  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\)/);
-  assert.match(recovery, /permissions:[\s\S]*contents: write[\s\S]*issues: read[\s\S]*statuses: write/);
+  assert.match(recovery, /if: needs\.route\.outputs\.active == 'true' && github\.event_name == 'schedule'/);
+  assert.match(recovery, /permissions:\n\s+contents: write\n\s+issues: read\n\s+statuses: write/);
   assert.doesNotMatch(recovery, /actions:\s*write|issues:\s*write|pull-requests:\s*write|CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
   assert.match(recovery, /concurrency:[\s\S]*group: agent-\$\{\{ matrix\.lane \}\}-cloud/);
-  assert.match(recovery, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"[\s\S]*inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /timeout-minutes: 5/);
+  assert.match(recovery, /timeout --signal=TERM --kill-after=10s 2m node src\/cli\.js inbox cloud-recover --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(recovery, /124\|137\|143[\s\S]*scheduled recovery timed out; normal drain recovery remains available/);
+  assert.doesNotMatch(recovery, /inbox cloud-repair --lane/);
   assert.match(workflow.slice(cloudOnceStart), /needs: \[route, admit, recover\]/);
 
-  const repair = workflow.slice(repairStart, controlStart);
-  assert.match(repair, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(repair, /inbox cloud-repair --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(repair, /CODEX_API_KEY|AGENT_GITHUB_TOKEN|OPENAI_API_KEY/);
+  assert.match(prepare, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(prepare, /\$\{AGENT_CROSS_REPO_READY:-false\}/);
+  assert.match(prepare, /inbox cloud-prepare --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(prepare, /hasExecutionWork === true/);
+  assert.match(prepare, /AGENT_CLOUD_LANE" != "self[\s\S]*cross_repo_credential_missing/);
+  assert.match(prepare, /has_work=\$HAS_WORK/);
+  assert.doesNotMatch(prepare, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
 
-  assert.match(control, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(control, /inbox cloud-control-once --lane "\$AGENT_CLOUD_LANE"/);
-  assert.doesNotMatch(control, /CODEX_API_KEY|AGENT_GITHUB_TOKEN:|OPENAI_API_KEY|docker|runtime sync/);
-
-  assert.match(preflight, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(preflight, /CROSS_REPO_CREDENTIAL_CONFIGURED: \$\{\{ secrets\.AGENT_GITHUB_TOKEN != '' && 'true' \|\| 'false' \}\}/);
-  assert.match(preflight, /inbox cloud-execution-peek --lane "\$AGENT_CLOUD_LANE"/);
-  assert.match(preflight, /website-pilot[\s\S]*cross_repo_credential_missing/);
-  assert.match(preflight, /has_work=\$HAS_WORK/);
-  assert.doesNotMatch(preflight, /cloud-admit|cloud-recover|CODEX_API_KEY|^\s*AGENT_GITHUB_TOKEN:|OPENAI_API_KEY/m);
-
+  const cloudOnce = workflow.slice(cloudOnceStart);
+  assert.doesNotMatch(cloudOnce.slice(0, runtimeStart - cloudOnceStart), /inbox cloud-repair|inbox cloud-control-once|inbox cloud-execution-peek/);
   assert.match(workflow, /- name: Prepare exact cloud runtime\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
-  assert.match(workflow, /- name: Run one governed cloud queue tick\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+  assert.match(workflow, /- name: Drain governed cloud work continuously\n\s+id: drain\n\s+if: steps\.preflight\.outputs\.has_work == 'true'/);
+
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
-  assert.match(cli, /cloud-control-once/);
-  assert.match(cli, /cloud-execution-peek/);
-  assert.match(cli, /executionEnabled: action !== 'cloud-control-once'/);
+  assert.match(cli, /action === 'cloud-prepare'/);
+  const prepareCliStart = cli.indexOf("} else if (action === 'cloud-prepare') {");
+  const repairCliStart = cli.indexOf("} else if (action === 'cloud-repair') {", prepareCliStart);
+  const recoverCliStart = cli.indexOf("} else if (action === 'cloud-recover') {", repairCliStart);
+  const peekCliStart = cli.indexOf("} else if (action === 'cloud-peek') {", recoverCliStart);
+  assert.ok(prepareCliStart > 0 && repairCliStart > prepareCliStart && recoverCliStart > repairCliStart && peekCliStart > recoverCliStart);
+  const prepareCli = cli.slice(prepareCliStart, repairCliStart);
+  const recoverCli = cli.slice(recoverCliStart, peekCliStart);
+  assert.match(recoverCli, /readSnapshot\(\{ repair: true \}\)[\s\S]*recoverAdmissionIntents\(\)/);
+  assert.doesNotMatch(prepareCli, /readSnapshot\(\{ repair: true \}\)/);
+  assert.doesNotMatch(prepareCli, /autonomousSelfImprovement\.hasWork\(\)/);
+  assert.match(prepareCli, /if \(autonomousSelfImprovement\)[\s\S]*queue: null, hasExecutionWork: true/);
+  assert.match(prepareCli, /else \{[\s\S]*withGlobalLease/);
+  assert.match(prepareCli, /hasExecutionWork/);
+  assert.match(cli, /executionEnabled: !\['cloud-control-once', 'cloud-prepare'\]\.includes\(action\)/);
+});
+
+test('every cloud lane gets an autonomous project improvement worker', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /AutonomousProjectImprovement/);
+  assert.match(cli, /cloudLane\.projectIds\.length === 1/);
+  assert.match(cli, /projectId: autonomousProjectId/);
+  assert.match(cli, /projects\.get\(autonomousProjectId\)\.budgets\.maxRuntimeMinutes/);
+  assert.doesNotMatch(cli, /cloudLane\.id === 'self'/);
 });
 
 test('cloud-once emits queue and autonomous results separately for auditability', () => {
@@ -192,21 +236,99 @@ test('cloud-once emits queue and autonomous results separately for auditability'
   assert.match(cli, /autonomous: result\.autonomousResult/);
 });
 
-test('model and cross-repo credentials exist only at the governed queue step', () => {
-  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 7);
-  assert.equal((workflow.match(/^\s*AGENT_GITHUB_TOKEN:/gm) ?? []).length, 1);
+test('production cloud execution uses the bounded drain while retaining cloud-once for diagnostics', () => {
+  const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.match(cli, /action === 'cloud-drain'/);
+  assert.match(cli, /runCloudDrainWithRecovery\(\{[\s\S]*store: activeStore,[\s\S]*queue,[\s\S]*autonomousSelfImprovement/);
+  assert.match(cli, /stopReason: result\.stopReason/);
+  assert.match(cli, /continuationRecommended: result\.continuationRecommended/);
+  assert.match(cli, /iterations: result\.iterations\.map/);
+  assert.match(cli, /action === 'cloud-once'/);
+});
+
+test('autonomous cloud work keeps model billing disabled and confines cross-repo auth to the orchestrator boundary', () => {
+  assert.equal((workflow.match(/^\s*GITHUB_TOKEN:/gm) ?? []).length, 4);
   assert.equal((workflow.match(/^\s*CODEX_API_KEY:/gm) ?? []).length, 1);
-  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 0);
-  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 1);
-  assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 2);
-  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 7);
+  assert.equal((workflow.match(/^\s*OPENAI_API_KEY:/gm) ?? []).length, 1);
+  assert.equal((workflow.match(/secrets\.OPENAI_API_KEY/g) ?? []).length, 0);
+  assert.equal((workflow.match(/secrets\.AGENT_GITHUB_TOKEN/g) ?? []).length, 1);
+  assert.match(workflow, /CONFIGURED_AGENT_GITHUB_TOKEN: \$\{\{ secrets\.AGENT_GITHUB_TOKEN \}\}/);
+  assert.match(workflow, /env -u GITHUB_TOKEN -u GH_TOKEN gh auth token/);
+  assert.match(workflow, /::add-mask::\$TOKEN/);
+  assert.match(workflow, /AGENT_GITHUB_TOKEN=\$TOKEN/);
+  assert.match(workflow, /AGENT_CROSS_REPO_READY=true/);
+  assert.match(workflow, /^\s*CODEX_API_KEY: ''$/m);
+  assert.match(workflow, /^\s*OPENAI_API_KEY: ''$/m);
+  assert.equal((workflow.match(/^\s*AGENT_CLOUD_LANE:/gm) ?? []).length, 6);
   assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
   assert.doesNotMatch(workflow, /AGENT_CLOUD_LANE: \$\{\{\s*github\./);
-  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY/);
+  assert.doesNotMatch(workflow, /VERCEL_TOKEN|secrets\.CODEX_API_KEY|secrets\.OPENAI_API_KEY/);
   assert.doesNotMatch(workflow, /https:\/\/[^\s]*\$\{\{\s*(?:github\.token|secrets\.)/);
-  assert.match(workflow, /run: exec node src\/cli\.js inbox cloud-once --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE" > "\$RESULT_FILE"/);
+});
+
+test('GitHub rate limits schedule one delayed lane retry without holding a runner', () => {
+  const retryStart = workflow.indexOf('- name: Schedule exact rate-limit continuation');
+  const heartbeatStart = workflow.indexOf('- name: Leave bounded continuation to MSI heartbeat');
+  assert.ok(retryStart > 0 && heartbeatStart > retryStart);
+  const retry = workflow.slice(retryStart, heartbeatStart);
+  assert.match(workflow, /rate_limit_retry_ms=\$RATE_LIMIT_RETRY_MS/);
+  assert.match(retry, /if: steps\.drain\.outputs\.rate_limit_retry_ms != ''/);
+  assert.match(retry, /AGENT_RATE_LIMIT_RETRY_MS: \$\{\{ steps\.drain\.outputs\.rate_limit_retry_ms \}\}/);
+  assert.match(retry, /node scripts\/schedule-cloud-retry\.js/);
+  assert.doesNotMatch(retry, /GITHUB_TOKEN|secrets\./);
+});
+
+test('cloud continuation is delegated to the MSI heartbeat without recursive workflow dispatch', () => {
+  assert.match(workflow, /- name: Leave bounded continuation to MSI heartbeat/);
+  assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
+  assert.match(workflow, /AGENT_CLOUD_LANE: \$\{\{ matrix\.lane \}\}/);
+  assert.match(workflow, /MSI heartbeat will wake it again without recursive dispatch/);
+  assert.doesNotMatch(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
+  assert.doesNotMatch(workflow, /cloud_continuation_dispatch_failed/);
 });
 
 test('cloud worker has no merge or production deployment command surface', () => {
   assert.doesNotMatch(workflow, /\bgh\s+pr\s+merge\b|merge_pull_request|vercel\s+--prod|production[_ -]?deploy/i);
+});
+
+test('autonomous self-maintenance failures cannot masquerade as a successful cloud drain', () => {
+  const drainStart = workflow.indexOf('- name: Drain governed cloud work continuously');
+  const heartbeatStart = workflow.indexOf('- name: Leave bounded continuation to MSI heartbeat');
+  assert.ok(drainStart > 0 && heartbeatStart > drainStart);
+  const drain = workflow.slice(drainStart, heartbeatStart);
+  assert.match(drain, /result\.stopReason === "autonomous_failure"/);
+  assert.match(drain, /AUTONOMOUS_FAILED=/);
+  assert.match(drain, /::error::autonomous self-maintenance failed/);
+  assert.match(drain, /exit 1/);
+});
+
+test('cloud supervisor headroom does not widen autonomous work budgets', () => {
+  const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
+  assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
+  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 25m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
+  assert.equal(self.budgets.maxRuntimeMinutes, 18);
+});
+
+test('cloud drain supervisor timeout yields to a governed continuation instead of failing the workflow', () => {
+  const drainStart = workflow.indexOf('- name: Drain governed cloud work continuously');
+  const retryStart = workflow.indexOf('- name: Schedule exact rate-limit continuation');
+  assert.ok(drainStart > 0 && retryStart > drainStart);
+  const drain = workflow.slice(drainStart, retryStart);
+  assert.match(drain, /set \+e/);
+  assert.match(drain, /DRAIN_EXIT="\$\?"/);
+  assert.match(drain, /124\|137\|143/);
+  assert.match(drain, /"stopReason":"supervisor_timeout"/);
+  assert.match(drain, /"continuationRecommended":true/);
+  assert.match(drain, /supervisorTimeoutMs":1500000/);
+  assert.match(drain, /exit "\$DRAIN_EXIT"/);
+  assert.match(drain, /drain hit supervisor timeout; MSI heartbeat will resume the lane/);
+});
+
+test('scheduled watchdogs remain as fallback while active work is resumed by the MSI heartbeat', () => {
+  for (const cron of ['2', '17', '32', '47']) assert.match(workflow, new RegExp(`cron: '${cron} \\* \\* \\* \\*'`));
+  assert.match(workflow, /if: steps\.drain\.outputs\.continue == 'true'/);
+  assert.match(workflow, /MSI heartbeat will wake it again without recursive dispatch/);
+  assert.doesNotMatch(workflow, /actions\/workflows\/agent-cloud\.yml\/dispatches/);
 });

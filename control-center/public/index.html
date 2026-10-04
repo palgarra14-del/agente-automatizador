@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#08111f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Agent Control">
+  <meta name="application-name" content="Agent Control">
+  <title>Agent Control</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="login" class="overlay">
+    <form id="loginForm" class="login-card">
+      <div class="logo">A</div>
+      <h1>Agent Control</h1>
+      <p>Acceso privado al agente del MSI.</p>
+      <label>Clave de acceso<input id="pin" autocomplete="current-password" type="password" required></label>
+      <button class="primary" type="submit">Entrar</button>
+      <small id="loginError"></small>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">MSI · ORCHESTRATOR</p>
+      <h1>Agent Control</h1>
+    </div>
+    <div class="live"><span id="liveDot"></span><strong id="liveText">Conectando</strong></div>
+  </header>
+
+  <main>
+    <section class="hero card">
+      <div>
+        <p class="eyebrow">ESTADO GENERAL</p>
+        <h2 id="heroTitle">Comprobando el agente…</h2>
+        <p id="heroSub">Esperando telemetría del MSI.</p>
+      </div>
+      <div class="hero-actions"><button id="installAppBtn" class="primary hidden">Instalar app</button><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
+    </section>
+
+    <section id="stats" class="stats"></section>
+
+    <section id="remoteControl" class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">CONTROL REMOTO</p><h2>Gobierna la autonomía desde cualquier parte</h2><p id="controlNote" class="section-sub">Leyendo estado de control…</p></div>
+        <span id="controlMode" class="badge warn">cargando</span>
+      </div>
+      <div class="hero-actions">
+        <button id="pauseAllBtn" class="danger">Pausar nuevas ejecuciones</button>
+        <button id="resumeAllBtn" class="primary">Reanudar todo</button>
+      </div>
+    </section>
+
+    <section id="missionControl" class="card mission-control">
+      <div class="section-title mission-title">
+        <div><p class="eyebrow">MISSION CONTROL</p><h2>Estado real del agente</h2><p id="missionMeta" class="section-sub">Calculando salud reciente…</p></div>
+        <span id="missionScore" class="mission-score">—</span>
+      </div>
+      <div id="missionGrid" class="mission-grid"></div>
+    </section>
+
+    <section class="two-col infra-section">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">CAPACIDAD</p><h2>Runners del MSI</h2></div>
+        </div>
+        <div id="runnerSummary" class="infra-summary"></div>
+        <div id="runnerList" class="runner-list"></div>
+      </article>
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">GITHUB</p><h2>Presupuesto API</h2></div>
+          <span id="infraFreshness" class="counter">—</span>
+        </div>
+        <div id="githubBudget" class="budget-list"></div>
+      </article>
+    </section>
+
+    <section id="attentionCard" class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">ATENCIÓN</p><h2>Qué necesita tu intervención</h2></div>
+        <span id="attentionCount" class="counter">0</span>
+      </div>
+      <div id="attention" class="attention-grid"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">COLA</p><h2>Vista por prioridad</h2></div>
+      </div>
+      <div id="queueView" class="queue-view"></div>
+      <p class="queue-note">La prioridad ordena la vista. El scheduler puede posponer una tarea si necesita aprobación, una dependencia está caída o existe un bloqueo de seguridad.</p>
+    </section>
+
+    <section>
+      <div class="section-title">
+        <div><p class="eyebrow">CARRILES</p><h2>Equipo del agente</h2></div>
+      </div>
+      <div id="lanes" class="lane-grid"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">INTELIGENCIA</p><h2>Salud de modelos y proveedores</h2></div>
+      </div>
+      <div id="aiHealth" class="health-grid"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">OPERACIONES</p><h2>Qué está haciendo cada carril</h2></div>
+      </div>
+      <div id="operations" class="operations-grid"></div>
+    </section>
+
+    <section class="card composer">
+      <div class="section-title">
+        <div><p class="eyebrow">NUEVA ORDEN</p><h2>Habla directamente con el agente</h2></div>
+      </div>
+      <form id="taskForm">
+        <div class="form-row">
+          <label>Destino
+            <select id="lane">
+              <option value="self">Agente / Automejora</option>
+              <option value="callflow">Callflow</option>
+              <option value="leadfinder">LeadFinder</option>
+              <option value="website-pilot">Website Pilot</option>
+            </select>
+          </label>
+          <label>Tipo
+            <select id="profile">
+              <option value="app-improvement">Mejorar / reparar</option>
+              <option value="website-build">Crear una web</option>
+            </select>
+          </label>
+          <label>Prioridad
+            <select id="priority">
+              <option value="high">Alta</option>
+              <option value="normal" selected>Normal</option>
+              <option value="low">Baja</option>
+            </select>
+          </label>
+        </div>
+        <div id="briefFields" class="brief-fields hidden">
+          <div class="form-row">
+            <label>Negocio<input id="businessName" placeholder="Peluquería Ejemplo"></label>
+            <label>Categoría<input id="category" placeholder="Peluquería"></label>
+          </div>
+          <div class="form-row">
+            <label>Localidad<input id="location" placeholder="Madrid"></label>
+            <label>Servicios<input id="services" placeholder="Corte, color, mechas"></label>
+          </div>
+        </div>
+        <label>Tarea
+          <textarea id="goal" rows="6" maxlength="1000" placeholder="Ej.: revisa por qué Callflow falla al cargar leads, encuentra la causa, corrígela, prueba y continúa hasta dejarlo estable." required></textarea>
+        </label>
+        <div class="composer-actions">
+          <span id="taskHint">Se enviará a la cola gobernada del agente y quedará registrada.</span>
+          <button id="sendTask" class="primary" type="submit">Enviar tarea</button>
+        </div>
+      </form>
+      <div id="taskResult" class="result hidden"></div>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">TRABAJO</p><h2>Tareas abiertas</h2></div>
+          <span id="taskCount" class="counter">0</span>
+        </div>
+        <div class="task-filters">
+          <select id="taskLaneFilter" aria-label="Filtrar tareas por carril">
+            <option value="all">Todos los carriles</option>
+            <option value="self">Agente / Automejora</option>
+            <option value="callflow">Callflow</option>
+            <option value="leadfinder">LeadFinder</option>
+            <option value="website-pilot">Website Pilot</option>
+          </select>
+          <select id="taskViewFilter" aria-label="Filtrar tareas por estado">
+            <option value="all">Todas</option>
+            <option value="attention">Requieren atención</option>
+            <option value="active">Activas</option>
+            <option value="high">Prioridad alta</option>
+          </select>
+        </div>
+        <div id="tasks" class="list"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">EJECUCIÓN</p><h2>Últimos workflows</h2></div>
+        </div>
+        <div id="runs" class="list"></div>
+      </article>
+    </section>
+
+
+    <section class="card">
+      <div class="section-title">
+        <div><p class="eyebrow">SEGURIDAD</p><h2>Cambiar PIN de acceso</h2></div>
+      </div>
+      <form id="pinChangeForm">
+        <div class="form-row">
+          <label>Nuevo PIN
+            <input id="newPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          </label>
+          <label>Repetir PIN
+            <input id="confirmPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          </label>
+        </div>
+        <div class="composer-actions">
+          <span>La sesión se renovará automáticamente al cambiarlo.</span>
+          <button id="changePinBtn" class="ghost" type="submit">Cambiar PIN</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">PROCESOS</p><h2>Qué está haciendo ahora</h2></div>
+        </div>
+        <pre id="processes" class="terminal"></pre>
+      </article>
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">LOGS</p><h2>Actividad reciente</h2></div>
+        </div>
+        <pre id="logs" class="terminal"></pre>
+      </article>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button data-jump="top">Inicio</button>
+    <button data-jump="remoteControl">Control</button>
+    <button data-jump="missionControl">Mando</button>
+    <button data-jump="taskForm">Nueva tarea</button>
+  </nav>
+
+  <div id="toast" class="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

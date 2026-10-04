@@ -1,13 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { JsonStore } from './core.js';
 
 const DEFAULT_TAG = 'agent-cloud-state-v1';
 const DEFAULT_PATH = '.agent/cloud-state.json';
 const DEFAULT_MAX_BYTES = 512 * 1024;
 const DEFAULT_LEASE_TTL_MS = 20 * 60 * 1000;
+const DEFAULT_LINEAGE_VALIDATION_PACE_MS = 500;
+const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
+const GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+const GITHUB_NETWORK_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
+const GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS = 30_000;
 const STATUS_PAGE_SIZE = 100;
-const LANE_INIT_STATUS_MAX_PAGES = 32;
 const EPOCH_STATUS_MAX_PAGES = 8;
 const EPOCH_SIZE = 256;
 const CHECKPOINT_NAMESPACE = 'agent-cloud-state-v2-checkpoints';
@@ -26,6 +32,47 @@ const RESERVED_STATE_TAGS = new Set([
   CLAIM_NAMESPACE,
   EPOCH_ANCHOR_NAMESPACE
 ]);
+
+function linuxProcessStartIdentity(pid, readFileSyncImpl = readFileSync) {
+  try {
+    const contents = readFileSyncImpl(`/proc/${pid}/stat`, 'utf8');
+    const fields = contents.slice(contents.lastIndexOf(')') + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function localCloudOwnerId({
+  pid = process.pid,
+  platform = process.platform,
+  readFileSyncImpl = readFileSync,
+  fallbackId = randomUUID
+} = {}) {
+  if (platform === 'linux') {
+    const identity = linuxProcessStartIdentity(pid, readFileSyncImpl);
+    if (identity) return `local:${pid}:${identity}`;
+  }
+  return `cloud:${fallbackId()}`;
+}
+
+export function localCloudOwnerIsAbandoned(ownerIdentity, {
+  platform = process.platform,
+  kill = process.kill.bind(process),
+  readFileSyncImpl = readFileSync
+} = {}) {
+  const match = /^local:(\d+):([^:\s]{1,120})$/.exec(String(ownerIdentity ?? ''));
+  if (!match || platform !== 'linux') return false;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+  } catch (error) {
+    return error?.code === 'ESRCH';
+  }
+  const currentIdentity = linuxProcessStartIdentity(pid, readFileSyncImpl);
+  return Boolean(currentIdentity && currentIdentity !== match[2]);
+}
 
 
 
@@ -55,6 +102,11 @@ function stateHash(state) {
   return createHash('sha256').update(JSON.stringify(canonical(state))).digest('hex');
 }
 
+function cloneSnapshot(snapshot) {
+  if (!snapshot) return null;
+  return JSON.parse(JSON.stringify(snapshot));
+}
+
 function epochForGeneration(generation) {
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
   return Math.floor((generation - 1) / EPOCH_SIZE);
@@ -68,6 +120,11 @@ function epochEndGeneration(epoch) {
 function assertSha(value, code = 'cloud_state_sha_invalid') {
   if (typeof value !== 'string' || !/^[a-f0-9]{40}$/i.test(value)) throw new Error(code);
   return value.toLowerCase();
+}
+
+function validatedLineageKey(generation, sha) {
+  if (!Number.isSafeInteger(generation) || generation < 1) throw new Error('cloud_state_generation_invalid');
+  return `${generation}:${assertSha(sha)}`;
 }
 
 function checkpointTagFor(tag) {
@@ -105,6 +162,97 @@ function sanitizeRemoteOnlyEvidence(value) {
   for (const child of Object.values(value)) sanitizeRemoteOnlyEvidence(child);
 }
 
+const TERMINAL_WORKFLOW_STATUSES = new Set(['completed', 'failed', 'blocked']);
+const TERMINAL_REQUEST_STATUSES = new Set(['completed', 'failed', 'blocked', 'rejected']);
+const CLOUD_STATE_COMPACTION_TRIGGER_RATIO = 0.80;
+const CLOUD_STATE_COMPACTION_TARGET_RATIO = 0.68;
+const CLOUD_STATE_MIN_RECENT_TERMINAL_WORKFLOWS = 8;
+const CLOUD_STATE_MIN_RECENT_EVENTS = 100;
+
+function serializedStateBytes(state) {
+  return Buffer.byteLength(JSON.stringify(state), 'utf8');
+}
+
+function workflowUpdatedEpoch(workflow) {
+  for (const value of [workflow?.updatedAt, workflow?.createdAt]) {
+    const epoch = Date.parse(value ?? '');
+    if (Number.isFinite(epoch)) return epoch;
+  }
+  return 0;
+}
+
+function protectedWorkflowIds(state) {
+  const protectedIds = new Set();
+  for (const autopilot of [state.autopilotSelfImprovement, state.autopilotProjectImprovement]) {
+    const workflowId = autopilot?.activeWorkflowId;
+    if (typeof workflowId === 'string' && workflowId) protectedIds.add(workflowId);
+  }
+  for (const record of Object.values(state.requests ?? {})) {
+    if (!record || TERMINAL_REQUEST_STATUSES.has(record.status)) continue;
+    if (typeof record.workflowId === 'string' && record.workflowId) protectedIds.add(record.workflowId);
+  }
+  return protectedIds;
+}
+
+export function compactCloudStateForWrite(state, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('cloud_state_invalid');
+  if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
+  const beforeBytes = serializedStateBytes(state);
+  const triggerBytes = Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TRIGGER_RATIO);
+  const targetBytes = Math.floor(maxBytes * CLOUD_STATE_COMPACTION_TARGET_RATIO);
+  if (beforeBytes <= triggerBytes) {
+    return { compacted: false, beforeBytes, afterBytes: beforeBytes, removedWorkflows: [], removedEvents: 0 };
+  }
+
+  const protectedIds = protectedWorkflowIds(state);
+  const terminal = Object.entries(state.workflows ?? {})
+    .filter(([workflowId, workflow]) =>
+      !protectedIds.has(workflowId) &&
+      TERMINAL_WORKFLOW_STATUSES.has(workflow?.status)
+    )
+    .sort((left, right) =>
+      workflowUpdatedEpoch(left[1]) - workflowUpdatedEpoch(right[1]) ||
+      left[0].localeCompare(right[0])
+    );
+
+  const removedWorkflows = [];
+  const workflows = state.workflows ?? null;
+  const removableWithoutTouchingRecent = Math.max(
+    0,
+    terminal.length - CLOUD_STATE_MIN_RECENT_TERMINAL_WORKFLOWS
+  );
+  for (let index = 0; index < removableWithoutTouchingRecent && serializedStateBytes(state) > targetBytes; index += 1) {
+    const [workflowId] = terminal[index];
+    delete workflows[workflowId];
+    removedWorkflows.push(workflowId);
+  }
+
+  if (serializedStateBytes(state) > maxBytes) {
+    const remainingTerminal = terminal.slice(removableWithoutTouchingRecent, Math.max(removableWithoutTouchingRecent, terminal.length - 2));
+    for (const [workflowId] of remainingTerminal) {
+      if (serializedStateBytes(state) <= targetBytes) break;
+      if (!Object.hasOwn(workflows ?? {}, workflowId)) continue;
+      delete workflows[workflowId];
+      removedWorkflows.push(workflowId);
+    }
+  }
+
+  let removedEvents = 0;
+  if (serializedStateBytes(state) > maxBytes && Array.isArray(state.events) && state.events.length > CLOUD_STATE_MIN_RECENT_EVENTS) {
+    const removeCount = state.events.length - CLOUD_STATE_MIN_RECENT_EVENTS;
+    state.events.splice(0, removeCount);
+    removedEvents = removeCount;
+  }
+
+  return {
+    compacted: removedWorkflows.length > 0 || removedEvents > 0,
+    beforeBytes,
+    afterBytes: serializedStateBytes(state),
+    removedWorkflows,
+    removedEvents
+  };
+}
+
 function normalizeAllowedProjectIds(value = ['self']) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new Error('cloud_state_allowed_projects_invalid');
   const normalized = [...new Set(value.map((projectId) => String(projectId ?? '').trim()))].sort();
@@ -135,9 +283,49 @@ export function validateCloudState(state, { maxBytes = DEFAULT_MAX_BYTES, allowe
   return state;
 }
 
+async function githubReadRateLimitDelayMs(response, fallbackDelayMs, nowMs) {
+  if (![403, 429].includes(response?.status)) return null;
+  const header = (name) => response?.headers?.get?.(name) ?? null;
+  const retryAfter = header('retry-after');
+  if (/^\d+$/.test(String(retryAfter ?? ''))) {
+    return Math.min(GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS, Math.max(1_000, Number(retryAfter) * 1_000));
+  }
+  const remaining = header('x-ratelimit-remaining');
+  const reset = header('x-ratelimit-reset');
+  if (remaining === '0' && /^\d+$/.test(String(reset ?? '')) && Number.isFinite(nowMs)) {
+    const resetDelayMs = (Number(reset) * 1_000) - nowMs + 1_000;
+    if (resetDelayMs > 0) return Math.min(GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS, resetDelayMs);
+  }
+  let body = '';
+  try {
+    const readable = typeof response?.clone === 'function' ? response.clone() : response;
+    if (typeof readable?.text === 'function') body = await readable.text();
+  } catch {
+    body = '';
+  }
+  const rateLimited = response.status === 429 || remaining === '0' || /secondary rate limit|rate limit exceeded|abuse detection/i.test(body);
+  return rateLimited ? fallbackDelayMs : null;
+}
+
 function responseError(status) {
   if ([409, 422].includes(status)) return new Error('cloud_state_conflict');
   return new Error(`cloud_state_github_request_failed:${status}`);
+}
+
+function rateLimitError(status, retryAfterMs = null) {
+  const error = new Error(`cloud_state_github_rate_limited:${status}`);
+  if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    error.retryAfterMs = Math.round(retryAfterMs);
+  }
+  return error;
+}
+
+function transientGitHubStatus(status) {
+  return [502, 503, 504].includes(status);
+}
+
+function transientCloudStateRequestError(error) {
+  return /cloud_state_github_request_failed:(?:502|503|504)(?:$|\D)/.test(String(error?.message ?? ''));
 }
 
 export class GitHubStateStore extends JsonStore {
@@ -154,8 +342,10 @@ export class GitHubStateStore extends JsonStore {
     leaseTtlMs = DEFAULT_LEASE_TTL_MS,
     ownerId = process.env.GITHUB_RUN_ID
       ? `github:${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`
-      : `cloud:${randomUUID()}`,
-    now = () => Date.now()
+      : localCloudOwnerId(),
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    lineageValidationPaceMs = DEFAULT_LINEAGE_VALIDATION_PACE_MS
   } = {}) {
     super('.agent/cloud-state-unused.json');
     if (!repository?.owner || !repository?.name) throw new Error('cloud_state_repository_required');
@@ -168,6 +358,10 @@ export class GitHubStateStore extends JsonStore {
     const normalizedAllowedProjectIds = normalizeAllowedProjectIds(allowedProjectIds);
     if (!Number.isInteger(maxBytes) || maxBytes < 16 * 1024 || maxBytes > 2 * 1024 * 1024) throw new Error('cloud_state_max_bytes_invalid');
     if (!Number.isInteger(leaseTtlMs) || leaseTtlMs < 60_000 || leaseTtlMs > 60 * 60 * 1000) throw new Error('cloud_state_lease_ttl_invalid');
+    if (typeof sleep !== 'function') throw new Error('cloud_state_sleep_invalid');
+    if (!Number.isInteger(lineageValidationPaceMs) || lineageValidationPaceMs < 0 || lineageValidationPaceMs > 1_000) {
+      throw new Error('cloud_state_lineage_validation_pace_invalid');
+    }
     this.repository = repository;
     this.token = token;
     this.fetchImpl = fetchImpl;
@@ -182,7 +376,11 @@ export class GitHubStateStore extends JsonStore {
     this.leaseTtlMs = leaseTtlMs;
     this.ownerId = ownerId;
     this.now = now;
+    this.sleep = sleep;
+    this.lineageValidationPaceMs = lineageValidationPaceMs;
     this.activeGlobalLeaseId = null;
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     this.mutationDeadlineContext = new AsyncLocalStorage();
     this.validatedLineageHeads = new Set();
     this.ledgerRootVerified = false;
@@ -202,6 +400,7 @@ export class GitHubStateStore extends JsonStore {
     this.epochSealContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/seal`;
     this.epochNextContextName = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/next`;
     this.epochAuthorityPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/g/`;
+    this.claimRecoveryContextPrefix = `${LEDGER_CONTEXT_ROOT}/${this.ledgerDigest}/claim-recovery/`;
     this.claimPrefix = `${CLAIM_NAMESPACE}/${this.ledgerDigest}/`;
     this.ledgerRootTreeSha = null;
   }
@@ -210,33 +409,102 @@ export class GitHubStateStore extends JsonStore {
     return `https://api.github.com/repos/${encodeURIComponent(this.repository.owner)}/${encodeURIComponent(this.repository.name)}${suffix}`;
   }
 
-  async request(suffix, { method = 'GET', body, allow404 = false } = {}) {
-    const deadlineAt = method === 'GET' ? null : this.mutationDeadlineContext?.getStore() ?? null;
-    let timeoutMs = 30_000;
+  activeRequestDeadline() {
+    return this.mutationDeadlineContext?.getStore() ?? null;
+  }
+
+  requestTimeoutMs(deadlineAt = this.activeRequestDeadline()) {
+    if (deadlineAt === null) return 30_000;
+    if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+    const remainingMs = Math.floor(deadlineAt - this.now());
+    if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
+    return Math.min(30_000, remainingMs);
+  }
+
+  async fetchWithDeadline(url, options = {}, deadlineAt = this.activeRequestDeadline()) {
+    const timeoutController = new globalThis.AbortController();
+    const timeout = setTimeout(() => {
+      timeoutController.abort(new Error('cloud_state_github_request_timeout'));
+    }, this.requestTimeoutMs(deadlineAt));
+    try {
+      return await this.fetchImpl(url, { ...options, signal: timeoutController.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async sleepWithinDeadline(delayMs, deadlineAt = this.activeRequestDeadline()) {
     if (deadlineAt !== null) {
       if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
       const remainingMs = Math.floor(deadlineAt - this.now());
-      if (remainingMs <= 0) throw new Error('workflow_deadline_cap_exceeded');
-      timeoutMs = Math.min(timeoutMs, remainingMs);
+      if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
     }
-    let response;
-    try {
-      response = await this.fetchImpl(this.apiPath(suffix), {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json'
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: globalThis.AbortSignal.timeout(timeoutMs)
-      });
-    } catch (error) {
-      throw new Error('cloud_state_github_request_failed', { cause: error });
+    await this.sleep(delayMs);
+  }
+
+  async request(suffix, { method = 'GET', body, allow404 = false } = {}) {
+    const deadlineAt = this.activeRequestDeadline();
+    const retryDelays = method === 'GET' ? GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS : [];
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchWithDeadline(this.apiPath(suffix), {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: body === undefined ? undefined : JSON.stringify(body)
+        }, deadlineAt);
+      } catch (error) {
+        if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
+        const networkRetryDelayMs = method === 'GET' ? GITHUB_NETWORK_READ_RETRY_DELAYS_MS[attempt] : undefined;
+        if (networkRetryDelayMs !== undefined) {
+          try {
+            await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          } catch (retryError) {
+            if (retryError?.message === 'workflow_deadline_cap_exceeded') {
+              throw new Error('cloud_state_github_request_failed', { cause: retryError });
+            }
+            throw retryError;
+          }
+          continue;
+        }
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+      if (allow404 && response.status === 404) return null;
+      if (response.ok) return response.status === 204 ? null : response.json();
+
+      const fallbackDelayMs = retryDelays[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
+        if (delayMs !== null) {
+          if (deadlineAt !== null) {
+            if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+            const remainingMs = Math.floor(deadlineAt - this.now());
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
+          }
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
+          await this.sleepWithinDeadline(delayMs, deadlineAt);
+          continue;
+        }
+      }
+      if (method === 'GET' && [403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
+        }
+      }
+      const transientDelayMs = method === 'GET' ? GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt] : undefined;
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs, deadlineAt);
+        continue;
+      }
+      throw responseError(response.status);
     }
-    if (allow404 && response.status === 404) return null;
-    if (!response.ok) throw responseError(response.status);
-    return response.status === 204 ? null : response.json();
   }
 
 
@@ -247,12 +515,100 @@ export class GitHubStateStore extends JsonStore {
   }
 
   async readRefs() {
-    const [stateSha, checkpointSha, witnessSha] = await Promise.all([
-      this.refSha(`tags/${encodeURIComponent(this.tag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.checkpointTag)}`),
-      this.refSha(`tags/${encodeURIComponent(this.witnessTag)}`)
-    ]);
-    return { stateSha, checkpointSha, witnessSha };
+    const query = `query CloudStateRefs($owner: String!, $name: String!, $stateRef: String!, $checkpointRef: String!, $witnessRef: String!) {
+      repository(owner: $owner, name: $name) {
+        state: ref(qualifiedName: $stateRef) { target { oid } }
+        checkpoint: ref(qualifiedName: $checkpointRef) { target { oid } }
+        witness: ref(qualifiedName: $witnessRef) { target { oid } }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      stateRef: `refs/tags/${this.tag}`,
+      checkpointRef: `refs/tags/${this.checkpointTag}`,
+      witnessRef: `refs/tags/${this.witnessTag}`
+    };
+    const deadlineAt = this.activeRequestDeadline();
+
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchWithDeadline('https://api.github.com/graphql', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query, variables })
+        }, deadlineAt);
+      } catch (error) {
+        if (error?.message === 'workflow_deadline_cap_exceeded' || error?.message === 'cloud_state_deadline_invalid') throw error;
+        const networkRetryDelayMs = GITHUB_NETWORK_READ_RETRY_DELAYS_MS[attempt];
+        if (networkRetryDelayMs !== undefined) {
+          try {
+            await this.sleepWithinDeadline(networkRetryDelayMs, deadlineAt);
+          } catch (retryError) {
+            if (retryError?.message === 'workflow_deadline_cap_exceeded') {
+              throw new Error('cloud_state_github_request_failed', { cause: retryError });
+            }
+            throw retryError;
+          }
+          continue;
+        }
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+
+      if (response.ok) {
+        let payload;
+        try { payload = await response.json(); } catch { throw new Error('cloud_state_graphql_invalid'); }
+        if (Array.isArray(payload?.errors) && payload.errors.length > 0) throw new Error('cloud_state_graphql_invalid');
+        const repository = payload?.data?.repository;
+        if (!repository || !Object.hasOwn(repository, 'state') ||
+            !Object.hasOwn(repository, 'checkpoint') || !Object.hasOwn(repository, 'witness')) {
+          throw new Error('cloud_state_graphql_invalid');
+        }
+        const refValue = (value) => {
+          if (value === null) return null;
+          return assertSha(value?.target?.oid, 'cloud_state_ref_invalid');
+        };
+        return {
+          stateSha: refValue(repository.state),
+          checkpointSha: refValue(repository.checkpoint),
+          witnessSha: refValue(repository.witness)
+        };
+      }
+
+      const fallbackDelayMs = GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
+        if (delayMs !== null) {
+          if (deadlineAt !== null) {
+            if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
+            const remainingMs = Math.floor(deadlineAt - this.now());
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
+          }
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
+          await this.sleepWithinDeadline(delayMs, deadlineAt);
+          continue;
+        }
+      }
+      if ([403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
+        }
+      }
+      const transientDelayMs = GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt];
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs, deadlineAt);
+        continue;
+      }
+      throw responseError(response.status);
+    }
   }
 
   async readCommit(sha) {
@@ -270,6 +626,93 @@ export class GitHubStateStore extends JsonStore {
     const comparison = await this.request(`/compare/${base}...${head}`);
     if (!['ahead', 'behind', 'diverged', 'identical'].includes(comparison?.status)) throw new Error('cloud_state_compare_invalid');
     return comparison.status;
+  }
+
+  async readStatusContext(commitSha, contextName) {
+    const oid = assertSha(commitSha);
+    if (typeof contextName !== 'string' || contextName.length < 1 || contextName.length > 200) {
+      throw new Error('cloud_state_status_context_invalid');
+    }
+    const query = `query CloudStateContext($owner: String!, $name: String!, $oid: GitObjectID!, $context: String!) {
+      repository(owner: $owner, name: $name) {
+        object(oid: $oid) {
+          ... on Commit {
+            status {
+              context(name: $context) {
+                context
+                state
+                description
+                targetUrl
+              }
+            }
+          }
+        }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      oid,
+      context: contextName
+    };
+
+    for (let attempt = 0; ; attempt += 1) {
+      let response;
+      try {
+        response = await this.fetchWithDeadline('https://api.github.com/graphql', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ query, variables })
+        });
+      } catch (error) {
+        throw new Error('cloud_state_github_request_failed', { cause: error });
+      }
+
+      if (response.ok) {
+        const payload = await response.json();
+        if (Array.isArray(payload?.errors) && payload.errors.length > 0) {
+          throw new Error('cloud_state_graphql_invalid');
+        }
+        const object = payload?.data?.repository?.object;
+        if (!object || !('status' in object)) throw new Error('cloud_state_graphql_invalid');
+        const status = object.status?.context ?? null;
+        if (!status) return null;
+        return {
+          context: status.context,
+          state: String(status.state ?? '').toLowerCase(),
+          description: status.description ?? null,
+          target_url: status.targetUrl ?? null
+        };
+      }
+
+      const fallbackDelayMs = GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+      if (fallbackDelayMs !== undefined) {
+        const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
+        if (delayMs !== null) {
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
+          await this.sleepWithinDeadline(delayMs);
+          continue;
+        }
+      }
+      if ([403, 429].includes(response.status)) {
+        const exhaustedRateLimitDelayMs = await githubReadRateLimitDelayMs(response, 0, this.now());
+        if (exhaustedRateLimitDelayMs !== null) {
+          throw rateLimitError(response.status, exhaustedRateLimitDelayMs);
+        }
+      }
+      const transientDelayMs = GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS[attempt];
+      if (transientGitHubStatus(response.status) && transientDelayMs !== undefined) {
+        await this.sleepWithinDeadline(transientDelayMs);
+        continue;
+      }
+      throw responseError(response.status);
+    }
   }
 
   validateEnvelope(envelope) {
@@ -313,6 +756,152 @@ export class GitHubStateStore extends JsonStore {
     let envelope;
     try { envelope = JSON.parse(blob.text); } catch { throw new Error('cloud_state_envelope_invalid'); }
     return this.validateEnvelope(envelope);
+  }
+
+
+  async readHistoryPage(oid, { first, after = null } = {}) {
+    const target = assertSha(oid);
+    if (!Number.isInteger(first) || first < 1 || first > 100) throw new Error('cloud_state_history_page_invalid');
+    if (after !== null && (typeof after !== 'string' || after.length < 1 || after.length > 500)) {
+      throw new Error('cloud_state_history_cursor_invalid');
+    }
+    const query = `query CloudStateHistory($owner: String!, $name: String!, $oid: GitObjectID!, $path: String!, $first: Int!, $after: String) {
+      repository(owner: $owner, name: $name) {
+        object(oid: $oid) {
+          ... on Commit {
+            history(first: $first, after: $after, path: $path) {
+              nodes {
+                oid
+                parents(first: 2) {
+                  totalCount
+                  nodes { oid }
+                }
+                file(path: $path) {
+                  object {
+                    ... on Blob {
+                      oid
+                      byteSize
+                      isBinary
+                      isTruncated
+                      text
+                    }
+                  }
+                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+            }
+          }
+        }
+      }
+    }`;
+    const variables = {
+      owner: this.repository.owner,
+      name: this.repository.name,
+      oid: target,
+      path: this.statePath,
+      first,
+      after
+    };
+    let response;
+    try {
+      response = await this.fetchWithDeadline('https://api.github.com/graphql', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query, variables })
+      });
+    } catch {
+      return null;
+    }
+    if (!response?.ok) return null;
+    let payload;
+    try { payload = await response.json(); } catch { return null; }
+    if (Array.isArray(payload?.errors) && payload.errors.length > 0) return null;
+    const history = payload?.data?.repository?.object?.history;
+    if (!history || !Array.isArray(history.nodes) || !history.pageInfo ||
+        typeof history.pageInfo.hasNextPage !== 'boolean') return null;
+    if (history.pageInfo.hasNextPage &&
+        (typeof history.pageInfo.endCursor !== 'string' || !history.pageInfo.endCursor)) return null;
+    return history;
+  }
+
+  async validateActiveEpochHistoryBatched(registration, authority, authorities, rootEvidence) {
+    if (!authority || !Array.isArray(authorities) || authorities.length < 1) return false;
+    const stepCount = authority.generation - registration.startGeneration + 1;
+    if (!Number.isSafeInteger(stepCount) || stepCount < 1 || stepCount > EPOCH_SIZE) {
+      throw new Error('cloud_state_history_page_limit');
+    }
+    const firstRegistration = rootEvidence.registrations[0];
+    if (!firstRegistration) throw new Error('cloud_state_epoch_registration_missing');
+    const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
+    let expectedGeneration = authority.generation;
+    let expectedSha = authority.stateSha;
+    let after = null;
+    let validated = 0;
+
+    while (validated < stepCount) {
+      const first = Math.min(100, stepCount - validated);
+      const history = await this.readHistoryPage(authority.stateSha, { first, after });
+      if (!history) return false;
+      if (history.nodes.length < 1 || history.nodes.length > first) return false;
+
+      for (const node of history.nodes) {
+        if (validated >= stepCount) break;
+        if (!node || typeof node.oid !== 'string' || node.oid.toLowerCase() !== expectedSha) {
+          // Path-filtered history may legitimately omit a commit. The exact REST
+          // validator below remains authoritative in that case.
+          return false;
+        }
+        const parents = node.parents;
+        if (!parents || !Number.isInteger(parents.totalCount) || !Array.isArray(parents.nodes)) return false;
+        if (parents.totalCount !== 1 || parents.nodes.length !== 1) {
+          throw new Error('cloud_state_history_fork');
+        }
+        const parentSha = assertSha(parents.nodes[0]?.oid, 'cloud_state_parent_invalid');
+        const authorityRecord = authorityByGeneration.get(expectedGeneration);
+        if (!authorityRecord ||
+            authorityRecord.stateSha !== expectedSha ||
+            authorityRecord.parentSha !== parentSha) {
+          throw new Error('cloud_state_epoch_authority_mismatch');
+        }
+
+        const blob = node.file?.object;
+        if (!blob || blob.isBinary !== false || blob.isTruncated !== false ||
+            !Number.isInteger(blob.byteSize) || typeof blob.text !== 'string') {
+          // GitHub can truncate large GraphQL blobs. Never trust partial evidence:
+          // fall back to exact per-SHA REST reads.
+          return false;
+        }
+        const envelope = this.parseHistoryBlob(blob);
+        if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
+          throw new Error('cloud_state_generation_discontinuity');
+        }
+        if (assertSha(envelope.lineageBaseSha, 'cloud_state_lineage_anchor_invalid') !== firstRegistration.anchorSha ||
+            envelope.lineageBaseGeneration !== firstRegistration.baseGeneration) {
+          throw new Error('cloud_state_lineage_anchor_mismatch');
+        }
+
+        validated += 1;
+        if (expectedGeneration === registration.startGeneration) {
+          if (parentSha !== registration.anchorSha) throw new Error('cloud_state_history_invalid');
+          if (validated !== stepCount) throw new Error('cloud_state_history_incomplete');
+          return true;
+        }
+        expectedGeneration -= 1;
+        expectedSha = parentSha;
+      }
+
+      if (validated >= stepCount) break;
+      if (!history.pageInfo.hasNextPage) return false;
+      after = history.pageInfo.endCursor;
+    }
+    return validated === stepCount;
   }
 
   async readEnvelopeAt(commitSha) {
@@ -388,25 +977,17 @@ export class GitHubStateStore extends JsonStore {
 
   async readLaneInitMarker() {
     await this.verifyLedgerRoot();
-    const wanted = this.laneInitContextName.toLowerCase();
-    for (let page = 1; page <= LANE_INIT_STATUS_MAX_PAGES; page += 1) {
-      const statuses = await this.request(`/commits/${LEDGER_ROOT_SHA}/statuses?per_page=${STATUS_PAGE_SIZE}&page=${page}`);
-      if (!Array.isArray(statuses)) throw new Error('cloud_state_lane_init_invalid');
-      for (const status of statuses) {
-        const context = typeof status?.context === 'string' ? status.context.toLowerCase() : '';
-        if (context !== wanted) continue;
-        if (String(status.state ?? '').toLowerCase() !== 'success' ||
-            (status.target_url !== null && status.target_url !== undefined) ||
-            typeof status.description !== 'string') {
-          throw new Error('cloud_state_lane_init_invalid');
-        }
-        const match = /^r=([a-f0-9]{40})$/i.exec(status.description);
-        if (!match) throw new Error('cloud_state_lane_init_invalid');
-        return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
-      }
-      if (statuses.length < STATUS_PAGE_SIZE) return null;
+    const status = await this.readStatusContext(LEDGER_ROOT_SHA, this.laneInitContextName);
+    if (!status) return null;
+    if (status.context.toLowerCase() !== this.laneInitContextName.toLowerCase() ||
+        status.state !== 'success' ||
+        (status.target_url !== null && status.target_url !== undefined) ||
+        typeof status.description !== 'string') {
+      throw new Error('cloud_state_lane_init_invalid');
     }
-    throw new Error('cloud_state_lane_init_status_limit');
+    const match = /^r=([a-f0-9]{40})$/i.exec(status.description);
+    if (!match) throw new Error('cloud_state_lane_init_invalid');
+    return { laneRootSha: assertSha(match[1], 'cloud_state_lane_init_invalid') };
   }
 
   async ensureLaneInitMarker(laneRootSha) {
@@ -1077,9 +1658,102 @@ export class GitHubStateStore extends JsonStore {
     return `${this.claimPrefix}${epoch}/${generation}`;
   }
 
-  async claimGenerationStrict(generation, candidateSha) {
-    const target = assertSha(candidateSha);
+  generationClaimRecoveryContext(generation) {
+    const epoch = epochForGeneration(generation);
+    return `${this.claimRecoveryContextPrefix}${epoch}/${generation}`;
+  }
+
+  generationClaimRecoveryDescription(orphanClaimSha, parentSha, statusAnchorSha) {
+    return `o=${assertSha(orphanClaimSha)};p=${assertSha(parentSha)};a=${assertSha(statusAnchorSha)}`;
+  }
+
+  async readGenerationClaimRecovery(registration, generation) {
+    const context = this.generationClaimRecoveryContext(generation);
+    const laneRoot = await this.laneRootCommit();
+    if (!laneRoot) return null;
+    const status = await this.readStatusContext(laneRoot.sha, context);
+    if (!status) return null;
+    if (status.context.toLowerCase() !== context.toLowerCase() ||
+        status.state !== 'success' ||
+        (status.target_url !== null && status.target_url !== undefined) ||
+        typeof status.description !== 'string') {
+      throw new Error('cloud_state_generation_claim_recovery_invalid');
+    }
+    const match = /^o=([a-f0-9]{40});p=([a-f0-9]{40});a=([a-f0-9]{40})$/i.exec(status.description);
+    if (!match) throw new Error('cloud_state_generation_claim_recovery_invalid');
+    const statusAnchorSha = assertSha(registration.statusAnchorSha, 'cloud_state_epoch_anchor_invalid');
+    if (assertSha(match[3], 'cloud_state_generation_claim_recovery_invalid') !== statusAnchorSha) {
+      throw new Error('cloud_state_generation_claim_recovery_invalid');
+    }
+    return {
+      orphanClaimSha: assertSha(match[1], 'cloud_state_generation_claim_recovery_invalid'),
+      parentSha: assertSha(match[2], 'cloud_state_generation_claim_recovery_invalid'),
+      statusAnchorSha
+    };
+  }
+
+  async quarantineGenerationClaim(registration, generation, parentSha) {
     const claimTag = this.generationClaimTag(generation);
+    const orphanClaimSha = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
+    if (!orphanClaimSha) return null;
+
+    const expectedParentSha = assertSha(parentSha);
+    const expectedDescription = this.generationClaimRecoveryDescription(
+      orphanClaimSha, expectedParentSha, registration.statusAnchorSha
+    );
+    const before = await this.readGenerationClaimRecovery(registration, generation);
+    if (before) {
+      if (before.orphanClaimSha === orphanClaimSha && before.parentSha === expectedParentSha) return before;
+      throw new Error('cloud_state_generation_claim_recovery_conflict');
+    }
+
+    const context = this.generationClaimRecoveryContext(generation);
+    const laneRoot = await this.laneRootCommit();
+    if (!laneRoot) throw new Error('cloud_state_generation_claim_recovery_invalid');
+    let postError = null;
+    try {
+      await this.request(`/statuses/${laneRoot.sha}`, {
+        method: 'POST',
+        body: { state: 'success', context, description: expectedDescription }
+      });
+    } catch (error) {
+      postError = error;
+    }
+
+    const after = await this.readGenerationClaimRecovery(registration, generation);
+    if (after?.orphanClaimSha === orphanClaimSha && after?.parentSha === expectedParentSha) return after;
+    if (after) throw new Error('cloud_state_generation_claim_recovery_conflict', { cause: postError ?? undefined });
+    if (postError) throw postError;
+    throw new Error('cloud_state_generation_claim_recovery_append_failed');
+  }
+
+  async quarantineNextGenerationClaim(evidence, parentSha, parentGeneration) {
+    if (!Number.isSafeInteger(parentGeneration) || parentGeneration < 0) {
+      throw new Error('cloud_state_generation_invalid');
+    }
+    const generation = parentGeneration + 1;
+    const registration = evidence.registrationByEpoch.get(epochForGeneration(generation)) ?? null;
+    if (!registration) return null;
+    const authorities = registration === evidence.activeRegistration
+      ? evidence.activeAuthorities
+      : await this.readEpochAuthorities(registration);
+    if (authorities.some((record) => record.generation >= generation)) return null;
+    return this.quarantineGenerationClaim(registration, generation, parentSha);
+  }
+
+  recoveryGenerationClaimTag(generation, nonce) {
+    const epoch = epochForGeneration(generation);
+    if (typeof nonce !== 'string' || !/^[a-f0-9]{32}$/i.test(nonce)) {
+      throw new Error('cloud_state_generation_claim_recovery_nonce_invalid');
+    }
+    // Recovery refs must be siblings of the deterministic generation ref.
+    // Git cannot store both refs/tags/.../<generation> and a child
+    // refs/tags/.../<generation>/recovery/<nonce> at the same time.
+    return `${this.claimPrefix}${epoch}/recovery/${generation}/${nonce.toLowerCase()}`;
+  }
+
+  async createGenerationClaimStrict(claimTag, candidateSha) {
+    const target = assertSha(candidateSha);
     let created;
     try {
       created = await this.request('/git/refs', {
@@ -1097,6 +1771,29 @@ export class GitHubStateStore extends JsonStore {
     const observed = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
     if (observed !== target) throw new Error('cloud_state_generation_claim_unproven');
     return claimTag;
+  }
+
+  async claimGenerationStrict(generation, candidateSha, { registration = null, parentSha = null } = {}) {
+    const claimTag = this.generationClaimTag(generation);
+    try {
+      return await this.createGenerationClaimStrict(claimTag, candidateSha);
+    } catch (error) {
+      if (!registration || !parentSha || error?.cause?.message !== 'cloud_state_conflict') throw error;
+      const observedClaimSha = await this.refSha(`tags/${encodeURIComponent(claimTag)}`);
+      if (!observedClaimSha) throw error;
+      const recovery = await this.readGenerationClaimRecovery(registration, generation);
+      const expectedParentSha = assertSha(parentSha);
+      if (!recovery || recovery.orphanClaimSha !== observedClaimSha || recovery.parentSha !== expectedParentSha) {
+        throw error;
+      }
+      const nonce = randomUUID().replaceAll('-', '');
+      const recoveryClaimTag = this.recoveryGenerationClaimTag(generation, nonce);
+      try {
+        return await this.createGenerationClaimStrict(recoveryClaimTag, candidateSha);
+      } catch (recoveryError) {
+        throw new Error('cloud_state_generation_recovery_claim_failed', { cause: recoveryError });
+      }
+    }
   }
 
   async appendEpochAuthorityAfterClaim(registration, generation, stateSha, parentSha, preClaimAuthorities, lineageEnvelope, { beforeCommit = null } = {}) {
@@ -1218,9 +1915,29 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_lineage_anchor_mismatch');
     }
     await this.validateLineageAnchor(stateEnvelope, { baseWitnessSha: latest.baseWitnessSha });
-    if (this.validatedLineageHeads.has(authority.stateSha)) return;
+    const authorityValidationKey = validatedLineageKey(authority.generation, authority.stateSha);
+    if (this.validatedLineageHeads.has(authorityValidationKey)) return;
 
     const authorityByGeneration = new Map(authorities.map((record) => [record.generation, record]));
+    const previousAuthority = authorityByGeneration.get(authority.generation - 1);
+    if (
+      authority.generation > registration.startGeneration &&
+      previousAuthority &&
+      previousAuthority.generation === authority.generation - 1 &&
+      latest.parentSha === previousAuthority.stateSha &&
+      latest.baseWitnessSha === previousAuthority.baseWitnessSha &&
+      this.validatedLineageHeads.has(validatedLineageKey(previousAuthority.generation, previousAuthority.stateSha))
+    ) {
+      const currentCommit = await this.readCommit(authority.stateSha);
+      if (!Array.isArray(currentCommit.parents) ||
+          currentCommit.parents.length !== 1 ||
+          assertSha(currentCommit.parents[0]?.sha, 'cloud_state_parent_invalid') !== previousAuthority.stateSha) {
+        throw new Error('cloud_state_history_fork');
+      }
+      this.validatedLineageHeads.add(authorityValidationKey);
+      return;
+    }
+
     let expectedSha = authority.stateSha;
     let expectedGeneration = authority.generation;
     const stepCount = authority.generation - registration.startGeneration + 1;
@@ -1228,14 +1945,23 @@ export class GitHubStateStore extends JsonStore {
       throw new Error('cloud_state_history_page_limit');
     }
 
+    if (await this.validateActiveEpochHistoryBatched(registration, authority, authorities, rootEvidence)) {
+      this.validatedLineageHeads.add(authorityValidationKey);
+      return;
+    }
+
     let done = false;
     for (let step = 0; step < stepCount; step += 1) {
-      const commit = await this.readCommit(expectedSha);
+      // Commit ancestry and state-envelope integrity are independent reads for the
+      // same immutable SHA. Validate both, but overlap their network latency on
+      // cold lineage walks. Generation order and pacing remain sequential.
+      const [commit, envelope] = step === 0
+        ? [await this.readCommit(expectedSha), stateEnvelope]
+        : await Promise.all([this.readCommit(expectedSha), this.readEnvelopeAt(expectedSha)]);
       if (!Array.isArray(commit.parents) || commit.parents.length !== 1) {
         throw new Error('cloud_state_history_fork');
       }
       const parentSha = assertSha(commit.parents[0]?.sha, 'cloud_state_parent_invalid');
-      const envelope = step === 0 ? stateEnvelope : await this.readEnvelopeAt(expectedSha);
       if (envelope.version !== 2 || envelope.generation !== expectedGeneration) {
         throw new Error('cloud_state_generation_discontinuity');
       }
@@ -1254,10 +1980,13 @@ export class GitHubStateStore extends JsonStore {
       }
       expectedSha = parentSha;
       expectedGeneration -= 1;
+      if (this.lineageValidationPaceMs > 0) {
+        await this.sleepWithinDeadline(this.lineageValidationPaceMs);
+      }
     }
 
     if (!done) throw new Error('cloud_state_history_incomplete');
-    this.validatedLineageHeads.add(authority.stateSha);
+    this.validatedLineageHeads.add(authorityValidationKey);
   }
 
   snapshotFrom(stateSha, checkpointSha, witnessSha, envelope, authority = null) {
@@ -1355,6 +2084,7 @@ export class GitHubStateStore extends JsonStore {
         const currentBaseSha = await this.baseBranchSha();
         const relation = await this.compareCommits(registration.anchorSha, currentBaseSha);
         if (!['identical', 'ahead'].includes(relation)) throw new Error('cloud_state_bootstrap_ancestry_invalid');
+        if (repair) await this.quarantineNextGenerationClaim(evidence, registration.anchorSha, 0);
         return this.snapshotFrom(null, null, null, null, null);
       }
       if (stateSha !== registration.anchorSha) throw new Error('cloud_state_unproven_state_advance');
@@ -1364,6 +2094,7 @@ export class GitHubStateStore extends JsonStore {
         throw new Error('cloud_state_epoch_registration_invalid');
       }
       await this.validateLegacyMigrationHead(stateSha, legacyEnvelope);
+      if (repair) await this.quarantineNextGenerationClaim(evidence, stateSha, legacyEnvelope.generation);
       return this.snapshotFrom(stateSha, null, null, legacyEnvelope, null);
     }
 
@@ -1400,6 +2131,7 @@ export class GitHubStateStore extends JsonStore {
       if (!repair) throw new Error('cloud_state_rollback');
       await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
     if (stateSha !== authority.stateSha) {
@@ -1408,6 +2140,7 @@ export class GitHubStateStore extends JsonStore {
         if (!repair) throw new Error('cloud_state_rollback');
         await revalidateSealedFallback();
         const repaired = await this.repairAllRefs(refs, authority.stateSha);
+        await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
         return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
       }
       if (relation === 'ahead') throw new Error('cloud_state_unproven_state_advance');
@@ -1421,9 +2154,11 @@ export class GitHubStateStore extends JsonStore {
     if (repair && (checkpointSha !== authority.stateSha || witnessSha !== authority.stateSha)) {
       await revalidateSealedFallback();
       const repaired = await this.repairAllRefs(refs, authority.stateSha);
+      await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
       return this.snapshotFrom(repaired.stateSha, repaired.checkpointSha, repaired.witnessSha, authorityEnvelope, authority);
     }
     await revalidateSealedFallback();
+    if (repair) await this.quarantineNextGenerationClaim(evidence, authority.stateSha, authority.generation);
     return this.snapshotFrom(stateSha, checkpointSha, witnessSha, authorityEnvelope, authority);
   }
 
@@ -1576,7 +2311,7 @@ export class GitHubStateStore extends JsonStore {
 
     await this.validateLineageAnchor(envelope);
     try {
-      await this.claimGenerationStrict(generation, commitSha);
+      await this.claimGenerationStrict(generation, commitSha, { registration, parentSha });
     } catch (error) {
       throw new Error('cloud_state_generation_election_failed', { cause: error });
     }
@@ -1626,14 +2361,46 @@ export class GitHubStateStore extends JsonStore {
     const finalAuthority = finalAuthorities.at(-1);
     if (finalRefs.stateSha === commitSha && finalRefs.checkpointSha === commitSha && finalRefs.witnessSha === commitSha &&
         finalAuthority?.generation === generation && finalAuthority.stateSha === commitSha && finalAuthority.parentSha === parentSha) {
-      this.validatedLineageHeads.add(commitSha);
+      this.validatedLineageHeads.add(validatedLineageKey(generation, commitSha));
+      const publishedSnapshot = this.snapshotFrom(commitSha, commitSha, commitSha, envelope, finalAuthority);
+      this.lastPublishedSnapshot = cloneSnapshot(publishedSnapshot);
+      this.cacheSnapshotForActiveLease(publishedSnapshot);
       return commitSha;
     }
     throw new Error('cloud_state_partial_publication', { cause: stateRefError ?? checkpointError ?? witnessError ?? undefined });
   }
 
+  hotSnapshotForActiveLease() {
+    const snapshot = this.hotLeaseSnapshot;
+    const lease = snapshot?.state?.cloudExecutionLease;
+    if (!snapshot || !this.activeGlobalLeaseId ||
+        lease?.leaseId !== this.activeGlobalLeaseId ||
+        lease?.ownerId !== this.ownerId ||
+        Date.parse(lease?.expiresAt ?? '') <= this.now()) {
+      this.hotLeaseSnapshot = null;
+      return null;
+    }
+    return cloneSnapshot(snapshot);
+  }
+
+  cacheSnapshotForActiveLease(snapshot) {
+    const lease = snapshot?.state?.cloudExecutionLease;
+    if (!this.activeGlobalLeaseId ||
+        lease?.leaseId !== this.activeGlobalLeaseId ||
+        lease?.ownerId !== this.ownerId ||
+        Date.parse(lease?.expiresAt ?? '') <= this.now()) {
+      this.hotLeaseSnapshot = null;
+      return;
+    }
+    this.hotLeaseSnapshot = cloneSnapshot(snapshot);
+  }
+
   async load() {
-    return (await this.readSnapshot()).state;
+    const hot = this.hotSnapshotForActiveLease();
+    if (hot) return hot.state;
+    const snapshot = await this.readSnapshot();
+    this.cacheSnapshotForActiveLease(snapshot);
+    return cloneSnapshot(snapshot).state;
   }
 
   async save() {
@@ -1644,8 +2411,9 @@ export class GitHubStateStore extends JsonStore {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('cloud_state_deadline_invalid');
     const operation = async () => {
-      const snapshot = await this.readSnapshot({ repair: true });
-      const data = snapshot.state;
+      const hot = requireLease ? this.hotSnapshotForActiveLease() : null;
+      const snapshot = hot ?? await this.readSnapshot({ repair: true });
+      const data = cloneSnapshot(snapshot).state;
       if (requireLease) {
         const lease = data.cloudExecutionLease;
         const expiresAt = Date.parse(lease?.expiresAt ?? '');
@@ -1660,8 +2428,22 @@ export class GitHubStateStore extends JsonStore {
       }
       const output = await mutator(data);
       sanitizeRemoteOnlyEvidence(data);
+      compactCloudStateForWrite(data, { maxBytes: this.maxBytes });
       if (beforeCommit) await beforeCommit();
-      await this.writeSnapshot(data, snapshot, { beforeCommit });
+      const intendedStateHash = stateHash(data);
+      try {
+        await this.writeSnapshot(data, snapshot, { beforeCommit });
+      } catch (error) {
+        if (!transientCloudStateRequestError(error)) throw error;
+        let observed;
+        try {
+          observed = await this.readSnapshot({ repair: true });
+        } catch {
+          throw error;
+        }
+        if (stateHash(observed.state) !== intendedStateHash) throw error;
+        this.cacheSnapshotForActiveLease(observed);
+      }
       return output;
     };
     if (deadlineAt === null) return operation();
@@ -1680,37 +2462,106 @@ export class GitHubStateStore extends JsonStore {
   async lockOwnerIsAbandoned(metadata) {
     const createdAt = Date.parse(metadata?.createdAt ?? '');
     if (!Number.isFinite(createdAt)) return false;
-    if (metadata?.ownerIdentity === this.ownerId) return false;
-    return this.now() - createdAt >= this.leaseTtlMs;
+    const ownerIdentity = metadata?.ownerIdentity ?? metadata?.ownerId ?? null;
+    if (ownerIdentity === this.ownerId) return false;
+    if (this.now() - createdAt >= this.leaseTtlMs) return true;
+
+    if (localCloudOwnerIsAbandoned(ownerIdentity)) return true;
+
+    const githubOwner = /^github:(\d+):(\d+)$/.exec(String(ownerIdentity ?? ''));
+    if (!githubOwner) return false;
+    try {
+      const run = await this.request(`/actions/runs/${githubOwner[1]}`);
+      return run?.status === 'completed';
+    } catch {
+      return false;
+    }
   }
 
   async claimGlobalLease() {
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     const lease = {
       leaseId: randomUUID(),
       ownerId: this.ownerId,
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(this.now() + this.leaseTtlMs).toISOString()
     };
-    await this.mutateInternal((data) => {
-      const existing = data.cloudExecutionLease;
-      const existingExpiry = Date.parse(existing?.expiresAt ?? '');
-      if (existing && Number.isFinite(existingExpiry) && existingExpiry > this.now()) {
-        throw new Error('cloud_global_lease_busy');
+    const retryDelaysMs = [250, 750, 1_500];
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.mutateInternal(async (data) => {
+          const existing = data.cloudExecutionLease;
+          const existingExpiry = Date.parse(existing?.expiresAt ?? '');
+          if (existing && Number.isFinite(existingExpiry) && existingExpiry > this.now()) {
+            const abandoned = await this.lockOwnerIsAbandoned({
+              ownerIdentity: existing.ownerId,
+              createdAt: existing.createdAt
+            });
+            if (!abandoned) throw new Error('cloud_global_lease_busy');
+          }
+          data.cloudExecutionLease = lease;
+          return lease;
+        }, { requireLease: false });
+        break;
+      } catch (error) {
+        const retryable = /^(cloud_state_conflict|cloud_state_generation_election_failed|cloud_state_partial_publication)$/.test(error?.message ?? '');
+        if (!retryable || attempt >= retryDelaysMs.length) throw error;
+        this.hotLeaseSnapshot = null;
+        this.lastPublishedSnapshot = null;
+        await this.sleepWithinDeadline(retryDelaysMs[attempt]);
       }
-      data.cloudExecutionLease = lease;
-      return lease;
-    }, { requireLease: false });
+    }
+
     this.activeGlobalLeaseId = lease.leaseId;
+    if (this.lastPublishedSnapshot) this.cacheSnapshotForActiveLease(this.lastPublishedSnapshot);
     return lease;
   }
 
   async releaseGlobalLease(leaseId) {
-    const released = await this.mutateInternal((data) => {
+    this.hotLeaseSnapshot = null;
+    const clearLease = () => this.mutateInternal((data) => {
       if (data.cloudExecutionLease?.leaseId !== leaseId || data.cloudExecutionLease?.ownerId !== this.ownerId) return false;
       data.cloudExecutionLease = null;
       return true;
     }, { requireLease: false });
+    const retryDelaysMs = [250, 750];
+    let released;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        released = await clearLease();
+        break;
+      } catch (error) {
+        let snapshot;
+        try {
+          snapshot = await this.readSnapshot({ repair: true });
+        } catch {
+          if (attempt < retryDelaysMs.length) {
+            await this.sleep(retryDelaysMs[attempt]);
+            continue;
+          }
+          throw error;
+        }
+        const current = snapshot.state.cloudExecutionLease;
+        if (!current) {
+          if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+          return true;
+        }
+        if (current.leaseId !== leaseId || current.ownerId !== this.ownerId) {
+          if (this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+          return false;
+        }
+        if (attempt < retryDelaysMs.length) {
+          await this.sleep(retryDelaysMs[attempt]);
+          continue;
+        }
+        throw error;
+      }
+    }
     if (released && this.activeGlobalLeaseId === leaseId) this.activeGlobalLeaseId = null;
+    this.hotLeaseSnapshot = null;
+    this.lastPublishedSnapshot = null;
     return released;
   }
 

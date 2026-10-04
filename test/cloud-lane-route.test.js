@@ -6,6 +6,7 @@ const config = {
   cloudLanes: [
     { id: 'self', projectIds: ['self'] },
     { id: 'website-pilot', projectIds: ['website-pilot'] },
+    { id: 'leadfinder', projectIds: ['leadfinder'] },
     { id: 'callflow', projectIds: ['callflow'] }
   ]
 };
@@ -19,25 +20,97 @@ ${JSON.stringify({
   scope: { allowedPaths: ['src'] }
 })}`;
 
-test('scheduled and manual recovery route every trusted configured lane', () => {
-  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', config }), ['self', 'website-pilot', 'callflow']);
-  assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'callflow']);
+test('scheduled watchdogs are staggered, push does not wake self, and manual recovery can cover every lane', () => {
+  assert.deepEqual(routeCloudLanes({ eventName: 'push', config }), []);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '2 * * * *', config }), ['self']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '17 * * * *', config }), ['website-pilot']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '32 * * * *', config }), ['leadfinder']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'schedule', schedule: '47 * * * *', config }), ['callflow']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'workflow_dispatch', config }), ['self', 'website-pilot', 'leadfinder', 'callflow']);
+});
+
+test('workflow dispatch continuation may target exactly one configured lane', () => {
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'callflow',
+    config
+  }), ['callflow']);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: '../escape',
+    config
+  }), /requested_lane_invalid/);
+  assert.throws(() => routeCloudLanes({
+    eventName: 'workflow_dispatch',
+    requestedLane: 'unknown',
+    config
+  }), /requested_lane_invalid/);
 });
 
 test('issue events route a valid request to exactly its configured owning lane', () => {
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('self'), config }), ['self']);
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('website-pilot'), config }), ['website-pilot']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: body('leadfinder'), config }), ['leadfinder']);
   assert.deepEqual(routeCloudLanes({ eventName: 'issue_comment', issueBody: body('callflow'), config }), ['callflow']);
 });
 
-test('issue edits and reopens conservatively wake every lane so prior ownership can invalidate', () => {
-  const all = ['self', 'website-pilot', 'callflow'];
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'edited', issueBody: body('self'), config }), all);
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'reopened', issueBody: body('callflow'), config }), all);
+test('issue edits and reopens target only lanes that can own current or prior governed state', () => {
+  const all = ['self', 'website-pilot', 'leadfinder', 'callflow'];
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('self'),
+    issueBodyWasEdited: false,
+    config
+  }), ['self']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('self'),
+    previousIssueBody: body('self'),
+    issueBodyWasEdited: true,
+    config
+  }), ['self']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('callflow'),
+    previousIssueBody: body('leadfinder'),
+    issueBodyWasEdited: true,
+    config
+  }), ['leadfinder', 'callflow']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: 'request removed',
+    previousIssueBody: body('callflow'),
+    issueBodyWasEdited: true,
+    config
+  }), ['callflow']);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'edited',
+    issueBody: body('callflow'),
+    previousIssueBody: 'ambiguous previous body',
+    issueBodyWasEdited: true,
+    config
+  }), all);
+
+  assert.deepEqual(routeCloudLanes({
+    eventName: 'issues',
+    eventAction: 'reopened',
+    issueBody: body('callflow'),
+    config
+  }), ['callflow']);
 });
 
 test('ambiguous or malformed event bodies fall back to every trusted lane', () => {
-  const all = ['self', 'website-pilot', 'callflow'];
+  const all = ['self', 'website-pilot', 'leadfinder', 'callflow'];
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: '', config }), all);
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: 'prefix\n' + body('self'), config }), all);
   assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: '<!-- agent-request:v1 -->\n{bad json', config }), all);
@@ -47,7 +120,7 @@ test('ambiguous or malformed event bodies fall back to every trusted lane', () =
 
 test('untrusted issue content can never create a dynamic lane name', () => {
   const malicious = body('evil-lane').replace('"evil-lane"', '"agent-$' + '{{ github.actor }}"');
-  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: malicious, config }), ['self', 'website-pilot', 'callflow']);
+  assert.deepEqual(routeCloudLanes({ eventName: 'issues', eventAction: 'opened', issueBody: malicious, config }), ['self', 'website-pilot', 'leadfinder', 'callflow']);
 });
 
 test('trusted routing configuration rejects duplicate or invalid ownership', () => {
@@ -63,4 +136,31 @@ test('trusted routing configuration rejects duplicate or invalid ownership', () 
     eventName: 'schedule',
     config: { cloudLanes: [] }
   }), /config_invalid/);
+});
+
+test('operator pause state is enforced for manual, scheduled and issue wakeups', () => {
+  assert.deepEqual(routeCloudLanes({
+    eventName:'workflow_dispatch',
+    requestedLane:'leadfinder',
+    pausedLanes:'leadfinder',
+    config
+  }), []);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'schedule',
+    schedule:'47 * * * *',
+    pausedLanes:'leadfinder',
+    config
+  }), ['callflow']);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'issues',
+    eventAction:'opened',
+    issueBody:body('callflow'),
+    globalPause:'true',
+    config
+  }), []);
+  assert.deepEqual(routeCloudLanes({
+    eventName:'workflow_dispatch',
+    pausedLanes:'self,website-pilot',
+    config
+  }), ['leadfinder','callflow']);
 });

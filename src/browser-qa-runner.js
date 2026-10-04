@@ -621,6 +621,146 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
     ));
     const observedAnchors = expectedAnchors.filter((anchor) => isRendered(document.getElementById(anchor)));
     const overlaySelectors = ['nextjs-portal', '[data-nextjs-dialog-overlay]', 'vite-error-overlay', 'webpack-dev-server-client-overlay', '#webpack-dev-server-client-overlay'];
+    const metric = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) * 1000) / 1000 : null;
+    const px = (value) => {
+      const parsed = Number.parseFloat(String(value ?? ''));
+      return Number.isFinite(parsed) ? metric(parsed) : null;
+    };
+    const viewportWidth = Math.max(1, window.innerWidth || document.documentElement?.clientWidth || 1);
+    const viewportHeight = Math.max(1, window.innerHeight || document.documentElement?.clientHeight || 1);
+    const pageHeight = Math.max(document.documentElement?.scrollHeight ?? 0, document.body?.scrollHeight ?? 0, viewportHeight);
+    const visualBlocks = queryAll('body > header, body > main > section, body > main > article, body > main > div, body > footer')
+      .filter(isRendered)
+      .slice(0, 20)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = styleFor(element);
+        const directChildren = [...(element.children ?? [])].filter(isRendered);
+        const childBoxes = directChildren.slice(0, 8).map((child) => {
+          const childRect = child.getBoundingClientRect();
+          const contentNodes = [
+            ...child.querySelectorAll('h1,h2,h3,h4,p,li,blockquote,figcaption,a[href],button,img,svg,canvas,video')
+          ].filter(isRendered);
+          const contentRects = contentNodes.map((node) => node.getBoundingClientRect())
+            .filter((contentRect) => contentRect.width > 0 && contentRect.height > 0);
+          const contentTop = contentRects.length
+            ? Math.max(childRect.top, Math.min(...contentRects.map((contentRect) => contentRect.top)))
+            : childRect.top;
+          const contentBottom = contentRects.length
+            ? Math.min(childRect.bottom, Math.max(...contentRects.map((contentRect) => contentRect.bottom)))
+            : childRect.bottom;
+          return {
+            xVw: metric(childRect.left / viewportWidth),
+            widthVw: metric(childRect.width / viewportWidth),
+            topRel: rect.height > 0 ? metric((childRect.top - rect.top) / rect.height) : null,
+            heightRel: rect.height > 0 ? metric(childRect.height / rect.height) : null,
+            contentHeightRel: rect.height > 0 ? metric(Math.max(0, contentBottom - contentTop) / rect.height) : null
+          };
+        }).filter((box) => box.widthVw > 0 && box.heightRel > 0);
+        const heading = queryAll('h2, h3').find((candidate) => element.contains(candidate) && isRendered(candidate)) ?? null;
+        const headingRect = heading?.getBoundingClientRect?.() ?? null;
+        const gridTemplate = String(style.gridTemplateColumns ?? '').trim();
+        const gridColumnCount = String(style.display ?? '').includes('grid') && gridTemplate && gridTemplate !== 'none'
+          ? gridTemplate.split(' ').filter(Boolean).length
+          : null;
+        return {
+          tag: String(element.tagName ?? '').toLowerCase(),
+          topVh: metric(rect.top / viewportHeight),
+          heightVh: metric(rect.height / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          textAlign: String(style.textAlign ?? '').toLowerCase(),
+          display: String(style.display ?? '').toLowerCase(),
+          flexDirection: String(style.flexDirection ?? '').toLowerCase(),
+          gridColumnCount,
+          directChildCount: Math.min(directChildren.length, 20),
+          childBoxes,
+          headingXVw: headingRect ? metric(headingRect.left / viewportWidth) : null,
+          headingWidthVw: headingRect ? metric(headingRect.width / viewportWidth) : null,
+          background: String(style.backgroundColor ?? '').toLowerCase().slice(0, 80)
+        };
+      });
+    const signatureElements = queryAll('[data-design-signature]')
+      .filter(isRendered)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          label: clean(element.getAttribute('data-design-signature')).slice(0, 80),
+          xVw: metric(rect.left / viewportWidth),
+          yVh: metric(rect.top / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          heightVh: metric(rect.height / viewportHeight)
+        };
+      })
+      .filter((item) => item.widthVw > 0 && item.heightVh > 0)
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0))
+      .slice(0, 24);
+    const visibleActions = queryAll('a[href], button')
+      .filter(isRendered)
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const actionStyle = styleFor(element);
+        let href = String(element.getAttribute?.('href') ?? '');
+        let kind = String(element.tagName ?? '').toLowerCase() === 'button' ? 'button' : 'link';
+        if (/^tel:/i.test(href)) kind = 'phone';
+        else if (/^mailto:/i.test(href)) kind = 'email';
+        else if (/^https?:/i.test(href)) kind = 'external';
+        else if (href.startsWith('#')) kind = 'anchor';
+        return {
+          kind,
+          recipient: ['phone', 'email'].includes(kind) ? href.slice(0, 240) : null,
+          xVw: metric(rect.left / viewportWidth),
+          yVh: metric(rect.top / viewportHeight),
+          widthVw: metric(rect.width / viewportWidth),
+          heightVh: metric(rect.height / viewportHeight),
+          fontSizePx: px(actionStyle?.fontSize),
+          nameLength: nameFor(element).length
+        };
+      })
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0) || (a.xVw ?? 0) - (b.xVw ?? 0))
+      .slice(0, 24);
+    const textSamples = queryAll('p, li, blockquote, figcaption, small, label')
+      .filter(isRendered)
+      .map((element) => {
+        const text = clean(element.innerText ?? element.textContent);
+        const rect = element.getBoundingClientRect();
+        const style = styleFor(element);
+        const fontSize = px(style?.fontSize);
+        const lineHeight = px(style?.lineHeight);
+        return {
+          tag: String(element.tagName ?? '').toLowerCase(),
+          textLength: text.length,
+          fontSizePx: fontSize,
+          lineHeightPx: lineHeight,
+          lineHeightRatio: fontSize && lineHeight ? metric(lineHeight / fontSize) : null,
+          measureEm: fontSize ? metric(rect.width / fontSize) : null,
+          widthVw: metric(rect.width / viewportWidth),
+          yVh: metric(rect.top / viewportHeight)
+        };
+      })
+      .filter((sample) => sample.textLength >= 24)
+      .sort((a, b) => (a.yVh ?? 0) - (b.yVh ?? 0))
+      .slice(0, 80);
+    const h1 = queryAll('h1').find(isRendered) ?? null;
+    const bodyStyle = styleFor(document.body);
+    const h1Style = h1 ? styleFor(h1) : null;
+    const designMetrics = {
+      viewport: { width: viewportWidth, height: viewportHeight },
+      pageHeightVh: metric(pageHeight / viewportHeight),
+      visualBlocks,
+      signatureElements,
+      actions: visibleActions,
+      textSamples,
+      typography: {
+        bodyFontSizePx: px(bodyStyle?.fontSize),
+        bodyLineHeightPx: px(bodyStyle?.lineHeight),
+        bodyFamily: String(bodyStyle?.fontFamily ?? '').toLowerCase().slice(0, 120),
+        h1FontSizePx: px(h1Style?.fontSize),
+        h1LineHeightPx: px(h1Style?.lineHeight),
+        h1Weight: String(h1Style?.fontWeight ?? '').slice(0, 20),
+        h1Align: String(h1Style?.textAlign ?? '').toLowerCase(),
+        h1Family: String(h1Style?.fontFamily ?? '').toLowerCase().slice(0, 120)
+      }
+    };
     return {
       finalUrl: location.href,
       bodyTextLength: clean(document.body?.innerText).length,
@@ -634,6 +774,7 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
         title: clean(document.title),
         description: clean(document.querySelector('meta[name="description"]')?.getAttribute('content'))
       },
+      designMetrics,
       interactiveControls: [],
       targets: expectedTargets.map(targetFor).filter(Boolean)
     };

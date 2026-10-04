@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { URL } from 'node:url';
-import { GitHubStateStore, validateCloudState } from '../src/cloud-state.js';
+import { GitHubStateStore, compactCloudStateForWrite, localCloudOwnerId, localCloudOwnerIsAbandoned, validateCloudState } from '../src/cloud-state.js';
 
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 
@@ -85,6 +85,7 @@ function fakeGitHub() {
   const failures = [];
   const contentRefs = [];
   const statusesBySha = new Map();
+  const workflowRuns = new Map();
   const truncatedBlobs = new Set();
   let precreateNextClaim = false;
   let loseNextClaimResponse = false;
@@ -215,6 +216,22 @@ function fakeGitHub() {
     };
   };
 
+  const refsPayload = (variables) => {
+    const refNode = (qualifiedName) => {
+      const value = refs.get(String(qualifiedName ?? ''));
+      return value ? { target: { oid: value } } : null;
+    };
+    return {
+      data: {
+        repository: {
+          state: refNode(variables.stateRef),
+          checkpoint: refNode(variables.checkpointRef),
+          witness: refNode(variables.witnessRef)
+        }
+      }
+    };
+  };
+
   const addStatus = (targetSha, { context, description, state = 'success', target_url = null }) => {
     const entry = {
       id: statusId++, state, description, target_url, context,
@@ -235,6 +252,9 @@ function fakeGitHub() {
 
     if (url.pathname === '/graphql') {
       assert.equal(method, 'POST');
+      if (typeof body?.query === 'string' && body.query.includes('CloudStateRefs')) {
+        return response(200, refsPayload(body.variables));
+      }
       if (typeof body?.query === 'string' && body.query.includes('CloudStateContext')) {
         return response(200, statusContextPayload(body.variables));
       }
@@ -279,6 +299,11 @@ function fakeGitHub() {
       }
       const value = refs.get(ref);
       return value ? response(200, { object: { sha: value } }) : response(404, { message: 'not found' });
+    }
+    const workflowRunGet = /^\/actions\/runs\/(\d+)$/.exec(path);
+    if (method === 'GET' && workflowRunGet) {
+      const value = workflowRuns.get(workflowRunGet[1]);
+      return value ? response(200, cloneState(value)) : response(404, { message: 'not found' });
     }
     if (method === 'GET' && path.startsWith('/git/commits/')) {
       const value = commits.get(path.slice('/git/commits/'.length));
@@ -534,6 +559,9 @@ function fakeGitHub() {
       assert.ok(commits.has(commitSha));
       moveMainBeforeNextMainRead = commitSha;
     },
+    setWorkflowRun(runId, { status = 'in_progress', conclusion = null } = {}) {
+      workflowRuns.set(String(runId), { id: Number(runId), status, conclusion });
+    },
     forceTag(tag, commitSha) { refs.set(fullTagRef(tag), commitSha); },
     deleteTag(tag) { refs.delete(fullTagRef(tag)); },
     tagSha(tag) { return refs.get(fullTagRef(tag)) ?? null; },
@@ -590,7 +618,9 @@ function storeFor(fake, {
   laneId = 'self',
   allowedProjectIds = ['self'],
   tag = 'agent-cloud-state-v1',
-  statePath = '.agent/cloud-state.json'
+  statePath = '.agent/cloud-state.json',
+  sleep = async () => {},
+  lineageValidationPaceMs = 0
 } = {}) {
   return new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
@@ -602,7 +632,9 @@ function storeFor(fake, {
     laneId,
     allowedProjectIds,
     tag,
-    statePath
+    statePath,
+    sleep,
+    lineageValidationPaceMs
   });
 }
 
@@ -741,6 +773,255 @@ test('cloud-state mutation refuses an already-expired remote write', async () =>
   assert.equal(writes, 0);
 });
 
+test('cloud-state read request is aborted at the active workflow deadline', async () => {
+  let reads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:read',
+    now: () => Date.now(),
+    fetchImpl: async (_url, options = {}) => {
+      reads += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(response(200, { object: { sha: 'a'.repeat(40) } })), 1_000);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('read_aborted_by_deadline'));
+        }, { once: true });
+      });
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      Date.now() + 200,
+      () => store.request('/git/ref/tags/test')
+    ),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(reads, 1);
+});
+
+test('cloud-state rate-limit retry cannot sleep past the active workflow deadline', async () => {
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:retry',
+    now: () => 10_000,
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => response(429, {})
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      10_050,
+      () => store.request('/git/ref/tags/test')
+    ),
+    /workflow_deadline_cap_exceeded/
+  );
+  assert.deepEqual(sleeps, []);
+});
+
+test('cloud-state yields immediately on a long GitHub rate-limit reset', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:rate-limit:long',
+    now: () => 10_000,
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      return {
+        status: 403,
+        ok: false,
+        headers: {
+          get(name) {
+            const key = String(name).toLowerCase();
+            if (key === 'x-ratelimit-remaining') return '0';
+            if (key === 'x-ratelimit-reset') return '70';
+            return null;
+          }
+        },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'API rate limit exceeded' }); },
+        async json() { return { message: 'API rate limit exceeded' }; }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => store.refSha('tags/test'),
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 61_000
+  );
+  assert.equal(reads, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test('cloud-state still fails closed for a non-rate-limit GitHub 403', async () => {
+  let reads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:permission:403',
+    fetchImpl: async () => {
+      reads += 1;
+      return {
+        status: 403,
+        ok: false,
+        headers: { get() { return null; } },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'Resource not accessible by integration' }); },
+        async json() { return { message: 'Resource not accessible by integration' }; }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => store.refSha('tags/test'),
+    /cloud_state_github_request_failed:403/
+  );
+  assert.equal(reads, 1);
+});
+
+test('cloud-state performs a short bounded rate-limit retry in place', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:rate-limit:short',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      if (reads > 1) return response(200, { object: { sha: 'a'.repeat(40) } });
+      return {
+        status: 429,
+        ok: false,
+        headers: {
+          get(name) {
+            return String(name).toLowerCase() === 'retry-after' ? '5' : null;
+          }
+        },
+        clone() { return this; },
+        async text() { return JSON.stringify({ message: 'rate limit exceeded' }); },
+        async json() { return { message: 'rate limit exceeded' }; }
+      };
+    }
+  });
+
+  assert.equal(await store.refSha('tags/test'), 'a'.repeat(40));
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [5_000]);
+});
+
+test('cloud-state GraphQL status read is bounded by the active workflow deadline', async () => {
+  let graphqlReads = 0;
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:graphql',
+    now: () => Date.now(),
+    fetchImpl: async (url, options = {}) => {
+      assert.equal(url, 'https://api.github.com/graphql');
+      graphqlReads += 1;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(response(200, { data: { repository: { object: { status: null } } } })), 1_000);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('graphql_aborted_by_deadline'));
+        }, { once: true });
+      });
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      Date.now() + 200,
+      () => store.readStatusContext('a'.repeat(40), 'agent-cloud-state-v2/test')
+    ),
+    /cloud_state_github_request_failed/
+  );
+  assert.equal(graphqlReads, 1);
+});
+
+test('cloud-state GET retries bounded transient GitHub 5xx responses', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:transient:get',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      if (reads === 1) return response(502, { message: 'bad gateway' });
+      return response(200, { object: { sha: 'a'.repeat(40) } });
+    }
+  });
+  assert.equal(await store.refSha('tags/test'), 'a'.repeat(40));
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [1_000]);
+});
+
+test('cloud-state GraphQL read retries bounded transient GitHub 5xx responses', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:transient:graphql',
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async (url) => {
+      assert.equal(url, 'https://api.github.com/graphql');
+      reads += 1;
+      if (reads === 1) return response(503, { message: 'service unavailable' });
+      return response(200, { data: { repository: { object: { status: null } } } });
+    }
+  });
+  assert.equal(await store.readStatusContext('a'.repeat(40), 'agent-cloud-state-v2/test'), null);
+  assert.equal(reads, 2);
+  assert.deepEqual(sleeps, [1_000]);
+});
+
+test('cloud-state mutation reconciles ambiguous transient 5xx only when canonical state matches intent', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const originalWriteSnapshot = store.writeSnapshot.bind(store);
+  let inject = true;
+  store.writeSnapshot = async (...args) => {
+    const result = await originalWriteSnapshot(...args);
+    if (inject) {
+      inject = false;
+      throw new Error('cloud_state_github_request_failed:502');
+    }
+    return result;
+  };
+
+  const output = await store.mutateInternal((data) => {
+    data.transientWriteMarker = 'published-once';
+    return 'completed';
+  }, { requireLease: false });
+
+  assert.equal(output, 'completed');
+  assert.equal((await store.load()).transientWriteMarker, 'published-once');
+});
+
+test('cloud-state mutation fails closed when transient 5xx did not publish intended state', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  store.writeSnapshot = async () => {
+    throw new Error('cloud_state_github_request_failed:502');
+  };
+
+  await assert.rejects(
+    () => store.mutateInternal((data) => {
+      data.transientWriteMarker = 'must-not-be-assumed';
+    }, { requireLease: false }),
+    /cloud_state_github_request_failed:502/
+  );
+  assert.equal((await store.load()).transientWriteMarker, undefined);
+});
+
 test('cloud state enforces explicit project ownership and secret boundaries', () => {
   assert.throws(() => validateCloudState({ runs: { r: { projectId: 'callflow' } }, approvals: {}, events: [] }), /ownership_mismatch/);
   assert.doesNotThrow(() => validateCloudState(
@@ -753,6 +1034,30 @@ test('cloud state enforces explicit project ownership and secret boundaries', ()
 test('generation claim namespace root cannot be used as a state tag', () => {
   const fake = fakeGitHub();
   assert.throws(() => storeFor(fake, { tag: 'agent-cloud-state-v2-claims' }), /tag_reserved/);
+});
+
+test('cloud-state reads state, checkpoint and witness refs in one exact GraphQL request', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const stateSha = 'a'.repeat(40);
+  const checkpointSha = 'b'.repeat(40);
+  const witnessSha = 'c'.repeat(40);
+  fake.forceTag(stateTag, stateSha);
+  fake.forceTag(checkpointTag, checkpointSha);
+  fake.forceTag(witnessTag, witnessSha);
+  fake.resetRequestCount();
+
+  assert.deepEqual(await store.readRefs(), { stateSha, checkpointSha, witnessSha });
+  assert.equal(fake.requestCount(), 1);
+});
+
+test('cloud-state coalesced ref read preserves missing refs as null', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  fake.resetRequestCount();
+
+  assert.deepEqual(await store.readRefs(), { stateSha: null, checkpointSha: null, witnessSha: null });
+  assert.equal(fake.requestCount(), 1);
 });
 
 test('lane initialization marker is looked up by exact context and binds deterministic root', async () => {
@@ -768,13 +1073,20 @@ test('lane initialization marker is looked up by exact context and binds determi
   assert.equal(initStatuses[0].description, store.laneInitDescription(root.sha));
 });
 
-test('lane initialization REST lookup is explicitly bounded and fails closed when exhausted', async () => {
+test('lane initialization exact-context lookup ignores unrelated status volume', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
+  const expectedRoot = 'f'.repeat(40);
+  fake.forceStatus(LEDGER_ROOT_SHA, store.laneInitContextName, store.laneInitDescription(expectedRoot));
   for (let index = 0; index < 3200; index += 1) {
     fake.forceStatus(LEDGER_ROOT_SHA, `other-lane-init/${index}`, 'unrelated');
   }
-  await assert.rejects(() => store.readLaneInitMarker(), /lane_init_status_limit/);
+  fake.resetRequestCount();
+
+  const marker = await store.readLaneInitMarker();
+
+  assert.equal(marker.laneRootSha, expectedRoot);
+  assert.equal(fake.requestCount(), 2);
 });
 
 test('initialized lane without first pointer fails closed instead of looking empty', async () => {
@@ -1082,28 +1394,101 @@ test('a lost claim-create response never becomes authority by rereading the clai
   await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
 });
 
-test('bootstrap crash after claim but before authority leaves no state authority and cannot auto-recover', async () => {
+test('bootstrap crash after claim recovers only after governed quarantine repair', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   fake.failNextAnyStatusWrite(500, (body) => body.context.includes('/g/'));
   await assert.rejects(() => publishMarker(store, 'uncertain'), /partial_publication/);
   assert.equal(fake.tagSha(stateTag), null);
+
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   assert.equal((await fresh.load()).marker, undefined);
-  assert.equal((await fresh.readSnapshot({ repair: true })).authoritySha, null);
-  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+  await assert.rejects(() => publishMarker(fresh, 'retry-before-repair'), /generation_election_failed/);
+
+  const repaired = await fresh.readSnapshot({ repair: true });
+  assert.equal(repaired.authoritySha, null);
+  const recovered = await publishMarker(fresh, 'recovered');
+  assert.equal((await storeFor(fake, { ownerId: 'github:3:1' }).load()).marker, 'recovered');
+  assert.notEqual(fake.tagSha(fresh.generationClaimTag(1)), recovered);
+  assert.ok(fake.refWrites().some((entry) =>
+    typeof entry.body?.ref === 'string' && entry.body.ref.includes('/recovery/1/') && entry.body.sha === recovered
+  ));
 });
 
-test('established crash after claim but before authority leaves the prior authority intact', async () => {
+test('established crash after claim preserves prior authority and recovers after explicit repair', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
   const first = await publishMarker(store, 'one');
   fake.failNextAnyStatusWrite(500, (body) => body.context.endsWith('/0/2'));
   await assert.rejects(() => publishMarker(store, 'two'), /partial_publication/);
   assert.equal(fake.tagSha(stateTag), first);
+
   const fresh = storeFor(fake, { ownerId: 'github:2:1' });
   assert.equal((await fresh.load()).marker, 'one');
-  await assert.rejects(() => publishMarker(fresh, 'retry-blocked'), /generation_election_failed/);
+  await assert.rejects(() => publishMarker(fresh, 'retry-before-repair'), /generation_election_failed/);
+  assert.equal((await fresh.readSnapshot({ repair: true })).state.marker, 'one');
+  const recovered = await publishMarker(fresh, 'two-recovered');
+  const final = await storeFor(fake, { ownerId: 'github:3:1' }).readSnapshot();
+  assert.equal(final.state.marker, 'two-recovered');
+  assert.equal(final.generation, 2);
+  assert.equal(final.authoritySha, recovered);
+});
+
+test('recovery claim refs are siblings, never children, of deterministic generation refs', () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const deterministic = store.generationClaimTag(316);
+  const recovery = store.recoveryGenerationClaimTag(316, '0123456789abcdef0123456789abcdef');
+
+  assert.equal(recovery.includes('/recovery/316/'), true);
+  assert.equal(recovery.startsWith(`${deterministic}/`), false);
+  assert.notEqual(recovery, deterministic);
+});
+
+test('mismatched quarantine proof cannot authorize recovery claim election', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  fake.precreateNextClaim();
+  await assert.rejects(() => publishMarker(store, 'attacker-blocked'), /generation_election_failed/);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  const root = await fresh.readRootEvidence();
+  const registration = root.registrationByEpoch.get(0);
+  const orphanClaimSha = fake.tagSha(fresh.generationClaimTag(2));
+  const laneRoot = await fresh.laneRootCommit();
+  fake.forceStatus(
+    laneRoot.sha,
+    fresh.generationClaimRecoveryContext(2),
+    fresh.generationClaimRecoveryDescription(orphanClaimSha, fake.mainSha, registration.statusAnchorSha)
+  );
+
+  assert.equal((await fresh.load()).marker, 'one');
+  await assert.rejects(() => publishMarker(fresh, 'still-blocked'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), first);
+});
+
+test('recovery-claim creation race fails closed without changing canonical authority', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  fake.failNextAnyStatusWrite(500, (body) => body.context.endsWith('/0/2'));
+  await assert.rejects(() => publishMarker(store, 'two'), /partial_publication/);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await fresh.readSnapshot({ repair: true });
+  const originalCreateClaim = fresh.createGenerationClaimStrict.bind(fresh);
+  fresh.createGenerationClaimStrict = async (claimTag, candidateSha) => {
+    if (claimTag.includes('/recovery/')) {
+      throw new Error('cloud_state_generation_claim_failed', { cause: new Error('cloud_state_conflict') });
+    }
+    return originalCreateClaim(claimTag, candidateSha);
+  };
+
+  await assert.rejects(() => publishMarker(fresh, 'race-lost'), /generation_election_failed/);
+  assert.equal(fake.tagSha(stateTag), first);
+  const check = await storeFor(fake, { ownerId: 'github:3:1' }).readSnapshot();
+  assert.equal(check.state.marker, 'one');
 });
 
 test('state-ref publication failure after authority is recoverable from canonical authority', async () => {
@@ -1415,6 +1800,83 @@ test('active epoch lineage validation does not depend on GraphQL history blobs',
   assert.equal((await storeFor(fake, { ownerId: 'github:2:1' }).load()).marker, 'two');
 });
 
+test('truncated batched history falls back to paced exact REST reads without weakening validation', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const first = await publishMarker(store, 'one');
+  await publishMarker(store, 'two');
+  await publishMarker(store, 'three');
+  fake.markHistoryTruncated(first);
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:2:1',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  assert.equal((await fresh.load()).marker, 'three');
+  assert.deepEqual(sleeps, [25, 25]);
+});
+
+test('cold active-epoch validation batches hundreds of exact envelopes into bounded requests', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const registration = await installRegistration(fake, store, 0, fake.mainSha, 0, 1);
+  let parentSha = fake.mainSha;
+  let lastSha = null;
+  for (let generation = 1; generation <= 215; generation += 1) {
+    const commitSha = fake.makeStateCommit({
+      parentSha,
+      generation,
+      state: blankState(`g${generation}`),
+      lineageBaseSha: fake.mainSha,
+      lineageBaseGeneration: 0
+    });
+    installAuthority(fake, store, registration, generation, commitSha, parentSha);
+    parentSha = commitSha;
+    lastSha = commitSha;
+  }
+  for (const tag of [stateTag, checkpointTag, witnessTag]) fake.forceTag(tag, lastSha);
+  fake.resetRequestCount();
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:batched-history:1',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const loaded = await fresh.load();
+
+  assert.equal(loaded.marker, 'g215');
+  assert.deepEqual(sleeps, []);
+  assert.ok(fake.requestCount() < 30, `expected batched active-epoch validation, received ${fake.requestCount()} requests`);
+});
+
+test('production default paces lineage validation at 500 ms', () => {
+  const fake = fakeGitHub();
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    fetchImpl: fake.fetchImpl,
+    ownerId: 'github:pace-default:1',
+    laneId: 'self',
+    allowedProjectIds: ['self']
+  });
+  assert.equal(store.lineageValidationPaceMs, 500);
+});
+
+test('lineage validation pacing rejects invalid configuration', () => {
+  const fake = fakeGitHub();
+  assert.throws(
+    () => storeFor(fake, { lineageValidationPaceMs: -1 }),
+    /cloud_state_lineage_validation_pace_invalid/
+  );
+  assert.throws(
+    () => storeFor(fake, { lineageValidationPaceMs: 1001 }),
+    /cloud_state_lineage_validation_pace_invalid/
+  );
+});
+
 test('v2 child cannot rewrite inherited lineage anchor', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
@@ -1566,6 +2028,54 @@ test('more than 2000 unrelated repository-root statuses cannot exhaust this lane
   assert.equal((await storeFor(legacy, { ownerId: 'github:3:1' }).load()).marker, 'g257');
 });
 
+test('validated active-epoch head makes the next write incrementally bounded', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  for (let generation = 1; generation <= 150; generation += 1) await publishMarker(writer, `g${generation}`);
+
+  const fresh = storeFor(fake, { ownerId: 'github:incremental:1' });
+  assert.equal((await fresh.load()).marker, 'g150');
+  fake.resetRequestCount();
+
+  const next = await publishMarker(fresh, 'g151');
+  assert.equal(fake.envelopeAt(next).generation, 151);
+  assert.ok(fake.requestCount() < 100, `expected incremental active-epoch write, received ${fake.requestCount()} requests`);
+});
+
+test('incremental lineage validation fails closed if the new commit parent is tampered', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  await publishMarker(writer, 'one');
+  await publishMarker(writer, 'two');
+  const warm = storeFor(fake, { ownerId: 'github:incremental:tamper' });
+  assert.equal((await warm.load()).marker, 'two');
+  const third = await publishMarker(writer, 'three');
+  fake.setCommitParents(third, [fake.mainSha]);
+  await assert.rejects(() => warm.load(), /cloud_state_epoch_authority_mismatch|cloud_state_history_fork/);
+});
+
+test('validated lineage cache is bound to both generation and SHA', async () => {
+  const fake = fakeGitHub();
+  const writer = storeFor(fake);
+  const first = await publishMarker(writer, 'one');
+  await publishMarker(writer, 'two');
+  const third = await publishMarker(writer, 'three');
+  // Force the exact REST fallback so pacing remains an observable proof that
+  // the deliberately wrong generation:SHA cache key was not trusted.
+  fake.markHistoryTruncated(first);
+
+  const sleeps = [];
+  const fresh = storeFor(fake, {
+    ownerId: 'github:incremental:generation-bound',
+    lineageValidationPaceMs: 25,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  fresh.validatedLineageHeads.add(`2:${third}`);
+
+  assert.equal((await fresh.load()).marker, 'three');
+  assert.deepEqual(sleeps, [25, 25]);
+});
+
 test('2050-generation segmented history validates with lane-isolated bounded requests', async () => {
   const fake = fakeGitHub();
   const store = storeFor(fake);
@@ -1623,9 +2133,61 @@ test('state content is always read by exact commit SHA', async () => {
   assert.ok(fake.contentRefs().includes(sha));
 });
 
-test('global lease excludes concurrent runners and recovers after expiry', async () => {
+test('active global lease reuses an isolated hot snapshot and invalidates it on release', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:hot-cache:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = await store.claimGlobalLease();
+
+  fake.resetRequestCount();
+  const first = await store.load();
+  assert.equal(first.cloudExecutionLease?.leaseId, lease.leaseId);
+  assert.equal(fake.requestCount(), 0);
+
+  first.hotCacheMarker = 'local-mutation-must-not-leak';
+  const isolated = await store.load();
+  assert.equal(isolated.hotCacheMarker, undefined);
+  assert.equal(fake.requestCount(), 0);
+
+  await store.mutate((state) => {
+    state.hotCacheMarker = 'published';
+  });
+  fake.resetRequestCount();
+  const published = await store.load();
+  assert.equal(published.hotCacheMarker, 'published');
+  assert.equal(fake.requestCount(), 0);
+
+  assert.equal(await store.releaseGlobalLease(lease.leaseId), true);
+  fake.resetRequestCount();
+  const afterRelease = await store.load();
+  assert.equal(afterRelease.hotCacheMarker, 'published');
+  assert.equal(afterRelease.cloudExecutionLease ?? null, null);
+  assert.ok(fake.requestCount() > 0);
+});
+
+test('cached lease snapshot cannot hide a conflicting remote advance from the next mutation', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const store = storeFor(fake, { ownerId: 'github:hot-cache:2', now: () => now, leaseTtlMs: 60_000 });
+  await store.claimGlobalLease();
+  await store.load();
+
+  const canonical = await store.readSnapshot();
+  const foreignState = cloneState(canonical.state);
+  foreignState.foreignAdvance = true;
+  const foreignWriter = storeFor(fake, { ownerId: 'github:foreign:1', now: () => now, leaseTtlMs: 60_000 });
+  await foreignWriter.writeSnapshot(foreignState, canonical);
+
+  await assert.rejects(
+    () => store.mutate((state) => { state.localAdvance = true; }),
+    /cloud_state_conflict|cloud_state_epoch_authority_conflict/
+  );
+});
+
+test('global lease excludes active concurrent runners and recovers after expiry', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
+  fake.setWorkflowRun(1, { status: 'in_progress' });
   const first = storeFor(fake, { ownerId: 'github:1:1', now: () => now, leaseTtlMs: 60_000 });
   const second = storeFor(fake, { ownerId: 'github:2:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = await first.claimGlobalLease();
@@ -1635,17 +2197,130 @@ test('global lease excludes concurrent runners and recovers after expiry', async
   assert.notEqual(recovered.leaseId, lease.leaseId);
 });
 
-test('execution leases use cloud owner identity and become recoverable only after ttl by another owner', async () => {
+test('completed GitHub run lease is reclaimable immediately before ttl', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  fake.setWorkflowRun(77, { status: 'in_progress' });
+  const first = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  const second = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = await first.claimGlobalLease();
+
+  fake.setWorkflowRun(77, { status: 'completed', conclusion: 'cancelled' });
+  const recovered = await second.claimGlobalLease();
+
+  assert.notEqual(recovered.leaseId, lease.leaseId);
+  assert.equal(recovered.ownerId, 'github:88:1');
+});
+
+test('global lease release reconciles partial publication without duplicating completed work', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const first = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
+  let executions = 0;
+
+  const result = await first.withGlobalLease(async () => {
+    executions += 1;
+    await first.mutate((state) => {
+      state.releaseRecoveryMarker = 'completed-once';
+    });
+    fake.failNextTagWrite(stateTag, 500);
+    return 'completed';
+  });
+
+  assert.equal(result, 'completed');
+  const afterRelease = await first.load();
+  assert.equal(afterRelease.releaseRecoveryMarker, 'completed-once');
+  assert.equal(afterRelease.cloudExecutionLease ?? null, null);
+
+  const second = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  await second.withGlobalLease(async () => {
+    const state = await second.load();
+    if (state.releaseRecoveryMarker !== 'completed-once') executions += 1;
+  });
+  assert.equal(executions, 1);
+});
+
+test('global lease release retries a transient write failure while authoritative ownership is unchanged', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:77:3',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const lease = await store.claimGlobalLease();
+  const mutateInternal = store.mutateInternal.bind(store);
+  let releaseAttempts = 0;
+  store.mutateInternal = async (...args) => {
+    releaseAttempts += 1;
+    if (releaseAttempts === 1) throw new Error('injected_release_write_failure');
+    return mutateInternal(...args);
+  };
+
+  assert.equal(await store.releaseGlobalLease(lease.leaseId), true);
+  assert.equal(releaseAttempts, 2);
+  assert.deepEqual(sleeps, [250]);
+
+  const state = await store.load();
+  assert.equal(state.cloudExecutionLease ?? null, null);
+});
+
+test('global lease release still fails closed when authoritative state retains the same lease after bounded retries', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:77:3',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const lease = await store.claimGlobalLease();
+  const mutateInternal = store.mutateInternal.bind(store);
+  let releaseAttempts = 0;
+  store.mutateInternal = async (...args) => {
+    releaseAttempts += 1;
+    if (releaseAttempts <= 3) throw new Error('injected_release_write_failure');
+    return mutateInternal(...args);
+  };
+
+  await assert.rejects(
+    () => store.releaseGlobalLease(lease.leaseId),
+    /injected_release_write_failure/
+  );
+
+  assert.equal(releaseAttempts, 3);
+  assert.deepEqual(sleeps, [250, 750]);
+  const state = await store.load();
+  assert.equal(state.cloudExecutionLease?.leaseId, lease.leaseId);
+  assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
+});
+
+test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();
   const owner = storeFor(fake, { ownerId: 'github:77:3', now: () => now, leaseTtlMs: 60_000 });
   const observer = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
   const lease = { leaseId: 'lease-1', pid: 123, ownerIdentity: 'github:77:3', createdAt: new Date(now).toISOString() };
+
   assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
   assert.equal(await observer.lockOwnerIsAbandoned(lease), false);
+
   now += 61_000;
   assert.equal(await owner.lockOwnerIsAbandoned(lease), false);
   assert.equal(await observer.lockOwnerIsAbandoned(lease), true);
+});
+
+test('active GitHub run lease remains protected before ttl', async () => {
+  const now = Date.parse('2026-09-17T00:00:00Z');
+  const fake = fakeGitHub();
+  fake.setWorkflowRun(77, { status: 'in_progress' });
+  const observer = storeFor(fake, { ownerId: 'github:88:1', now: () => now, leaseTtlMs: 60_000 });
+  const lease = { leaseId: 'lease-1', ownerIdentity: 'github:77:3', createdAt: new Date(now).toISOString() };
+
+  assert.equal(await observer.lockOwnerIsAbandoned(lease), false);
 });
 
 test('remote envelope integrity mismatch fails closed with matching epoch authority', async () => {
@@ -1656,3 +2331,164 @@ test('remote envelope integrity mismatch fails closed with matching epoch author
   await assert.rejects(() => storeFor(fake, { ownerId: 'github:2:1' }).load(), /integrity_mismatch/);
 });
 
+
+
+test('cloud state compaction removes stale terminal workflows but preserves active and live-request workflows', () => {
+  const workflows = {};
+  for (let index = 0; index < 18; index += 1) {
+    workflows[`workflow-${String(index).padStart(2, '0')}`] = {
+      id: `workflow-${String(index).padStart(2, '0')}`,
+      projectId: 'self',
+      status: 'completed',
+      createdAt: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 60_000).toISOString(),
+      updatedAt: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 60_000).toISOString(),
+      result: { evidence: 'x'.repeat(2_000) }
+    };
+  }
+  workflows['workflow-active'] = {
+    id: 'workflow-active',
+    projectId: 'self',
+    status: 'running',
+    createdAt: '2026-09-29T20:00:00Z',
+    updatedAt: '2026-09-29T20:00:00Z',
+    result: { evidence: 'a'.repeat(2_000) }
+  };
+  workflows['workflow-live-request'] = {
+    id: 'workflow-live-request',
+    projectId: 'self',
+    status: 'blocked',
+    createdAt: '2026-09-19T20:00:00Z',
+    updatedAt: '2026-09-19T20:00:00Z',
+    result: { evidence: 'b'.repeat(2_000) }
+  };
+  const state = {
+    runs: {},
+    approvals: {},
+    events: [],
+    workflows,
+    requests: {
+      'owner/repo#1': {
+        projectId: 'self',
+        workflowId: 'workflow-live-request',
+        status: 'running'
+      }
+    },
+    autopilotSelfImprovement: {
+      activeWorkflowId: 'workflow-active'
+    }
+  };
+
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+
+  assert.equal(result.compacted, true);
+  assert.ok(result.removedWorkflows.length > 0);
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-active'), true);
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-live-request'), true);
+  assert.ok(Buffer.byteLength(JSON.stringify(state), 'utf8') <= 32 * 1024);
+  validateCloudState(state, { maxBytes: 32 * 1024, allowedProjectIds: ['self'] });
+});
+
+test('cloud state compaction keeps small state byte-identical', () => {
+  const state = {
+    runs: {},
+    approvals: {},
+    events: [{ id: 'event-1', value: 'small' }],
+    workflows: {
+      'workflow-recent': {
+        id: 'workflow-recent',
+        projectId: 'self',
+        status: 'completed',
+        createdAt: '2026-09-29T20:00:00Z',
+        updatedAt: '2026-09-29T20:00:00Z'
+      }
+    }
+  };
+  const before = JSON.stringify(state);
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+  assert.equal(result.compacted, false);
+  assert.equal(JSON.stringify(state), before);
+});
+
+test('cloud state compaction can trim old events only after terminal workflow cleanup is insufficient', () => {
+  const state = {
+    runs: {},
+    approvals: {},
+    workflows: {
+      'workflow-active': {
+        id: 'workflow-active',
+        projectId: 'self',
+        status: 'running',
+        createdAt: '2026-09-29T20:00:00Z',
+        updatedAt: '2026-09-29T20:00:00Z',
+        result: { evidence: 'x'.repeat(12_000) }
+      }
+    },
+    autopilotSelfImprovement: { activeWorkflowId: 'workflow-active' },
+    events: Array.from({ length: 180 }, (_, index) => ({
+      id: `event-${index}`,
+      timestamp: new Date(Date.parse('2026-09-20T00:00:00Z') + index * 1_000).toISOString(),
+      details: 'y'.repeat(100)
+    }))
+  };
+
+  const result = compactCloudStateForWrite(state, { maxBytes: 32 * 1024 });
+
+  assert.equal(Object.hasOwn(state.workflows, 'workflow-active'), true);
+  assert.ok(result.removedEvents > 0);
+  assert.equal(state.events.length, 100);
+});
+
+
+test('global lease acquisition retries transient generation-election races', async () => {
+  const now = Date.parse('2026-09-30T00:00:00Z');
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, {
+    ownerId: 'github:lease-retry:1',
+    now: () => now,
+    leaseTtlMs: 60_000,
+    sleep: async (ms) => { sleeps.push(ms); }
+  });
+  const mutateInternal = store.mutateInternal.bind(store);
+  let attempts = 0;
+  store.mutateInternal = async (...args) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('cloud_state_generation_election_failed');
+    return mutateInternal(...args);
+  };
+
+  const lease = await store.claimGlobalLease();
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [250]);
+  assert.equal(lease.ownerId, 'github:lease-retry:1');
+  assert.equal((await store.load()).cloudExecutionLease?.leaseId, lease.leaseId);
+});
+
+
+test('local cloud owner IDs bind leases to pid and Linux process start identity', () => {
+  const owner = localCloudOwnerId({
+    pid: 4242,
+    platform: 'linux',
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '987654'].join(' ')}`
+  });
+  assert.equal(owner, 'local:4242:987654');
+});
+
+test('local cloud owner abandonment detects dead and PID-reused processes immediately', () => {
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => { const error = new Error('missing'); error.code = 'ESRCH'; throw error; },
+    readFileSyncImpl: () => { throw new Error('should not read'); }
+  }), true);
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => {},
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '200'].join(' ')}`
+  }), true);
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => {},
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '100'].join(' ')}`
+  }), false);
+});

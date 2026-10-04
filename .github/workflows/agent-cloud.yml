@@ -1,4 +1,5 @@
 name: Agent Cloud Worker
+run-name: Agent Cloud Worker (${{ inputs.lane || github.event_name }})
 
 on:
   issues:
@@ -6,8 +7,16 @@ on:
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:
+      lane:
+        description: Trusted cloud lane for bounded continuation
+        required: false
+        type: string
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '2 * * * *'
+    - cron: '17 * * * *'
+    - cron: '32 * * * *'
+    - cron: '47 * * * *'
 
 permissions:
   actions: write
@@ -33,10 +42,10 @@ jobs:
       )
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 5
     outputs:
-      active: ${{ steps.wakeup.outputs.active }}
+      active: ${{ steps.route.outputs.active }}
       lanes: ${{ steps.route.outputs.lanes }}
     steps:
       - name: Checkout trusted main
@@ -63,10 +72,30 @@ jobs:
           AGENT_CLOUD_EVENT_NAME: ${{ github.event_name }}
           AGENT_CLOUD_EVENT_ACTION: ${{ github.event.action }}
           AGENT_CLOUD_ISSUE_BODY: ${{ github.event.issue.body }}
+          AGENT_CLOUD_PREVIOUS_ISSUE_BODY: ${{ github.event.changes.body.from }}
+          AGENT_CLOUD_ISSUE_BODY_WAS_EDITED: ${{ github.event.changes.body != null }}
+          AGENT_CLOUD_REQUESTED_LANE: ${{ inputs.lane }}
+          AGENT_CLOUD_SCHEDULE: ${{ github.event.schedule }}
+          AGENT_GLOBAL_PAUSE: ${{ vars.AGENT_GLOBAL_PAUSE }}
+          AGENT_PAUSED_LANES: ${{ vars.AGENT_PAUSED_LANES }}
         run: |
           LANES="$(node scripts/cloud-lane-route.js)"
-          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.length < 1 || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
-          echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+          node -e 'const lanes=JSON.parse(process.argv[1]); if (!Array.isArray(lanes) || lanes.some((lane) => typeof lane !== "string" || !/^[a-z0-9-]{1,80}$/.test(lane))) process.exit(1)' "$LANES"
+          if [[ "$AGENT_CLOUD_EVENT_NAME" == "schedule" && "$LANES" != "[]" ]]; then
+            SCHEDULE_LANE="$(node -e 'const lanes=JSON.parse(process.argv[1]); if (lanes.length !== 1) process.exit(2); process.stdout.write(lanes[0]);' "$LANES")"
+            if systemctl --user is-active --quiet "agent-cloud-retry-$SCHEDULE_LANE.timer"; then
+              echo "::notice::$SCHEDULE_LANE scheduled watchdog skipped because an exact rate-limit retry is already pending"
+              LANES="[]"
+            fi
+          fi
+          if [[ "$LANES" == "[]" ]]; then
+            echo 'active=false' >> "$GITHUB_OUTPUT"
+            echo 'lanes=["self"]' >> "$GITHUB_OUTPUT"
+            echo "::notice::Operator pause or rate-limit cooldown prevented this cloud wakeup"
+          else
+            echo 'active=true' >> "$GITHUB_OUTPUT"
+            echo "lanes=$LANES" >> "$GITHUB_OUTPUT"
+          fi
 
   admit:
     name: admit cloud event (${{ matrix.lane }})
@@ -79,7 +108,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: ${{ fromJSON(needs.route.outputs.lanes) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -96,7 +125,7 @@ jobs:
   recover:
     name: recover cloud admissions (${{ matrix.lane }})
     needs: route
-    if: needs.route.outputs.active == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: needs.route.outputs.active == 'true' && github.event_name == 'schedule'
     permissions:
       contents: write
       issues: read
@@ -108,24 +137,33 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: [self-hosted, Linux, X64, agent-local]
+    # Scheduled repair is a safety net, not a gate for heartbeat-dispatched work.
+    # Keep it short so a slow control-plane recovery cannot monopolize a runner.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts
-      - name: Repair authorized partial cloud state
+      - name: Repair cloud state and recover missing admissions
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
-      - name: Recover missing admissions from open requests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
+        shell: bash
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=10s 2m node src/cli.js inbox cloud-recover --lane "$AGENT_CLOUD_LANE"
+          RECOVERY_EXIT="$?"
+          set -e
+          case "$RECOVERY_EXIT" in
+            0) ;;
+            124|137|143)
+              echo "::notice::$AGENT_CLOUD_LANE scheduled recovery timed out; normal drain recovery remains available"
+              ;;
+            *) exit "$RECOVERY_EXIT" ;;
+          esac
 
   cloud-once:
     name: cloud-once (${{ matrix.lane }})
@@ -138,8 +176,9 @@ jobs:
     concurrency:
       group: agent-${{ matrix.lane }}-cloud
       cancel-in-progress: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+    runs-on: [self-hosted, Linux, X64, agent-local]
+    # Supervisor headroom only: internal self/drain budgets remain bounded separately.
+    timeout-minutes: 60
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5
@@ -156,36 +195,39 @@ jobs:
       - name: Install frozen dependencies
         run: npm ci --ignore-scripts
 
-      - name: Repair authorized partial cloud state
+      - name: Resolve orchestrator-only cross-repo credential
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-repair --lane "$AGENT_CLOUD_LANE"
+          CONFIGURED_AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          TOKEN="$CONFIGURED_AGENT_GITHUB_TOKEN"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token 2>/dev/null || true)"
+          fi
+          if [[ -n "$TOKEN" && ! "$TOKEN" =~ [[:space:]] ]]; then
+            echo "::add-mask::$TOKEN"
+            echo "AGENT_GITHUB_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+            echo "AGENT_CROSS_REPO_READY=true" >> "$GITHUB_ENV"
+          else
+            echo "AGENT_CROSS_REPO_READY=false" >> "$GITHUB_ENV"
+          fi
 
-      - name: Run lightweight cloud control tick
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: node src/cli.js inbox cloud-control-once --lane "$AGENT_CLOUD_LANE"
-
-      - name: Check lane for executable work
+      - name: Prepare cloud control and executable-work preflight
         id: preflight
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-          CROSS_REPO_CREDENTIAL_CONFIGURED: ${{ secrets.AGENT_GITHUB_TOKEN != '' && 'true' || 'false' }}
         run: |
-          HAS_WORK="$(node src/cli.js inbox cloud-execution-peek --lane "$AGENT_CLOUD_LANE")"
-          if [[ "$HAS_WORK" != "true" && "$HAS_WORK" != "false" ]]; then
-            echo "invalid cloud execution preflight result" >&2
-            exit 1
-          fi
+          RESULT_FILE="$RUNNER_TEMP/cloud-prepare-$AGENT_CLOUD_LANE.json"
+          node src/cli.js inbox cloud-prepare --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          cat "$RESULT_FILE"
+          HAS_WORK="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.hasExecutionWork === true ? "true" : "false");' "$RESULT_FILE")"
           SKIP_REASON=""
-          if [[ "$AGENT_CLOUD_LANE" == "website-pilot" && "$HAS_WORK" == "true" && "$CROSS_REPO_CREDENTIAL_CONFIGURED" != "true" ]]; then
+          if [[ "$AGENT_CLOUD_LANE" != "self" && "$HAS_WORK" == "true" && "${AGENT_CROSS_REPO_READY:-false}" != "true" ]]; then
             HAS_WORK="false"
             SKIP_REASON="cross_repo_credential_missing"
-            echo "::notice::website-pilot execution deferred because AGENT_GITHUB_TOKEN is not configured"
+            echo "::notice::$AGENT_CLOUD_LANE execution deferred because AGENT_GITHUB_TOKEN is not configured"
           fi
           echo "has_work=$HAS_WORK" >> "$GITHUB_OUTPUT"
           echo "skip_reason=$SKIP_REASON" >> "$GITHUB_OUTPUT"
@@ -197,12 +239,56 @@ jobs:
           node src/cli.js runtime sync
           docker run --rm --entrypoint git agent-node22-pnpm11:local --version
 
-      - name: Run one governed cloud queue tick
+      - name: Drain governed cloud work continuously
+        id: drain
         if: steps.preflight.outputs.has_work == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ''
+          OPENAI_API_KEY: ''
           AGENT_CLOUD_LANE: ${{ matrix.lane }}
-        run: exec node src/cli.js inbox cloud-once --lane "$AGENT_CLOUD_LANE"
+        run: |
+          RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
+          set +e
+          timeout --signal=TERM --kill-after=30s 25m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          DRAIN_EXIT="$?"
+          set -e
+          case "$DRAIN_EXIT" in
+            0)
+              ;;
+            124|137|143)
+              printf '%s\n' '{"version":1,"iterations":[],"stopReason":"supervisor_timeout","remainingWork":true,"continuationRecommended":true,"elapsedMs":1500000,"limits":{"supervisorTimeoutMs":1500000}}' > "$RESULT_FILE"
+              echo "::notice::$AGENT_CLOUD_LANE drain hit supervisor timeout; MSI heartbeat will resume the lane"
+              ;;
+            *)
+              cat "$RESULT_FILE" || true
+              exit "$DRAIN_EXIT"
+              ;;
+          esac
+          cat "$RESULT_FILE"
+          CONTINUE="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.continuationRecommended === true ? "true" : "false");' "$RESULT_FILE")"
+          RATE_LIMIT_RETRY_MS="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); const value=result.stopReason === "rate_limited" && Number.isFinite(result.limits?.retryAfterMs) ? Math.max(0, Math.round(result.limits.retryAfterMs)) : null; process.stdout.write(value === null ? "" : String(value));' "$RESULT_FILE")"
+          AUTONOMOUS_FAILED="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; const result=JSON.parse(readFileSync(process.argv[1], "utf8")); process.stdout.write(result.stopReason === "autonomous_failure" ? "true" : "false");' "$RESULT_FILE")"
+          echo "continue=$CONTINUE" >> "$GITHUB_OUTPUT"
+          echo "rate_limit_retry_ms=$RATE_LIMIT_RETRY_MS" >> "$GITHUB_OUTPUT"
+          if [[ "$AUTONOMOUS_FAILED" == "true" ]]; then
+            echo "::error::autonomous self-maintenance failed; inspect the drain result"
+            exit 1
+          fi
+
+      - name: Schedule exact rate-limit continuation
+        if: steps.drain.outputs.rate_limit_retry_ms != ''
+        shell: bash
+        env:
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+          AGENT_RATE_LIMIT_RETRY_MS: ${{ steps.drain.outputs.rate_limit_retry_ms }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/schedule-cloud-retry.js
+
+      - name: Leave bounded continuation to MSI heartbeat
+        if: steps.drain.outputs.continue == 'true'
+        shell: bash
+        env:
+          AGENT_CLOUD_LANE: ${{ matrix.lane }}
+        run: echo "::notice::$AGENT_CLOUD_LANE still has governed work; MSI heartbeat will wake it again without recursive dispatch"

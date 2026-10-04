@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  WSL_MANAGED_RUNNER_DIRECTORIES,
   WSL_WAKEUP_RUN_VALUE,
   renderWslGuardianScript,
   syncWslWakeup,
@@ -79,11 +81,67 @@ test('WSL wakeup command is bounded, hidden, explicit-user, and guardian keeps W
   assert.doesNotMatch(guardian, /token|secret|password/i);
 });
 
+test('WSL guardian supervises the three configured local Actions runners without embedding credentials', () => {
+  assert.deepEqual(WSL_MANAGED_RUNNER_DIRECTORIES, [
+    'actions-runner-agente',
+    'actions-runner-agente-2',
+    'actions-runner-agente-3'
+  ]);
+  const guardian = renderWslGuardianScript();
+  for (const directory of WSL_MANAGED_RUNNER_DIRECTORIES) {
+    assert.match(guardian, new RegExp(`runner_watch "\\$HOME/${directory.replaceAll('.', '\\\\.')}"`));
+  }
+  assert.match(guardian, /runner_listener_pid/);
+  assert.match(guardian, /runner_worker_active/);
+  assert.match(guardian, /listener_elapsed_seconds/);
+  assert.match(guardian, /runner_reported_offline/);
+  assert.match(guardian, /recycle_stale_offline_listener/);
+  assert.doesNotMatch(guardian, /recycle_stale_idle_listener/);
+  assert.match(guardian, /\/proc\/\[0-9\]\*/);
+  assert.match(guardian, /readlink "\$process\/cwd"/);
+  assert.match(guardian, /readlink "\$process\/exe"/);
+  assert.match(guardian, /Runner\.Listener/);
+  assert.match(guardian, /Runner\.Worker/);
+  assert.match(guardian, /ps -o etimes=/);
+  assert.match(guardian, /"\$elapsed" -ge 7200/);
+  assert.match(guardian, /elapsed % 300/);
+  assert.match(guardian, /gh api "repos\/palgarra14-del\/agente-automatizador\/actions\/runners\?per_page=100"/);
+  assert.match(guardian, /grep -Fx "\$runner_name offline"/);
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1/);
+  assert.match(guardian, /kill -TERM "\$pid"/);
+  assert.match(guardian, /kill -KILL "\$pid"/);
+  assert.match(guardian, /runner_worker_active "\$runner" && return 1/);
+  assert.match(guardian, /run\.sh/);
+  assert.match(guardian, /\[ ! -L "\$runner" \]/);
+  assert.match(guardian, /\[ ! -L "\$runner\/\.runner" \]/);
+  assert.match(guardian, /\[ ! -L "\$listener" \]/);
+  assert.match(guardian, /\[ ! -L "\$launcher" \]/);
+  assert.match(guardian, /sleep 10/);
+  assert.match(guardian, /launch_pid=""/);
+  assert.match(guardian, /kill -0 "\$launch_pid"/);
+  assert.match(guardian, /\(cd "\$runner" && "\$launcher"\) >\/dev\/null 2>&1 &/);
+  assert.match(guardian, /launch_pid="\$!"/);
+  assert.doesNotMatch(guardian, /exec "\$launcher"/);
+  assert.match(guardian, /sleep 2/);
+  assert.doesNotMatch(guardian, /token|secret|password|credential/i);
+  if (process.platform !== 'win32') {
+    const syntax = spawnSync('/bin/sh', ['-n'], { input: guardian, encoding: 'utf8' });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
+});
+
+test('WSL guardian recycles only GitHub-confirmed offline listeners and fails safe when status is unavailable', () => {
+  const guardian = renderWslGuardianScript();
+  assert.match(guardian, /runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*sleep 2[\s\S]*runner_worker_active "\$runner" && return 1[\s\S]*runner_reported_offline "\$runner_name" \|\| return 1[\s\S]*kill -TERM/);
+  assert.match(guardian, /statuses=.*gh api/);
+  assert.match(guardian, /\[ -n "\$statuses" \] \|\| return 1/);
+});
+
 test('WSL wakeup sync is idempotent and status is ownership-bound', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     const first = await syncWslWakeup(options);
     assert.equal(first.healthy, true);
@@ -109,11 +167,47 @@ test('WSL wakeup sync is idempotent and status is ownership-bound', async () => 
   }
 });
 
+test('WSL wakeup starts the guardian in the current Windows session once', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'w-'));
+  const fixture = fixtureRunner();
+  await seedInboxService(home);
+  let running = false;
+  let starts = 0;
+  const options = {
+    home,
+    platform: 'linux',
+    pathValue: '/usr/bin:/bin',
+    environment: environment({ HOME: home }),
+    commandRunner: fixture.runner,
+    regExecutable: '/fake/reg.exe',
+    guardianRunning: async () => running,
+    guardianStarter: async (expected) => {
+      starts += 1;
+      assert.equal(expected.powershellInterop, '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe');
+      assert.equal(expected.wsl, 'C:\\Windows\\System32\\wsl.exe');
+      running = true;
+    }
+  };
+  try {
+    const first = await syncWslWakeup(options);
+    assert.equal(first.running, true);
+    assert.equal(first.started, true);
+    assert.equal(starts, 1);
+
+    const second = await syncWslWakeup(options);
+    assert.equal(second.running, true);
+    assert.equal(second.started, false);
+    assert.equal(starts, 1);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('WSL wakeup refuses foreign or tampered startup state', async () => {
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner();
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     const installed = await syncWslWakeup(options);
     const runEntry = [...fixture.registry.keys()].find((entry) => entry.endsWith(`|${WSL_WAKEUP_RUN_VALUE}`));
@@ -146,7 +240,7 @@ test('WSL wakeup refuses a symlinked config ancestor before creating guardian st
     await mkdir(serviceDirectory, { recursive: true });
     await writeFile(join(serviceDirectory, 'engineering-orchestrator-inbox.service'), '# managed-by=engineering-orchestrator:v1\n');
 
-    const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+    const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
     await assert.rejects(syncWslWakeup(options), /wsl_guardian_directory_invalid/);
     await assert.rejects(lstat(join(target, 'engineering-orchestrator')), /ENOENT/);
     assert.equal(fixture.registry.size, 0);
@@ -160,7 +254,7 @@ test('WSL wakeup rolls registry and guardian back if Windows registration fails'
   const home = await mkdtemp(join(tmpdir(), 'w-'));
   const fixture = fixtureRunner({ failRunWrite: true });
   await seedInboxService(home);
-  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe' };
+  const options = { home, platform: 'linux', pathValue: '/usr/bin:/bin', environment: environment({ HOME: home }), commandRunner: fixture.runner, regExecutable: '/fake/reg.exe', guardianRunning: async () => true };
   try {
     await assert.rejects(syncWslWakeup(options), /windows_registry_write_failed:EngineeringOrchestratorWSLWakeup/);
     assert.equal(fixture.registry.size, 0);

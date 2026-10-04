@@ -4,6 +4,18 @@ export default [
   { ignores: ['dist/**', 'node_modules/**', '.agent/**', '.agent-workspaces/**'] },
   js.configs.recommended,
   {
+    files: ['control-center/public/**/*.js'],
+    languageOptions: {
+      globals: {
+        document: 'readonly',
+        navigator: 'readonly',
+        setInterval: 'readonly',
+        self: 'readonly',
+        caches: 'readonly'
+      }
+    }
+  },
+  {
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

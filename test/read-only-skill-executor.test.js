@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { link, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexReadOnlySkillExecutor, buildReadOnlySkillPrompt, collectReadOnlyRepositoryContext } from '../src/core.js';
@@ -73,6 +73,109 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.match(invocation.prompt, /exactly one JSON object/);
   assert.match(invocation.prompt, /relevantPaths/);
   assert.match(invocation.prompt, /If repository access is blocked/);
+});
+
+test('isolated Codex session persists rotated auth back to the canonical home', async () => {
+  const sourceHome = await mkdtemp(join(tmpdir(), 'agent-codex-source-'));
+  const sourceAuth = join(sourceHome, 'auth.json');
+  const initialAuth = JSON.stringify({ tokens: { access_token: 'old-access', refresh_token: 'old-refresh' } });
+  const rotatedAuth = JSON.stringify({ tokens: { access_token: 'new-access', refresh_token: 'new-refresh' } });
+  try {
+    await writeFile(sourceAuth, initialAuth, { mode: 0o600 });
+    class RotatingCodex {
+      constructor(options) { this.options = options; }
+      startThread() {
+        const options = this.options;
+        return {
+          id: 'rotating-auth-thread',
+          run: async () => {
+            await writeFile(join(options.env.CODEX_HOME, 'auth.json'), rotatedAuth, { mode: 0o600 });
+            return {
+              finalResponse: JSON.stringify({
+                inspectionEvidence: {
+                  summary: 'Inspected bounded repository context.',
+                  relevantPaths: ['src/core.js'],
+                  findings: ['Auth rotation fixture completed.']
+                }
+              }),
+              usage: {}
+            };
+          }
+        };
+      }
+    }
+    const executor = new CodexReadOnlySkillExecutor({
+      CodexClient: RotatingCodex,
+      environment: () => ({ PATH: '/safe/bin', CODEX_HOME: sourceHome }),
+      platform: 'linux'
+    });
+    const result = await executor.execute({
+      skill: 'code.inspect',
+      goal: 'Inspect auth rotation',
+      contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+      context: {}
+    }, { workspace: process.cwd(), timeoutMs: 500 });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(sourceAuth, 'utf8'), rotatedAuth);
+  } finally {
+    await rm(sourceHome, { recursive: true, force: true });
+  }
+});
+
+test('refresh-token collision reloads a newer canonical auth once before failing', async () => {
+  const sourceHome = await mkdtemp(join(tmpdir(), 'agent-codex-collision-'));
+  const sourceAuth = join(sourceHome, 'auth.json');
+  const initialAuth = JSON.stringify({ tokens: { access_token: 'old-access', refresh_token: 'old-refresh' } });
+  const newerAuth = JSON.stringify({ tokens: { access_token: 'fresh-access', refresh_token: 'fresh-refresh' } });
+  let calls = 0;
+  try {
+    await writeFile(sourceAuth, initialAuth, { mode: 0o600 });
+    class CollisionCodex {
+      constructor(options) { this.options = options; }
+      startThread() {
+        const options = this.options;
+        return {
+          id: `collision-thread-${calls + 1}`,
+          run: async () => {
+            calls += 1;
+            if (calls === 1) {
+              await writeFile(sourceAuth, newerAuth, { mode: 0o600 });
+              throw new Error('Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.');
+            }
+            assert.equal(await readFile(join(options.env.CODEX_HOME, 'auth.json'), 'utf8'), newerAuth);
+            return {
+              finalResponse: JSON.stringify({
+                inspectionEvidence: {
+                  summary: 'Retried with the newer canonical session.',
+                  relevantPaths: ['src/core.js'],
+                  findings: ['Refresh collision recovered once.']
+                }
+              }),
+              usage: {}
+            };
+          }
+        };
+      }
+    }
+    const executor = new CodexReadOnlySkillExecutor({
+      CodexClient: CollisionCodex,
+      environment: () => ({ PATH: '/safe/bin', CODEX_HOME: sourceHome }),
+      platform: 'linux'
+    });
+    const result = await executor.execute({
+      skill: 'code.inspect',
+      goal: 'Recover auth collision',
+      contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+      context: {}
+    }, { workspace: process.cwd(), timeoutMs: 500 });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls, 2);
+    assert.equal(await readFile(sourceAuth, 'utf8'), newerAuth);
+  } finally {
+    await rm(sourceHome, { recursive: true, force: true });
+  }
 });
 
 test('orchestrator repository context is bounded, masked, scope-bound, and rejects aliased files', async () => {
@@ -262,6 +365,30 @@ test('review context carries a bounded diff and detects diff drift', async () =>
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('read-only skill prompt uses governed business context to prioritize commercial leverage', () => {
+  const contract = defaultToolSkillRegistry.getSkill('code.inspect').contract;
+  const prompt = buildReadOnlySkillPrompt({
+    skill: 'code.inspect',
+    goal: 'Inspect one high-impact improvement',
+    contract,
+    context: {
+      businessContext: {
+        version: 1,
+        model: 'LeadFinder -> Callflow -> demo -> follow-up -> conversion',
+        projectRole: 'Improve qualified lead throughput.',
+        priorities: ['Improve contactability.'],
+        metrics: ['qualified leads generated'],
+        constraints: ['Do not invent prices or lead facts.']
+      }
+    }
+  });
+  assert.match(prompt, /trusted strategic context/i);
+  assert.match(prompt, /real commercial funnel/i);
+  assert.match(prompt, /do not invent prices or offers/i);
+  assert.ok(prompt.includes('LeadFinder -> Callflow -> demo -> follow-up -> conversion'));
+  assert.ok(prompt.includes('qualified leads generated'));
 });
 
 test('read-only skill prompt redacts sensitive request fields', () => {
@@ -470,6 +597,88 @@ test('website planner is offline, anti-fabrication, and structurally validates i
   assert.match(invalid.error, /websitePlan\.pages\[0\]\.slug is invalid/);
 });
 
+test('website planner applies a universal professional design standard and distinct cross-industry modes', () => {
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const promptFor = (businessBrief) => buildReadOnlySkillPrompt({
+    skill: 'website.plan',
+    goal: 'Create a visually exceptional conversion-focused website',
+    contract,
+    context: { businessBrief, websiteBlueprint: { version: 1, profileId: 'generic-local' } }
+  });
+
+  const tech = promptFor({ category: 'SaaS de analítica', summary: 'Plataforma de datos para equipos', services: [{ name: 'Dashboard' }], brand: { tone: 'preciso y moderno' } });
+  assert.match(tech, /Universal design-excellence standard/);
+  assert.match(tech, /Product\/technology mode/);
+  assert.match(tech, /product or capability is the hero/);
+  assert.match(tech, /supporting navigation should recede/i);
+  assert.match(tech, /Avoid template tells/);
+
+  const luxury = promptFor({ category: 'Estudio de arquitectura premium', summary: 'Arquitectura residencial', services: [{ name: 'Interiorismo' }], brand: { tone: 'sobrio y sofisticado' } });
+  assert.match(luxury, /Premium\/editorial mode/);
+  assert.match(luxury, /confident scale/);
+  assert.match(luxury, /tactile or cinematic media/);
+
+  const hospitality = promptFor({ category: 'Restaurante', summary: 'Cocina local', services: [{ name: 'Reservas' }], brand: { tone: 'cálido y contemporáneo' } });
+  assert.match(hospitality, /Hospitality\/sensory mode/);
+  assert.match(hospitality, /place, food, material, atmosphere and human experience/);
+
+  const professional = promptFor({ category: 'Consultoría financiera B2B', summary: 'Asesoramiento para empresas', services: [{ name: 'Consultoría' }], brand: { tone: 'serio y cercano' } });
+  assert.match(professional, /Professional\/trust mode/);
+  assert.match(professional, /bland corporate templates are not acceptable/);
+
+  const craft = promptFor({ category: 'Reformas integrales', summary: 'Obra y reforma local', services: [{ name: 'Reformas' }], brand: { tone: 'directo y fiable' } });
+  assert.match(craft, /Craft\/local mode/);
+  assert.match(craft, /real work, process, material, locality and people/);
+
+  for (const prompt of [tech, luxury, hospitality, professional, craft]) {
+    assert.match(prompt, /first viewport/i);
+    assert.match(prompt, /Design mobile as its own composition/);
+    assert.match(prompt, /prefers-reduced-motion/);
+    assert.match(prompt, /one or two signature visual ideas|small number of memorable visual moments/);
+  }
+});
+
+test('beauty niche planner applies distinct visual art direction for hair salons, barbershops and wellness', () => {
+  const contract = defaultToolSkillRegistry.getSkill('website.plan').contract;
+  const promptFor = (businessBrief) => buildReadOnlySkillPrompt({
+    skill: 'website.plan',
+    goal: 'Create a visually exceptional conversion-focused website',
+    contract,
+    context: {
+      businessBrief,
+      websiteBlueprint: { version: 1, profileId: 'beauty-salon' }
+    }
+  });
+
+  const hair = promptFor({
+    category: 'Peluquería femenina',
+    services: [{ name: 'Mechas y balayage' }],
+    brand: { tone: 'elegante y actual' }
+  });
+  assert.match(hair, /Hair-salon editorial direction/);
+  assert.match(hair, /fashion\/editorial rather than spa-template/);
+  assert.match(hair, /Avoid automatic blush-pink\/beige femininity/);
+  assert.match(hair, /typography, layout, texture and clearly decorative abstract art/);
+
+  const barber = promptFor({
+    category: 'Barbería urbana',
+    services: [{ name: 'Corte y barba' }],
+    brand: { tone: 'directo y premium' }
+  });
+  assert.match(barber, /Barbershop\/grooming direction/);
+  assert.match(barber, /craft, character, culture and atmosphere/);
+  assert.match(barber, /Dark palettes are optional, not mandatory/);
+  assert.match(barber, /Avoid lazy barber clichés/);
+
+  const wellness = promptFor({
+    category: 'Salón de belleza y estética',
+    services: [{ name: 'Tratamiento facial' }],
+    brand: { tone: 'sereno y profesional' }
+  });
+  assert.match(wellness, /Beauty\/wellness direction/);
+  assert.match(wellness, /Avoid generic pastel spa gradients/);
+});
+
 test('website change critic independently checks the diff against authoritative business facts', () => {
   const contract = defaultToolSkillRegistry.getSkill('code.review').contract;
   const prompt = buildReadOnlySkillPrompt({
@@ -590,4 +799,107 @@ test('read-only skill executor fails closed on an unverified platform before con
   assert.equal(result.ok, false);
   assert.equal(result.error, 'codex_worker_read_isolation_unverified_on_freebsd');
   assert.equal(constructed, 0);
+});
+
+test('default read-only executor uses hard-bounded Codex CLI JSONL path', async () => {
+  const invocation = {};
+  let cleaned = false;
+  const executor = new CodexReadOnlySkillExecutor({
+    environment: () => ({ PATH: '/safe/bin' }),
+    codexHomeFactory: async () => ({
+      path: '/isolated/codex-home',
+      authAvailable: true,
+      syncAuth: async () => false,
+      cleanup: async () => { cleaned = true; }
+    }),
+    codexCliPathResolver: () => '/virtual/codex.js',
+    codexProcessRunner: async (command, args, options) => {
+      Object.assign(invocation, { command, args, options });
+      return {
+        ok: true,
+        exitCode: 0,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutBytes: 200,
+        stderrBytes: 0,
+        stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: 'cli-thread-1' }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({
+            inspectionEvidence: {
+              summary: 'Inspected the bounded target.',
+              relevantPaths: ['src/core.js'],
+              findings: ['The target is grounded.']
+            }
+          }) } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 20 } })
+        ].join('\n')
+      };
+    }
+  });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Inspect bounded target',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: { projectId: 'fixture' }
+  }, { workspace: process.cwd(), timeoutMs: 500 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.codexThreadId, 'cli-thread-1');
+  assert.equal(result.authMode, 'session');
+  assert.equal(result.paidApiUsed, false);
+  assert.equal(cleaned, true);
+  assert.equal(invocation.command, process.execPath);
+  assert.equal(invocation.args[0], '/virtual/codex.js');
+  assert.ok(invocation.args.includes('--json'));
+  assert.ok(invocation.args.includes('--ignore-user-config'));
+  assert.ok(invocation.args.includes('--ignore-rules'));
+  assert.equal(invocation.args.at(-1), '-');
+  assert.equal(invocation.options.restrictEnvironment, true);
+  assert.equal(invocation.options.timeoutMs <= 500, true);
+  assert.match(invocation.options.input, /exactly one JSON object/);
+  assert.equal(invocation.options.env.CODEX_HOME, '/isolated/codex-home');
+  assert.equal(invocation.options.env.HOME, '/isolated/codex-home');
+});
+
+test('hard-bounded Codex CLI timeout is surfaced without a retry', async () => {
+  let calls = 0;
+  const executor = new CodexReadOnlySkillExecutor({
+    environment: () => ({ PATH: '/safe/bin' }),
+    codexHomeFactory: async () => ({
+      path: '/isolated/codex-home',
+      authAvailable: true,
+      syncAuth: async () => false,
+      cleanup: async () => {}
+    }),
+    codexCliPathResolver: () => '/virtual/codex.js',
+    codexProcessRunner: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        exitCode: null,
+        timedOut: true,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        stdout: '',
+        stderr: ''
+      };
+    }
+  });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Inspect bounded target',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: {}
+  }, { workspace: process.cwd(), timeoutMs: 50 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.timedOut, true);
+  assert.match(result.error, /codex_cli_timeout/);
+  assert.equal(result.authMode, 'session');
+  assert.equal(calls, 1);
 });

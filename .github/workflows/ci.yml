@@ -1,24 +1,35 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, agent-local]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci
       - run: npm test
-      - name: Smoke real Chrome/CDP Browser QA runtime
-        run: node scripts/browser-qa-chrome-smoke.js
-      - name: Adversarial Browser QA Chrome smoke
-        run: node scripts/browser-qa-adversarial-smoke.js
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - name: Smoke real Chrome/CDP Browser QA runtime
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+        run: node scripts/browser-qa-chrome-smoke.js
+      - name: Adversarial Browser QA Chrome smoke
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+        run: node scripts/browser-qa-adversarial-smoke.js
       - name: Build prepared Node 22 / pnpm 11.19.0 image
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
         run: docker build --pull=false --tag agent-node22-pnpm11:local docker/node22-pnpm11
       - name: Verify real Docker execution boundary
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
         run: node scripts/docker-integration-smoke.js

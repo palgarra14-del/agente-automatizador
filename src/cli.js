@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
@@ -9,7 +9,10 @@ import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCh
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
-import { AutonomousSelfImprovement } from './self-improvement.js';
+import { AutonomousProjectImprovement } from './self-improvement.js';
+import { cloudRateLimitDeferral, runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
+import { cloudPeekHasWork } from './cloud-peek.js';
+import { schedulerYieldRequested } from './scheduler-yield.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -30,7 +33,11 @@ if (command === 'doctor') {
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
-const workflows = new WorkflowEngine({ store, projects });
+const workflowModelExecutors = {
+  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: false }),
+  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: false })
+};
+const workflows = new WorkflowEngine({ store, projects, ...workflowModelExecutors });
 
 async function loadWorkflowInput(profile) {
   const briefPath = take('--brief');
@@ -49,6 +56,83 @@ async function loadWorkflowInput(profile) {
     throw new Error(`Invalid business brief JSON: ${error.message}`, { cause: error });
   }
   return { businessBrief: parsed };
+}
+
+function routingFailureCategory(value) {
+  const text = String(value || '').toLowerCase();
+  if (/quota|resource_exhausted|insufficient/.test(text)) return 'quota';
+  if (/rate.?limit|429/.test(text)) return 'rate_limit';
+  if (/auth|login|token|unauthorized|forbidden/.test(text)) return 'auth';
+  if (/timeout|timed out|etimedout/.test(text)) return 'timeout';
+  if (/unavailable|connection|refused|network|5\d\d/.test(text)) return 'service_unavailable';
+  if (/without_workspace_changes|no_changes/.test(text)) return 'no_changes';
+  return 'other';
+}
+
+function summarizeQueueRecord(state, record) {
+  if (!record) return null;
+  const workflow = record.workflowId ? state.workflows?.[record.workflowId] ?? null : null;
+  const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
+  const activeStep = steps.find((step) => step.status === 'running')
+    ?? steps.find((step) => step.status === 'awaiting_approval')
+    ?? steps.find((step) => ['blocked', 'failed'].includes(step.status))
+    ?? steps.find((step) => step.status === 'ready')
+    ?? [...steps].reverse().find((step) => step.status === 'completed')
+    ?? null;
+  const routing = activeStep?.evidence?.workerEvidence?.modelRouting
+    ?? activeStep?.evidence?.modelRouting
+    ?? null;
+  const fallbackCategories = Array.isArray(routing?.fallbackErrors)
+    ? [...new Set(routing.fallbackErrors.filter((item) => typeof item === 'string').map(routingFailureCategory))].slice(-8)
+    : [];
+  return {
+    issueNumber: record.issueNumber,
+    workflowId: record.workflowId,
+    projectId: record.request?.projectId ?? null,
+    goal: record.request?.goal ?? null,
+    profile: record.request?.profile ?? null,
+    status: record.status,
+    reason: record.reason,
+    priority: record.request?.priority ?? 'normal',
+    execution: workflow ? {
+      workflowStatus: workflow.status ?? null,
+      stepId: activeStep?.id ?? null,
+      skill: activeStep?.skill ?? null,
+      specialist: activeStep?.specialist ?? null,
+      stepStatus: activeStep?.status ?? null,
+      attempts: Number.isInteger(activeStep?.attempts) ? activeStep.attempts : 0,
+      maxAttempts: Number.isInteger(workflow.budgets?.maxAttempts) ? workflow.budgets.maxAttempts : null,
+      modelCandidate: typeof routing?.candidate === 'string' ? routing.candidate : null,
+      modelProvider: typeof routing?.provider === 'string' ? routing.provider : null,
+      model: typeof routing?.model === 'string' ? routing.model : null,
+      resourceClass: typeof routing?.resourceClass === 'string' ? routing.resourceClass : null,
+      providerSlot: routing?.providerSlot && typeof routing.providerSlot === 'object'
+        ? {
+            provider: typeof routing.providerSlot.provider === 'string' ? routing.providerSlot.provider : null,
+            slot: Number.isInteger(routing.providerSlot.slot) ? routing.providerSlot.slot : null,
+            limit: Number.isInteger(routing.providerSlot.limit) ? routing.providerSlot.limit : null,
+            coordinated: routing.providerSlot.coordinated === true
+          }
+        : null,
+      routingScore: Number.isFinite(routing?.routingScore) ? routing.routingScore : null,
+      fallbackCategories,
+      fallbackCount: Array.isArray(routing?.fallbackErrors) ? routing.fallbackErrors.length : 0,
+      routingMode: typeof routing?.mode === 'string' ? routing.mode : null,
+      usedFallback: Boolean(routing && (
+        String(routing.mode ?? '').includes('fallback') ||
+        routing.localPatchCandidate ||
+        routing.primaryError ||
+        fallbackCategories.length
+      ))
+    } : null,
+    pendingApproval: record.pendingApproval ? {
+      kind: record.pendingApproval.kind,
+      stepId: record.pendingApproval.stepId,
+      fingerprint: record.pendingApproval.fingerprint
+    } : null,
+    publication: record.publication ?? null,
+    updatedAt: record.updatedAt
+  };
 }
 
 try {
@@ -99,26 +183,15 @@ try {
   } else if (command === 'inbox') {
     const action = args[1] ?? 'once';
     if (action === 'status') {
-      const requests = Object.values((await store.load()).requests ?? {}).map((record) => ({
-        issueNumber: record.issueNumber,
-        workflowId: record.workflowId,
-        status: record.status,
-        reason: record.reason,
-        pendingApproval: record.pendingApproval ? {
-          kind: record.pendingApproval.kind,
-          stepId: record.pendingApproval.stepId,
-          fingerprint: record.pendingApproval.fingerprint
-        } : null,
-        publication: record.publication ?? null,
-        updatedAt: record.updatedAt
-      }));
+      const state = await store.load();
+      const requests = Object.values(state.requests ?? {}).map((record) => summarizeQueueRecord(state, record));
       console.log(JSON.stringify(requests, null, 2));
     } else {
       const queueConfig = await loadIssueQueueConfig(resolve('config/issue-queue.json'));
       const channel = new GitHubIssueChannel({ repository: queueConfig.repository });
       const watcherRepositoryRoot = resolve('.');
       const loadedRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
-      const cloudAction = action === 'cloud-once' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair';
+      const cloudAction = action === 'cloud-once' || action === 'cloud-drain' || action === 'cloud-prepare' || action === 'cloud-control-once' || action === 'cloud-peek' || action === 'cloud-execution-peek' || action === 'cloud-admit' || action === 'cloud-recover' || action === 'cloud-repair' || action === 'cloud-status';
       const requestedLaneId = take('--lane') ?? 'self';
       const cloudLane = cloudAction
         ? queueConfig.cloudLanes.find((lane) => lane.id === requestedLaneId)
@@ -135,7 +208,7 @@ try {
         })
         : store;
       const activeWorkflows = cloudAction
-        ? new DurableCloudWorkflowEngine({ store: activeStore, projects })
+        ? new DurableCloudWorkflowEngine({ store: activeStore, projects, ...workflowModelExecutors })
         : workflows;
       const queue = new SupervisedIssueQueue({
         store: activeStore,
@@ -147,10 +220,20 @@ try {
         operatorBranch: 'main',
         includedProjectIds: cloudAction ? cloudLane.projectIds : null,
         excludedProjectIds: cloudAction ? [] : queueConfig.cloudProjectIds,
-        executionEnabled: action !== 'cloud-control-once'
+        executionEnabled: !['cloud-control-once', 'cloud-prepare'].includes(action)
       });
-      const autonomousSelfImprovement = cloudAction && cloudLane.id === 'self'
-        ? new AutonomousSelfImprovement({ store: activeStore, workflowEngine: activeWorkflows, operatorRevision: loadedRevision })
+      const autonomousProjectId = cloudAction && cloudLane.projectIds.length === 1
+        ? cloudLane.projectIds[0]
+        : null;
+      const autonomousSelfImprovement = autonomousProjectId
+        ? new AutonomousProjectImprovement({
+          store: activeStore,
+          workflowEngine: activeWorkflows,
+          operatorRevision: loadedRevision,
+          projectId: autonomousProjectId,
+          project: projects.get(autonomousProjectId),
+          workflowTimeoutMs: projects.get(autonomousProjectId).budgets.maxRuntimeMinutes * 60_000
+        })
         : null;
       const view = (record) => record ? {
         issueNumber: record.issueNumber,
@@ -180,25 +263,114 @@ try {
           throw new Error(`Invalid GitHub event payload: ${error.message}`, { cause: error });
         }
         console.log(JSON.stringify(await queue.admitEvent(eventName, event), null, 2));
+      } else if (action === 'cloud-prepare') {
+        try {
+          if (autonomousSelfImprovement) {
+            // The self drain re-checks cooldowns, budgets and active work under the
+            // governed execution lease. Avoid a duplicate Cloud State read here.
+            console.log(JSON.stringify({ queue: null, hasExecutionWork: true }, null, 2));
+          } else {
+            const prepared = await activeStore.withGlobalLease(async () => {
+              await queue.ingestAdmissionIntents();
+              const queueResult = await queue.tick();
+              const queueWork = await queue.hasExecutionWork();
+              return { queueResult, hasExecutionWork: Boolean(queueWork) };
+            });
+            console.log(JSON.stringify({
+              queue: view(prepared.queueResult),
+              hasExecutionWork: prepared.hasExecutionWork
+            }, null, 2));
+          }
+        } catch (error) {
+          const deferral = cloudRateLimitDeferral(error, { phase: 'cloud_prepare' });
+          if (!deferral) throw error;
+          console.log(JSON.stringify({
+            queue: null,
+            hasExecutionWork: false,
+            ...deferral
+          }, null, 2));
+        }
       } else if (action === 'cloud-repair') {
         const snapshot = await activeStore.readSnapshot({ repair: true });
         console.log(JSON.stringify({ generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration }, null, 2));
       } else if (action === 'cloud-recover') {
-        console.log(JSON.stringify(await queue.recoverAdmissionIntents(), null, 2));
+        try {
+          // Repair/validate once, then recover admissions in the same process so the
+          // verified lineage prefix can be reused by the subsequent store.load().
+          const snapshot = await activeStore.readSnapshot({ repair: true });
+          const recovery = await queue.recoverAdmissionIntents();
+          console.log(JSON.stringify({
+            repair: { generation: snapshot.generation, authorityGeneration: snapshot.authorityGeneration },
+            recovery
+          }, null, 2));
+        } catch (error) {
+          const deferral = cloudRateLimitDeferral(error, { phase: 'cloud_recover' });
+          if (!deferral) throw error;
+          console.log(JSON.stringify({
+            repair: null,
+            recovery: null,
+            ...deferral
+          }, null, 2));
+        }
+      } else if (action === 'cloud-status') {
+        const cloudState = await activeStore.load();
+        const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
+        const records = Object.values(cloudState.requests ?? {})
+          .filter((record) => cloudLane.projectIds.includes(record.request?.projectId))
+          .sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')))
+          .slice(0, 6)
+          .map((record) => summarizeQueueRecord(cloudState, record));
+        const current = records.find((record) => !terminal.has(record.status)) ?? null;
+        console.log(JSON.stringify({
+          lane: cloudLane.id,
+          projectIds: cloudLane.projectIds,
+          current,
+          latest: records[0] ?? null,
+          records
+        }, null, 2));
       } else if (action === 'cloud-peek') {
-        const queueWork = await queue.hasWork();
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-        console.log(String(queueWork || autonomousWork));
+        console.log(String(await cloudPeekHasWork({
+          store: activeStore,
+          queue,
+          autonomousSelfImprovement
+        })));
       } else if (action === 'cloud-execution-peek') {
-        const queueWork = await queue.hasExecutionWork();
-        const autonomousWork = autonomousSelfImprovement ? await autonomousSelfImprovement.hasWork() : false;
-        console.log(String(queueWork || autonomousWork));
+        console.log(String(await cloudPeekHasWork({
+          store: activeStore,
+          queue,
+          autonomousSelfImprovement,
+          executionOnly: true
+        })));
       } else if (action === 'cloud-control-once') {
         const result = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
           return queue.tick();
         });
         console.log(JSON.stringify(view(result), null, 2));
+      } else if (action === 'cloud-drain') {
+        const result = await runCloudDrainWithRecovery({
+          store: activeStore,
+          queue,
+          autonomousSelfImprovement,
+          drainOptions: {
+            shouldYield: () => schedulerYieldRequested(cloudLane.id)
+          }
+        });
+        console.log(JSON.stringify({
+          version: result.version,
+          stopReason: result.stopReason,
+          remainingWork: result.remainingWork,
+          continuationRecommended: result.continuationRecommended,
+          elapsedMs: result.elapsedMs,
+          limits: result.limits,
+          recovery: result.recovery ?? [],
+          iterations: result.iterations.map((iteration) => ({
+            index: iteration.index,
+            admitted: iteration.admitted,
+            queue: view(iteration.queueResult),
+            autonomous: iteration.autonomousResult
+          }))
+        }, null, 2));
       } else if (action === 'cloud-once') {
         const result = await activeStore.withGlobalLease(async () => {
           await queue.ingestAdmissionIntents();
@@ -233,8 +405,17 @@ try {
             onTick: (record) => {
               if (record) console.log(JSON.stringify(view(record)));
             },
-            onError: (error) => {
+            onError: async (error) => {
               console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
+              if (!autonomousSelfImprovement) return;
+              try {
+                const autonomousResult = await autonomousSelfImprovement.tick();
+                if (autonomousResult && autonomousResult.status !== 'idle') {
+                  console.log(JSON.stringify({ queueError: maskSecrets(error.message), autonomous: autonomousResult }));
+                }
+              } catch (autonomousError) {
+                console.error(`autonomous fallback tick failed: ${maskSecrets(autonomousError.message)}`);
+              }
             }
           });
         } finally {
@@ -244,7 +425,7 @@ try {
         if (checkoutReloadRevision) {
           console.error(`inbox watcher checkout changed; exiting for managed restart (${loadedRevision.slice(0, 12)} -> ${checkoutReloadRevision.slice(0, 12)})`);
         }
-      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-repair [--lane <id>]|cloud-recover [--lane <id>]|cloud-peek [--lane <id>]|cloud-execution-peek [--lane <id>]|cloud-control-once [--lane <id>]|cloud-once [--lane <id>]|watch|status>');
+      } else throw new Error('Usage: agent inbox <once|cloud-admit [--lane <id>]|cloud-repair [--lane <id>]|cloud-recover [--lane <id>]|cloud-status [--lane <id>]|cloud-peek [--lane <id>]|cloud-execution-peek [--lane <id>]|cloud-control-once [--lane <id>]|cloud-drain [--lane <id>]|cloud-once [--lane <id>]|watch|status>');
     }
   } else if (command === 'service') {
     const action = args[1] ?? 'status';
@@ -310,7 +491,7 @@ try {
       console.log(JSON.stringify(await workflows.list(), null, 2));
     } else throw new Error('Usage: agent workflow create website-build --project <id> --goal "..." --brief business.json [--allowed-path path] [--forbidden-path path] | agent workflow create <app-improvement|data-analysis> --project <id> --goal "..." [--allowed-path path] [--forbidden-path path] | run <id> [--dry-run] | status <id> | resume <id> | approve <id> <step-id> | cancel <id> [--reason reason] | list');
   } else {
-    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
+    console.log('Usage: agent capabilities --project leadfinder [--surface workflow|orchestrator] | agent specialists --project leadfinder [--surface workflow|orchestrator] | agent doctor --project leadfinder | agent inbox <once|cloud-admit|cloud-repair|cloud-recover|cloud-peek|cloud-execution-peek|cloud-control-once|cloud-prepare|cloud-drain|cloud-once|watch|status> | agent runtime <status|sync> | agent service <install|sync|bootstrap|wakeup|status|restart|upgrade|auto-upgrade|uninstall> | agent run --project leadfinder --goal "..." [--dry-run] [--allowed-path app] [--forbidden-path docs] | agent resume <runId> | agent report <runId> | agent approvals | agent approve <id>');
   }
 } catch (error) {
   console.error(maskSecrets(error.stack ?? error.message));
