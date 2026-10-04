@@ -52,11 +52,12 @@ test('every business lane has an explicit bounded autonomous policy', () => {
     'self',
     'website-pilot'
   ]);
+  const expectedDailyBudgets = { self: 6, leadfinder: 12, callflow: 12, 'website-pilot': 12 };
   for (const [projectId, policy] of Object.entries(AUTONOMOUS_PROJECT_POLICIES)) {
     assert.ok(policy.goal.length > 80, projectId);
     assert.ok(policy.scope.allowedPaths.length > 0, projectId);
     assert.ok(policy.scope.forbiddenPaths.length > 0, projectId);
-    assert.equal(policy.maxStartsPer24h, 24);
+    assert.equal(policy.maxStartsPer24h, expectedDailyBudgets[projectId], projectId);
   }
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.callflow.scope.forbiddenPaths.includes('google-apps-script'), true);
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.leadfinder.scope.forbiddenPaths.includes('.github'), true);
