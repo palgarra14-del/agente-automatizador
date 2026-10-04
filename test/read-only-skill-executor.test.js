@@ -267,7 +267,7 @@ test('exact-file app-improvement inspection can execute deterministically withou
   assert.equal(executor.usesModel('code.review'), true);
 });
 
-test('deterministic inspection fast path rejects broad, incomplete, oversized and website scopes', () => {
+test('deterministic inspection fast path accepts bounded directory scopes but rejects incomplete, oversized and website scopes', () => {
   const makeContext = (paths) => {
     const files = paths.map((path) => {
       const content = `export const value = ${JSON.stringify(path)};\n`;
@@ -282,12 +282,13 @@ test('deterministic inspection fast path rejects broad, incomplete, oversized an
   const executor = new CodexReadOnlySkillExecutor({ environment: () => ({}) });
   const one = makeContext(['src/a.js']);
 
-  assert.equal(executor.deterministicInspectionContext({
+  const boundedDirectory = executor.deterministicInspectionContext({
     skill: 'code.inspect',
     workflowProfile: 'app-improvement',
     scope: { allowedPaths: ['src'], forbiddenPaths: [] },
     repositoryContext: one
-  }), null);
+  });
+  assert.deepEqual(boundedDirectory.allowedPaths, ['src/a.js']);
 
   assert.equal(executor.deterministicInspectionContext({
     skill: 'code.inspect',
@@ -296,12 +297,12 @@ test('deterministic inspection fast path rejects broad, incomplete, oversized an
     repositoryContext: one
   }), null);
 
-  const ninePaths = Array.from({ length: 9 }, (_, index) => `src/file-${index}.js`);
+  const oversizedPaths = Array.from({ length: 31 }, (_, index) => `src/file-${index}.js`);
   assert.equal(executor.deterministicInspectionContext({
     skill: 'code.inspect',
     workflowProfile: 'app-improvement',
-    scope: { allowedPaths: ninePaths, forbiddenPaths: [] },
-    repositoryContext: makeContext(ninePaths)
+    scope: { allowedPaths: oversizedPaths, forbiddenPaths: [] },
+    repositoryContext: makeContext(oversizedPaths)
   }), null);
 
   assert.equal(executor.deterministicInspectionContext({
