@@ -21,6 +21,7 @@ import {
   WorkspaceManager,
   assertAllowedWorkingBranch,
   buildWorkerPrompt,
+  businessBriefFromCallflowDemoBrief,
   codexWorkerSecurityConfig,
   codexTurnFailureDiagnostics,
   codexApiKeyFromEnvironment,
@@ -1459,6 +1460,84 @@ test('website blueprint selection is deterministic, fact-bound, accent-insensiti
     fingerprintA
   );
   assert.throws(() => websiteBlueprintForBrief(null), /website_blueprint_business_brief_invalid/);
+});
+
+test('Callflow demo handoff converts to a factual Website Pilot businessBrief without inventing services', () => {
+  const brief = businessBriefFromCallflowDemoBrief({
+    version: 'website-pilot-brief-v1',
+    source: 'callflow',
+    lead: {
+      callflowId: 'lead-1',
+      leadFinderId: 'lf-1',
+      businessName: 'Salón Luz',
+      city: 'Valencia',
+      niche: 'Peluquería',
+      phone: '600111222',
+      existingWebsite: 'https://salon.example',
+      websiteDiscoveryStatus: 'confirmed'
+    },
+    commercialEvidence: {
+      salesFit: 84,
+      salesSegment: 'marketplace_owned_gap',
+      opportunityScore: 78,
+      leadScore: 80,
+      websiteQuality: 'mejorable',
+      reasonToCall: 'Negocio fuerte con brecha de canal propio.',
+      primaryPitchReason: 'Reserva dispersa.'
+    },
+    demo: {
+      type: 'conceptual',
+      defaultScope: 'one_page',
+      objective: 'Mostrar un canal propio.',
+      primaryCta: 'Reservar en Booksy',
+      existingBookingPlatform: 'Booksy',
+      preserveExistingBooking: true,
+      existingWebsiteReference: 'https://salon.example'
+    },
+    missingBusinessFacts: ['servicios exactos', 'precios', 'URL real de reservas'],
+    constraints: ['No inventar precios ni testimonios.']
+  });
+
+  assert.equal(brief.version, 2);
+  assert.equal(brief.commercialPackage, 'demo');
+  assert.equal(brief.businessName, 'Salón Luz');
+  assert.equal(brief.category, 'Peluquería');
+  assert.deepEqual(brief.locations, ['Valencia']);
+  assert.deepEqual(brief.services, []);
+  assert.equal(brief.contact.phone, '600111222');
+  assert.equal(brief.contact.website, 'https://salon.example');
+  assert.deepEqual(brief.website.requiredPages, ['home']);
+  assert.match(brief.website.requiredFeatures[0], /Booksy/);
+  assert.ok(brief.contentRestrictions.some((item) => /servicios exactos/.test(item)));
+  assert.ok(brief.contentRestrictions.some((item) => /URL real de reservas/.test(item)));
+
+  const blueprint = websiteBlueprintForBrief(brief);
+  assert.deepEqual(blueprint.commercialScope, { package: 'demo', maxPages: 1, maxSectionsPerPage: 5 });
+  assert.equal(blueprint.contentSources.services.length, 0);
+  assert.equal(blueprint.seoRequirements.serviceSources.length, 0);
+  assert.equal(blueprint.pages[0].sections.includes('services'), false);
+  assert.equal(blueprint.pages[0].sections.includes('experience'), false);
+});
+
+test('demo package alone may omit unknown service and location facts', () => {
+  const demo = normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'demo',
+    businessName: 'Demo sin datos',
+    category: 'Peluquería',
+    locations: [],
+    services: []
+  });
+  assert.deepEqual(demo.locations, []);
+  assert.deepEqual(demo.services, []);
+  assert.throws(() => normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'essential',
+    businessName: 'Esencial sin datos',
+    category: 'Peluquería',
+    locations: ['Valencia'],
+    services: []
+  }), /between 1 and 20/);
 });
 
 test('Codex routing prefers the logged-in session and uses paid API only as a bounded fallback', async () => {
