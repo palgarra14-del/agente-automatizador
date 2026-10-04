@@ -110,8 +110,10 @@ export function diffUvNotifications(previousState, current) {
   if (!Array.isArray(current)) throw new Error('uv_notifications_current_invalid');
   if (!previousState) return [];
   const seen = new Set((previousState.notifications ?? []).map((item) => item.id));
+  // Expired evidence must suppress every copy, regardless of row order.
+  const expiredIds = new Set(current.filter((item) => item.expired).map((item) => item.id));
   return current.filter((item) => {
-    if (seen.has(item.id) || item.expired) return false;
+    if (seen.has(item.id) || expiredIds.has(item.id)) return false;
     seen.add(item.id);
     return true;
   });

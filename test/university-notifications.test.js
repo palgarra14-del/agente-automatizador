@@ -216,6 +216,18 @@ test('repeated notification rows surface each new non-expired alert only once', 
   assert.deepEqual(current, snapshot);
 });
 
+test('conflicting notification expiry suppresses the alert regardless of record order', () => {
+  const active = { id: 'conflicting', title: 'Entrega', expired: false };
+  const expired = { ...active, expired: true };
+  const other = { id: 'other', title: 'Otra entrega', expired: false };
+  for (const records of [[active, expired], [expired, active]]) {
+    const current = [...records, other, { ...other }];
+    const snapshot = structuredClone(current);
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, current), [other]);
+    assert.deepEqual(current, snapshot);
+  }
+});
+
 test('code-less deadlines require a matching assignment from a current course', () => {
   const page = { text: [
     'Notificaciones',
