@@ -94,8 +94,9 @@ export function recommendAcademicPreparation(signal, materials, { limit = 3 } = 
   if (!Array.isArray(materials)) throw new Error('academic_preparation_materials_invalid');
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('academic_preparation_limit_invalid');
 
-  // Conflicting course evidence cannot establish which course owns a resource.
+  // Conflicting course or title evidence cannot establish a resource's relevance.
   const subjectsById = new Map();
+  const titlesById = new Map();
   const ambiguousIds = new Set();
   for (const material of materials) {
     const subjectId = typeof material?.subjectId === 'string' ? clean(material.subjectId) : null;
@@ -103,6 +104,11 @@ export function recommendAcademicPreparation(signal, materials, { limit = 3 } = 
       ambiguousIds.add(material?.id);
     }
     subjectsById.set(material?.id, subjectId);
+    const title = clean(material?.title);
+    if (titlesById.has(material?.id) && titlesById.get(material?.id) !== title) {
+      ambiguousIds.add(material?.id);
+    }
+    titlesById.set(material?.id, title);
   }
 
   let candidates = materials
