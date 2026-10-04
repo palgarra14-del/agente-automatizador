@@ -3,6 +3,19 @@ import { planWork } from './work-scheduler.js';
 const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generation_election_failed|github_request_failed|state_recovery_failed|checkpoint_recovery_failed|witness_recovery_failed)|cloud_global_lease_(busy|lost|release_failed)|workflow_deadline_cap_exceeded|timeout|deadline/i;
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
 const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
+const HEARTBEAT_EXECUTION_MODES = new Set(['cloud','local-primary']);
+
+export function heartbeatExecutionMode(value = 'cloud') {
+  const mode = String(value || 'cloud').trim().toLowerCase();
+  if (!HEARTBEAT_EXECUTION_MODES.has(mode)) throw new Error('heartbeat_execution_mode_invalid');
+  return mode;
+}
+
+export function localCloudUnitName(lane) {
+  const value = String(lane ?? '');
+  if (!/^[a-z0-9-]{1,80}$/.test(value)) throw new Error('heartbeat_lane_invalid');
+  return `agent-local-cloud-${value}`;
+}
 
 export function heartbeatObservationOrder(lanes = [], operatorLanes = [], rotation = 0) {
   const operator = operatorLanes instanceof Set ? operatorLanes : new Set(operatorLanes ?? []);

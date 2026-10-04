@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { JsonStore } from './core.js';
 
 const DEFAULT_TAG = 'agent-cloud-state-v1';
@@ -31,6 +32,47 @@ const RESERVED_STATE_TAGS = new Set([
   CLAIM_NAMESPACE,
   EPOCH_ANCHOR_NAMESPACE
 ]);
+
+function linuxProcessStartIdentity(pid, readFileSyncImpl = readFileSync) {
+  try {
+    const contents = readFileSyncImpl(`/proc/${pid}/stat`, 'utf8');
+    const fields = contents.slice(contents.lastIndexOf(')') + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function localCloudOwnerId({
+  pid = process.pid,
+  platform = process.platform,
+  readFileSyncImpl = readFileSync,
+  fallbackId = randomUUID
+} = {}) {
+  if (platform === 'linux') {
+    const identity = linuxProcessStartIdentity(pid, readFileSyncImpl);
+    if (identity) return `local:${pid}:${identity}`;
+  }
+  return `cloud:${fallbackId()}`;
+}
+
+export function localCloudOwnerIsAbandoned(ownerIdentity, {
+  platform = process.platform,
+  kill = process.kill.bind(process),
+  readFileSyncImpl = readFileSync
+} = {}) {
+  const match = /^local:(\d+):([^:\s]{1,120})$/.exec(String(ownerIdentity ?? ''));
+  if (!match || platform !== 'linux') return false;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+  } catch (error) {
+    return error?.code === 'ESRCH';
+  }
+  const currentIdentity = linuxProcessStartIdentity(pid, readFileSyncImpl);
+  return Boolean(currentIdentity && currentIdentity !== match[2]);
+}
 
 
 
@@ -300,7 +342,7 @@ export class GitHubStateStore extends JsonStore {
     leaseTtlMs = DEFAULT_LEASE_TTL_MS,
     ownerId = process.env.GITHUB_RUN_ID
       ? `github:${process.env.GITHUB_RUN_ID}:${process.env.GITHUB_RUN_ATTEMPT ?? '1'}`
-      : `cloud:${randomUUID()}`,
+      : localCloudOwnerId(),
     now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     lineageValidationPaceMs = DEFAULT_LINEAGE_VALIDATION_PACE_MS
@@ -2423,6 +2465,8 @@ export class GitHubStateStore extends JsonStore {
     const ownerIdentity = metadata?.ownerIdentity ?? metadata?.ownerId ?? null;
     if (ownerIdentity === this.ownerId) return false;
     if (this.now() - createdAt >= this.leaseTtlMs) return true;
+
+    if (localCloudOwnerIsAbandoned(ownerIdentity)) return true;
 
     const githubOwner = /^github:(\d+):(\d+)$/.exec(String(ownerIdentity ?? ''));
     if (!githubOwner) return false;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, heartbeatObservationOrder, heartbeatRunLane, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -198,4 +198,17 @@ test('unauthorized issue content cannot elevate a lane to operator priority', ()
     body:'<!-- agent-request:v1 -->\n'+JSON.stringify({version:1,projectId:'self'})
   }],config);
   assert.deepEqual(lanes,[]);
+});
+
+
+test('heartbeat execution mode validates local-primary and cloud modes', () => {
+  assert.equal(heartbeatExecutionMode('cloud'), 'cloud');
+  assert.equal(heartbeatExecutionMode('LOCAL-PRIMARY'), 'local-primary');
+  assert.throws(() => heartbeatExecutionMode('remote-magic'), /heartbeat_execution_mode_invalid/);
+});
+
+test('local cloud unit names are deterministic and lane-scoped', () => {
+  assert.equal(localCloudUnitName('callflow'), 'agent-local-cloud-callflow');
+  assert.equal(localCloudUnitName('website-pilot'), 'agent-local-cloud-website-pilot');
+  assert.throws(() => localCloudUnitName('../bad'), /heartbeat_lane_invalid/);
 });
