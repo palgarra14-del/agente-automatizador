@@ -97,6 +97,29 @@ test('named dates preserve years introduced by del without creating false remind
   }
 });
 
+test('named dates preserve bare explicit years instead of inventing upcoming reminders', () => {
+  const capturedAt = '2026-09-27T16:00:00Z';
+  for (const month of ['de octubre', 'd’octubre']) {
+    for (const [year, expected] of [
+      ['2025', ['2025-10-02']],
+      ['2027', ['2027-10-02']],
+      ['25', []],
+      ['20250', []],
+      ['1999', []]
+    ]) {
+      const body = `El test: 2 ${month} ${year}.`;
+      const signal = alertToAcademicSignal({
+        id: 'uv-mail:bare-year', subject: 'Test Tema 1', body
+      }, { capturedAt });
+      assert.deepEqual(signal.dates, expected, body);
+      assert.deepEqual(buildAcademicReminders({ today: '2026-09-30', signals: [signal] }), [], body);
+      assert.deepEqual(extractAcademicDates(
+        body + ' El siguiente test: 3 de octubre.', capturedAt
+      ), [...expected, '2026-10-03'].sort(), body);
+    }
+  }
+});
+
 test('numeric academic dates reject partial matches inside unsupported date formats', () => {
   const capturedAt = '2026-09-27T16:00:00Z';
   for (const value of ['2026-10-02', '2-10-25', '2-10-20250', '2-10-2026-01']) {
