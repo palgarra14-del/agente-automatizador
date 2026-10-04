@@ -7,12 +7,16 @@ function clean(value) {
 function currentSubjects(courses) {
   if (!Array.isArray(courses) || !courses.length) throw new Error('uv_notifications_courses_invalid');
   const map = new Map();
+  const ambiguousCodes = new Set();
   for (const course of courses) {
     const code = clean(course?.code);
     if (!/^\d{5}$/.test(code)) continue;
     const academicYear = clean(course?.name).match(/^(\d{4}-\d{2})\b/)?.[1] ?? null;
+    if (map.has(code) && map.get(code) !== academicYear) ambiguousCodes.add(code);
     map.set(code, academicYear);
   }
+  // Conflicting course evidence cannot establish current-year membership.
+  for (const code of ambiguousCodes) map.delete(code);
   return map;
 }
 

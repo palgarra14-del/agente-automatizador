@@ -47,6 +47,34 @@ test('notification parser ignores unmatched deadlines and old-year notifications
   assert.deepEqual(parsed, []);
 });
 
+test('conflicting course years fail closed for coded and matched deadlines in either order', () => {
+  const page = { text: [
+    'Notificaciones',
+    '2026-27 Análisis Matemático II (34156) contenido nuevo',
+    '2025-26 Análisis Matemático II (34156) contenido nuevo',
+    'Análisis Matemático II (34156) contenido nuevo',
+    'Vence el 28 de septiembre de 2026: Ejercicios Tema 1',
+    '2026-27 Estructuras de datos y algoritmos (34670) contenido nuevo'
+  ].join('\n') };
+  for (const name of ['2025-26 Análisis Matemático II', 'Análisis Matemático II']) {
+    const conflicting = { code: '34156', name };
+    for (const records of [[...courses, conflicting], [conflicting, ...courses]]) {
+      const snapshot = structuredClone(records);
+      const parsed = parseUvNotifications(page, records, {
+        today: '2026-09-27',
+        assignments: [{ subjectId: '34156', title: 'Ejercicios Tema 1' }]
+      });
+      assert.deepEqual(parsed.map((item) => item.subjectId), ['34670']);
+      assert.deepEqual(records, snapshot);
+    }
+  }
+  const parsed = parseUvNotifications(page, [...courses, { ...courses[0] }], {
+    today: '2026-09-27',
+    assignments: [{ subjectId: '34156', title: 'Ejercicios Tema 1' }]
+  });
+  assert.deepEqual(parsed.map((item) => item.subjectId), ['34156', '34156', '34156', '34670']);
+});
+
 test('a matching current assignment gives a code-less deadline its real subject', () => {
   const page = { text: [
     'Notificaciones',
