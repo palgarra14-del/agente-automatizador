@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { heartbeatObservationOrder, heartbeatRunLane, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 
@@ -19,6 +19,7 @@ function boundedDuration(name, fallback, min, max) {
 const timeoutMs = boundedDuration('AGENT_HEARTBEAT_PEEK_TIMEOUT_MS', 20_000, 1_000, 60_000);
 const observationBudgetMs = boundedDuration('AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS', 35_000, 5_000, 120_000);
 const dryRun = ['1','true','yes','on'].includes(String(process.env.AGENT_HEARTBEAT_DRY_RUN || '').toLowerCase());
+const executionMode = heartbeatExecutionMode(process.env.AGENT_HEARTBEAT_EXECUTION_MODE || 'cloud');
 
 async function run(command,args,options={}) {
   try {
@@ -64,6 +65,7 @@ async function openOperatorIssues() {
 }
 
 async function rateLimitCooldownLanes(lanes) {
+  if (executionMode === 'local-primary') return new Set();
   const states = await Promise.all(lanes.map(async (lane) => {
     const result = await run('systemctl', ['--user', 'is-active', `agent-cloud-retry-${lane}.timer`], { timeout: 3_000 });
     return result.ok && ['active', 'activating'].includes(result.stdout) ? lane : null;
@@ -71,12 +73,21 @@ async function rateLimitCooldownLanes(lanes) {
   return new Set(states.filter(Boolean));
 }
 
+async function localActiveLanes(lanes) {
+  if (executionMode !== 'local-primary') return new Set();
+  const states = await Promise.all(lanes.map(async (lane) => {
+    const result = await run('systemctl', ['--user', 'is-active', `${localCloudUnitName(lane)}.service`], { timeout: 3_000 });
+    return result.ok && ['active', 'activating'].includes(result.stdout) ? lane : null;
+  }));
+  return new Set(states.filter(Boolean));
+}
+
 async function activeLanes(lanes) {
+  const active = await localActiveLanes(lanes);
   const runs = await run('gh',['run','list','--repo',repo,'--workflow',workflow,'--limit','20','--json','databaseId,status,displayTitle,event'],{timeout:15_000});
-  if (!runs.ok) return new Set();
+  if (!runs.ok) return active;
   let parsed;
-  try { parsed=JSON.parse(runs.stdout); } catch { return new Set(); }
-  const active = new Set();
+  try { parsed=JSON.parse(runs.stdout); } catch { return active; }
   for (const item of parsed.filter((run) => run.status !== 'completed')) {
     const dispatchedLane=heartbeatRunLane(item,lanes);
     if (dispatchedLane) {
@@ -158,15 +169,46 @@ const yieldRequests = dryRun
   ? plan.yieldCandidates.map((item) => item.lane)
   : await syncSchedulerYieldRequests(lanes, plan.yieldCandidates);
 
+async function dispatchLane(item) {
+  if (executionMode === 'local-primary') {
+    const unit = localCloudUnitName(item.lane);
+    const result = await run('systemd-run', [
+      '--user',
+      `--unit=${unit}`,
+      '--collect',
+      '--property=RuntimeMaxSec=25min',
+      '--property=TimeoutStopSec=30s',
+      `--property=WorkingDirectory=${process.cwd()}`,
+      process.execPath,
+      'scripts/local-cloud-drain.js',
+      '--lane',
+      item.lane
+    ], { timeout: 10_000 });
+    if (result.ok) return {...item,ok:true,dryRun:false,mode:'local-primary',error:null};
+
+    const fallback = await run('gh',['workflow','run',workflow,'--repo',repo,'-f',`lane=${item.lane}`],{timeout:30_000});
+    return {
+      ...item,
+      ok:fallback.ok,
+      dryRun:false,
+      mode:'cloud-fallback',
+      localError:result.stderr || result.stdout || 'local_dispatch_failed',
+      error:fallback.ok ? null : (fallback.stderr || fallback.stdout)
+    };
+  }
+
+  const result=await run('gh',['workflow','run',workflow,'--repo',repo,'-f',`lane=${item.lane}`],{timeout:30_000});
+  return {...item,ok:result.ok,dryRun:false,mode:'cloud',error:result.ok?null:(result.stderr||result.stdout)};
+}
+
 const dispatched=[];
 for (const item of plan.dispatch) {
   if (dryRun) {
-    dispatched.push({...item,ok:true,dryRun:true,error:null});
+    dispatched.push({...item,ok:true,dryRun:true,mode:executionMode,error:null});
     continue;
   }
-  const result=await run('gh',['workflow','run',workflow,'--repo',repo,'-f',`lane=${item.lane}`],{timeout:30_000});
-  dispatched.push({...item,ok:result.ok,dryRun:false,error:result.ok?null:(result.stderr||result.stdout)});
+  dispatched.push(await dispatchLane(item));
 }
 
-console.log(JSON.stringify({...plan,yieldRequests,dryRun,dispatched,operatorControl,rateLimitCooldown:[...cooldown]},null,2));
+console.log(JSON.stringify({...plan,yieldRequests,dryRun,executionMode,dispatched,operatorControl,rateLimitCooldown:[...cooldown]},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;

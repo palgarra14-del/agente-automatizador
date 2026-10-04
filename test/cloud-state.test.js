@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { URL } from 'node:url';
-import { GitHubStateStore, compactCloudStateForWrite, validateCloudState } from '../src/cloud-state.js';
+import { GitHubStateStore, compactCloudStateForWrite, localCloudOwnerId, localCloudOwnerIsAbandoned, validateCloudState } from '../src/cloud-state.js';
 
 const LEDGER_ROOT_SHA = 'b4f3b2e76e24be58d241227850a5d48ea19c2ea8';
 
@@ -2463,4 +2463,32 @@ test('global lease acquisition retries transient generation-election races', asy
   assert.deepEqual(sleeps, [250]);
   assert.equal(lease.ownerId, 'github:lease-retry:1');
   assert.equal((await store.load()).cloudExecutionLease?.leaseId, lease.leaseId);
+});
+
+
+test('local cloud owner IDs bind leases to pid and Linux process start identity', () => {
+  const owner = localCloudOwnerId({
+    pid: 4242,
+    platform: 'linux',
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '987654'].join(' ')}`
+  });
+  assert.equal(owner, 'local:4242:987654');
+});
+
+test('local cloud owner abandonment detects dead and PID-reused processes immediately', () => {
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => { const error = new Error('missing'); error.code = 'ESRCH'; throw error; },
+    readFileSyncImpl: () => { throw new Error('should not read'); }
+  }), true);
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => {},
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '200'].join(' ')}`
+  }), true);
+  assert.equal(localCloudOwnerIsAbandoned('local:4242:100', {
+    platform: 'linux',
+    kill: () => {},
+    readFileSyncImpl: () => `4242 (node) ${['S', ...Array(18).fill('0'), '100'].join(' ')}`
+  }), false);
 });
