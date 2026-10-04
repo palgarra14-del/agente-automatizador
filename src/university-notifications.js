@@ -63,9 +63,12 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     // Conflicting years cannot establish current-course membership.
     if (years.length > 1) continue;
     const year = years[0] ?? null;
-    const deadlines = [...title.matchAll(/(\d{1,2}) de ([a-záéíóú]+) de (20\d{2})/gi)];
+    const deadlines = [...title.matchAll(/(\d{1,2})\s+(?:de\s+|d['’])([a-záéíóúàèòç]+)\s+de\s+(20\d{2})/gi)];
     const dueDates = deadlines.map((deadline) => {
-      const months = { enero:0,febrero:1,marzo:2,abril:3,mayo:4,junio:5,julio:6,agosto:7,septiembre:8,octubre:9,noviembre:10,diciembre:11 };
+      const months = {
+        enero:0,febrero:1,marzo:2,abril:3,mayo:4,junio:5,julio:6,agosto:7,septiembre:8,octubre:9,noviembre:10,diciembre:11,
+        gener:0,febrer:1,'març':2,maig:4,juny:5,juliol:6,agost:7,setembre:8,novembre:10,desembre:11
+      };
       const month = months[deadline[2].toLowerCase()];
       if (!Number.isInteger(month)) return null;
       const day = Number(deadline[1]);
