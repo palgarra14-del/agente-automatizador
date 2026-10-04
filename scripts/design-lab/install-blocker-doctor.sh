@@ -7,6 +7,7 @@ UNIT_DIR="/home/pablo/.config/systemd/user"
 DOCTOR_SERVICE="$UNIT_DIR/engineering-orchestrator-design-lab-doctor.service"
 LAB_DROPIN_DIR="$UNIT_DIR/engineering-orchestrator-design-lab.service.d"
 DOCTOR_DROPIN="$LAB_DROPIN_DIR/doctor.conf"
+RECOVERY_DROPIN="$LAB_DROPIN_DIR/recovery.conf"
 
 test -x "$REPO/scripts/design-lab/blocker-doctor.py"
 mkdir -p "$UNIT_DIR" "$LAB_DROPIN_DIR" "$STATE"
@@ -34,6 +35,19 @@ cat > "$DOCTOR_DROPIN" <<EOF
 OnFailure=engineering-orchestrator-design-lab-doctor.service
 EOF
 
+# The timer fires every ~5 minutes. Keep the service start-limit window aligned
+# with that cadence so successful oneshot runs cannot exhaust a 30-minute burst.
+cat > "$RECOVERY_DROPIN" <<EOF
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+[Service]
+Restart=on-failure
+RestartSec=90s
+EOF
+
 systemctl --user daemon-reload
 systemctl --user reset-failed engineering-orchestrator-design-lab-doctor.service >/dev/null 2>&1 || true
+systemctl --user reset-failed engineering-orchestrator-design-lab.service >/dev/null 2>&1 || true
 echo "blocker_doctor_installed=true"
