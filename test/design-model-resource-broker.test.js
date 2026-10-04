@@ -96,6 +96,28 @@ print(json.dumps({"slots":slots,"thirdBlocked":third_blocked,"recycled":recycled
   assert.ok([0, 1].includes(result.recycled));
 });
 
+test('provider capacity timeout skips sibling candidates without a second full wait', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile,time
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.STATE=Path(tempfile.mkdtemp())
+m.RUNTIME_HEALTH=m.STATE/"model-runtime-health.json"
+m.CANDIDATE_FAILURE_COOLDOWN_SECONDS=7
+m.PROVIDER_FAILURE_COOLDOWN_SECONDS=300
+scope=m._remember_unavailability("ollama-qwen-7b",m.ProviderUnavailable("provider_capacity_timeout:ollama"))
+blocked=m._runtime_cooldown("ollama-qwen-3b")
+remaining=(blocked[1]["until"]-time.monotonic()) if blocked else 0
+print(json.dumps({"scope":scope,"blockedScope":blocked[0] if blocked else None,"remaining":remaining}))
+`);
+  assert.equal(result.scope, 'provider');
+  assert.equal(result.blockedScope, 'provider');
+  assert.ok(result.remaining > 0 && result.remaining <= 8);
+});
+
 test('candidate result reports resource class and acquired provider slot', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile
