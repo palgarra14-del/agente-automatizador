@@ -2757,7 +2757,7 @@ export class WorkflowEngine {
         saved.result = { error: step.error, stepId: step.id };
       });
     }
-    plan = await this.update(id, (saved) => {
+    await this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === next.id);
       step.status = WorkflowStepStatus.RUNNING;
       step.attempts += 1;
