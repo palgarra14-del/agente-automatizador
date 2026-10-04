@@ -55,6 +55,11 @@ PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
 CANDIDATE_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS", "90"))
 )
+
+try:
+    OLLAMA_7B_MIN_AVAILABLE_MB = max(0, int(os.environ.get("OLLAMA_7B_MIN_AVAILABLE_MB", "7000")))
+except (TypeError, ValueError):
+    OLLAMA_7B_MIN_AVAILABLE_MB = 7000
 PROVIDER_SLOT_WAIT_SECONDS = max(
     0.1, float(os.environ.get("MODEL_PROVIDER_SLOT_WAIT_SECONDS", "45"))
 )
@@ -942,6 +947,25 @@ def candidate_family(candidate):
     return MODEL_FAMILY.get(candidate, CANDIDATES[candidate]["provider"])
 
 
+def available_memory_mb():
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def candidate_resource_safe(candidate):
+    if candidate != "ollama-qwen-7b":
+        return True
+    available = available_memory_mb()
+    # Fail closed when memory cannot be measured: the 7B model is only an
+    # optional local fallback and must never risk the runners/control plane.
+    return available is not None and available >= OLLAMA_7B_MIN_AVAILABLE_MB
+
+
 def candidate_available(
     candidate,
     disabled_providers=None,
@@ -957,6 +981,7 @@ def candidate_available(
         and candidate_family(candidate) not in excluded_family_set
         and cost_allowed(spec)
         and spec["provider"] not in disabled
+        and candidate_resource_safe(candidate)
         and _runtime_cooldown(candidate) is None
         and provider_available(spec["provider"], spec.get("model"))
     )
