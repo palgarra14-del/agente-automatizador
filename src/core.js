@@ -5972,23 +5972,28 @@ function validateSkillOutput(contract, output, skillId = null, context = {}) {
   return normalized;
 }
 
-const deterministicInspectionMaxFiles = 8;
+const deterministicInspectionMaxFiles = 30;
 
 function deterministicInspectionBinding({ skill, workflowProfile, scope, repositoryContext } = {}) {
   if (skill !== 'code.inspect' || workflowProfile !== 'app-improvement' || !repositoryContext) return null;
   const normalizedScope = normalizeRunScope(scope ?? {});
-  if (!normalizedScope.allowedPaths.length || normalizedScope.allowedPaths.length > deterministicInspectionMaxFiles) return null;
-  const contextPaths = repositoryContextPathSet({ repositoryContext });
-  const allowedPaths = [...normalizedScope.allowedPaths].sort();
-  if (contextPaths.size !== allowedPaths.length || allowedPaths.some((path) => !contextPaths.has(path))) return null;
+  if (!normalizedScope.allowedPaths.length) return null;
+  const allowedRoots = [...normalizedScope.allowedPaths].sort();
+  const contextPaths = [...repositoryContextPathSet({ repositoryContext })].sort();
+  if (!contextPaths.length || contextPaths.length > deterministicInspectionMaxFiles) return null;
+  if (contextPaths.some((path) =>
+    !pathMatchesAnyRoot(path, allowedRoots) ||
+    pathMatchesAnyRoot(path, normalizedScope.forbiddenPaths)
+  )) return null;
   const fingerprint = evidenceFingerprint({
     version: 1,
-    mode: 'deterministic-exact-file-inspection',
+    mode: 'deterministic-bounded-scope-inspection',
     workflowProfile,
-    allowedPaths,
+    allowedRoots,
+    inspectedPaths: contextPaths,
     repositoryContextFingerprint: repositoryContext.fingerprint
   });
-  return { version: 1, fingerprint, allowedPaths };
+  return { version: 1, fingerprint, allowedPaths: contextPaths };
 }
 
 function deterministicInspectionResult(request) {
