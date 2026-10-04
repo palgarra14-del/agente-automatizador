@@ -1743,7 +1743,11 @@ export class GitHubStateStore extends JsonStore {
       }
       const nonce = randomUUID().replaceAll('-', '');
       const recoveryClaimTag = this.recoveryGenerationClaimTag(generation, nonce);
-      return this.createGenerationClaimStrict(recoveryClaimTag, candidateSha);
+      try {
+        return await this.createGenerationClaimStrict(recoveryClaimTag, candidateSha);
+      } catch (recoveryError) {
+        throw new Error('cloud_state_generation_recovery_claim_failed', { cause: recoveryError });
+      }
     }
   }
 

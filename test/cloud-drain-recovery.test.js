@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  cloudControlErrorChain,
   cloudRateLimitDeferral,
   recoverableCloudControlError,
   runCloudDrainWithRecovery
@@ -24,6 +25,19 @@ test('recoverable control error classifier is narrow and excludes safety failure
   assert.equal(recoverableCloudControlError(new Error('cloud_global_lease_busy')), true);
   assert.equal(recoverableCloudControlError(new Error('cloud_state_history_fork')), false);
   assert.equal(recoverableCloudControlError(new Error('cloud_state_snapshot_untrusted')), false);
+});
+
+test('cloud recovery diagnostics preserve a bounded nested cause chain', () => {
+  const root = new Error('cloud_state_conflict');
+  const claim = new Error('cloud_state_generation_claim_failed', { cause: root });
+  const recovery = new Error('cloud_state_generation_recovery_claim_failed', { cause: claim });
+  const election = new Error('cloud_state_generation_election_failed', { cause: recovery });
+  assert.deepEqual(cloudControlErrorChain(election), [
+    'cloud_state_generation_election_failed',
+    'cloud_state_generation_recovery_claim_failed',
+    'cloud_state_generation_claim_failed',
+    'cloud_state_conflict'
+  ]);
 });
 
 test('rate-limit deferral is explicit and does not mask permission failures', () => {
@@ -80,8 +94,10 @@ test('drain recovers transient state publication failure and resumes work in-pro
   assert.deepEqual(output.recovery, [{
     attempt: 1,
     error: 'cloud_state_partial_publication',
+    causes: ['cloud_state_partial_publication'],
     repaired: true,
     repairError: null,
+    repairCauses: [],
     generation: 14,
     authorityGeneration: 14
   }]);
