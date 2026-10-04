@@ -80,7 +80,10 @@ export function parseUvNotifications(page, courses, { today, assignments = [] } 
     const matchedAssignment = !code && /^(Vence|Venciment)\b/i.test(title)
       ? matchingAssignment(title, assignments)
       : null;
-    const belongs = codedBelongs || Boolean(matchedAssignment && subjects.has(clean(matchedAssignment.subjectId)));
+    const matchedSubjectId = clean(matchedAssignment?.subjectId);
+    // A title match cannot override an explicit conflicting or unverified academic year.
+    const belongs = codedBelongs || Boolean(matchedAssignment && subjects.has(matchedSubjectId) &&
+      (!year || year === subjects.get(matchedSubjectId)));
     if (!belongs) continue;
     out.push({
       id: notificationId(title),

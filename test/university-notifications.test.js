@@ -90,6 +90,24 @@ test('a matching current assignment gives a code-less deadline its real subject'
   assert.equal(parsed[0].expired, false);
 });
 
+test('code-less deadlines reject explicit years that do not match their assigned course', () => {
+  const titles = [
+    'Vence el 28 de septiembre de 2026: Ejercicios Tema 1 2025-26',
+    'Vence el 28 de septiembre de 2026: Ejercicios Tema 1 2026-27',
+    'Vence el 28 de septiembre de 2026: Ejercicios Tema 1'
+  ];
+  for (const name of [courses[1].name, 'Estructuras de datos y algoritmos']) {
+    const parsed = parseUvNotifications({ text: ['Notificaciones', ...titles].join('\n') },
+      [{ ...courses[1], name }], {
+        today: '2026-09-27',
+        assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+      });
+    assert.deepEqual(parsed.map((item) => item.title),
+      name === courses[1].name ? titles.slice(1) : titles.slice(2));
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed);
+  }
+});
+
 test('notifications with conflicting course codes fail closed regardless of code order', () => {
   const validTitle = '2026-27 Análisis Matemático II (34156) contenido nuevo';
   const repeatedTitle = '2026-27 Análisis Matemático II (34156) aviso para (34156)';
