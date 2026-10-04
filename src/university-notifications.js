@@ -44,6 +44,11 @@ function notificationId(title) {
 export function parseUvNotifications(page, courses, { today, assignments = [] } = {}) {
   if (!page || typeof page.text !== 'string') throw new Error('uv_notifications_page_invalid');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(today ?? ''))) throw new Error('uv_notifications_today_invalid');
+  const referenceDay = new Date(today + 'T12:00:00Z');
+  // Reject impossible days before using the reference date to suppress expired alerts.
+  if (!Number.isFinite(referenceDay.getTime()) || referenceDay.toISOString().slice(0, 10) !== today) {
+    throw new Error('uv_notifications_today_invalid');
+  }
   if (!Array.isArray(assignments)) throw new Error('uv_notifications_assignments_invalid');
   const subjects = currentSubjects(courses);
   const lines = page.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);

@@ -11,6 +11,24 @@ const courses = [
   { code: '34670', name: '2026-27 Estructuras de datos y algoritmos Gr.A-T (34670)' }
 ];
 
+test('notification expiry rejects impossible reference days and accepts real calendar boundaries', () => {
+  const page = { text: 'Notificaciones\nVence el 1 de octubre de 2026: Entrega (34156)' };
+  for (const today of ['2026-02-29', '2026-02-30', '2026-04-31', '2026-09-31', '2026-13-01', '2026-10-00']) {
+    assert.throws(() => parseUvNotifications(page, courses, { today }),
+      /uv_notifications_today_invalid/, today);
+  }
+  for (const [today, expired] of [
+    ['2026-09-30', false],
+    ['2026-10-01', false],
+    ['2026-10-02', true],
+    ['2028-02-29', true]
+  ]) {
+    const parsed = parseUvNotifications(page, courses, { today });
+    assert.equal(parsed.length, 1, today);
+    assert.equal(parsed[0].expired, expired, today);
+  }
+});
+
 test('notification parser keeps current-course items and marks expired deadlines', () => {
   const page = { text: [
     'Notificaciones',
