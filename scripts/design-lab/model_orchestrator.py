@@ -895,10 +895,14 @@ def _remember_unavailability(candidate, exc):
         "service_unavailable", "service unavailable", "connection refused",
         "credits exhausted", "credit exhausted",
     )
-    provider_wide = any(marker in lowered for marker in provider_markers)
+    provider_capacity = "provider_capacity_timeout:" in lowered
+    provider_wide = provider_capacity or any(marker in lowered for marker in provider_markers)
     ttl = (
-        PROVIDER_FAILURE_COOLDOWN_SECONDS
-        if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        if provider_capacity
+        else PROVIDER_FAILURE_COOLDOWN_SECONDS
+        if provider_wide
+        else CANDIDATE_FAILURE_COOLDOWN_SECONDS
     )
     if ttl <= 0:
         return None
