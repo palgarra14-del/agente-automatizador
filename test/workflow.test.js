@@ -2612,6 +2612,42 @@ test('reviewed publication requires a ready preview when deployment acceptance r
   assert.equal(publication.evidence.preview.state, 'ERROR');
 });
 
+test('reviewed publication blocks without retrying when Vercel preview quota is exhausted', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-preview-quota-'));
+  const configured = managedProject('publication-preview-quota', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] },
+    acceptance: { require: ['test', 'ci', 'deployment'] },
+    deployment: { provider: 'vercel', projectId: 'prj_fixture', teamId: 'team_fixture', requirePreviewReady: true }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const changeSet = changedChangeSet(['src/feature.js']);
+  const baseHead = 'a'.repeat(40);
+  const commitHead = 'b'.repeat(40);
+  const remote = `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`;
+  let branch = configured.defaultBranch;
+  let head = baseHead;
+  const localGit = stableLocalGit({
+    async inspect(project) { return { repository: project.workspace, remote, currentBranch: branch, initialHead: head, status: '' }; },
+    async prepareWorkingBranch(_project, runId) { branch = `agent/${runId}`; return { remote, workingBranch: branch, initialHead: baseHead, remoteBaseHead: baseHead }; },
+    async inspectChangeSet() { return changeSet; }
+  });
+  const publicationBridge = new FakeWorkflowPublicationBridge({
+    baseHead, commitHead, changeSet, onCommit: (nextHead) => { head = nextHead; },
+    preview: { provider: 'vercel', state: 'QUOTA', ok: false, reason: 'vercel_preview_quota_exhausted', retryAfterMs: 86_400_000 }
+  });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit, publicationBridge });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Respect preview quota' });
+  await instance.workspaceProject(created.id, configured);
+  await prepareReviewedPublication(instance, created.id, changeSet);
+  const blocked = await instance.run(created.id);
+  const publication = blocked.steps.find((step) => step.id === 'publication');
+  assert.equal(blocked.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(publication.error, 'workflow_publication_preview_quota_exhausted');
+  assert.equal(publication.evidence.phase, 'preview-quota');
+  assert.equal(publication.evidence.preview.state, 'QUOTA');
+  assert.equal(publication.evidence.preview.retryAfterMs, 86_400_000);
+});
+
 test('CI observation timeout resumes from the persisted PR without repeating commit, push, or PR creation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-publication-ci-resume-'));
   const configured = managedProject('publication-ci-resume', root, {
