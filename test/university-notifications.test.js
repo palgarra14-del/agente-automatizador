@@ -298,6 +298,30 @@ test('Valencian deadlines preserve expiry and reject invalid or conflicting date
   }
 });
 
+test('deadlines using del retain expiry and fail closed for invalid or conflicting dates', () => {
+  const dates = [
+    '23 de septiembre del 2026',
+    '28 de septiembre del 2026',
+    '31 de septiembre del 2026',
+    '28 de septiembre del 2026 (29 de septiembre de 2026)',
+    "23 d’octubre del 2026"
+  ];
+  for (const coded of [false, true]) {
+    const parsed = parseUvNotifications({ text: ['Notificaciones', ...dates.map((date) =>
+      `Vence el ${date}: Ejercicios Tema 1${coded ? ' (34670)' : ''}`
+    )].join('\n') }, courses, {
+      today: '2026-09-27',
+      assignments: [{ subjectId: '34670', title: 'Ejercicios Tema 1' }]
+    });
+    assert.deepEqual(parsed.map(({ dueDate, expired }) => ({ dueDate, expired })), [
+      { dueDate: '2026-09-23', expired: true },
+      { dueDate: '2026-09-28', expired: false },
+      { dueDate: '2026-10-23', expired: false }
+    ]);
+    assert.deepEqual(diffUvNotifications({ notifications: [] }, parsed), parsed.slice(1));
+  }
+});
+
 test('conflicting notification dates fail closed regardless of order', () => {
   const validTitle = 'Vence el 28 de septiembre de 2026: Práctica de árboles';
   const repeatedTitle = 'Vence el 28 de septiembre de 2026: Práctica de árboles (28 de septiembre de 2026)';
