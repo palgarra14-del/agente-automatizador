@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   AUTONOMOUS_MAINTENANCE_GOAL,
   AUTONOMOUS_MAINTENANCE_SCOPE,
+  AutonomousProjectImprovement,
   AutonomousSelfImprovement,
   autonomousSensitiveImplementationAllowed
 } from '../src/self-improvement.js';
