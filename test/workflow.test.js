@@ -4,7 +4,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
 import { browserQaFingerprint } from '../src/browser-qa.js';
 
 function project() {
@@ -256,6 +256,71 @@ test('business brief normalization is bounded, deterministic, and safe for websi
     locations: ['Valencia'],
     services: ['Corte']
   }), /commercialPackage/);
+});
+
+test('website workflow accepts the Callflow demo handoff contract directly', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({
+    profile: 'website-build',
+    project: configured,
+    goal: 'Crear demo comercial desde Callflow',
+    input: {
+      callflowBrief: {
+        version: 'website-pilot-brief-v1',
+        source: 'callflow',
+        lead: {
+          callflowId: 'cf-1',
+          leadFinderId: 'lf-1',
+          businessName: 'Salón Luz',
+          city: 'Valencia',
+          niche: 'Peluquería',
+          phone: '600111222',
+          existingWebsite: '',
+          websiteDiscoveryStatus: 'third_party_only'
+        },
+        commercialEvidence: {
+          salesFit: 86,
+          salesSegment: 'marketplace_owned_gap',
+          opportunityScore: 80,
+          leadScore: 79,
+          websiteQuality: 'no_website',
+          reasonToCall: 'Ya usa reservas online pero no tiene canal web propio.',
+          primaryPitchReason: 'Solo presencia en plataforma de terceros.'
+        },
+        demo: {
+          type: 'conceptual',
+          defaultScope: 'one_page',
+          objective: 'Complementar la reserva existente con un canal propio.',
+          primaryCta: 'Reservar en Booksy',
+          existingBookingPlatform: 'Booksy',
+          preserveExistingBooking: true,
+          existingWebsiteReference: ''
+        },
+        verifiedBusinessFacts: {
+          bookingUrl: 'https://booksy.com/es-es/12345'
+        },
+        missingBusinessFacts: ['servicios exactos', 'precios'],
+        constraints: ['No inventar precios, reseñas, equipo ni testimonios.']
+      }
+    }
+  });
+
+  assert.equal(plan.input.businessBrief.version, 2);
+  assert.equal(plan.input.businessBrief.commercialPackage, 'demo');
+  assert.equal(plan.input.businessBrief.businessName, 'Salón Luz');
+  assert.deepEqual(plan.input.businessBrief.services, []);
+  assert.deepEqual(plan.input.businessBrief.locations, ['Valencia']);
+  assert.equal(plan.input.businessBrief.contact.bookingUrl, 'https://booksy.com/es-es/12345');
+  assert.equal(plan.input.businessBrief.website.primaryGoal, 'reserva');
+  const blueprint = websiteBlueprintForBrief(plan.input.businessBrief);
+  assert.deepEqual(blueprint.ctas[0], {
+    id: 'primary',
+    kind: 'booking',
+    destination: 'https://booksy.com/es-es/12345',
+    source: 'businessBrief.contact.bookingUrl',
+    goalSource: 'businessBrief.website.primaryGoal'
+  });
+  assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
 });
 
 test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {

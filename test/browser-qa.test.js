@@ -52,6 +52,7 @@ function hrefFor(target, request) {
   if (target.semantics === 'anchor') return target.destination;
   if (target.destination === 'phone') return 'tel:+34123456789';
   if (target.destination === 'email') return 'mailto:demo@example.com';
+  if (target.destination === 'booking') return target.expectedHref;
   return 'https://wa.me/34123456789';
 }
 function passingSnapshot(request, overrides = {}) {
@@ -390,6 +391,26 @@ test('runner verification is bounded and receives cancellation', async () => {
   assert.throws(() => new BrowserQaCoordinator({ timeoutMs: 0 }), /runner_timeout_invalid/);
   assert.throws(() => new BrowserQaCoordinator({ timeoutMs: 120001 }), /runner_timeout_invalid/);
 });
+test('verified booking CTA is exact, syntax-only, and never navigated', () => {
+  const siteBlueprint = blueprint({ contactPage: false });
+  siteBlueprint.ctas = [{
+    id: 'primary',
+    kind: 'booking',
+    destination: 'https://booksy.com/es-es/12345?ref=demo',
+    source: 'businessBrief.contact.bookingUrl'
+  }];
+  const request = requestFor(siteBlueprint);
+  const plan = browserQaNavigationPlan(request);
+  assert.deepEqual(plan.externalTargets, [{ id: 'cta:primary', syntaxOnly: true }]);
+  assert.equal(classifyBrowserQaSnapshot(request, passingSnapshot(request)).status, 'pass');
+
+  const wrong = passingSnapshot(request);
+  wrong.pages[0].targets.find((target) => target.id === 'cta:primary').href = 'https://booksy.com/es-es/99999?ref=demo';
+  assert.ok(classifyBrowserQaSnapshot(request, wrong).deterministicDefects.some((item) =>
+    item.kind === 'broken_required_target' && item.subject === 'cta:primary'
+  ));
+});
+
 test('external CTA is syntax-checked but excluded from navigation and execution', async () => {
   const siteBlueprint = blueprint({ contactPage: false, external: 'whatsapp' });
   const request = requestFor(siteBlueprint);
