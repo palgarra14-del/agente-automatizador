@@ -1014,6 +1014,11 @@ test('issue queue config normalizes explicit cloud lanes and queue routing is mu
   assert.equal(localFixture.workflowEngine.createCalls.length, 0);
   assert.deepEqual((await localFixture.store.load()).requests ?? {}, {});
 
+  localFixture.channel.issues[0].body = `${ISSUE_REQUEST_MARKER}\n{not-json}`;
+  assert.equal(await localQueue.tick(), null);
+  assert.equal(localFixture.workflowEngine.createCalls.length, 0);
+  assert.deepEqual((await localFixture.store.load()).requests ?? {}, {});
+
   const cloudFixture = await queueFixture();
   const cloudQueue = new SupervisedIssueQueue({
     store: cloudFixture.store,

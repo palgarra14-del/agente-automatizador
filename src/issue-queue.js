@@ -994,7 +994,10 @@ export class SupervisedIssueQueue {
   }
 
   ownsProject(projectId) {
-    if (typeof projectId !== 'string' || !projectId) return this.includedProjectIds === null;
+    if (typeof projectId !== 'string' || !projectId) {
+      if (this.includedProjectIds !== null) return false;
+      return [...this.projects.keys()].some((id) => !this.excludedProjectIds.has(id));
+    }
     if (this.excludedProjectIds.has(projectId)) return false;
     return this.includedProjectIds === null || this.includedProjectIds.has(projectId);
   }
@@ -2272,7 +2275,7 @@ export class SupervisedIssueQueue {
       try {
         routingRequest = parseIssueRequestBody(issue.body).request;
       } catch {
-        if (this.includedProjectIds !== null) continue;
+        if (!this.ownsProject(null)) continue;
         if (this.authorized(issue.user?.login)) return true;
         continue;
       }
@@ -2374,7 +2377,7 @@ export class SupervisedIssueQueue {
       let routingRequest = null;
       try { routingRequest = parseIssueRequestBody(issue.body).request; }
       catch {
-        if (this.includedProjectIds !== null) continue;
+        if (!this.ownsProject(null)) continue;
       }
       if (routingRequest && !this.ownsProject(routingRequest.projectId)) continue;
       const existing = await this.getRecord(issueKey);
