@@ -231,6 +231,10 @@ export function autonomousSensitiveImplementationAllowed(step) {
   return sensitiveImplementationAllowedForScope(step, AUTONOMOUS_MAINTENANCE_SCOPE);
 }
 
+function historicalWorkflowFingerprintMismatch(error) {
+  return /(?:capability registry|specialist registry|project skill policy) fingerprint does not match/i.test(String(error?.message ?? error ?? ''));
+}
+
 function billingUnavailableError(error) {
   return /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(error ?? ''));
 }
@@ -553,10 +557,24 @@ export class AutonomousProjectImprovement {
         continue;
       }
 
-      plan = await this.workflowEngine.run(workflowId, {
-        refreshPristineDeadline: pristineWorkflowForDeadlineRefresh(plan),
-        deadlineCapAt: tickDeadlineAt
-      });
+      try {
+        plan = await this.workflowEngine.run(workflowId, {
+          refreshPristineDeadline: pristineWorkflowForDeadlineRefresh(plan),
+          deadlineCapAt: tickDeadlineAt
+        });
+      } catch (error) {
+        if (!historicalWorkflowFingerprintMismatch(error) || typeof this.workflowEngine.cancel !== 'function') throw error;
+        const cancelled = await this.workflowEngine.cancel(workflowId, {
+          reason: 'autonomous_workflow_registry_changed',
+          deadlineCapAt: tickDeadlineAt
+        });
+        await this.settle(cancelled, { baseRevision });
+        return {
+          ...resultSummary(cancelled),
+          status: cancelled.status,
+          historicalRecovery: cancelled.result?.historicalRecovery === true
+        };
+      }
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
         return { ...resultSummary(plan), status: plan.status };
