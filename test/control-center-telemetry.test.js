@@ -86,15 +86,28 @@ test('control health scores MSI heavy capacity instead of being masked by an aux
   assert.deepEqual(health.reasons,['msi_runners_offline']);
 });
 
-test('control health reports partial MSI degradation and full heavy-capacity use', () => {
+test('control health ignores stale registered runners but reports exhausted live heavy capacity', () => {
   const health = deriveControlHealth({
     service:{active:true},
     queue:{error:null},
-    runnerTelemetry:{online:3,busy:2,free:1,msiTotal:3,msiOnline:2,msiBusy:2,msiFree:0,auxiliaryOnline:1},
+    runnerTelemetry:{online:3,busy:2,free:1,msiTotal:7,msiOnline:2,msiBusy:2,msiFree:0,auxiliaryOnline:1},
     rateLimit:{core:{remainingPercent:4}},
     laneTelemetry:{business:{healthy:3}}
   });
-  assert.equal(health.score, 67);
-  assert.equal(health.state, 'degraded');
-  assert.deepEqual(health.reasons,['msi_runner_capacity_degraded','msi_runner_capacity_full','github_core_critical']);
+  assert.equal(health.score, 75);
+  assert.equal(health.state, 'good');
+  assert.deepEqual(health.reasons,['msi_runner_capacity_full','github_core_critical']);
+});
+
+test('control health stays strong with one healthy native runner despite stale offline registrations', () => {
+  const health = deriveControlHealth({
+    service:{active:true},
+    queue:{error:null},
+    runnerTelemetry:{online:1,busy:0,free:1,msiTotal:6,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
+    rateLimit:{core:{remainingPercent:80}},
+    laneTelemetry:{business:{healthy:3}}
+  });
+  assert.equal(health.score, 100);
+  assert.equal(health.state, 'strong');
+  assert.deepEqual(health.reasons,[]);
 });

@@ -161,12 +161,13 @@ export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit,
   const msiOnline = Number(runnerTelemetry?.msiOnline);
   const msiFree = Number(runnerTelemetry?.msiFree);
   if (Number.isFinite(msiTotal) && msiTotal > 0) {
+    // GitHub keeps de-registered/offline self-hosted runner records around until
+    // they are explicitly removed. Treat registered inventory as telemetry, not
+    // desired capacity: one healthy local runner is enough unless all currently
+    // online local capacity is busy.
     if (msiOnline === 0) {
       score -= 40;
       reasons.push('msi_runners_offline');
-    } else if (msiOnline < msiTotal) {
-      score -= Math.min(24, (msiTotal - msiOnline) * 8);
-      reasons.push('msi_runner_capacity_degraded');
     }
     if (msiOnline > 0 && msiFree === 0) {
       score -= 5;
