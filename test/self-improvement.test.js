@@ -286,6 +286,105 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
   assert.equal(blockedStore.state.autopilotSelfImprovement.activeWorkflowId, null);
 });
 
+test('autopilot retires a pristine historical workflow after a registry fingerprint change', async () => {
+  const now = Date.parse('2026-10-07T00:10:00Z');
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-historical',
+      activeBaseRevision: REV_A,
+      sequence: 1,
+      starts: ['2026-10-06T23:50:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const plan = {
+    ...pendingPlan('workflow-historical'),
+    projectId: 'website-pilot',
+    workspace: null,
+    outputBytes: 0,
+    modelUsage: { calls: 0 },
+    bootstrap: { status: 'pending' }
+  };
+  let cancellations = 0;
+  const engine = {
+    async get() { return clone(plan); },
+    async run() {
+      throw new Error('Workflow capability registry fingerprint does not match the active registry');
+    },
+    async cancel(id, options) {
+      cancellations += 1;
+      assert.equal(id, 'workflow-historical');
+      assert.equal(options.reason, 'autonomous_workflow_registry_changed');
+      assert.equal(options.deadlineCapAt, now + 300_000);
+      return {
+        ...clone(plan),
+        status: 'blocked',
+        result: {
+          error: options.reason,
+          stepId: 'implementation',
+          historicalRecovery: true
+        }
+      };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine: engine,
+    projectId: 'website-pilot',
+    operatorRevision: REV_B,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.historicalRecovery, true);
+  assert.equal(cancellations, 1);
+  assert.equal(store.state.autopilotProjectImprovement.activeWorkflowId, null);
+  assert.equal(store.state.autopilotProjectImprovement.history.at(-1).error, 'autonomous_workflow_registry_changed');
+  assert.equal(store.state.autopilotProjectImprovement.history.at(-1).baseRevision, REV_A);
+});
+
+test('autopilot never retires a workflow for an unrelated execution failure', async () => {
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-real-failure',
+      activeBaseRevision: REV_A,
+      sequence: 1,
+      starts: ['2026-10-06T23:50:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  let cancellations = 0;
+  const engine = {
+    async get() {
+      return {
+        ...pendingPlan('workflow-real-failure'),
+        projectId: 'website-pilot'
+      };
+    },
+    async run() { throw new Error('repository_integrity_check_failed'); },
+    async cancel() { cancellations += 1; throw new Error('must not cancel unrelated failures'); }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine: engine,
+    projectId: 'website-pilot',
+    operatorRevision: REV_B,
+    now: () => Date.parse('2026-10-07T00:10:00Z')
+  });
+
+  await assert.rejects(() => autopilot.tick(), /repository_integrity_check_failed/);
+  assert.equal(cancellations, 0);
+  assert.equal(store.state.autopilotProjectImprovement.activeWorkflowId, 'workflow-real-failure');
+});
+
 test('completed autonomous PRs do not halt the loop and their files are excluded from later cycles', async () => {
   const now = Date.parse('2026-09-23T12:00:00Z');
   const store = fakeStore({
