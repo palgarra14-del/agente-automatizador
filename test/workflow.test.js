@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
@@ -4639,6 +4640,79 @@ test('historical pristine workflow can be terminalized despite registry fingerpr
   const persisted = await workflowEngine.get(created.id);
   assert.equal(persisted.status, WorkflowStepStatus.BLOCKED);
   assert.equal(persisted.executionLease, null);
+});
+
+test('historical pristine workflow with an orphaned managed workspace can be terminalized', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'historical orphaned workspace recovery'
+  });
+  const orphanedWorkspace = join(tmpdir(), `missing-agent-workspace-${randomUUID()}`);
+  assert.equal(existsSync(orphanedWorkspace), false);
+
+  await workflowEngine.store.mutate((data) => {
+    const workflow = data.workflows[created.id];
+    workflow.registryFingerprint = '4'.repeat(64);
+    workflow.workspace = {
+      path: orphanedWorkspace,
+      managed: true,
+      projectId: 'workflow-project',
+      repository: { owner: 'example', name: 'repo' },
+      initializedAt: '2026-10-06T03:19:49.443Z',
+      remoteUrl: 'https://github.com/example/repo.git',
+      workingBranch: `agent/${created.id}`,
+      baseHead: 'a'.repeat(40),
+      remote: 'https://github.com/example/repo.git'
+    };
+  });
+
+  const recovered = await workflowEngine.cancel(created.id, { reason: 'historical_orphaned_workspace_cancelled' });
+  assert.equal(recovered.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(recovered.result.error, 'historical_orphaned_workspace_cancelled');
+  assert.equal(recovered.result.historicalRecovery, true);
+  assert.equal(recovered.steps[0].attempts, 0);
+  assert.equal(recovered.steps[0].evidence.type, 'historical-cancellation');
+  assert.equal(recovered.workspace.path, orphanedWorkspace);
+  assert.equal(existsSync(orphanedWorkspace), false);
+});
+
+test('historical workflow recovery keeps a still-present managed workspace fail closed', async () => {
+  const workflowEngine = await engine();
+  const created = await workflowEngine.create({
+    profile: 'app-improvement',
+    projectId: 'workflow-project',
+    goal: 'historical live workspace stays blocked'
+  });
+  const liveWorkspace = await mkdtemp(join(tmpdir(), 'live-agent-workspace-'));
+  try {
+    await workflowEngine.store.mutate((data) => {
+      const workflow = data.workflows[created.id];
+      workflow.registryFingerprint = '5'.repeat(64);
+      workflow.workspace = {
+        path: liveWorkspace,
+        managed: true,
+        projectId: 'workflow-project',
+        repository: { owner: 'example', name: 'repo' },
+        initializedAt: '2026-10-06T03:19:49.443Z',
+        remoteUrl: 'https://github.com/example/repo.git',
+        workingBranch: `agent/${created.id}`,
+        baseHead: 'a'.repeat(40),
+        remote: 'https://github.com/example/repo.git'
+      };
+    });
+
+    await assert.rejects(
+      () => workflowEngine.cancel(created.id, { reason: 'must_not_cancel_live_workspace' }),
+      /Workflow capability registry fingerprint does not match the active registry/
+    );
+    const unchanged = await workflowEngine.get(created.id);
+    assert.equal(unchanged.status, WorkflowStepStatus.PENDING);
+    assert.equal(unchanged.workspace.path, liveWorkspace);
+  } finally {
+    await rm(liveWorkspace, { recursive: true, force: true });
+  }
 });
 
 test('historical workflow recovery fails closed once any execution attempt exists', async () => {

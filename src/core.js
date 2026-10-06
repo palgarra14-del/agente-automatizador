@@ -2248,10 +2248,22 @@ export function evaluateDefinitionOfDone(plan) {
   return { ok: requirements.every((requirement) => requirement.ok), requirements };
 }
 
+function historicalWorkspaceIsRecoverable(workspace) {
+  if (workspace === null) return true;
+  if (!workspace || typeof workspace !== 'object' || workspace.managed !== true) return false;
+  if (typeof workspace.path !== 'string' || !workspace.path || resolve(workspace.path) !== workspace.path) return false;
+  if (typeof workspace.projectId !== 'string' || !workspace.projectId) return false;
+  if (!workspace.repository?.owner || !workspace.repository?.name) return false;
+  if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch) return false;
+  if (!/^[a-f0-9]{40}$/i.test(workspace.baseHead ?? '')) return false;
+  if (typeof workspace.remote !== 'string' || !workspace.remote) return false;
+  return !existsSync(workspace.path);
+}
+
 function pristineHistoricalWorkflow(plan, leaseId) {
   if (!plan || typeof plan !== 'object' || plan.status !== WorkflowStepStatus.PENDING) return false;
   if (!plan.executionLease || plan.executionLease.leaseId !== leaseId || plan.executionLease.kind !== 'workflow') return false;
-  if (plan.pausedAt !== null || plan.workspace !== null || plan.result !== null || plan.validation !== null || plan.dryRun !== false) return false;
+  if (plan.pausedAt !== null || !historicalWorkspaceIsRecoverable(plan.workspace) || plan.result !== null || plan.validation !== null || plan.dryRun !== false) return false;
   const usage = plan.modelUsage;
   if (!usage || usage.calls !== 0 || usage.inputTokens !== 0 || usage.outputTokens !== 0 || usage.totalTokens !== 0 || usage.unknownUsageCalls !== 0 || !Array.isArray(usage.entries) || usage.entries.length !== 0) return false;
   if (!Array.isArray(plan.steps) || !plan.steps.length) return false;
