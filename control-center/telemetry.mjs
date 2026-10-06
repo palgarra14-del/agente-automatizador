@@ -105,24 +105,29 @@ export function summarizeRunners(runners = []) {
       status: runner.status || 'unknown',
       busy: runner.busy === true,
       labels,
-      role: labels.includes('agent-local') ? 'msi-heavy' : labels.includes('agent-lite') ? 'auxiliary' : 'other'
+      role: labels.includes('agent-local') ? 'local-heavy' : labels.includes('agent-lite') ? 'auxiliary' : 'other'
     };
   });
   const online = normalized.filter((runner) => runner.status === 'online');
   const busy = online.filter((runner) => runner.busy);
-  const msi = normalized.filter((runner) => runner.role === 'msi-heavy');
-  const msiOnline = msi.filter((runner) => runner.status === 'online');
-  const msiBusy = msiOnline.filter((runner) => runner.busy);
+  const local = normalized.filter((runner) => runner.role === 'local-heavy');
+  const localOnline = local.filter((runner) => runner.status === 'online');
+  const localBusy = localOnline.filter((runner) => runner.busy);
   const auxiliary = normalized.filter((runner) => runner.role === 'auxiliary');
   return {
     total: normalized.length,
     online: online.length,
     busy: busy.length,
     free: Math.max(0, online.length - busy.length),
-    msiTotal: msi.length,
-    msiOnline: msiOnline.length,
-    msiBusy: msiBusy.length,
-    msiFree: Math.max(0, msiOnline.length - msiBusy.length),
+    localTotal: local.length,
+    localOnline: localOnline.length,
+    localBusy: localBusy.length,
+    localFree: Math.max(0, localOnline.length - localBusy.length),
+    // Compatibility aliases for older Control Center clients.
+    msiTotal: local.length,
+    msiOnline: localOnline.length,
+    msiBusy: localBusy.length,
+    msiFree: Math.max(0, localOnline.length - localBusy.length),
     auxiliaryOnline: auxiliary.filter((runner) => runner.status === 'online').length,
     runners: normalized
   };
@@ -157,21 +162,21 @@ export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit,
   const reasons = [];
   if (!service?.active) { score -= 45; reasons.push('service_offline'); }
   if (queue?.error) { score -= 20; reasons.push('queue_unavailable'); }
-  const msiTotal = Number(runnerTelemetry?.msiTotal);
-  const msiOnline = Number(runnerTelemetry?.msiOnline);
-  const msiFree = Number(runnerTelemetry?.msiFree);
-  if (Number.isFinite(msiTotal) && msiTotal > 0) {
+  const localTotal = Number(runnerTelemetry?.localTotal ?? runnerTelemetry?.msiTotal);
+  const localOnline = Number(runnerTelemetry?.localOnline ?? runnerTelemetry?.msiOnline);
+  const localFree = Number(runnerTelemetry?.localFree ?? runnerTelemetry?.msiFree);
+  if (Number.isFinite(localTotal) && localTotal > 0) {
     // GitHub keeps de-registered/offline self-hosted runner records around until
     // they are explicitly removed. Treat registered inventory as telemetry, not
     // desired capacity: one healthy local runner is enough unless all currently
     // online local capacity is busy.
-    if (msiOnline === 0) {
+    if (localOnline === 0) {
       score -= 40;
-      reasons.push('msi_runners_offline');
+      reasons.push('local_runners_offline');
     }
-    if (msiOnline > 0 && msiFree === 0) {
+    if (localOnline > 0 && localFree === 0) {
       score -= 5;
-      reasons.push('msi_runner_capacity_full');
+      reasons.push('local_runner_capacity_full');
     }
   } else if (runnerTelemetry?.online === 0) {
     score -= 35;

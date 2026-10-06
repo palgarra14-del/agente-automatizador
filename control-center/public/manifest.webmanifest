@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Agent Control Center",
   "short_name": "Agent Control",
-  "description": "Control móvil del agente autónomo del MSI",
+  "description": "Control móvil del agente autónomo local en Arch",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
