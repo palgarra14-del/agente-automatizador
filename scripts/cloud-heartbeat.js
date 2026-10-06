@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
+import { systemdRunEnvironmentArgs } from '../src/service.js';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
@@ -185,6 +186,7 @@ async function dispatchLane(item) {
       '--property=RuntimeMaxSec=25min',
       '--property=TimeoutStopSec=30s',
       `--property=WorkingDirectory=${process.cwd()}`,
+      ...systemdRunEnvironmentArgs(process.env),
       process.execPath,
       'scripts/local-cloud-drain.js',
       '--lane',

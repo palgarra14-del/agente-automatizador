@@ -27,7 +27,7 @@ function trustedServicePath(nodePath) {
   return [...new Set(['/usr/local/bin', '/usr/bin', '/bin', dirname(resolve(nodePath))])].join(':');
 }
 
-function serviceRuntimeEnvironment(environment = {}) {
+export function serviceRuntimeEnvironment(environment = {}) {
   const result = {};
   const allowed = [
     'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
@@ -51,6 +51,11 @@ function serviceRuntimeEnvironment(environment = {}) {
     result[name] = text;
   }
   return result;
+}
+
+export function systemdRunEnvironmentArgs(environment = {}) {
+  return Object.entries(serviceRuntimeEnvironment(environment))
+    .map(([name, value]) => `--setenv=${name}=${value}`);
 }
 
 function checkoutReadEnvironment(environment = process.env) {

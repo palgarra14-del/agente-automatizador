@@ -19,6 +19,7 @@ import {
   renderInboxServiceUnit,
   restartInboxService,
   serviceStatus,
+  systemdRunEnvironmentArgs,
   syncAutoUpgradeTimer,
   syncInboxService,
   uninstallAutoUpgradeTimer,
@@ -126,6 +127,29 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /OPENCODE_BIN=\/usr\/bin\/opencode/);
   assert.match(unit, /OPENCODE_FREE_TIMEOUT=90/);
   assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY|PAID_MODELS_EXPLICITLY_ENABLED|must-never-be-rendered|gho_|ghp_/);
+});
+
+test('systemd transient jobs inherit only approved non-secret provider configuration', () => {
+  const args = systemdRunEnvironmentArgs({
+    MODEL_COST_POLICY: 'subscription_included',
+    ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
+    CODEX_BIN: '/usr/bin/codex',
+    OPENCODE_BIN: '/usr/bin/opencode',
+    OPENCODE_FREE_TIMEOUT: '90',
+    GITHUB_TOKEN: 'must-never-cross',
+    OPENAI_API_KEY: 'must-never-cross',
+    CODEX_API_KEY: 'must-never-cross',
+    PAID_MODELS_EXPLICITLY_ENABLED: '1'
+  });
+  assert.deepEqual(args, [
+    '--setenv=MODEL_COST_POLICY=subscription_included',
+    '--setenv=ANTIGRAVITY_CLI=/home/pablo/.local/bin/agy',
+    '--setenv=CODEX_BIN=/usr/bin/codex',
+    '--setenv=OPENCODE_BIN=/usr/bin/opencode',
+    '--setenv=OPENCODE_FREE_TIMEOUT=90'
+  ]);
+  assert.equal(JSON.stringify(args).includes('must-never-cross'), false);
+  assert.equal(args.some((arg) => /GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY|PAID_MODELS_EXPLICITLY_ENABLED/.test(arg)), false);
 });
 
 test('auto-upgrade units are bounded, persistent, and never persist GitHub credentials', () => {
