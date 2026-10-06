@@ -83,6 +83,7 @@ Environment="OLLAMA_MODELS=$MODELS"
 Environment="OLLAMA_NO_CLOUD=true"
 Environment="OLLAMA_MAX_LOADED_MODELS=1"
 Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_KEEP_ALIVE=60s"
 Restart=always
 RestartSec=3
 Nice=10

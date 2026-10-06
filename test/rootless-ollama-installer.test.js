@@ -11,6 +11,7 @@ test('rootless Ollama installer verifies Arch package and stays local-only', () 
   assert.match(script, /OLLAMA_NO_CLOUD=true/);
   assert.match(script, /CPUQuota=200%/);
   assert.match(script, /MemoryMax=6G/);
+  assert.match(script, /OLLAMA_KEEP_ALIVE=60s/);
   assert.match(script, /--pull-model/);
   assert.match(script, /qwen2\.5-coder:3b/);
   assert.doesNotMatch(script, /sudo|GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY/);
