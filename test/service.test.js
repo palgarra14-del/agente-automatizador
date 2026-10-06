@@ -315,6 +315,38 @@ test('auto-upgrade timer rolls back its managed files if enablement fails', asyn
   }
 });
 
+test('remote service status reconstructs the standard Linux user bus without session secrets', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'agent-service-remote-status-home-'));
+  const unitDirectory = join(home, '.config', 'systemd', 'user');
+  const calls = [];
+  try {
+    await mkdir(unitDirectory, { recursive: true });
+    await writeFile(join(unitDirectory, INBOX_SERVICE_NAME), '# managed-by=engineering-orchestrator:v1\n[Unit]\n');
+    const runner = async (command, args, options) => {
+      calls.push({command,args,options});
+      assert.equal(command,'systemctl');
+      assert.equal(options.env.XDG_RUNTIME_DIR, `/run/user/${process.getuid()}`);
+      assert.equal(options.env.DBUS_SESSION_BUS_ADDRESS, `unix:path=/run/user/${process.getuid()}/bus`);
+      assert.equal(options.env.GITHUB_TOKEN, undefined);
+      const action=args[1];
+      if (action==='is-enabled') return {exitCode:0,stdout:'enabled\n',stderr:''};
+      if (action==='is-active') return {exitCode:0,stdout:'active\n',stderr:''};
+      return {exitCode:0,stdout:'',stderr:''};
+    };
+    const status = await serviceStatus({
+      home,
+      pathValue:'/usr/bin:/bin',
+      commandRunner:runner,
+      environment:{PATH:'/usr/bin:/bin',HOME:home,GITHUB_TOKEN:'must-not-cross'}
+    });
+    assert.equal(status.enabled,true);
+    assert.equal(status.active,true);
+    assert.equal(calls.length,2);
+  } finally {
+    await rm(home,{recursive:true,force:true});
+  }
+});
+
 test('service install/status/restart/uninstall is managed and rollback-safe', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-service-home-'));
   const repositoryRoot = await mkdtemp(join(tmpdir(), 'agent-service-repo-'));

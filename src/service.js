@@ -248,13 +248,17 @@ async function assertManagedOrMissing(unitPath) {
 
 function systemdUserCommandEnvironment({ home, pathValue, environment = process.env }) {
   const result = { PATH: pathValue, HOME: home };
-  const runtimeDir = environment.XDG_RUNTIME_DIR;
+  const fallbackRuntimeDir = process.platform === 'linux' && typeof process.getuid === 'function'
+    ? `/run/user/${process.getuid()}`
+    : undefined;
+  const runtimeDir = environment.XDG_RUNTIME_DIR ?? fallbackRuntimeDir;
   if (runtimeDir !== undefined) {
     const value = validateText(String(runtimeDir), 'XDG_RUNTIME_DIR');
     if (!isAbsolute(value)) throw new Error('XDG_RUNTIME_DIR must be absolute');
     result.XDG_RUNTIME_DIR = value;
   }
-  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS;
+  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS ??
+    (result.XDG_RUNTIME_DIR ? `unix:path=${result.XDG_RUNTIME_DIR}/bus` : undefined);
   if (busAddress !== undefined) result.DBUS_SESSION_BUS_ADDRESS = validateText(String(busAddress), 'DBUS_SESSION_BUS_ADDRESS');
   return result;
 }
