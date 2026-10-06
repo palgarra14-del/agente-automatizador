@@ -111,3 +111,18 @@ test('control health stays strong with one healthy native runner despite stale o
   assert.equal(health.state, 'strong');
   assert.deepEqual(health.reasons,[]);
 });
+
+
+test('control health does not treat intentionally paused business lanes as stale', () => {
+  const health = deriveControlHealth({
+    service:{active:true},
+    queue:{error:null},
+    runnerTelemetry:{online:1,busy:0,free:1,msiTotal:1,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
+    rateLimit:{core:{remainingPercent:80}},
+    laneTelemetry:{business:{healthy:0}},
+    remoteControl:{globalPaused:true}
+  });
+  assert.equal(health.score,100);
+  assert.equal(health.state,'strong');
+  assert.deepEqual(health.reasons,[]);
+});

@@ -152,7 +152,7 @@ export function summarizeGithubRateLimit(payload = {}, nowMs = Date.now()) {
   };
 }
 
-export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit, laneTelemetry} = {}) {
+export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit, laneTelemetry, remoteControl} = {}) {
   let score = 100;
   const reasons = [];
   if (!service?.active) { score -= 45; reasons.push('service_offline'); }
@@ -184,7 +184,8 @@ export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit,
   if (Number.isFinite(corePct) && corePct <= 5) { score -= 20; reasons.push('github_core_critical'); }
   else if (Number.isFinite(corePct) && corePct <= 15) { score -= 10; reasons.push('github_core_low'); }
   const healthyBusiness = laneTelemetry?.business?.healthy;
-  if (Number.isFinite(healthyBusiness) && healthyBusiness < 3) {
+  const monitoringBusinessLiveness = remoteControl?.globalPaused !== true;
+  if (monitoringBusinessLiveness && Number.isFinite(healthyBusiness) && healthyBusiness < 3) {
     score -= (3 - healthyBusiness) * 8;
     reasons.push('business_lane_stale');
   }
