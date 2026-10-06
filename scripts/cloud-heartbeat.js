@@ -2,9 +2,10 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
+import { systemdRunEnvironmentArgs } from '../src/service.js';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
@@ -108,7 +109,13 @@ async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=time
   if (cooldown.has(lane)) return {lane,active:false,operatorRequested,rateLimitCooldown:true};
   const result=await run(cli,['src/cli.js','inbox','cloud-peek','--lane',lane],{timeout:peekTimeoutMs});
   if (result.timedOut) return {lane,active:false,operatorRequested,observationSkipped:true};
-  if (!result.ok) return {lane,active:false,operatorRequested,error:result.stderr || result.stdout || 'cloud_peek_failed'};
+  if (!result.ok) {
+    const error = result.stderr || result.stdout || 'cloud_peek_failed';
+    if (executionMode === 'local-primary' && heartbeatControlAuthUnavailable(error)) {
+      return {lane,active:false,operatorRequested,controlUnavailable:true};
+    }
+    return {lane,active:false,operatorRequested,error};
+  }
   return {lane,active:false,operatorRequested,hasWork:result.stdout.split(/\s+/).at(-1) === 'true'};
 }
 
@@ -179,6 +186,7 @@ async function dispatchLane(item) {
       '--property=RuntimeMaxSec=25min',
       '--property=TimeoutStopSec=30s',
       `--property=WorkingDirectory=${process.cwd()}`,
+      ...systemdRunEnvironmentArgs(process.env),
       process.execPath,
       'scripts/local-cloud-drain.js',
       '--lane',
@@ -210,5 +218,5 @@ for (const item of plan.dispatch) {
   dispatched.push(await dispatchLane(item));
 }
 
-console.log(JSON.stringify({...plan,yieldRequests,dryRun,executionMode,dispatched,operatorControl,rateLimitCooldown:[...cooldown]},null,2));
+console.log(JSON.stringify({...plan,yieldRequests,dryRun,executionMode,dispatched,operatorControl,rateLimitCooldown:[...cooldown],controlFallback:plan.classified.some((item)=>item.reason==='local_control_auth_unavailable')?'scheduled-cloud':null},null,2));
 if (dispatched.some((item)=>!item.ok)) process.exitCode=1;

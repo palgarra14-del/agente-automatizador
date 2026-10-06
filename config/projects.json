@@ -543,6 +543,7 @@
           "code.inspect",
           "code.diagnose",
           "code.review",
+          "visual.review",
           "website.plan",
           "release.publish-reviewed-workflow"
         ],

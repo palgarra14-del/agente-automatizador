@@ -117,12 +117,20 @@ function renderAttention(data) {
   }
 
   const runners = data.runnerTelemetry || {};
-  if (Number.isFinite(runners.msiTotal) && runners.msiTotal > 0 && runners.msiOnline < runners.msiTotal) {
+  const localOnline = Number(runners.localOnline ?? runners.msiOnline ?? 0);
+  const localFree = Number(runners.localFree ?? runners.msiFree ?? 0);
+  if (localOnline === 0) {
     items.push({
-      severity:runners.msiOnline === 0 ? 'bad' : 'warn',
-      title:'Capacidad MSI degradada',
-      detail:runners.msiOnline + '/' + runners.msiTotal + ' runners pesados online' +
-        (runners.auxiliaryOnline ? ' · runner auxiliar online: ' + runners.auxiliaryOnline : ''),
+      severity:'bad',
+      title:'Sin runner local online',
+      detail:'No hay capacidad local/native disponible para ejecutar trabajo pesado.',
+      action:'runnerList'
+    });
+  } else if (localFree === 0) {
+    items.push({
+      severity:'warn',
+      title:'Capacidad local ocupada',
+      detail:localOnline + ' runner(s) local(es) online, todos ocupados.',
       action:'runnerList'
     });
   }
@@ -275,10 +283,13 @@ function renderMission(data) {
 function renderInfrastructure(data) {
   const runners = data.runnerTelemetry || {};
   const rows = runners.runners || [];
+  const localOnline = runners.localOnline ?? runners.msiOnline ?? 0;
+  const localBusy = runners.localBusy ?? runners.msiBusy ?? 0;
+  const localFree = runners.localFree ?? runners.msiFree ?? 0;
   $('runnerSummary').innerHTML =
-    '<div class="infra-kpi"><strong>'+esc(String(runners.msiOnline ?? 0))+'/'+esc(String(runners.msiTotal ?? 0))+'</strong><span>MSI online</span></div>'+
-    '<div class="infra-kpi"><strong>'+esc(String(runners.msiBusy ?? 0))+'</strong><span>MSI ocupados</span></div>'+
-    '<div class="infra-kpi"><strong>'+esc(String(runners.msiFree ?? 0))+'</strong><span>MSI libres</span></div>';
+    '<div class="infra-kpi"><strong>'+esc(String(localOnline))+'</strong><span>Locales online</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(localBusy))+'</strong><span>Locales ocupados</span></div>'+
+    '<div class="infra-kpi"><strong>'+esc(String(localFree))+'</strong><span>Locales libres</span></div>';
   $('runnerList').innerHTML = rows.length ? rows.map((runner) =>
     '<div class="runner-row"><span class="dot '+(runner.status === 'online' ? 'good' : 'bad')+'"></span>'+
     '<strong>'+esc(runner.name || 'runner')+'</strong>'+
@@ -323,10 +334,10 @@ function renderStats(data) {
   const business = data.laneTelemetry?.business || {};
   const corePct = data.githubRateLimit?.core?.remainingPercent;
   const operatorPaused = data.remoteControl?.globalPaused === true;
-  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.msiOnline || 0) > 0 && !operatorPaused;
+  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.localOnline ?? runners.msiOnline ?? 0) > 0 && !operatorPaused;
   const values = [
     [operatorPaused ? 'PAUSADO' : (autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE')),'Agente'],
-    [(runners.msiOnline ?? '—') + '/' + (runners.msiTotal ?? '—'),'Runners MSI'],
+    [String(runners.localOnline ?? runners.msiOnline ?? '—'),'Runners locales'],
     [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
     [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];

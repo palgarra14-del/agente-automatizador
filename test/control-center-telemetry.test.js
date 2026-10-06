@@ -41,7 +41,7 @@ test('lane summary exposes current work, recent reliability and business health'
   assert.equal(summary.business.allHealthy, true);
 });
 
-test('runner summary separates MSI heavy capacity from auxiliary runners', () => {
+test('runner summary separates local heavy capacity from auxiliary runners', () => {
   assert.deepEqual(summarizeRunners([
     {id:1,name:'MSI-WSL-agent',status:'online',busy:true,os:'Linux',labels:[{name:'agent-local'}]},
     {id:2,name:'MSI-WSL-agent-2',status:'online',busy:false,os:'Linux',labels:[{name:'agent-local'}]},
@@ -49,11 +49,12 @@ test('runner summary separates MSI heavy capacity from auxiliary runners', () =>
     {id:4,name:'ASUS-LITE-01',status:'online',busy:false,os:'Windows',labels:[{name:'agent-lite'}]}
   ]), {
     total:4, online:3, busy:1, free:2,
+    localTotal:3, localOnline:2, localBusy:1, localFree:1,
     msiTotal:3, msiOnline:2, msiBusy:1, msiFree:1, auxiliaryOnline:1,
     runners:[
-      {id:1,name:'MSI-WSL-agent',os:'Linux',status:'online',busy:true,labels:['agent-local'],role:'msi-heavy'},
-      {id:2,name:'MSI-WSL-agent-2',os:'Linux',status:'online',busy:false,labels:['agent-local'],role:'msi-heavy'},
-      {id:3,name:'MSI-WSL-agent-3',os:'Linux',status:'offline',busy:false,labels:['agent-local'],role:'msi-heavy'},
+      {id:1,name:'MSI-WSL-agent',os:'Linux',status:'online',busy:true,labels:['agent-local'],role:'local-heavy'},
+      {id:2,name:'MSI-WSL-agent-2',os:'Linux',status:'online',busy:false,labels:['agent-local'],role:'local-heavy'},
+      {id:3,name:'MSI-WSL-agent-3',os:'Linux',status:'offline',busy:false,labels:['agent-local'],role:'local-heavy'},
       {id:4,name:'ASUS-LITE-01',os:'Windows',status:'online',busy:false,labels:['agent-lite'],role:'auxiliary'}
     ]
   });
@@ -73,7 +74,7 @@ test('rate-limit summary exposes remaining budget and reset', () => {
   assert.equal(summary.graphql.remainingPercent, 80);
 });
 
-test('control health scores MSI heavy capacity instead of being masked by an auxiliary runner', () => {
+test('control health scores local heavy capacity instead of being masked by an auxiliary runner', () => {
   const health = deriveControlHealth({
     service:{active:true},
     queue:{error:null},
@@ -83,18 +84,46 @@ test('control health scores MSI heavy capacity instead of being masked by an aux
   });
   assert.equal(health.score, 60);
   assert.equal(health.state, 'degraded');
-  assert.deepEqual(health.reasons,['msi_runners_offline']);
+  assert.deepEqual(health.reasons,['local_runners_offline']);
 });
 
-test('control health reports partial MSI degradation and full heavy-capacity use', () => {
+test('control health ignores stale registered runners but reports exhausted live heavy capacity', () => {
   const health = deriveControlHealth({
     service:{active:true},
     queue:{error:null},
-    runnerTelemetry:{online:3,busy:2,free:1,msiTotal:3,msiOnline:2,msiBusy:2,msiFree:0,auxiliaryOnline:1},
+    runnerTelemetry:{online:3,busy:2,free:1,msiTotal:7,msiOnline:2,msiBusy:2,msiFree:0,auxiliaryOnline:1},
     rateLimit:{core:{remainingPercent:4}},
     laneTelemetry:{business:{healthy:3}}
   });
-  assert.equal(health.score, 67);
-  assert.equal(health.state, 'degraded');
-  assert.deepEqual(health.reasons,['msi_runner_capacity_degraded','msi_runner_capacity_full','github_core_critical']);
+  assert.equal(health.score, 75);
+  assert.equal(health.state, 'good');
+  assert.deepEqual(health.reasons,['local_runner_capacity_full','github_core_critical']);
+});
+
+test('control health stays strong with one healthy native runner despite stale offline registrations', () => {
+  const health = deriveControlHealth({
+    service:{active:true},
+    queue:{error:null},
+    runnerTelemetry:{online:1,busy:0,free:1,msiTotal:6,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
+    rateLimit:{core:{remainingPercent:80}},
+    laneTelemetry:{business:{healthy:3}}
+  });
+  assert.equal(health.score, 100);
+  assert.equal(health.state, 'strong');
+  assert.deepEqual(health.reasons,[]);
+});
+
+
+test('control health does not treat intentionally paused business lanes as stale', () => {
+  const health = deriveControlHealth({
+    service:{active:true},
+    queue:{error:null},
+    runnerTelemetry:{online:1,busy:0,free:1,msiTotal:1,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
+    rateLimit:{core:{remainingPercent:80}},
+    laneTelemetry:{business:{healthy:0}},
+    remoteControl:{globalPaused:true}
+  });
+  assert.equal(health.score,100);
+  assert.equal(health.state,'strong');
+  assert.deepEqual(health.reasons,[]);
 });

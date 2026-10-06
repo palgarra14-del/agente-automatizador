@@ -19,7 +19,7 @@
     <form id="loginForm" class="login-card">
       <div class="logo">A</div>
       <h1>Agent Control</h1>
-      <p>Acceso privado al agente del MSI.</p>
+      <p>Acceso privado al agente local en Arch.</p>
       <label>Clave de acceso<input id="pin" autocomplete="current-password" type="password" required></label>
       <button class="primary" type="submit">Entrar</button>
       <small id="loginError"></small>
@@ -28,7 +28,7 @@
 
   <header class="topbar">
     <div>
-      <p class="eyebrow">MSI · ORCHESTRATOR</p>
+      <p class="eyebrow">ARCH · ORCHESTRATOR</p>
       <h1>Agent Control</h1>
     </div>
     <div class="live"><span id="liveDot"></span><strong id="liveText">Conectando</strong></div>
@@ -39,7 +39,7 @@
       <div>
         <p class="eyebrow">ESTADO GENERAL</p>
         <h2 id="heroTitle">Comprobando el agente…</h2>
-        <p id="heroSub">Esperando telemetría del MSI.</p>
+        <p id="heroSub">Esperando telemetría del nodo local.</p>
       </div>
       <div class="hero-actions"><button id="installAppBtn" class="primary hidden">Instalar app</button><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
     </section>
@@ -68,7 +68,7 @@
     <section class="two-col infra-section">
       <article class="card">
         <div class="section-title">
-          <div><p class="eyebrow">CAPACIDAD</p><h2>Runners del MSI</h2></div>
+          <div><p class="eyebrow">CAPACIDAD</p><h2>Runners locales</h2></div>
         </div>
         <div id="runnerSummary" class="infra-summary"></div>
         <div id="runnerList" class="runner-list"></div>

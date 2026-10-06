@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -12,6 +12,19 @@ test('heartbeat does not retry non-recoverable control failures blindly', () => 
   const state=classifyLaneObservation({lane:'callflow',error:'security_policy_violation'});
   assert.equal(state.state,'blocked');
   assert.equal(state.runnable,false);
+});
+
+test('heartbeat defers expired local GitHub auth to scheduled cloud recovery', () => {
+  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 403'), true);
+  assert.equal(heartbeatControlAuthUnavailable('security_policy_violation'), false);
+  const state=classifyLaneObservation({lane:'callflow',controlUnavailable:true,operatorRequested:true});
+  assert.deepEqual(state,{
+    lane:'callflow',
+    state:'deferred',
+    runnable:false,
+    reason:'local_control_auth_unavailable',
+    operatorRequested:true
+  });
 });
 
 test('heartbeat defers lanes it could not observe within the cycle budget', () => {

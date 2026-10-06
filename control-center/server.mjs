@@ -311,6 +311,10 @@ function providerFailureCategory(reason) {
 
 async function getAiHealth(processes = []) {
   const stateDir = process.env.DESIGN_LAB_STATE_DIR || join(homedir(), '.local', 'state', 'engineering-orchestrator', 'design-lab');
+  const opencodeProbe = await cachedTelemetry('opencode-availability', 60_000, async () => {
+    const result = await run(process.env.OPENCODE_BIN || 'opencode', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    return { available: result.ok, version: result.ok ? result.stdout : null };
+  });
   const now = Date.now() / 1000;
   let runtime = { providers: {}, candidates: {} };
   try {
@@ -331,6 +335,8 @@ async function getAiHealth(processes = []) {
       label: 'OpenCode',
       kind: 'local/free',
       local: true,
+      installed: opencodeProbe.available,
+      version: opencodeProbe.version,
       processActive: localText.includes('opencode')
     },
     {
@@ -346,7 +352,11 @@ async function getAiHealth(processes = []) {
     const cooldown = untilEpoch > now;
     return {
       ...provider,
-      state: cooldown ? 'cooldown' : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
+      state: cooldown
+        ? 'cooldown'
+        : provider.id === 'opencode'
+          ? (provider.installed ? 'available' : 'offline')
+          : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
       reasonCategory: cooldown ? providerFailureCategory(persisted?.reason) : null,
       cooldownUntil: cooldown ? new Date(untilEpoch * 1000).toISOString() : null,
       retryInSeconds: cooldown ? Math.max(0, Math.ceil(untilEpoch - now)) : 0
@@ -507,7 +517,7 @@ async function snapshot() {
   const laneTelemetry = summarizeLaneRuns(runs);
   const runnerTelemetry = summarizeRunners(runnerSource.runners);
   const githubRateLimit = summarizeGithubRateLimit(rateLimitSource);
-  const controlHealth = deriveControlHealth({ service, queue, runnerTelemetry, rateLimit: githubRateLimit, laneTelemetry });
+  const controlHealth = deriveControlHealth({ service, queue, runnerTelemetry, rateLimit: githubRateLimit, laneTelemetry, remoteControl });
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,

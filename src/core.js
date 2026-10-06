@@ -10,6 +10,8 @@ import { TextDecoder } from 'node:util';
 import { Codex } from '@openai/codex-sdk';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
+import { BrowserQaCoordinator, createBrowserQaRequest, validateBrowserQaEvidence } from './browser-qa.js';
+import { ChromeBrowserQaRunner } from './browser-qa-runner.js';
 import { planBrowserQaAutocorrection } from './browser-qa-autocorrection.js';
 
 export const RunStatus = Object.freeze({
@@ -1168,13 +1170,25 @@ export function normalizeBusinessContext(value) {
 }
 
 function normalizeOptionalContact(value = {}) {
-  assertObjectKeys(value, new Set(['phone', 'whatsapp', 'email', 'address', 'website']), 'businessBrief.contact');
+  assertObjectKeys(value, new Set(['phone', 'whatsapp', 'email', 'address', 'website', 'bookingUrl']), 'businessBrief.contact');
+  const rawBookingUrl = boundedText(value.bookingUrl, 'businessBrief.contact.bookingUrl', { max: 500 });
+  let bookingUrl = null;
+  if (rawBookingUrl) {
+    try {
+      const parsed = new URL(rawBookingUrl);
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('unsafe');
+      bookingUrl = parsed.href;
+    } catch {
+      throw new Error('businessBrief.contact.bookingUrl must be an HTTPS URL without credentials');
+    }
+  }
   return {
     phone: boundedText(value.phone, 'businessBrief.contact.phone', { max: 80 }) || null,
     whatsapp: boundedText(value.whatsapp, 'businessBrief.contact.whatsapp', { max: 80 }) || null,
     email: boundedText(value.email, 'businessBrief.contact.email', { max: 160 }) || null,
     address: boundedText(value.address, 'businessBrief.contact.address', { max: 240 }) || null,
-    website: boundedText(value.website, 'businessBrief.contact.website', { max: 240 }) || null
+    website: boundedText(value.website, 'businessBrief.contact.website', { max: 240 }) || null,
+    ...(bookingUrl ? { bookingUrl } : {})
   };
 }
 
@@ -1247,7 +1261,10 @@ export function normalizeBusinessBrief(value) {
   const commercialPackage = version === 2
     ? normalizeWebsiteCommercialPackage(value.commercialPackage, { required: true })
     : null;
-  if (!Array.isArray(value.services) || value.services.length < 1 || value.services.length > 20) throw new Error('businessBrief.services must contain between 1 and 20 items');
+  const minimumServices = commercialPackage === 'demo' ? 0 : 1;
+  if (!Array.isArray(value.services) || value.services.length < minimumServices || value.services.length > 20) {
+    throw new Error(`businessBrief.services must contain between ${minimumServices} and 20 items`);
+  }
   const services = value.services.map((service, index) => {
     if (typeof service === 'string') return { name: boundedText(service, `businessBrief.services[${index}]`, { required: true, max: 120 }), description: null };
     assertObjectKeys(service, new Set(['name', 'description']), `businessBrief.services[${index}]`);
@@ -1262,7 +1279,7 @@ export function normalizeBusinessBrief(value) {
     businessName: boundedText(value.businessName, 'businessBrief.businessName', { required: true, max: 120 }),
     category: boundedText(value.category, 'businessBrief.category', { required: true, max: 120 }),
     summary: boundedText(value.summary, 'businessBrief.summary', { max: 1_200 }) || null,
-    locations: boundedTextList(value.locations, 'businessBrief.locations', { required: true, min: 1, max: 12, itemMax: 120 }),
+    locations: boundedTextList(value.locations, 'businessBrief.locations', { required: commercialPackage !== 'demo', min: commercialPackage === 'demo' ? 0 : 1, max: 12, itemMax: 120 }),
     services,
     contact: normalizeOptionalContact(value.contact ?? {}),
     brand: normalizeBrand(value.brand ?? {}),
@@ -1270,6 +1287,118 @@ export function normalizeBusinessBrief(value) {
     facts: boundedTextList(value.facts ?? [], 'businessBrief.facts', { max: 40, itemMax: 400 }),
     contentRestrictions: boundedTextList(value.contentRestrictions ?? [], 'businessBrief.contentRestrictions', { max: 30, itemMax: 300 }),
     assets: normalizeBusinessAssets(value.assets ?? {})
+  });
+}
+
+const callflowBookingProviders = Object.freeze([
+  Object.freeze({ name: 'Booksy', domains: ['booksy.com'] }),
+  Object.freeze({ name: 'Fresha', domains: ['fresha.com'] }),
+  Object.freeze({ name: 'Treatwell', domains: ['treatwell.es', 'treatwell.com', 'treatwell.co.uk'] }),
+  Object.freeze({ name: 'Altegio', domains: ['alteg.io', 'altegio.com'] }),
+  Object.freeze({ name: 'Yclients', domains: ['yclients.com'] }),
+  Object.freeze({ name: 'Versum', domains: ['versum.com'] })
+]);
+
+function callflowBookingEvidence(value, expectedPlatform = '') {
+  const raw = boundedText(value, 'callflowBrief.verifiedBusinessFacts.bookingUrl', { max: 500 });
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must be a valid URL');
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must be an HTTPS URL without credentials');
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  const provider = callflowBookingProviders.find((item) =>
+    item.domains.some((domain) => host === domain || host.endsWith(`.${domain}`))
+  );
+  if (!provider) throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must use a verified booking provider');
+  const expected = String(expectedPlatform ?? '').trim().toLowerCase();
+  if (expected && expected !== provider.name.toLowerCase()) {
+    throw new Error('callflowBrief booking platform does not match verified booking URL');
+  }
+  return { url: parsed.href, platform: provider.name };
+}
+
+export function businessBriefFromCallflowDemoBrief(value) {
+  assertObjectKeys(
+    value,
+    new Set(['version', 'source', 'lead', 'commercialEvidence', 'demo', 'verifiedBusinessFacts', 'missingBusinessFacts', 'constraints']),
+    'callflowBrief'
+  );
+  if (value.version !== 'website-pilot-brief-v1') throw new Error('callflowBrief.version must be website-pilot-brief-v1');
+  if (value.source !== 'callflow') throw new Error('callflowBrief.source must be callflow');
+
+  const lead = value.lead ?? {};
+  assertObjectKeys(
+    lead,
+    new Set(['callflowId', 'leadFinderId', 'businessName', 'city', 'niche', 'phone', 'existingWebsite', 'websiteDiscoveryStatus']),
+    'callflowBrief.lead'
+  );
+  const evidence = value.commercialEvidence ?? {};
+  assertObjectKeys(
+    evidence,
+    new Set(['salesFit', 'salesSegment', 'opportunityScore', 'leadScore', 'websiteQuality', 'reasonToCall', 'primaryPitchReason']),
+    'callflowBrief.commercialEvidence'
+  );
+  const demo = value.demo ?? {};
+  assertObjectKeys(
+    demo,
+    new Set(['type', 'defaultScope', 'objective', 'primaryCta', 'existingBookingPlatform', 'preserveExistingBooking', 'existingWebsiteReference']),
+    'callflowBrief.demo'
+  );
+  const verifiedBusinessFacts = value.verifiedBusinessFacts ?? {};
+  assertObjectKeys(
+    verifiedBusinessFacts,
+    new Set(['bookingUrl']),
+    'callflowBrief.verifiedBusinessFacts'
+  );
+
+  const businessName = boundedText(lead.businessName, 'callflowBrief.lead.businessName', { required: true, max: 120 });
+  const category = boundedText(lead.niche, 'callflowBrief.lead.niche', { required: true, max: 120 });
+  const city = boundedText(lead.city, 'callflowBrief.lead.city', { max: 120 });
+  const phone = boundedText(lead.phone, 'callflowBrief.lead.phone', { max: 80 });
+  const existingWebsite = boundedText(lead.existingWebsite, 'callflowBrief.lead.existingWebsite', { max: 240 });
+  const missingFacts = boundedTextList(value.missingBusinessFacts ?? [], 'callflowBrief.missingBusinessFacts', { max: 30, itemMax: 160 });
+  const constraints = boundedTextList(value.constraints ?? [], 'callflowBrief.constraints', { max: 30, itemMax: 300 });
+  const bookingPlatform = boundedText(demo.existingBookingPlatform, 'callflowBrief.demo.existingBookingPlatform', { max: 80 });
+  const bookingEvidence = callflowBookingEvidence(verifiedBusinessFacts.bookingUrl, bookingPlatform);
+  const effectiveBookingPlatform = bookingEvidence?.platform ?? bookingPlatform;
+  if (demo.preserveExistingBooking !== undefined && typeof demo.preserveExistingBooking !== 'boolean') {
+    throw new Error('callflowBrief.demo.preserveExistingBooking must be a boolean');
+  }
+
+  const requiredFeatures = effectiveBookingPlatform
+    ? [bookingEvidence
+        ? `Mantener ${effectiveBookingPlatform} como sistema de reservas; usar exclusivamente businessBrief.contact.bookingUrl.`
+        : `Mantener ${effectiveBookingPlatform} como sistema de reservas cuando se facilite su URL real; no inventar el enlace.`]
+    : [];
+  const missingRestrictions = missingFacts.map((fact) => `Dato no verificado: ${fact}. No inventarlo ni presentarlo como hecho real.`);
+
+  return normalizeBusinessBrief({
+    version: 2,
+    commercialPackage: 'demo',
+    businessName,
+    category,
+    locations: city ? [city] : [],
+    services: [],
+    contact: {
+      ...(phone ? { phone } : {}),
+      ...(existingWebsite ? { website: existingWebsite } : {}),
+      ...(bookingEvidence ? { bookingUrl: bookingEvidence.url } : {})
+    },
+    website: {
+      language: 'es',
+      primaryGoal: bookingEvidence ? 'reserva' : phone ? 'llamada' : 'contacto',
+      requiredPages: ['home'],
+      requiredFeatures
+    },
+    facts: [],
+    contentRestrictions: [...new Set([...constraints, ...missingRestrictions])],
+    assets: {}
   });
 }
 
@@ -1329,9 +1458,16 @@ function websiteBlueprintPages(brief, profileId) {
   const hasMediaPage = pages.some((page) => /(galer|portfolio|look|inspir)/.test(page.id));
   const baseProfileSections = websiteBlueprintSectionProfiles[profileId] ?? websiteBlueprintSectionProfiles['generic-local'];
   const packageLimit = brief?.commercialPackage ? websiteCommercialPackageLimits[brief.commercialPackage] : null;
-  const profileSections = packageLimit
+  const hasVerifiedServices = Array.isArray(brief?.services) && brief.services.length > 0;
+  const hasVerifiedFacts = Array.isArray(brief?.facts) && brief.facts.length > 0;
+  const hasProvidedMedia = Array.isArray(brief?.assets?.photoPaths) && brief.assets.photoPaths.length > 0;
+  const allowServicePlaceholder = brief?.commercialPackage === 'demo';
+  const profileSections = (packageLimit
     ? baseProfileSections.filter((section) => section !== 'faq').slice(0, packageLimit.maxSectionsPerPage)
-    : baseProfileSections;
+    : baseProfileSections)
+    .filter((section) => section !== 'services' || hasVerifiedServices || allowServicePlaceholder)
+    .filter((section) => !['inspiration-media', 'verified-work-media'].includes(section) || hasProvidedMedia)
+    .filter((section) => section !== 'experience' || brief?.commercialPackage !== 'demo' || hasVerifiedFacts);
 
   return pages.map((page) => {
     let sections;
@@ -1361,6 +1497,15 @@ function websiteBlueprintContactDestination(pages) {
 function websiteBlueprintPrimaryCta(brief, pages) {
   const goal = normalizeWebsiteBlueprintCategory(brief?.website?.primaryGoal);
   const contact = brief?.contact ?? {};
+  if ((goal.includes('reserv') || goal.includes('cita')) && typeof contact.bookingUrl === 'string' && contact.bookingUrl.trim()) {
+    return {
+      id: 'primary',
+      kind: 'booking',
+      destination: contact.bookingUrl,
+      source: 'businessBrief.contact.bookingUrl',
+      goalSource: 'businessBrief.website.primaryGoal'
+    };
+  }
   const candidates = [];
   if (goal.includes('whatsapp')) candidates.push(['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp]);
   if (goal.includes('llam') || goal.includes('telefon')) candidates.push(['phone', 'businessBrief.contact.phone', contact.phone]);
@@ -1412,6 +1557,21 @@ export function websiteBlueprintForBrief(businessBrief) {
   const missingContactSources = ['phone', 'whatsapp', 'email', 'address']
     .filter((field) => !businessBrief?.contact?.[field])
     .map((field) => `businessBrief.contact.${field}`);
+  const placeholderRequirements = [];
+  if (!services.length && pages.some((page) => page.sections.includes('services'))) {
+    placeholderRequirements.push({
+      section: 'services',
+      label: 'Servicios por confirmar',
+      source: 'businessBrief.services'
+    });
+  }
+  if (!businessBrief?.contact?.address) {
+    placeholderRequirements.push({
+      section: 'contact',
+      label: 'Ubicación exacta por confirmar',
+      source: 'businessBrief.contact.address'
+    });
+  }
 
   const requiredFeatures = Array.isArray(businessBrief?.website?.requiredFeatures)
     ? businessBrief.website.requiredFeatures.map((value, index) => ({
@@ -1431,6 +1591,7 @@ export function websiteBlueprintForBrief(businessBrief) {
     ...(commercialScope ? { commercialScope } : {}),
     pages,
     requiredFeatures,
+    placeholderRequirements,
     contentSources: {
       services: services.map((_service, index) => `businessBrief.services[${index}]`),
       facts: facts.map((_fact, index) => `businessBrief.facts[${index}]`),
@@ -1480,7 +1641,10 @@ export function websiteBlueprintForBrief(businessBrief) {
       value,
       source: `businessBrief.contentRestrictions[${index}]`
     })),
-    missingFactSources: missingContactSources
+    missingFactSources: [
+      ...missingContactSources,
+      ...(!services.length ? ['businessBrief.services'] : [])
+    ]
   });
 }
 
@@ -1496,8 +1660,17 @@ function evidenceFingerprint(value) {
 
 function normalizeWorkflowInput(profile, input) {
   if (profile === 'website-build') {
-    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => key !== 'businessBrief')) throw new Error('website-build requires input.businessBrief and no unknown workflow input fields');
-    return { businessBrief: normalizeBusinessBrief(input.businessBrief) };
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('website-build requires input.businessBrief or input.callflowBrief');
+    }
+    const keys = Object.keys(input);
+    if (keys.length !== 1 || !['businessBrief', 'callflowBrief'].includes(keys[0])) {
+      throw new Error('website-build requires exactly one of input.businessBrief or input.callflowBrief and no unknown workflow input fields');
+    }
+    const businessBrief = keys[0] === 'callflowBrief'
+      ? businessBriefFromCallflowDemoBrief(input.callflowBrief)
+      : normalizeBusinessBrief(input.businessBrief);
+    return { businessBrief };
   }
   if (input !== undefined && input !== null) throw new Error(`Workflow input is not supported for profile: ${profile}`);
   return null;
@@ -1505,8 +1678,8 @@ function normalizeWorkflowInput(profile, input) {
 
 const workflowProfiles = Object.freeze({
   'website-build': {
-    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }],
-    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder'], ['visual-verification', 'checkpoint']]
+    definitionOfDone: [{ id: 'websitePlanned', steps: ['requirements'] }, { id: 'implementationCompleted', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'qualityVerified', steps: ['quality'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }, { id: 'browserQaPassed', steps: ['browser-verification'] }, { id: 'visualReviewCompleted', steps: ['visual-verification'] }],
+    steps: [['requirements', 'placeholder'], ['design', 'checkpoint'], ['implementation', 'placeholder'], ['dependency-refresh', 'placeholder'], ['review', 'placeholder'], ['quality', 'verification'], ['release-readiness', 'checkpoint'], ['publication', 'placeholder'], ['browser-verification', 'placeholder'], ['visual-verification', 'checkpoint']]
   },
   'app-improvement': {
     definitionOfDone: [{ id: 'changeImplemented', steps: ['implementation'] }, { id: 'dependenciesValidated', steps: ['dependency-refresh'] }, { id: 'changeReviewed', steps: ['review'] }, { id: 'testsPassed', steps: ['tests'] }, { id: 'verificationCompleted', steps: ['verification'] }, { id: 'releaseReady', steps: ['release-readiness'] }, { id: 'publishedForReview', steps: ['publication'] }],
@@ -1565,6 +1738,7 @@ const workflowStepSkills = Object.freeze({
     'dependency-refresh': 'project.dependencies.refresh',
     review: 'code.review',
     quality: 'project.verify',
+    'browser-verification': 'visual.review',
     'visual-verification': 'human.approval',
     'release-readiness': 'human.approval',
     publication: 'release.publish-reviewed-workflow'
@@ -1610,6 +1784,7 @@ const workflowStepSpecialists = Object.freeze({
     'dependency-refresh': 'dependency-manager',
     review: 'change-critic',
     quality: 'verifier',
+    'browser-verification': 'visual-reviewer',
     'visual-verification': 'human-supervisor',
     'release-readiness': 'human-supervisor',
     publication: 'release-manager'
@@ -1854,6 +2029,40 @@ function validateCompletedWorkflowEvidence(plan, step, project = null) {
       if (preview.state === 'READY' && (preview.environment !== 'preview' || preview.commitSha !== commit.finalHead || preview.branch !== plan.workspace.workingBranch || (plan.profile === 'website-build' && (typeof preview.url !== 'string' || !preview.url)))) throw new Error('Completed publication READY preview is not bound to the published commit');
       if (preview.state === 'NOT_REQUIRED' && (previewRequired || project.deployment?.provider === 'vercel')) throw new Error('Completed publication cannot omit configured preview evidence');
     }
+    if (step.skill === 'visual.review') {
+      const requirements = plan.steps.find((candidate) => candidate.id === 'requirements');
+      const implementation = plan.steps.find((candidate) => candidate.id === 'implementation');
+      const review = plan.steps.find((candidate) => candidate.id === 'review');
+      const publication = plan.steps.find((candidate) => candidate.id === 'publication');
+      const preview = publication?.evidence?.preview;
+      const commit = publication?.evidence?.commit;
+      if (
+        plan.profile !== 'website-build' ||
+        requirements?.status !== WorkflowStepStatus.COMPLETED ||
+        implementation?.status !== WorkflowStepStatus.COMPLETED ||
+        review?.status !== WorkflowStepStatus.COMPLETED ||
+        reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' ||
+        publication?.status !== WorkflowStepStatus.COMPLETED ||
+        preview?.state !== 'READY' ||
+        preview?.ok !== true ||
+        preview?.environment !== 'preview' ||
+        typeof preview?.url !== 'string' ||
+        !preview.url ||
+        !commit?.finalHead ||
+        preview.commitSha !== commit.finalHead
+      ) throw new Error('Completed Browser QA prerequisites are invalid');
+      const expectedRequest = createBrowserQaRequest({
+        workflowId: plan.id,
+        websiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        publishedCommitSha: commit.finalHead,
+        previewUrl: preview.url,
+        websiteBlueprint: requirements.evidence.websiteBlueprint
+      });
+      if (JSON.stringify(step.evidence.browserQaRequest) !== JSON.stringify(expectedRequest)) throw new Error('Completed Browser QA request is not bound to the published preview');
+      validateBrowserQaEvidence(expectedRequest, step.evidence.browserQaEvidence);
+      if (step.evidence.browserQaEvidence.status !== 'pass') throw new Error('Completed Browser QA requires pass evidence');
+    }
     return;
   }
   if (step.type === 'checkpoint') {
@@ -2059,10 +2268,10 @@ function historicalFingerprintMismatch(error) {
 }
 
 export class WorkflowEngine {
-  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
+  constructor({ store, projects, registry = defaultToolSkillRegistry, specialistRegistry = defaultSpecialistRegistry, workspaceManager = new WorkspaceManager(), localGit = new LocalGitAdapter(), skillExecutor = new CodexReadOnlySkillExecutor(), codingWorker = new CodexSdkWorker(), publicationBridge = null, browserQaCoordinator = null, commandRunner = (project, name, options) => new ProjectCommandRunner().run(project, name, options), now = () => Date.now() } = {}) {
     if (!store || !projects || !registry || !specialistRegistry || !skillExecutor || !codingWorker || !localGit) throw new Error('WorkflowEngine requires store, projects, registry, specialistRegistry, localGit, skillExecutor, and codingWorker');
     const resolvedPublicationBridge = publicationBridge ?? new WorkflowPublicationBridge({ localGit });
-    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, commandRunner, now });
+    Object.assign(this, { store, projects, registry, specialistRegistry, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge: resolvedPublicationBridge, browserQaCoordinator, commandRunner, now });
   }
 
   async create(input) {
@@ -2655,6 +2864,126 @@ export class WorkflowEngine {
       } else {
         step.status = WorkflowStepStatus.READY;
         step.error = execution.timedOut ? 'skill_executor_timeout_retry_available' : 'skill_executor_failed_retry_available';
+        saved.status = WorkflowStepStatus.PENDING;
+      }
+    });
+  }
+
+  browserQa() {
+    if (!this.browserQaCoordinator) {
+      this.browserQaCoordinator = new BrowserQaCoordinator({ runner: new ChromeBrowserQaRunner() });
+    }
+    return this.browserQaCoordinator;
+  }
+
+  async executeBrowserQaWorkflowStep(id, next) {
+    let plan = await this.get(id);
+    const requirements = plan.steps.find((step) => step.id === 'requirements');
+    const implementation = plan.steps.find((step) => step.id === 'implementation');
+    const review = plan.steps.find((step) => step.id === 'review');
+    const publication = plan.steps.find((step) => step.id === 'publication');
+    const preview = publication?.evidence?.preview;
+    const commit = publication?.evidence?.commit;
+    if (
+      plan.profile !== 'website-build' ||
+      requirements?.status !== WorkflowStepStatus.COMPLETED ||
+      implementation?.status !== WorkflowStepStatus.COMPLETED ||
+      review?.status !== WorkflowStepStatus.COMPLETED ||
+      reviewEvidenceVerdict(review.evidence?.result) !== 'PASS' ||
+      publication?.status !== WorkflowStepStatus.COMPLETED ||
+      preview?.state !== 'READY' ||
+      preview?.ok !== true ||
+      preview?.environment !== 'preview' ||
+      typeof preview?.url !== 'string' ||
+      !preview.url ||
+      !commit?.finalHead ||
+      preview.commitSha !== commit.finalHead
+    ) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'browser_qa_prerequisites_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step) };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    let request;
+    try {
+      request = createBrowserQaRequest({
+        workflowId: plan.id,
+        websiteBlueprintFingerprint: requirements.evidence.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: implementation.evidence.changeSetFingerprint,
+        publishedCommitSha: commit.finalHead,
+        previewUrl: preview.url,
+        websiteBlueprint: requirements.evidence.websiteBlueprint
+      });
+    } catch (error) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === next.id);
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'browser_qa_request_invalid';
+        step.evidence = { type: 'executor', ok: false, ...workflowEvidenceContext(saved, step), error: clip(error.message, 1_000) };
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      });
+    }
+    await this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      step.status = WorkflowStepStatus.RUNNING;
+      step.attempts += 1;
+      step.evidence = { type: 'executor-start', ...workflowEvidenceContext(saved, step), browserQaRequest: safeJson(request) };
+      saved.status = WorkflowStepStatus.RUNNING;
+    });
+    let result;
+    try {
+      result = await this.browserQa().verify(request);
+    } catch (error) {
+      result = { evidence: { status: 'unavailable', unavailableReason: clip(error.message, 160), deterministicDefects: [], observations: [] } };
+    }
+    const evidence = result?.evidence ?? null;
+    let evidenceValid = false;
+    try {
+      if (evidence) evidenceValid = validateBrowserQaEvidence(request, evidence) === true;
+    } catch {
+      evidenceValid = false;
+    }
+    const outputBytes = Buffer.byteLength(JSON.stringify(evidence ?? {}));
+    return this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === next.id);
+      saved.outputBytes += outputBytes;
+      const status = evidenceValid ? evidence.status : 'unavailable';
+      step.evidence = {
+        type: 'executor',
+        ok: evidenceValid && status === 'pass',
+        completedAt: evidenceValid && status === 'pass' ? new Date().toISOString() : null,
+        ...workflowEvidenceContext(saved, step),
+        browserQaRequest: safeJson(request),
+        browserQaEvidence: evidenceValid ? safeJson(evidence) : null,
+        error: evidenceValid ? null : 'browser_qa_evidence_invalid'
+      };
+      if (saved.outputBytes > saved.budgets.maxOutputBytes) {
+        step.status = WorkflowStepStatus.FAILED;
+        step.error = 'workflow_output_budget_exhausted';
+        saved.status = WorkflowStepStatus.FAILED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else if (status === 'pass' && evidenceValid) {
+        step.status = WorkflowStepStatus.COMPLETED;
+        step.error = null;
+        saved.status = WorkflowStepStatus.PENDING;
+      } else if (status === 'defects' && evidenceValid) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'browser_qa_defects';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id, defects: safeJson(evidence.deterministicDefects) };
+      } else if (step.attempts >= saved.budgets.maxAttempts) {
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = evidenceValid ? 'browser_qa_unavailable' : 'browser_qa_evidence_invalid';
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.result = { error: step.error, stepId: step.id };
+      } else {
+        step.status = WorkflowStepStatus.READY;
+        step.error = 'browser_qa_unavailable_retry_available';
         saved.status = WorkflowStepStatus.PENDING;
       }
     });
@@ -3669,6 +3998,39 @@ export class WorkflowEngine {
       const current = await this.get(id);
       const expiredPause = await this.recoverExpiredPausedWorkflow(id, current, { deadlineAt: options.deadlineCapAt ?? null });
       if (expiredPause) return expiredPause;
+      const retryableDeadlineStep = (
+        current.status === WorkflowStepStatus.FAILED &&
+        current.result?.error === 'workflow_budget_deadline_exceeded' &&
+        current.deadlineAt <= this.now() &&
+        current.modelUsage?.calls < current.modelUsage?.maxCalls
+      )
+        ? current.steps.find((step) =>
+            step.status === WorkflowStepStatus.READY &&
+            step.error === 'skill_executor_failed_retry_available' &&
+            step.attempts < current.budgets.maxAttempts &&
+            ['code.inspect', 'code.diagnose', 'code.review', 'website.plan'].includes(step.skill)
+          )
+        : null;
+      if (retryableDeadlineStep) {
+        await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === retryableDeadlineStep.id);
+          if (
+            saved.status !== WorkflowStepStatus.FAILED ||
+            saved.result?.error !== 'workflow_budget_deadline_exceeded' ||
+            step?.status !== WorkflowStepStatus.READY ||
+            step.error !== 'skill_executor_failed_retry_available' ||
+            step.attempts >= saved.budgets.maxAttempts ||
+            saved.modelUsage?.calls >= saved.modelUsage?.maxCalls
+          ) {
+            throw new Error('workflow_deadline_retry_state_changed');
+          }
+          saved.deadlineAt = boundedWorkflowDeadlineAt(this.now(), saved.budgets.timeoutMs, options.deadlineCapAt ?? null);
+          saved.pausedAt = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        }, { deadlineAt: options.deadlineCapAt ?? null });
+        return this.runUnlocked(id, options);
+      }
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
         validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
@@ -3705,6 +4067,19 @@ export class WorkflowEngine {
         return this.runUnlocked(id, options);
       }
       const interruptedStep = plan.steps.find((step) => step.status === WorkflowStepStatus.BLOCKED && step.error === 'interrupted_step_requires_human_approval');
+      if (interruptedStep?.skill === 'visual.review') {
+        await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === interruptedStep.id);
+          if (Number.isFinite(saved.pausedAt)) saved.deadlineAt += Math.max(0, this.now() - saved.pausedAt);
+          saved.pausedAt = null;
+          step.status = WorkflowStepStatus.READY;
+          step.error = null;
+          step.evidence = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        });
+        return this.runUnlocked(id, options);
+      }
       if (interruptedStep?.skill === 'release.publish-reviewed-workflow') {
         plan = await this.update(id, (saved) => {
           const step = saved.steps.find((item) => item.id === interruptedStep.id);
@@ -4113,6 +4488,11 @@ export class WorkflowEngine {
       }
       if (next.type === 'placeholder' && next.skill === 'release.publish-reviewed-workflow' && governedImplementationProfiles.has(plan.profile)) {
         plan = await this.executePublicationWorkflowStep(id, project, next);
+        if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
+        continue;
+      }
+      if (next.type === 'placeholder' && next.skill === 'visual.review' && plan.profile === 'website-build') {
+        plan = await this.executeBrowserQaWorkflowStep(id, next);
         if ([WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(plan.status)) return plan;
         continue;
       }
@@ -4626,6 +5006,7 @@ export function buildWorkerPrompt(task) {
   const websiteRules = cleanTask?.websiteBuild ? [
     'This is a structured website build. Treat the supplied businessBrief as the complete authoritative source of business facts.',
     'Treat websiteBuild.websiteBlueprint as a deterministic requirements contract, not art direction and never as evidence of new business facts. Satisfy its bound structural/CTA/navigation/accessibility/SEO/provenance requirements without overriding businessBrief, scope, content restrictions, or governance.',
+    'Render websiteBuild.websiteBlueprint.placeholderRequirements only as visibly provisional copy using the supplied labels; never replace them with invented specifics. A missing business photo may justify generic decorative treatment, but never a gallery or work showcase unless the blueprint includes that media section.',
     'Treat the approved websitePlan.design direction, typography and color strategy as a real implementation requirement. A website-build should materially express that art direction through hierarchy, composition, spacing, responsive behavior and the planned visual motif; do not collapse it into a generic template merely to minimize the diff.',
     'Implement a professional visual system, not a page assembled from default components: preserve deliberate grid/alignment, typographic hierarchy, section-to-section rhythm, focal hierarchy, authentic asset treatment, purposeful responsive recomposition, polished interaction states and only intentional motion. Avoid card soup, arbitrary rounded rectangles, generic gradient blobs, decorative glassmorphism, excessive pills, repeated icon-text triples and other recognizable template defaults unless the approved concept specifically justifies them.',
     'The first viewport must communicate positioning and create a memorable but usable brand moment while keeping the primary action immediately understandable. Prefer one or two signature visual ideas carried consistently through the site over many unrelated effects.',
@@ -4671,6 +5052,7 @@ function multiModelGatewayEnvironment(environment = process.env) {
   const allowed = [
     'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME',
     'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
+    'CODEX_BIN',
     'OLLAMA_URL', 'OLLAMA_MODEL',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
     'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
@@ -4679,9 +5061,12 @@ function multiModelGatewayEnvironment(environment = process.env) {
     'MODEL_PROVIDER_MAX_OLLAMA', 'MODEL_PROVIDER_MAX_OPENCODE',
     'MODEL_PROVIDER_MAX_COPILOT', 'MODEL_PROVIDER_MAX_CODEX'
   ];
+  const requestedCostPolicy = environment.MODEL_COST_POLICY === 'subscription_included'
+    ? 'subscription_included'
+    : 'free_only';
   return {
     ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
-    MODEL_COST_POLICY: 'free_only',
+    MODEL_COST_POLICY: requestedCostPolicy,
     PAID_MODELS_EXPLICITLY_ENABLED: '0',
     OPENCODE_FREE_ENABLED: '1',
     COPILOT_FREE_ENABLED: '1',
@@ -4702,13 +5087,131 @@ function multiModelRoleForReadOnlySkill(skill) {
   return null;
 }
 
+function multiModelOutputSchema(name) {
+  const stringArray = { type: 'array', items: { type: 'string' } };
+  if (name === 'websitePlan') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'pages', 'design', 'conversion', 'seo', 'implementation', 'missingInputs'],
+      properties: {
+        summary: { type: 'string' },
+        pages: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['slug', 'title', 'purpose', 'sections'],
+            properties: {
+              slug: { type: 'string' },
+              title: { type: 'string' },
+              purpose: { type: 'string' },
+              sections: stringArray
+            }
+          }
+        },
+        design: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['direction', 'tone', 'colors', 'typography'],
+          properties: {
+            direction: { type: 'string' },
+            tone: { type: 'string' },
+            colors: stringArray,
+            typography: { type: 'string' }
+          }
+        },
+        conversion: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['primaryCta', 'secondaryCta'],
+          properties: {
+            primaryCta: { type: 'string' },
+            secondaryCta: { type: ['string', 'null'] }
+          }
+        },
+        seo: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['primaryLocation', 'keywords'],
+          properties: {
+            primaryLocation: { type: ['string', 'null'] },
+            keywords: stringArray
+          }
+        },
+        implementation: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['priorities', 'constraints'],
+          properties: {
+            priorities: stringArray,
+            constraints: stringArray
+          }
+        },
+        missingInputs: stringArray
+      }
+    };
+  }
+  if (name === 'reviewEvidence') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['verdict', 'summary', 'findings'],
+      properties: {
+        verdict: { type: 'string', enum: ['PASS', 'FAIL'] },
+        summary: { type: 'string' },
+        findings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['severity', 'message', 'path'],
+            properties: {
+              severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+              message: { type: 'string' },
+              path: { type: ['string', 'null'] }
+            }
+          }
+        }
+      }
+    };
+  }
+  if (name === 'inspectionEvidence') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'relevantPaths', 'findings'],
+      properties: {
+        summary: { type: 'string' },
+        relevantPaths: stringArray,
+        findings: stringArray
+      }
+    };
+  }
+  if (name === 'diagnosis') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'cause', 'relevantPaths', 'recommendedChange', 'risks'],
+      properties: {
+        summary: { type: 'string' },
+        cause: { type: 'string' },
+        relevantPaths: stringArray,
+        recommendedChange: { type: 'string' },
+        risks: stringArray
+      }
+    };
+  }
+  return { type: 'object', additionalProperties: false, required: [], properties: {} };
+}
+
 function multiModelSchemaForContract(contract = {}) {
   const outputs = Array.isArray(contract.outputs) ? contract.outputs : [];
   return {
     type: 'object',
     additionalProperties: false,
     required: [...outputs],
-    properties: Object.fromEntries(outputs.map((name) => [name, { type: 'object' }]))
+    properties: Object.fromEntries(outputs.map((name) => [name, multiModelOutputSchema(name)]))
   };
 }
 
@@ -5804,10 +6307,10 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
       : 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
-    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements and materially implements the approved websitePlan design direction, typography, hierarchy, composition and visual motif. Treat a generic-template implementation that drops the core approved art direction as a material quality defect, while still allowing reasonable implementation choices. Also inspect for template tells such as repetitive card grids, arbitrary radii, gratuitous gradients/glass effects, weak or flat typographic hierarchy, identical section rhythm, CTA clutter, decorative motion without purpose, poor mobile recomposition, and a first viewport with no clear focal hierarchy. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; if it uses business-specific assets outside the verified asset evidence; or if it materially abandons the approved visual concept.'
+    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance, placeholder and restriction requirements and materially implements the approved websitePlan design direction, typography, hierarchy, composition and visual motif. Treat a generic-template implementation that drops the core approved art direction as a material quality defect, while still allowing reasonable implementation choices. Also inspect for template tells such as repetitive card grids, arbitrary radii, gratuitous gradients/glass effects, weak or flat typographic hierarchy, identical section rhythm, CTA clutter, decorative motion without purpose, poor mobile recomposition, and a first viewport with no clear focal hierarchy. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; if it uses business-specific assets outside the verified asset evidence; or if it materially abandons the approved visual concept.'
     : null;
   const websiteInstruction = skill === 'website.plan'
-    ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
+    ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance, placeholder and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
     : null;
   const websiteUniversalVisualInstruction = skill === 'website.plan'
     ? websiteUniversalDesignInstruction(clean?.context?.businessBrief)

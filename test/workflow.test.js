@@ -4,7 +4,8 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
+import { browserQaFingerprint } from '../src/browser-qa.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
@@ -81,10 +82,10 @@ function stableLocalGit(overrides = {}) {
   };
 }
 
-async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge, now } = {}) {
+async function engine({ runner, projects, workspaceManager, localGit, skillExecutor, codingWorker, publicationBridge, browserQaCoordinator, now } = {}) {
   const store = new JsonStore(join(await mkdtemp(join(tmpdir(), 'agent-workflow-')), 'state.json'));
   const configuredProjects = projects ?? new Map([['workflow-project', project()]]);
-  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
+  return new WorkflowEngine({ store, projects: configuredProjects, workspaceManager, localGit: localGit ?? stableLocalGit(), skillExecutor, codingWorker, publicationBridge, browserQaCoordinator, now, commandRunner: runner ?? (async (_project, name) => ({ name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' })) });
 }
 
 function fixtureEvidenceFingerprint(value) {
@@ -255,6 +256,71 @@ test('business brief normalization is bounded, deterministic, and safe for websi
     locations: ['Valencia'],
     services: ['Corte']
   }), /commercialPackage/);
+});
+
+test('website workflow accepts the Callflow demo handoff contract directly', () => {
+  const configured = project();
+  const plan = createWorkflowPlan({
+    profile: 'website-build',
+    project: configured,
+    goal: 'Crear demo comercial desde Callflow',
+    input: {
+      callflowBrief: {
+        version: 'website-pilot-brief-v1',
+        source: 'callflow',
+        lead: {
+          callflowId: 'cf-1',
+          leadFinderId: 'lf-1',
+          businessName: 'Salón Luz',
+          city: 'Valencia',
+          niche: 'Peluquería',
+          phone: '600111222',
+          existingWebsite: '',
+          websiteDiscoveryStatus: 'third_party_only'
+        },
+        commercialEvidence: {
+          salesFit: 86,
+          salesSegment: 'marketplace_owned_gap',
+          opportunityScore: 80,
+          leadScore: 79,
+          websiteQuality: 'no_website',
+          reasonToCall: 'Ya usa reservas online pero no tiene canal web propio.',
+          primaryPitchReason: 'Solo presencia en plataforma de terceros.'
+        },
+        demo: {
+          type: 'conceptual',
+          defaultScope: 'one_page',
+          objective: 'Complementar la reserva existente con un canal propio.',
+          primaryCta: 'Reservar en Booksy',
+          existingBookingPlatform: 'Booksy',
+          preserveExistingBooking: true,
+          existingWebsiteReference: ''
+        },
+        verifiedBusinessFacts: {
+          bookingUrl: 'https://booksy.com/es-es/12345'
+        },
+        missingBusinessFacts: ['servicios exactos', 'precios'],
+        constraints: ['No inventar precios, reseñas, equipo ni testimonios.']
+      }
+    }
+  });
+
+  assert.equal(plan.input.businessBrief.version, 2);
+  assert.equal(plan.input.businessBrief.commercialPackage, 'demo');
+  assert.equal(plan.input.businessBrief.businessName, 'Salón Luz');
+  assert.deepEqual(plan.input.businessBrief.services, []);
+  assert.deepEqual(plan.input.businessBrief.locations, ['Valencia']);
+  assert.equal(plan.input.businessBrief.contact.bookingUrl, 'https://booksy.com/es-es/12345');
+  assert.equal(plan.input.businessBrief.website.primaryGoal, 'reserva');
+  const blueprint = websiteBlueprintForBrief(plan.input.businessBrief);
+  assert.deepEqual(blueprint.ctas[0], {
+    id: 'primary',
+    kind: 'booking',
+    destination: 'https://booksy.com/es-es/12345',
+    source: 'businessBrief.contact.bookingUrl',
+    goalSource: 'businessBrief.website.primaryGoal'
+  });
+  assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
 });
 
 test('website workflow persists normalized input fingerprint and rejects business brief tampering', () => {
@@ -775,7 +841,7 @@ test('app-improvement dry-run discloses future reviewed publication without exec
 test('website-build dry-run exposes the full governed factory path with zero project or external writes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-dry-run-'));
   const configured = managedProject('website-build-dry-run', root, {
-    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow', 'visual.review'], deny: [] }
   });
   let gitCalls = 0;
   let workerCalls = 0;
@@ -802,10 +868,12 @@ test('website-build dry-run exposes the full governed factory path with zero pro
   });
   const dryRun = await instance.run(created.id, { dryRun: true });
   assert.equal(dryRun.dryRun, true);
-  assert.equal(dryRun.plannedSteps.length, 9);
+  assert.equal(dryRun.plannedSteps.length, 10);
   assert.deepEqual(dryRun.plannedSteps.map((step) => step.id), [
-    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'release-readiness', 'publication', 'visual-verification'
+    'requirements', 'design', 'implementation', 'dependency-refresh', 'review', 'quality', 'release-readiness', 'publication', 'browser-verification', 'visual-verification'
   ]);
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'browser-verification').specialist, 'visual-reviewer');
+  assert.equal(dryRun.plannedSteps.find((step) => step.id === 'browser-verification').specialistAuthority, 'network-read');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialist, 'requirements-engineer');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'requirements').specialistAuthority, 'workspace-read');
   assert.equal(dryRun.plannedSteps.find((step) => step.id === 'visual-verification').specialist, 'human-supervisor');
@@ -1112,6 +1180,75 @@ test('workflow global deadline is enforced before start, between steps, between 
   assert.equal(commandTimeouts.at(-1), 1_000);
   assert.equal(calls, 2);
   assert.equal(deadlineFailed.steps.find((step) => step.id === 'verification').attempts, 1);
+});
+
+test('resume renews an expired deadline only for an explicit retryable read-only step', async () => {
+  let clock = 0;
+  let changeCalls = 0;
+  let reviewCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    }
+  });
+  const configured = configFrom({
+    id: 'deadline-review-retry',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'implemented', output: 'done', outputBytes: 4 };
+    }
+  };
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute() {
+      reviewCalls += 1;
+      if (reviewCalls === 1) {
+        clock = 1_000;
+        return { ok: false, status: 'failed', outputBytes: 0, error: 'transient reviewer failure' };
+      }
+      return { ok: true, status: 'completed', outputBytes: 16, result: { reviewEvidence: { verdict: 'PASS', summary: 'retry passed', findings: [] } } };
+    }
+  };
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    codingWorker,
+    skillExecutor,
+    now: () => clock
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover a retryable review after deadline',
+    budgets: { timeoutMs: 1_000, maxAttempts: 2 }
+  });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const failedReview = failed.steps.find((step) => step.id === 'review');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(failedReview.status, WorkflowStepStatus.READY);
+  assert.equal(failedReview.error, 'skill_executor_failed_retry_available');
+  const expiredDeadline = failed.deadlineAt;
+
+  clock = 1_100;
+  const resumed = await instance.resume(created.id);
+  const review = resumed.steps.find((step) => step.id === 'review');
+  assert.equal(reviewCalls, 2);
+  assert.equal(review.status, WorkflowStepStatus.COMPLETED);
+  assert.ok(resumed.deadlineAt > expiredDeadline);
+  assert.equal(resumed.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(resumed.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
 });
 
 test('crash and resume preserve a managed workspace and never repeat completed steps before approval', async () => {
@@ -2867,7 +3004,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   const root = await mkdtemp(join(tmpdir(), 'agent-website-build-e2e-'));
   const configured = managedProject('website-e2e', root, {
     deployment: { provider: 'vercel', projectId: 'prj_website_e2e', teamId: 'team_website_e2e', requirePreviewReady: true },
-    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow'], deny: [] }
+    skills: { allow: ['workspace.prepare', 'website.plan', 'human.approval', 'code.implement', 'code.review', 'project.verify', 'release.publish-reviewed-workflow', 'visual.review'], deny: [] }
   });
   const manager = new FakeWorkflowWorkspaceManager();
   const brief = businessBrief();
@@ -2937,6 +3074,23 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     preview: { provider: 'vercel', state: 'READY', ok: true, environment: 'preview', url: previewUrl },
     onCommit: (nextHead) => { head = nextHead; }
   });
+  const browserQaCoordinator = {
+    async verify(request) {
+      const base = {
+        workflowId: request.workflowId,
+        websiteBlueprintFingerprint: request.websiteBlueprintFingerprint,
+        reviewedChangeSetFingerprint: request.reviewedChangeSetFingerprint,
+        publishedCommitSha: request.publishedCommitSha,
+        previewUrl: request.previewUrl,
+        acceptanceSchemaVersion: request.acceptanceSchemaVersion,
+        requestFingerprint: request.requestFingerprint,
+        status: 'pass',
+        deterministicDefects: [],
+        observations: []
+      };
+      return { evidence: { ...base, evidenceFingerprint: browserQaFingerprint(base) } };
+    }
+  };
   const commandCalls = [];
   const instance = await engine({
     projects: new Map([[configured.id, configured]]),
@@ -2945,6 +3099,7 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
     skillExecutor,
     codingWorker,
     publicationBridge,
+    browserQaCoordinator,
     runner: async (_project, name) => { commandCalls.push(name); return { name, ok: true, exitCode: 0, stdout: 'ok', stderr: '' }; }
   });
 
@@ -3006,6 +3161,11 @@ test('website-build runs brief to reviewed PR-ready publication with three bound
   assert.equal(publication.evidence.preview.state, 'READY');
   assert.equal(publication.evidence.preview.url, previewUrl);
   assert.equal(publication.evidence.preview.commitSha, commitHead);
+  const browserVerification = waiting.steps.find((step) => step.id === 'browser-verification');
+  assert.equal(browserVerification.status, WorkflowStepStatus.COMPLETED);
+  assert.equal(browserVerification.evidence.browserQaEvidence.status, 'pass');
+  assert.equal(browserVerification.evidence.browserQaEvidence.publishedCommitSha, commitHead);
+  assert.equal(browserVerification.evidence.browserQaEvidence.previewUrl, `${previewUrl}/`);
   assert.equal(waiting.steps.find((step) => step.id === 'visual-verification').status, WorkflowStepStatus.AWAITING_APPROVAL);
 
   waiting = await instance.approve(created.id, 'visual-verification');

@@ -110,6 +110,16 @@ function blueprintAcceptance(blueprint) {
       targets.push({ id: `cta:${id}`, kind: 'cta', fromRoute: '/', semantics: 'anchor', destination: cta.destination });
     } else if (['email', 'phone', 'whatsapp'].includes(cta.kind) && cta.destination === 'provided-contact') {
       targets.push({ id: `cta:${id}`, kind: 'cta', fromRoute: '/', semantics: 'external', destination: cta.kind });
+    } else if (cta.kind === 'booking') {
+      let expectedHref;
+      try {
+        const url = new URL(cta.destination);
+        if (url.protocol !== 'https:' || url.username || url.password) throw new Error('unsafe');
+        expectedHref = url.href;
+      } catch {
+        throw new Error('browser_qa_blueprint_cta_invalid');
+      }
+      targets.push({ id: `cta:${id}`, kind: 'cta', fromRoute: '/', semantics: 'external', destination: 'booking', expectedHref });
     } else {
       throw new Error('browser_qa_blueprint_cta_invalid');
     }
@@ -226,7 +236,7 @@ function targetHrefAnchor(href, request, fromRoute) {
     return null;
   }
 }
-function externalTargetSyntax(kind, href) {
+function externalTargetSyntax(kind, href, expectedHref = null) {
   const validRecipient = (value) => /^[0-9]{7,15}$/.test(String(value ?? '').replace(/^\+/, ''));
   if (kind === 'phone') {
     if (!/^tel:\+?[0-9(). -]{3,80}$/i.test(href)) return false;
@@ -242,6 +252,15 @@ function externalTargetSyntax(kind, href) {
         return validRecipient(url.searchParams.get('phone'));
       }
       return false;
+    } catch {
+      return false;
+    }
+  }
+  if (kind === 'booking' && typeof expectedHref === 'string') {
+    try {
+      const actual = new URL(href);
+      const expected = new URL(expectedHref);
+      return actual.protocol === 'https:' && !actual.username && !actual.password && actual.href === expected.href;
     } catch {
       return false;
     }
@@ -307,7 +326,7 @@ export function classifyBrowserQaSnapshot(request, snapshot) {
       const resolved = targetHrefAnchor(observed.href, normalizedRequest, expected.fromRoute);
       ok = resolved?.route === expected.fromRoute && resolved?.hash === expected.destination && page?.anchors.includes(expected.destination.slice(1));
     } else if (observed && expected.semantics === 'external') {
-      ok = externalTargetSyntax(expected.destination, observed.href);
+      ok = externalTargetSyntax(expected.destination, observed.href, expected.expectedHref);
     }
     if (!ok) defects.push(defect('broken_required_target', expected.fromRoute, expected.id));
     if (observed && !observed.accessibleName) defects.push(defect('missing_accessible_name', expected.fromRoute, expected.id));

@@ -27,16 +27,35 @@ function trustedServicePath(nodePath) {
   return [...new Set(['/usr/local/bin', '/usr/bin', '/bin', dirname(resolve(nodePath))])].join(':');
 }
 
-function serviceRuntimeEnvironment(environment = {}) {
+export function serviceRuntimeEnvironment(environment = {}) {
   const result = {};
-  for (const name of ['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL']) {
+  const allowed = [
+    'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
+    'MODEL_COST_POLICY',
+    'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
+    'CODEX_BIN',
+    'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
+    'MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS', 'MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS',
+    'MODEL_PROVIDER_SLOT_WAIT_SECONDS', 'MODEL_PROVIDER_MAX_ANTIGRAVITY',
+    'MODEL_PROVIDER_MAX_OPENCODE', 'MODEL_PROVIDER_MAX_CODEX'
+  ];
+  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
+  for (const name of allowed) {
     const value = environment[name];
     if (value === undefined) continue;
     const text = validateText(String(value), name);
-    if (['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME'].includes(name) && !isAbsolute(text)) throw new Error(`${name} must be absolute`);
+    if (absolutePaths.has(name) && !isAbsolute(text)) throw new Error(`${name} must be absolute`);
+    if (name === 'MODEL_COST_POLICY' && !['free_only', 'subscription_included'].includes(text)) {
+      throw new Error('MODEL_COST_POLICY must be free_only or subscription_included');
+    }
     result[name] = text;
   }
   return result;
+}
+
+export function systemdRunEnvironmentArgs(environment = {}) {
+  return Object.entries(serviceRuntimeEnvironment(environment))
+    .map(([name, value]) => `--setenv=${name}=${value}`);
 }
 
 function checkoutReadEnvironment(environment = process.env) {
@@ -229,13 +248,17 @@ async function assertManagedOrMissing(unitPath) {
 
 function systemdUserCommandEnvironment({ home, pathValue, environment = process.env }) {
   const result = { PATH: pathValue, HOME: home };
-  const runtimeDir = environment.XDG_RUNTIME_DIR;
+  const fallbackRuntimeDir = process.platform === 'linux' && typeof process.getuid === 'function'
+    ? `/run/user/${process.getuid()}`
+    : undefined;
+  const runtimeDir = environment.XDG_RUNTIME_DIR ?? fallbackRuntimeDir;
   if (runtimeDir !== undefined) {
     const value = validateText(String(runtimeDir), 'XDG_RUNTIME_DIR');
     if (!isAbsolute(value)) throw new Error('XDG_RUNTIME_DIR must be absolute');
     result.XDG_RUNTIME_DIR = value;
   }
-  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS;
+  const busAddress = environment.DBUS_SESSION_BUS_ADDRESS ??
+    (result.XDG_RUNTIME_DIR ? `unix:path=${result.XDG_RUNTIME_DIR}/bus` : undefined);
   if (busAddress !== undefined) result.DBUS_SESSION_BUS_ADDRESS = validateText(String(busAddress), 'DBUS_SESSION_BUS_ADDRESS');
   return result;
 }

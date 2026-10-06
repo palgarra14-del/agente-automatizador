@@ -132,6 +132,8 @@ def cost_allowed(spec):
     cost_class = spec.get("costClass")
     if cost_class in FREE_COST_CLASSES:
         return True
+    if cost_class == "subscription_quota" and COST_POLICY == "subscription_included":
+        return True
     return COST_POLICY == "allow_all" and PAID_MODELS_EXPLICITLY_ENABLED
 
 

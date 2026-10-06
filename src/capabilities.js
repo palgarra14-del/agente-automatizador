@@ -156,7 +156,7 @@ export const defaultTools = Object.freeze([
   { id: 'workflow-publication', kind: 'publisher', binding: 'WorkflowPublicationBridge', surfaces: ['workflow'], risk: 'external-write', description: 'Publishes a fully reviewed workflow change through the controlled review-only publication bridge.' },
   { id: 'human-approval', kind: 'human', binding: 'WorkflowApproval', surfaces: ['workflow', 'orchestrator'], risk: 'approval', description: 'Requires an explicit human decision.' },
   { id: 'web-research', kind: 'research', binding: null, surfaces: [], risk: 'network-read', description: 'Reserved for future reviewed web research integration.' },
-  { id: 'browser-visual', kind: 'browser', binding: null, surfaces: [], risk: 'network-read', description: 'Reserved for future reviewed browser and visual verification integration.' }
+  { id: 'browser-visual', kind: 'browser', binding: 'BrowserQaCoordinator', surfaces: ['workflow'], risk: 'network-read', description: 'Performs bounded same-origin browser QA against a published non-production preview.' }
 ]);
 
 export const defaultSkills = Object.freeze([
@@ -179,7 +179,7 @@ export const defaultSkills = Object.freeze([
   { id: 'research.web', requiresTools: ['web-research'], surfaces: [], contract: { version: 1, inputs: ['researchQuestion'], outputs: ['researchEvidence'] }, risk: 'network-read', description: 'Research public web sources.' },
   { id: 'business.analyze', requiresTools: ['web-research'], surfaces: [], contract: { version: 1, inputs: ['businessContext', 'researchEvidence'], outputs: ['businessAnalysis'] }, risk: 'network-read', description: 'Analyze a business using reviewed research evidence.' },
   { id: 'requirements.define', requiresTools: ['coding-worker'], surfaces: [], contract: { version: 1, inputs: ['project', 'inspectionEvidence', 'goal'], outputs: ['requirements'] }, risk: 'workspace-read', description: 'Reserved for a future reviewed requirements executor.' },
-  { id: 'visual.review', requiresTools: ['browser-visual'], surfaces: [], contract: { version: 1, inputs: ['previewTarget', 'acceptanceCriteria'], outputs: ['visualEvidence'] }, risk: 'network-read', description: 'Review rendered output with a browser/visual tool.' },
+  { id: 'visual.review', requiresTools: ['browser-visual'], surfaces: ['workflow'], contract: { version: 1, inputs: ['previewTarget', 'acceptanceCriteria'], outputs: ['visualEvidence'] }, risk: 'network-read', description: 'Run bounded deterministic browser QA against a reviewed preview.' },
   { id: 'data.inspect', requiresTools: ['coding-worker'], surfaces: [], contract: { version: 1, inputs: ['project', 'workspace'], outputs: ['dataInspection'] }, risk: 'workspace-read', description: 'Reserved for a future reviewed data-inspection executor.' },
   { id: 'data.analyze', requiresTools: ['coding-worker'], surfaces: [], contract: { version: 1, inputs: ['dataInspection', 'analysisGoal'], outputs: ['analysisEvidence'] }, risk: 'workspace-read', description: 'Reserved for a future reviewed data-analysis executor.' },
   { id: 'data.summarize', requiresTools: ['coding-worker'], surfaces: [], contract: { version: 1, inputs: ['analysisEvidence'], outputs: ['analysisOutput'] }, risk: 'workspace-read', description: 'Reserved for a future reviewed data-output executor.' }

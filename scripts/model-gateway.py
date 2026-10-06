@@ -13,8 +13,12 @@ from pathlib import Path
 MAX_STDIN_BYTES = 1536 * 1024
 ALLOWED_ACTIONS = {"structured", "edit"}
 
-# The bridge is a hard free-only boundary.
-os.environ["MODEL_COST_POLICY"] = "free_only"
+# The bridge defaults to free-only. An explicit subscription_included policy
+# may use already-paid subscription quota while API credentials remain stripped.
+_requested_cost_policy = os.environ.get("MODEL_COST_POLICY", "free_only").strip().lower()
+os.environ["MODEL_COST_POLICY"] = (
+    "subscription_included" if _requested_cost_policy == "subscription_included" else "free_only"
+)
 os.environ["PAID_MODELS_EXPLICITLY_ENABLED"] = "0"
 os.environ["CODEX_API_KEY"] = ""
 os.environ["OPENAI_API_KEY"] = ""

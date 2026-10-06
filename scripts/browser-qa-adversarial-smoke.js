@@ -347,8 +347,11 @@ try {
   const hiddenTextboxes = hiddenEvidence.interactiveControls.filter((control) => control.role === 'textbox');
   assert.equal(hiddenButtons.length, 5, 'hidden ancestor/aria-hidden buttons must be absent from the accessibility audit');
   assert.ok(hiddenButtons.filter((control) => !control.accessibleName).length >= 3, 'alt-only, hidden-text and empty buttons must remain unnamed');
-  assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Submit'), 'default submit control should use Chrome accessible name');
-  assert.ok(hiddenButtons.some((control) => control.accessibleName === 'Reset'), 'default reset control should use Chrome accessible name');
+  assert.equal(
+    hiddenButtons.filter((control) => control.accessibleName).length,
+    2,
+    'default submit and reset controls should use non-empty Chrome accessible names regardless of browser locale'
+  );
   assert.ok(hiddenTextboxes.some((control) => !control.accessibleName), 'text input value must not become its accessible name');
   assert.equal(
     hiddenEvidence.interactiveControls.some((control) => control.role === 'generic'),
