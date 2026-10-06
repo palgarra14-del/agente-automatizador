@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-import json, os, subprocess, tempfile, time, urllib.error, urllib.request
+import json, os, shutil, subprocess, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 
-AGY=os.environ.get("ANTIGRAVITY_CLI","/home/pablo/.local/bin/agy")
+def _tool_path(env_name, command, legacy_fallback):
+    return os.environ.get(env_name) or shutil.which(command) or legacy_fallback
+
+AGY=_tool_path("ANTIGRAVITY_CLI","agy","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
-CODEX=os.environ.get("CODEX_BIN","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
-OPENCODE=os.environ.get("OPENCODE_BIN","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
+CODEX=_tool_path("CODEX_BIN","codex","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
+OPENCODE=_tool_path("OPENCODE_BIN","opencode","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
-COPILOT=os.environ.get("COPILOT_BIN","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
+COPILOT=_tool_path("COPILOT_BIN","copilot","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
 COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
-OPENCODE_FREE_TIMEOUT=min(60,max(10,int(os.environ.get("OPENCODE_FREE_TIMEOUT","35"))))
+OPENCODE_FREE_TIMEOUT=min(120,max(10,int(os.environ.get("OPENCODE_FREE_TIMEOUT","90"))))
 OPENCODE_MODELS_TTL=float(os.environ.get("OPENCODE_MODELS_TTL","60"))
 ANTIGRAVITY_AUTH_TTL=float(os.environ.get("ANTIGRAVITY_AUTH_TTL","300"))
 _ANTIGRAVITY_AUTH_CACHE={"checkedAt":0.0,"authenticated":False}

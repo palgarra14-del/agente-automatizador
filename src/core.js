@@ -3998,6 +3998,39 @@ export class WorkflowEngine {
       const current = await this.get(id);
       const expiredPause = await this.recoverExpiredPausedWorkflow(id, current, { deadlineAt: options.deadlineCapAt ?? null });
       if (expiredPause) return expiredPause;
+      const retryableDeadlineStep = (
+        current.status === WorkflowStepStatus.FAILED &&
+        current.result?.error === 'workflow_budget_deadline_exceeded' &&
+        current.deadlineAt <= this.now() &&
+        current.modelUsage?.calls < current.modelUsage?.maxCalls
+      )
+        ? current.steps.find((step) =>
+            step.status === WorkflowStepStatus.READY &&
+            step.error === 'skill_executor_failed_retry_available' &&
+            step.attempts < current.budgets.maxAttempts &&
+            ['code.inspect', 'code.diagnose', 'code.review', 'website.plan'].includes(step.skill)
+          )
+        : null;
+      if (retryableDeadlineStep) {
+        await this.update(id, (saved) => {
+          const step = saved.steps.find((item) => item.id === retryableDeadlineStep.id);
+          if (
+            saved.status !== WorkflowStepStatus.FAILED ||
+            saved.result?.error !== 'workflow_budget_deadline_exceeded' ||
+            step?.status !== WorkflowStepStatus.READY ||
+            step.error !== 'skill_executor_failed_retry_available' ||
+            step.attempts >= saved.budgets.maxAttempts ||
+            saved.modelUsage?.calls >= saved.modelUsage?.maxCalls
+          ) {
+            throw new Error('workflow_deadline_retry_state_changed');
+          }
+          saved.deadlineAt = boundedWorkflowDeadlineAt(this.now(), saved.budgets.timeoutMs, options.deadlineCapAt ?? null);
+          saved.pausedAt = null;
+          saved.status = WorkflowStepStatus.PENDING;
+          saved.result = null;
+        }, { deadlineAt: options.deadlineCapAt ?? null });
+        return this.runUnlocked(id, options);
+      }
       const pausedAt = this.now();
       let plan = await this.update(id, (saved) => {
         validateWorkflowPlan(saved, this.projects, this.registry, this.specialistRegistry);
@@ -5019,6 +5052,7 @@ function multiModelGatewayEnvironment(environment = process.env) {
   const allowed = [
     'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME',
     'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
+    'CODEX_BIN',
     'OLLAMA_URL', 'OLLAMA_MODEL',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
     'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
@@ -5027,9 +5061,12 @@ function multiModelGatewayEnvironment(environment = process.env) {
     'MODEL_PROVIDER_MAX_OLLAMA', 'MODEL_PROVIDER_MAX_OPENCODE',
     'MODEL_PROVIDER_MAX_COPILOT', 'MODEL_PROVIDER_MAX_CODEX'
   ];
+  const requestedCostPolicy = environment.MODEL_COST_POLICY === 'subscription_included'
+    ? 'subscription_included'
+    : 'free_only';
   return {
     ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
-    MODEL_COST_POLICY: 'free_only',
+    MODEL_COST_POLICY: requestedCostPolicy,
     PAID_MODELS_EXPLICITLY_ENABLED: '0',
     OPENCODE_FREE_ENABLED: '1',
     COPILOT_FREE_ENABLED: '1',
@@ -5050,13 +5087,131 @@ function multiModelRoleForReadOnlySkill(skill) {
   return null;
 }
 
+function multiModelOutputSchema(name) {
+  const stringArray = { type: 'array', items: { type: 'string' } };
+  if (name === 'websitePlan') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'pages', 'design', 'conversion', 'seo', 'implementation', 'missingInputs'],
+      properties: {
+        summary: { type: 'string' },
+        pages: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['slug', 'title', 'purpose', 'sections'],
+            properties: {
+              slug: { type: 'string' },
+              title: { type: 'string' },
+              purpose: { type: 'string' },
+              sections: stringArray
+            }
+          }
+        },
+        design: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['direction', 'tone', 'colors', 'typography'],
+          properties: {
+            direction: { type: 'string' },
+            tone: { type: 'string' },
+            colors: stringArray,
+            typography: { type: 'string' }
+          }
+        },
+        conversion: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['primaryCta', 'secondaryCta'],
+          properties: {
+            primaryCta: { type: 'string' },
+            secondaryCta: { type: ['string', 'null'] }
+          }
+        },
+        seo: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['primaryLocation', 'keywords'],
+          properties: {
+            primaryLocation: { type: ['string', 'null'] },
+            keywords: stringArray
+          }
+        },
+        implementation: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['priorities', 'constraints'],
+          properties: {
+            priorities: stringArray,
+            constraints: stringArray
+          }
+        },
+        missingInputs: stringArray
+      }
+    };
+  }
+  if (name === 'reviewEvidence') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['verdict', 'summary', 'findings'],
+      properties: {
+        verdict: { type: 'string', enum: ['PASS', 'FAIL'] },
+        summary: { type: 'string' },
+        findings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['severity', 'message', 'path'],
+            properties: {
+              severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+              message: { type: 'string' },
+              path: { type: ['string', 'null'] }
+            }
+          }
+        }
+      }
+    };
+  }
+  if (name === 'inspectionEvidence') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'relevantPaths', 'findings'],
+      properties: {
+        summary: { type: 'string' },
+        relevantPaths: stringArray,
+        findings: stringArray
+      }
+    };
+  }
+  if (name === 'diagnosis') {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'cause', 'relevantPaths', 'recommendedChange', 'risks'],
+      properties: {
+        summary: { type: 'string' },
+        cause: { type: 'string' },
+        relevantPaths: stringArray,
+        recommendedChange: { type: 'string' },
+        risks: stringArray
+      }
+    };
+  }
+  return { type: 'object', additionalProperties: false, required: [], properties: {} };
+}
+
 function multiModelSchemaForContract(contract = {}) {
   const outputs = Array.isArray(contract.outputs) ? contract.outputs : [];
   return {
     type: 'object',
     additionalProperties: false,
     required: [...outputs],
-    properties: Object.fromEntries(outputs.map((name) => [name, { type: 'object' }]))
+    properties: Object.fromEntries(outputs.map((name) => [name, multiModelOutputSchema(name)]))
   };
 }
 

@@ -1182,6 +1182,75 @@ test('workflow global deadline is enforced before start, between steps, between 
   assert.equal(deadlineFailed.steps.find((step) => step.id === 'verification').attempts, 1);
 });
 
+test('resume renews an expired deadline only for an explicit retryable read-only step', async () => {
+  let clock = 0;
+  let changeCalls = 0;
+  let reviewCalls = 0;
+  const normalChange = changedChangeSet(['src/feature.js'], { additions: 2, diffLines: 2, changedBytes: 64 });
+  const localGit = stableLocalGit({
+    async inspectChangeSet() {
+      changeCalls += 1;
+      return changeCalls === 1 ? emptyChangeSet() : normalChange;
+    }
+  });
+  const configured = configFrom({
+    id: 'deadline-review-retry',
+    repository: { owner: 'owner', name: 'repo' },
+    defaultBranch: 'main',
+    protectedBranches: ['main'],
+    workspace: '.',
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    execution: { provider: 'local-sanitized' },
+    skills: { allow: ['code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const codingWorker = {
+    async execute() {
+      return { status: 'completed', summary: 'implemented', output: 'done', outputBytes: 4 };
+    }
+  };
+  const skillExecutor = {
+    supports: (skill) => skill === 'code.review',
+    async execute() {
+      reviewCalls += 1;
+      if (reviewCalls === 1) {
+        clock = 1_000;
+        return { ok: false, status: 'failed', outputBytes: 0, error: 'transient reviewer failure' };
+      }
+      return { ok: true, status: 'completed', outputBytes: 16, result: { reviewEvidence: { verdict: 'PASS', summary: 'retry passed', findings: [] } } };
+    }
+  };
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    localGit,
+    codingWorker,
+    skillExecutor,
+    now: () => clock
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Recover a retryable review after deadline',
+    budgets: { timeoutMs: 1_000, maxAttempts: 2 }
+  });
+  await prepareImplementation(instance, created.id);
+  const failed = await instance.run(created.id);
+  const failedReview = failed.steps.find((step) => step.id === 'review');
+  assert.equal(failed.status, WorkflowStepStatus.FAILED);
+  assert.equal(failed.result.error, 'workflow_budget_deadline_exceeded');
+  assert.equal(failedReview.status, WorkflowStepStatus.READY);
+  assert.equal(failedReview.error, 'skill_executor_failed_retry_available');
+  const expiredDeadline = failed.deadlineAt;
+
+  clock = 1_100;
+  const resumed = await instance.resume(created.id);
+  const review = resumed.steps.find((step) => step.id === 'review');
+  assert.equal(reviewCalls, 2);
+  assert.equal(review.status, WorkflowStepStatus.COMPLETED);
+  assert.ok(resumed.deadlineAt > expiredDeadline);
+  assert.equal(resumed.status, WorkflowStepStatus.AWAITING_APPROVAL);
+  assert.equal(resumed.steps.find((step) => step.id === 'release-readiness').status, WorkflowStepStatus.AWAITING_APPROVAL);
+});
+
 test('crash and resume preserve a managed workspace and never repeat completed steps before approval', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-resume-'));
   const leadfinder = managedProject('leadfinder', root);

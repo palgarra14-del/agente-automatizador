@@ -69,6 +69,55 @@ test('multi-model gateway hardens child environment to free-only and strips orch
   assert.equal(request.role, 'long_horizon_implementation');
 });
 
+test('multi-model gateway permits explicit subscription quota without exposing API credentials', async () => {
+  let observed = null;
+  const client = new MultiModelGatewayClient({
+    environment: {
+      HOME: '/home/test',
+      PATH: '/usr/bin:/bin',
+      MODEL_COST_POLICY: 'subscription_included',
+      CODEX_BIN: '/usr/bin/codex',
+      OPENAI_API_KEY: 'must-not-cross',
+      CODEX_API_KEY: 'must-not-cross'
+    },
+    gatewayPath: '/repo/scripts/model-gateway.py',
+    processRunner: async (command, args, options) => {
+      observed = { command, args, options };
+      return {
+        ok: true,
+        exitCode: 0,
+        stdout: JSON.stringify({
+          ok: true,
+          candidate: 'codex-astra',
+          family: 'openai',
+          provider: 'codex',
+          model: 'gpt-6-astra',
+          routingScore: 1,
+          fallbackErrors: [],
+          value: { ok: true }
+        }),
+        stderr: '',
+        timedOut: false
+      };
+    }
+  });
+
+  await client.structured({
+    role: 'creative_direction',
+    prompt: 'Return a bounded result.',
+    schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } }
+  }, {
+    workspace: '/tmp/workspace',
+    timeoutMs: 120_000
+  });
+
+  assert.equal(observed.options.env.MODEL_COST_POLICY, 'subscription_included');
+  assert.equal(observed.options.env.PAID_MODELS_EXPLICITLY_ENABLED, '0');
+  assert.equal(observed.options.env.CODEX_BIN, '/usr/bin/codex');
+  assert.equal(observed.options.env.OPENAI_API_KEY, '');
+  assert.equal(observed.options.env.CODEX_API_KEY, '');
+});
+
 test('coding worker gives website work to frontend routing and app work to long-horizon routing', async () => {
   const calls = [];
   const gateway = {
@@ -266,6 +315,10 @@ test('website planning uses the creative lead rather than the generic research r
   }, { workspace: '/tmp/site', timeoutMs: 120_000 });
 
   assert.equal(observed.role, 'creative_direction');
+  assert.deepEqual(observed.schema.required, ['websitePlan']);
+  assert.equal(observed.schema.properties.websitePlan.type, 'object');
+  assert.ok(observed.schema.properties.websitePlan.required.includes('pages'));
+  assert.equal(observed.schema.properties.websitePlan.properties.pages.items.properties.sections.items.type, 'string');
   assert.equal(result.modelRouting.candidate, 'ag-sonnet-4.6');
 });
 

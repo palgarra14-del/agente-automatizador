@@ -436,7 +436,8 @@ try {
     } else if (action === 'bootstrap') {
       const runtimes = await syncProjectRuntimes([...projects.values()]);
       const service = await syncInboxService();
-      const wakeup = await syncWslWakeup();
+      const wakeupStatus = await wslWakeupStatus();
+      const wakeup = wakeupStatus.supported ? await syncWslWakeup() : wakeupStatus;
       console.log(JSON.stringify({ runtimes, service, wakeup }, null, 2));
     } else if (action === 'wakeup') {
       const wakeupAction = args[2] ?? 'status';

@@ -76,6 +76,29 @@ print(json.dumps({
   assert.equal(result.bulk, 'ollama-qwen-3b');
 });
 
+test('subscription_included unlocks subscription quota without enabling generic paid candidates', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="subscription_included"
+m.PAID_MODELS_EXPLICITLY_ENABLED=False
+print(json.dumps({
+  "codex":m.candidate_available("codex-astra"),
+  "antigravity":m.candidate_available("ag-sonnet-4.6"),
+  "opencode":m.candidate_available("oc-mimo-2.6-flash")
+}))
+`);
+  assert.equal(result.codex, true);
+  assert.equal(result.antigravity, true);
+  assert.equal(result.opencode, true);
+});
+
 test('allow_all does not unlock paid models without explicit second gate', () => {
   const result = python(`
 import importlib.util,json,sys,tempfile

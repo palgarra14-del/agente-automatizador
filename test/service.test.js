@@ -102,7 +102,15 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
     environment: {
       GH_CONFIG_DIR: '/home/pablo/.config/gh-custom',
       CODEX_HOME: '/home/pablo/.codex-custom',
-      GITHUB_TOKEN: 'must-never-be-rendered'
+      MODEL_COST_POLICY: 'subscription_included',
+      ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
+      CODEX_BIN: '/usr/bin/codex',
+      OPENCODE_BIN: '/usr/bin/opencode',
+      OPENCODE_FREE_TIMEOUT: '90',
+      GITHUB_TOKEN: 'must-never-be-rendered',
+      OPENAI_API_KEY: 'must-never-be-rendered',
+      CODEX_API_KEY: 'must-never-be-rendered',
+      PAID_MODELS_EXPLICITLY_ENABLED: '1'
     }
   });
   assert.match(unit, /managed-by=engineering-orchestrator:v1/);
@@ -112,7 +120,12 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
   assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
-  assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|must-never-be-rendered|gho_|ghp_/);
+  assert.match(unit, /MODEL_COST_POLICY=subscription_included/);
+  assert.match(unit, /ANTIGRAVITY_CLI=\/home\/pablo\/\.local\/bin\/agy/);
+  assert.match(unit, /CODEX_BIN=\/usr\/bin\/codex/);
+  assert.match(unit, /OPENCODE_BIN=\/usr\/bin\/opencode/);
+  assert.match(unit, /OPENCODE_FREE_TIMEOUT=90/);
+  assert.doesNotMatch(unit, /\/tmp\/untrusted-bin|GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY|PAID_MODELS_EXPLICITLY_ENABLED|must-never-be-rendered|gho_|ghp_/);
 });
 
 test('auto-upgrade units are bounded, persistent, and never persist GitHub credentials', () => {

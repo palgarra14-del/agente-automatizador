@@ -29,11 +29,25 @@ function trustedServicePath(nodePath) {
 
 function serviceRuntimeEnvironment(environment = {}) {
   const result = {};
-  for (const name of ['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL']) {
+  const allowed = [
+    'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
+    'MODEL_COST_POLICY',
+    'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
+    'CODEX_BIN',
+    'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
+    'MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS', 'MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS',
+    'MODEL_PROVIDER_SLOT_WAIT_SECONDS', 'MODEL_PROVIDER_MAX_ANTIGRAVITY',
+    'MODEL_PROVIDER_MAX_OPENCODE', 'MODEL_PROVIDER_MAX_CODEX'
+  ];
+  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
+  for (const name of allowed) {
     const value = environment[name];
     if (value === undefined) continue;
     const text = validateText(String(value), name);
-    if (['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME'].includes(name) && !isAbsolute(text)) throw new Error(`${name} must be absolute`);
+    if (absolutePaths.has(name) && !isAbsolute(text)) throw new Error(`${name} must be absolute`);
+    if (name === 'MODEL_COST_POLICY' && !['free_only', 'subscription_included'].includes(text)) {
+      throw new Error('MODEL_COST_POLICY must be free_only or subscription_included');
+    }
     result[name] = text;
   }
   return result;

@@ -127,6 +127,28 @@ print(json.dumps(m.generate_structured("x",{"required":["ok"]},providers=("antig
   assert.match(result.errors[0],/antigravity/);
 });
 
+test('provider binaries prefer native PATH before legacy WSL fallbacks', () => {
+  const result=python(`
+import importlib.util,json,os,tempfile
+from pathlib import Path
+bindir=Path(tempfile.mkdtemp())
+for name in ("agy","codex","opencode","copilot"):
+    p=bindir/name
+    p.write_text("#!/bin/sh\\nexit 0\\n")
+    p.chmod(0o755)
+os.environ["PATH"]=str(bindir)
+for key in ("ANTIGRAVITY_CLI","CODEX_BIN","OPENCODE_BIN","COPILOT_BIN"):
+    os.environ.pop(key,None)
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps({"agy":m.AGY,"codex":m.CODEX,"opencode":m.OPENCODE,"copilot":m.COPILOT}))
+`);
+  assert.match(result.agy,/\/agy$/);
+  assert.match(result.codex,/\/codex$/);
+  assert.match(result.opencode,/\/opencode$/);
+  assert.match(result.copilot,/\/copilot$/);
+});
+
 test('OpenCode model discovery retries a transient empty service response', () => {
   const result=python(`
 import importlib.util,json,tempfile,os,subprocess
@@ -210,7 +232,7 @@ print(json.dumps({"value":value,"args":captured["args"],"password":captured["pas
 `);
   assert.equal(result.value.ok,true);
   assert.equal(result.password,'secret-value');
-  assert.ok(result.timeout <= 35);
+  assert.ok(result.timeout <= 90);
   assert.ok(result.args.includes('--server'));
   assert.ok(result.args.includes('http://127.0.0.1:49374'));
   assert.ok(!result.args.includes('--standalone'));
