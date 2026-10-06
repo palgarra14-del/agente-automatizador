@@ -11,5 +11,8 @@ test('native heartbeat installer is explicit, local-primary, and secret-free', (
   assert.match(script, /--enable/);
   assert.match(script, /OnCalendar=\*-\*-\* \*:0\/2:00/);
   assert.match(script, /XDG_RUNTIME_DIR="\/run\/user\/\$\(id -u\)"/);
+  assert.match(script, /DBUS_SESSION_BUS_ADDRESS="unix:path=\$XDG_RUNTIME_DIR\/bus"/);
+  assert.match(script, /AGENT_HEARTBEAT_PEEK_TIMEOUT_MS/);
+  assert.match(script, /AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS/);
   assert.doesNotMatch(script, /GITHUB_TOKEN|OPENAI_API_KEY|CODEX_API_KEY|PAID_MODELS_EXPLICITLY_ENABLED/);
 });
