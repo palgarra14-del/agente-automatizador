@@ -2251,12 +2251,13 @@ export function evaluateDefinitionOfDone(plan) {
 function historicalWorkspaceIsRecoverable(workspace) {
   if (workspace === null) return true;
   if (!workspace || typeof workspace !== 'object' || workspace.managed !== true) return false;
-  if (typeof workspace.path !== 'string' || !workspace.path) return false;
+  if (typeof workspace.path !== 'string' || !workspace.path || resolve(workspace.path) !== workspace.path) return false;
   if (typeof workspace.projectId !== 'string' || !workspace.projectId) return false;
+  if (!workspace.repository?.owner || !workspace.repository?.name) return false;
   if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch) return false;
   if (!/^[a-f0-9]{40}$/i.test(workspace.baseHead ?? '')) return false;
   if (typeof workspace.remote !== 'string' || !workspace.remote) return false;
-  return !existsSync(resolve(workspace.path));
+  return !existsSync(workspace.path);
 }
 
 function pristineHistoricalWorkflow(plan, leaseId) {
