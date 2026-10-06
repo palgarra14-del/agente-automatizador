@@ -12,6 +12,16 @@ GIST_ID_FILE="$CONFIG_DIR/locator-gist-id"
 GIST_URL_FILE="$CONFIG_DIR/locator-gist-url"
 mkdir -p "$HOME/.local/bin" "$UNITS" "$CONFIG_DIR"
 
+# Remote/non-interactive shells may not inherit the user manager bus even when
+# the logged-in user manager is healthy. Reconstruct only the standard local
+# user-bus coordinates; never source session files or credentials.
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -S "$XDG_RUNTIME_DIR/bus" ]]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
 if [[ ! -x "$BIN" ]]; then
   arch="$(uname -m)"
   [[ "$arch" == "x86_64" ]] || { echo "Arquitectura no soportada automáticamente: $arch"; exit 1; }
