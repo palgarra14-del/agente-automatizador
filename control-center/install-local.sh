@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_ROOT="${AGENT_ROOT:-$HOME/projects/agente-automatizador}"
+AGENT_ROOT="${AGENT_ROOT:-$HOME/agente-automatizador}"
 [[ -d "$AGENT_ROOT/.git" || -f "$AGENT_ROOT/.git" ]] || { echo "No encuentro el agente en $AGENT_ROOT"; exit 1; }
 BIN="$HOME/.local/bin/cloudflared"
 UNITS="$HOME/.config/systemd/user"
@@ -74,6 +74,6 @@ if [[ -s "$TUNNEL_URL_FILE" && ! -s "$GIST_ID_FILE" ]] && command -v gh >/dev/nu
 fi
 
 echo "Control center activo."
-[[ -s "$CONFIG_DIR/access-token" ]] && echo "Clave: $(<"$CONFIG_DIR/access-token")"
+[[ -s "$CONFIG_DIR/access-token" ]] && echo "Clave guardada de forma local en $CONFIG_DIR/access-token (no se muestra en consola)."
 [[ -s "$TUNNEL_URL_FILE" ]] && echo "Túnel directo: $(<"$TUNNEL_URL_FILE")"
 [[ -s "$GIST_URL_FILE" ]] && echo "Locator remoto configurado."
