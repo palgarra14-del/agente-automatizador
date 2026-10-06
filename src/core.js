@@ -1168,13 +1168,25 @@ export function normalizeBusinessContext(value) {
 }
 
 function normalizeOptionalContact(value = {}) {
-  assertObjectKeys(value, new Set(['phone', 'whatsapp', 'email', 'address', 'website']), 'businessBrief.contact');
+  assertObjectKeys(value, new Set(['phone', 'whatsapp', 'email', 'address', 'website', 'bookingUrl']), 'businessBrief.contact');
+  const rawBookingUrl = boundedText(value.bookingUrl, 'businessBrief.contact.bookingUrl', { max: 500 });
+  let bookingUrl = null;
+  if (rawBookingUrl) {
+    try {
+      const parsed = new URL(rawBookingUrl);
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('unsafe');
+      bookingUrl = parsed.href;
+    } catch {
+      throw new Error('businessBrief.contact.bookingUrl must be an HTTPS URL without credentials');
+    }
+  }
   return {
     phone: boundedText(value.phone, 'businessBrief.contact.phone', { max: 80 }) || null,
     whatsapp: boundedText(value.whatsapp, 'businessBrief.contact.whatsapp', { max: 80 }) || null,
     email: boundedText(value.email, 'businessBrief.contact.email', { max: 160 }) || null,
     address: boundedText(value.address, 'businessBrief.contact.address', { max: 240 }) || null,
-    website: boundedText(value.website, 'businessBrief.contact.website', { max: 240 }) || null
+    website: boundedText(value.website, 'businessBrief.contact.website', { max: 240 }) || null,
+    ...(bookingUrl ? { bookingUrl } : {})
   };
 }
 
@@ -1276,10 +1288,43 @@ export function normalizeBusinessBrief(value) {
   });
 }
 
+const callflowBookingProviders = Object.freeze([
+  Object.freeze({ name: 'Booksy', domains: ['booksy.com'] }),
+  Object.freeze({ name: 'Fresha', domains: ['fresha.com'] }),
+  Object.freeze({ name: 'Treatwell', domains: ['treatwell.es', 'treatwell.com', 'treatwell.co.uk'] }),
+  Object.freeze({ name: 'Altegio', domains: ['alteg.io', 'altegio.com'] }),
+  Object.freeze({ name: 'Yclients', domains: ['yclients.com'] }),
+  Object.freeze({ name: 'Versum', domains: ['versum.com'] })
+]);
+
+function callflowBookingEvidence(value, expectedPlatform = '') {
+  const raw = boundedText(value, 'callflowBrief.verifiedBusinessFacts.bookingUrl', { max: 500 });
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must be a valid URL');
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must be an HTTPS URL without credentials');
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  const provider = callflowBookingProviders.find((item) =>
+    item.domains.some((domain) => host === domain || host.endsWith(`.${domain}`))
+  );
+  if (!provider) throw new Error('callflowBrief.verifiedBusinessFacts.bookingUrl must use a verified booking provider');
+  const expected = String(expectedPlatform ?? '').trim().toLowerCase();
+  if (expected && expected !== provider.name.toLowerCase()) {
+    throw new Error('callflowBrief booking platform does not match verified booking URL');
+  }
+  return { url: parsed.href, platform: provider.name };
+}
+
 export function businessBriefFromCallflowDemoBrief(value) {
   assertObjectKeys(
     value,
-    new Set(['version', 'source', 'lead', 'commercialEvidence', 'demo', 'missingBusinessFacts', 'constraints']),
+    new Set(['version', 'source', 'lead', 'commercialEvidence', 'demo', 'verifiedBusinessFacts', 'missingBusinessFacts', 'constraints']),
     'callflowBrief'
   );
   if (value.version !== 'website-pilot-brief-v1') throw new Error('callflowBrief.version must be website-pilot-brief-v1');
@@ -1303,6 +1348,12 @@ export function businessBriefFromCallflowDemoBrief(value) {
     new Set(['type', 'defaultScope', 'objective', 'primaryCta', 'existingBookingPlatform', 'preserveExistingBooking', 'existingWebsiteReference']),
     'callflowBrief.demo'
   );
+  const verifiedBusinessFacts = value.verifiedBusinessFacts ?? {};
+  assertObjectKeys(
+    verifiedBusinessFacts,
+    new Set(['bookingUrl']),
+    'callflowBrief.verifiedBusinessFacts'
+  );
 
   const businessName = boundedText(lead.businessName, 'callflowBrief.lead.businessName', { required: true, max: 120 });
   const category = boundedText(lead.niche, 'callflowBrief.lead.niche', { required: true, max: 120 });
@@ -1312,12 +1363,16 @@ export function businessBriefFromCallflowDemoBrief(value) {
   const missingFacts = boundedTextList(value.missingBusinessFacts ?? [], 'callflowBrief.missingBusinessFacts', { max: 30, itemMax: 160 });
   const constraints = boundedTextList(value.constraints ?? [], 'callflowBrief.constraints', { max: 30, itemMax: 300 });
   const bookingPlatform = boundedText(demo.existingBookingPlatform, 'callflowBrief.demo.existingBookingPlatform', { max: 80 });
+  const bookingEvidence = callflowBookingEvidence(verifiedBusinessFacts.bookingUrl, bookingPlatform);
+  const effectiveBookingPlatform = bookingEvidence?.platform ?? bookingPlatform;
   if (demo.preserveExistingBooking !== undefined && typeof demo.preserveExistingBooking !== 'boolean') {
     throw new Error('callflowBrief.demo.preserveExistingBooking must be a boolean');
   }
 
-  const requiredFeatures = bookingPlatform
-    ? [`Mantener ${bookingPlatform} como sistema de reservas cuando se facilite su URL real; no inventar el enlace.`]
+  const requiredFeatures = effectiveBookingPlatform
+    ? [bookingEvidence
+        ? `Mantener ${effectiveBookingPlatform} como sistema de reservas; usar exclusivamente businessBrief.contact.bookingUrl.`
+        : `Mantener ${effectiveBookingPlatform} como sistema de reservas cuando se facilite su URL real; no inventar el enlace.`]
     : [];
   const missingRestrictions = missingFacts.map((fact) => `Dato no verificado: ${fact}. No inventarlo ni presentarlo como hecho real.`);
 
@@ -1330,11 +1385,12 @@ export function businessBriefFromCallflowDemoBrief(value) {
     services: [],
     contact: {
       ...(phone ? { phone } : {}),
-      ...(existingWebsite ? { website: existingWebsite } : {})
+      ...(existingWebsite ? { website: existingWebsite } : {}),
+      ...(bookingEvidence ? { bookingUrl: bookingEvidence.url } : {})
     },
     website: {
       language: 'es',
-      primaryGoal: phone ? 'llamada' : 'contacto',
+      primaryGoal: bookingEvidence ? 'reserva' : phone ? 'llamada' : 'contacto',
       requiredPages: ['home'],
       requiredFeatures
     },
@@ -1402,10 +1458,13 @@ function websiteBlueprintPages(brief, profileId) {
   const packageLimit = brief?.commercialPackage ? websiteCommercialPackageLimits[brief.commercialPackage] : null;
   const hasVerifiedServices = Array.isArray(brief?.services) && brief.services.length > 0;
   const hasVerifiedFacts = Array.isArray(brief?.facts) && brief.facts.length > 0;
+  const hasProvidedMedia = Array.isArray(brief?.assets?.photoPaths) && brief.assets.photoPaths.length > 0;
+  const allowServicePlaceholder = brief?.commercialPackage === 'demo';
   const profileSections = (packageLimit
     ? baseProfileSections.filter((section) => section !== 'faq').slice(0, packageLimit.maxSectionsPerPage)
     : baseProfileSections)
-    .filter((section) => section !== 'services' || hasVerifiedServices)
+    .filter((section) => section !== 'services' || hasVerifiedServices || allowServicePlaceholder)
+    .filter((section) => !['inspiration-media', 'verified-work-media'].includes(section) || hasProvidedMedia)
     .filter((section) => section !== 'experience' || brief?.commercialPackage !== 'demo' || hasVerifiedFacts);
 
   return pages.map((page) => {
@@ -1436,6 +1495,15 @@ function websiteBlueprintContactDestination(pages) {
 function websiteBlueprintPrimaryCta(brief, pages) {
   const goal = normalizeWebsiteBlueprintCategory(brief?.website?.primaryGoal);
   const contact = brief?.contact ?? {};
+  if ((goal.includes('reserv') || goal.includes('cita')) && typeof contact.bookingUrl === 'string' && contact.bookingUrl.trim()) {
+    return {
+      id: 'primary',
+      kind: 'booking',
+      destination: contact.bookingUrl,
+      source: 'businessBrief.contact.bookingUrl',
+      goalSource: 'businessBrief.website.primaryGoal'
+    };
+  }
   const candidates = [];
   if (goal.includes('whatsapp')) candidates.push(['whatsapp', 'businessBrief.contact.whatsapp', contact.whatsapp]);
   if (goal.includes('llam') || goal.includes('telefon')) candidates.push(['phone', 'businessBrief.contact.phone', contact.phone]);
@@ -1487,6 +1555,21 @@ export function websiteBlueprintForBrief(businessBrief) {
   const missingContactSources = ['phone', 'whatsapp', 'email', 'address']
     .filter((field) => !businessBrief?.contact?.[field])
     .map((field) => `businessBrief.contact.${field}`);
+  const placeholderRequirements = [];
+  if (!services.length && pages.some((page) => page.sections.includes('services'))) {
+    placeholderRequirements.push({
+      section: 'services',
+      label: 'Servicios por confirmar',
+      source: 'businessBrief.services'
+    });
+  }
+  if (!businessBrief?.contact?.address) {
+    placeholderRequirements.push({
+      section: 'contact',
+      label: 'Ubicación exacta por confirmar',
+      source: 'businessBrief.contact.address'
+    });
+  }
 
   const requiredFeatures = Array.isArray(businessBrief?.website?.requiredFeatures)
     ? businessBrief.website.requiredFeatures.map((value, index) => ({
@@ -1506,6 +1589,7 @@ export function websiteBlueprintForBrief(businessBrief) {
     ...(commercialScope ? { commercialScope } : {}),
     pages,
     requiredFeatures,
+    placeholderRequirements,
     contentSources: {
       services: services.map((_service, index) => `businessBrief.services[${index}]`),
       facts: facts.map((_fact, index) => `businessBrief.facts[${index}]`),
@@ -1555,7 +1639,10 @@ export function websiteBlueprintForBrief(businessBrief) {
       value,
       source: `businessBrief.contentRestrictions[${index}]`
     })),
-    missingFactSources: missingContactSources
+    missingFactSources: [
+      ...missingContactSources,
+      ...(!services.length ? ['businessBrief.services'] : [])
+    ]
   });
 }
 
@@ -4710,6 +4797,7 @@ export function buildWorkerPrompt(task) {
   const websiteRules = cleanTask?.websiteBuild ? [
     'This is a structured website build. Treat the supplied businessBrief as the complete authoritative source of business facts.',
     'Treat websiteBuild.websiteBlueprint as a deterministic requirements contract, not art direction and never as evidence of new business facts. Satisfy its bound structural/CTA/navigation/accessibility/SEO/provenance requirements without overriding businessBrief, scope, content restrictions, or governance.',
+    'Render websiteBuild.websiteBlueprint.placeholderRequirements only as visibly provisional copy using the supplied labels; never replace them with invented specifics. A missing business photo may justify generic decorative treatment, but never a gallery or work showcase unless the blueprint includes that media section.',
     'Treat the approved websitePlan.design direction, typography and color strategy as a real implementation requirement. A website-build should materially express that art direction through hierarchy, composition, spacing, responsive behavior and the planned visual motif; do not collapse it into a generic template merely to minimize the diff.',
     'Implement a professional visual system, not a page assembled from default components: preserve deliberate grid/alignment, typographic hierarchy, section-to-section rhythm, focal hierarchy, authentic asset treatment, purposeful responsive recomposition, polished interaction states and only intentional motion. Avoid card soup, arbitrary rounded rectangles, generic gradient blobs, decorative glassmorphism, excessive pills, repeated icon-text triples and other recognizable template defaults unless the approved concept specifically justifies them.',
     'The first viewport must communicate positioning and create a memorable but usable brand moment while keeping the primary action immediately understandable. Prefer one or two signature visual ideas carried consistently through the site over many unrelated effects.',
@@ -5888,10 +5976,10 @@ export function buildReadOnlySkillPrompt({ skill, goal, contract, context = {} }
       : 'Inspect the actual current repository diff and relevant surrounding code; do not base the verdict only on supplied metadata. For reviewEvidence return exactly: {"verdict":"PASS"|"FAIL","summary":"non-empty string","findings":[{"severity":"low"|"medium"|"high"|"critical","message":"non-empty string","path":"repository-relative path or null"}]}. Use FAIL for any material correctness, security, scope, integrity, or regression concern; otherwise PASS.'
     : null;
   const websiteReviewInstruction = skill === 'code.review' && clean?.context?.websiteReview
-    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements and materially implements the approved websitePlan design direction, typography, hierarchy, composition and visual motif. Treat a generic-template implementation that drops the core approved art direction as a material quality defect, while still allowing reasonable implementation choices. Also inspect for template tells such as repetitive card grids, arbitrary radii, gratuitous gradients/glass effects, weak or flat typographic hierarchy, identical section rhythm, CTA clutter, decorative motion without purpose, poor mobile recomposition, and a first viewport with no clear focal hierarchy. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; if it uses business-specific assets outside the verified asset evidence; or if it materially abandons the approved visual concept.'
+    ? 'This diff implements a structured business website. Independently compare all business-specific claims in the actual diff against websiteReview.businessBrief and its contentRestrictions. Treat websiteReview.websiteBlueprint as the deterministic requirements contract and websiteReview.businessBrief as the factual source of truth. Check that the implementation satisfies the bound page/section, CTA-source, navigation, responsive/accessibility, SEO-source, asset-provenance, placeholder and restriction requirements and materially implements the approved websitePlan design direction, typography, hierarchy, composition and visual motif. Treat a generic-template implementation that drops the core approved art direction as a material quality defect, while still allowing reasonable implementation choices. Also inspect for template tells such as repetitive card grids, arbitrary radii, gratuitous gradients/glass effects, weak or flat typographic hierarchy, identical section rhythm, CTA clutter, decorative motion without purpose, poor mobile recomposition, and a first viewport with no clear focal hierarchy. Use FAIL if the implementation invents or implies unsupported testimonials, reviews, customers, project counts, years in business, prices, discounts, guarantees, response times, certifications, awards, accreditations, brands, service areas, opening hours, addresses, contact details, legal claims, or other factual business claims; if it turns missingInputs into guessed content; if it uses business-specific assets outside the verified asset evidence; or if it materially abandons the approved visual concept.'
     : null;
   const websiteInstruction = skill === 'website.plan'
-    ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
+    ? 'Use only the supplied businessBrief, websiteBlueprint, verified asset evidence, repository context, and configuredQualityCommands. businessBrief is the complete authoritative source of business facts. websiteBlueprint is a trusted deterministic requirements contract derived from the validated businessBrief. Satisfy its page/section inventory, CTA source mapping, navigation, responsive/accessibility, SEO-source, asset-provenance, placeholder and restriction requirements, while using businessBrief.brand and the creative planning step for art direction. Never treat the blueprint as a source of new business facts. Do not use web research and do not invent facts absent from the brief. configuredQualityCommands are authoritative orchestrator-side validation commands; when they are present, do not treat missing package.json scripts with the same names as missing inputs or blockers. Put any fact genuinely needed for a professional result but not supplied into missingInputs. Return websitePlan with exactly: summary, pages, design, conversion, seo, implementation, missingInputs. Strict bounds: summary non-empty <=1200 chars; pages 1-20, each exactly slug,title,purpose,sections; slug must be / or a lowercase hyphenated route such as /servicios; title <=120; purpose <=500; sections 1-20 items each <=180. design exactly direction,tone,colors,typography; direction <=600; tone <=160; colors <=8 and every item exactly a seven-character #RRGGBB six-digit hex value with no label or extra text; typography <=300. conversion exactly primaryCta,secondaryCta; primaryCta non-empty <=160; secondaryCta null or <=160. seo exactly primaryLocation,keywords; primaryLocation null or one location supplied by businessBrief <=120; keywords <=30 items each <=120. implementation exactly priorities,constraints; priorities 1-30 items each <=240; constraints <=30 items each <=300. missingInputs <=30 items each <=300. Keep each list item concise enough to stay comfortably below its limit.'
     : null;
   const websiteUniversalVisualInstruction = skill === 'website.plan'
     ? websiteUniversalDesignInstruction(clean?.context?.businessBrief)

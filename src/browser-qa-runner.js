@@ -609,6 +609,13 @@ function buildDomProbeExpression({ request, pagePlan, routeUrls }) {
             return resolved.hostname === 'wa.me' || resolved.hostname === 'whatsapp.com' || resolved.hostname.endsWith('.whatsapp.com');
           } catch { return false; }
         }) ?? null;
+      } else if (target.destination === 'booking' && target.expectedHref) {
+        element = hrefElements.find((candidate) => {
+          try {
+            const resolved = new URL(candidate.getAttribute('href'), candidate.ownerDocument?.baseURI ?? location.href);
+            return resolved.href === target.expectedHref;
+          } catch { return false; }
+        }) ?? null;
       }
       if (!element) return null;
       let href = element.getAttribute('href');

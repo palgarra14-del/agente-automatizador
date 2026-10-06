@@ -4,7 +4,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan } from '../src/core.js';
+import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
 
 function project() {
   return configFrom({ id: 'workflow-project', repository: { owner: 'owner', name: 'repo' }, defaultBranch: 'main', protectedBranches: ['main'], workspace: '.', commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' }, execution: { provider: 'local-sanitized' } });
@@ -295,7 +295,10 @@ test('website workflow accepts the Callflow demo handoff contract directly', () 
           preserveExistingBooking: true,
           existingWebsiteReference: ''
         },
-        missingBusinessFacts: ['servicios exactos', 'precios', 'URL real de reservas'],
+        verifiedBusinessFacts: {
+          bookingUrl: 'https://booksy.com/es-es/12345'
+        },
+        missingBusinessFacts: ['servicios exactos', 'precios'],
         constraints: ['No inventar precios, reseñas, equipo ni testimonios.']
       }
     }
@@ -306,6 +309,16 @@ test('website workflow accepts the Callflow demo handoff contract directly', () 
   assert.equal(plan.input.businessBrief.businessName, 'Salón Luz');
   assert.deepEqual(plan.input.businessBrief.services, []);
   assert.deepEqual(plan.input.businessBrief.locations, ['Valencia']);
+  assert.equal(plan.input.businessBrief.contact.bookingUrl, 'https://booksy.com/es-es/12345');
+  assert.equal(plan.input.businessBrief.website.primaryGoal, 'reserva');
+  const blueprint = websiteBlueprintForBrief(plan.input.businessBrief);
+  assert.deepEqual(blueprint.ctas[0], {
+    id: 'primary',
+    kind: 'booking',
+    destination: 'https://booksy.com/es-es/12345',
+    source: 'businessBrief.contact.bookingUrl',
+    goalSource: 'businessBrief.website.primaryGoal'
+  });
   assert.equal(validateWorkflowPlan(plan, new Map([[configured.id, configured]])).ok, true);
 });
 

@@ -1515,8 +1515,44 @@ test('Callflow demo handoff converts to a factual Website Pilot businessBrief wi
   assert.deepEqual(blueprint.commercialScope, { package: 'demo', maxPages: 1, maxSectionsPerPage: 5 });
   assert.equal(blueprint.contentSources.services.length, 0);
   assert.equal(blueprint.seoRequirements.serviceSources.length, 0);
-  assert.equal(blueprint.pages[0].sections.includes('services'), false);
+  assert.equal(blueprint.pages[0].sections.includes('services'), true);
+  assert.equal(blueprint.pages[0].sections.includes('inspiration-media'), false);
   assert.equal(blueprint.pages[0].sections.includes('experience'), false);
+  assert.deepEqual(blueprint.placeholderRequirements, [
+    { section: 'services', label: 'Servicios por confirmar', source: 'businessBrief.services' },
+    { section: 'contact', label: 'Ubicación exacta por confirmar', source: 'businessBrief.contact.address' }
+  ]);
+  assert.ok(blueprint.missingFactSources.includes('businessBrief.services'));
+});
+
+test('Callflow verified booking evidence is strict and cannot smuggle an arbitrary external CTA', () => {
+  const base = {
+    version: 'website-pilot-brief-v1',
+    source: 'callflow',
+    lead: { businessName: 'Salón Seguro', niche: 'Peluquería' },
+    commercialEvidence: {},
+    demo: { existingBookingPlatform: 'Booksy', preserveExistingBooking: true },
+    missingBusinessFacts: [],
+    constraints: []
+  };
+  const accepted = businessBriefFromCallflowDemoBrief({
+    ...base,
+    verifiedBusinessFacts: { bookingUrl: 'https://booksy.com/es-es/12345' }
+  });
+  assert.equal(accepted.contact.bookingUrl, 'https://booksy.com/es-es/12345');
+  assert.equal(accepted.website.primaryGoal, 'reserva');
+  assert.throws(() => businessBriefFromCallflowDemoBrief({
+    ...base,
+    verifiedBusinessFacts: { bookingUrl: 'http://booksy.com/es-es/12345' }
+  }), /HTTPS URL/);
+  assert.throws(() => businessBriefFromCallflowDemoBrief({
+    ...base,
+    verifiedBusinessFacts: { bookingUrl: 'https://example.com/reservar' }
+  }), /verified booking provider/);
+  assert.throws(() => businessBriefFromCallflowDemoBrief({
+    ...base,
+    verifiedBusinessFacts: { bookingUrl: 'https://fresha.com/a/salon-seguro' }
+  }), /does not match/);
 });
 
 test('demo package alone may omit unknown service and location facts', () => {
