@@ -987,7 +987,17 @@ class ChromeCdpBrowser {
         const method = String(requestData.method ?? '').toUpperCase();
         const url = new URL(requestData.url);
         const isDocument = params.resourceType === 'Document';
-        const isMainDocument = isDocument && (mainFrameId ? params.frameId === mainFrameId : browserQaDocumentUrlMatches(url, pagePlan.url));
+        if (
+          isDocument &&
+          !mainFrameId &&
+          params.frameId &&
+          browserQaDocumentUrlMatches(url, pagePlan.url)
+        ) mainFrameId = params.frameId;
+        const isMainDocument = isDocument && (
+          mainFrameId
+            ? params.frameId === mainFrameId
+            : browserQaDocumentUrlMatches(url, pagePlan.url)
+        );
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
           if (isMainDocument) {
             interceptionFailure = interceptionFailure ?? new Error(`browser_qa_document_method_forbidden:${method || 'UNKNOWN'}`);
@@ -1140,6 +1150,7 @@ class ChromeCdpBrowser {
         const attempted = await evaluateJson(this.connection, sessionId, directNetworkExpression, contextId);
         if (attempted) throw new Error(`browser_qa_direct_network_forbidden:${networkFrameId}`);
       }
+      if (interceptionFailure) throw interceptionFailure;
       if (websocketFailure) throw websocketFailure;
       if (directNetworkFailure) throw directNetworkFailure;
       if (!browserQaDocumentUrlMatches(probe.finalUrl, pagePlan.url)) throw new Error('browser_qa_final_url_mismatch');
