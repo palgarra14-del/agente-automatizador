@@ -101,17 +101,32 @@ function sendOffline(res) {
 
 export default async function handler(req, res) {
   try {
-    const upstreamOrigin = await resolveTunnelOrigin();
-    const target = proxyTarget(req.url, upstreamOrigin);
     const headers = requestHeaders(req);
     const body = requestBody(req);
-    const response = await fetch(target, {
-      method: req.method || 'GET',
-      headers,
-      body,
-      redirect: 'manual',
-      signal: globalThis.AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
-    });
+    let upstreamOrigin = null;
+    let target = null;
+    let response = null;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) resetLocatorCache();
+      upstreamOrigin = await resolveTunnelOrigin();
+      target = proxyTarget(req.url, upstreamOrigin);
+      try {
+        response = await fetch(target, {
+          method: req.method || 'GET',
+          headers,
+          body,
+          redirect: 'manual',
+          signal: globalThis.AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+        });
+      } catch (error) {
+        if (attempt === 0) continue;
+        throw error;
+      }
+      if (attempt === 0 && [502, 503, 504, 530].includes(response.status)) continue;
+      break;
+    }
+    if (!response || !upstreamOrigin || !target) throw new Error('control_proxy_upstream_unavailable');
 
     res.statusCode = response.status;
     for (const [name, value] of response.headers.entries()) {
