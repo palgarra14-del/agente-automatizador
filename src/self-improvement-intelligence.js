@@ -19,6 +19,20 @@ const FAILURE_CLASSES = Object.freeze([
   ['human-gate', /(human_gate|approval|required)/i]
 ]);
 
+const ORCHESTRATOR_FAILURE_CLASSES = new Set([
+  'github-state',
+  'runtime-timeout',
+  'workspace',
+  'model-availability',
+  'model-execution',
+  'human-gate',
+  'other'
+]);
+
+function failureActionableInProject(projectId, kind) {
+  return projectId === 'self' || !ORCHESTRATOR_FAILURE_CLASSES.has(kind);
+}
+
 function failureClass(error) {
   const value = String(error ?? '');
   return FAILURE_CLASSES.find(([, pattern]) => pattern.test(value))?.[0] ?? (value ? 'other' : null);
@@ -124,11 +138,12 @@ export class AutonomousGapIntelligence {
         relevantFailures.find((entry) => entry.rootCause)?.rootCause ??
         relevantFailures[0]?.detail ??
         null;
+      const actionable = failureActionableInProject(this.project.id, kind);
       signals.push({
         kind: `reliability:${kind}`,
         score: 70 + Math.min(24, count * 6),
-        actionable: true,
-        evidence: `${count} recent non-successful cycle(s) classified as ${kind}${latestDetail ? `; latest root-cause detail: ${latestDetail}` : ''}`
+        actionable,
+        evidence: `${count} recent non-successful cycle(s) classified as ${kind}${latestDetail ? `; latest root-cause detail: ${latestDetail}` : ''}${actionable ? '' : '; infrastructure-owned signal: keep visible for self lane, do not spend this business lane on it'}`
       });
     }
 
@@ -136,15 +151,15 @@ export class AutonomousGapIntelligence {
       signals.push({
         kind: 'throughput:no-recent-success',
         score: 68,
-        actionable: true,
-        evidence: `0 successful autonomous cycles across the last ${recent.length} recorded outcomes`
+        actionable: this.project.id === 'self',
+        evidence: `0 successful autonomous cycles across the last ${recent.length} recorded outcomes${this.project.id === 'self' ? '' : '; diagnostic only for business lanes'}`
       });
     } else if (recent.length >= 6 && completed.length / recent.length < 0.4) {
       signals.push({
         kind: 'throughput:low-success-rate',
         score: 58,
-        actionable: true,
-        evidence: `${completed.length}/${recent.length} recent autonomous cycles completed successfully`
+        actionable: this.project.id === 'self',
+        evidence: `${completed.length}/${recent.length} recent autonomous cycles completed successfully${this.project.id === 'self' ? '' : '; diagnostic only for business lanes'}`
       });
     }
 

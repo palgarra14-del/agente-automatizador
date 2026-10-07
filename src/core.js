@@ -2260,6 +2260,20 @@ function historicalWorkspaceIsRecoverable(workspace) {
   return !existsSync(workspace.path);
 }
 
+function pristineWorkflowForWorkspaceReallocation(plan) {
+  if (!plan || typeof plan !== 'object' || plan.status !== WorkflowStepStatus.PENDING) return false;
+  if (plan.pausedAt !== null || plan.result !== null || plan.validation !== null || plan.dryRun !== false || plan.outputBytes !== 0) return false;
+  const usage = plan.modelUsage;
+  if (!usage || usage.calls !== 0 || usage.inputTokens !== 0 || usage.outputTokens !== 0 || usage.totalTokens !== 0 || usage.unknownUsageCalls !== 0 || !Array.isArray(usage.entries) || usage.entries.length !== 0) return false;
+  if (!Array.isArray(plan.steps) || !plan.steps.length) return false;
+  if (plan.steps[0].status !== WorkflowStepStatus.READY) return false;
+  if (plan.steps.slice(1).some((step) => step.status !== WorkflowStepStatus.PENDING)) return false;
+  if (plan.steps.some((step) => step.attempts !== 0 || step.evidence !== null || step.error !== null)) return false;
+  const bootstrap = plan.bootstrap;
+  if (!bootstrap || bootstrap.attempts !== 0 || !['pending', 'not_required'].includes(bootstrap.status) || bootstrap.completedAt !== null || bootstrap.evidence !== null || bootstrap.error !== null) return false;
+  return true;
+}
+
 function pristineHistoricalWorkflow(plan, leaseId) {
   if (!plan || typeof plan !== 'object' || plan.status !== WorkflowStepStatus.PENDING) return false;
   if (!plan.executionLease || plan.executionLease.leaseId !== leaseId || plan.executionLease.kind !== 'workflow') return false;
@@ -4137,7 +4151,9 @@ export class WorkflowEngine {
           current.currentBranch !== expected.branch ||
           current.initialHead !== expected.head ||
           current.remote !== expected.remote;
-        const filesChanged = Boolean(changeSet?.paths?.length) ||
+        const filesChanged =
+          !changeSet ||
+          changeSet.changeSetFingerprint !== interruptedStep.evidence?.workspaceBeforeFingerprint ||
           !protectedIgnored ||
           protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
         if (repositoryChanged || filesChanged) {
@@ -4182,8 +4198,37 @@ export class WorkflowEngine {
     const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
     const publicationEnabled = governedImplementationProfiles.has(plan.profile) && publicationCapability.available;
     if (plan.workspace) {
+      const allocationChanged =
+        typeof plan.workspace.path === 'string' &&
+        (resolve(plan.workspace.path) !== resolve(expected.workspace) ||
+         plan.workspace.managed !== expected.managed);
+      const sameProjectRepository =
+        plan.workspace.projectId === project.id &&
+        plan.workspace.repository?.owner === project.repository.owner &&
+        plan.workspace.repository?.name === project.repository.name;
+      const safelyReallocatable =
+        allocationChanged &&
+        sameProjectRepository &&
+        plan.workspace.managed === true &&
+        typeof plan.workspace.path === 'string' &&
+        resolve(plan.workspace.path) === plan.workspace.path &&
+        !existsSync(plan.workspace.path) &&
+        pristineWorkflowForWorkspaceReallocation(plan);
+      if (safelyReallocatable) {
+        const staleWorkspacePath = plan.workspace.path;
+        await this.update(id, (saved) => {
+          if (!pristineWorkflowForWorkspaceReallocation(saved) ||
+              saved.workspace?.managed !== true ||
+              saved.workspace.path !== staleWorkspacePath ||
+              existsSync(saved.workspace.path)) {
+            throw new Error('workflow_workspace_reallocation_state_changed');
+          }
+          saved.workspace = null;
+        });
+        return this.workspaceProject(id, project);
+      }
       validateWorkflowWorkspace(plan.workspace, project);
-      if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
+      if (allocationChanged) throw new Error('Workflow workspace does not match its project allocation');
       if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
       const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
       if (publicationEnabled) {
@@ -4291,6 +4336,57 @@ export class WorkflowEngine {
     const project = this.projects.get(observed.projectId);
     const expected = interruptedStep.evidence?.repositoryState;
     if (!observed.workspace || !expected) return null;
+
+    const capabilityContextChanged =
+      observed.registryFingerprint !== this.registry.fingerprint ||
+      observed.specialistRegistryFingerprint !== this.specialistRegistry.fingerprint ||
+      observed.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {});
+
+    const retireForCapabilityContextChange = () => this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === interruptedStep.id);
+      if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
+        throw new Error('historical_interrupted_read_only_recovery_state_changed');
+      }
+      const startedCalls = saved.modelUsage.entries.filter((entry) =>
+        entry.status === 'started' &&
+        entry.surface === 'workflow' &&
+        entry.stepId === step.id &&
+        entry.attempt === step.attempts
+      );
+      if (startedCalls.length > 1) throw new Error('interrupted_read_only_model_reservation_ambiguous');
+      if (startedCalls.length === 1) {
+        completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
+      }
+      step.status = WorkflowStepStatus.BLOCKED;
+      step.error = 'historical_interrupted_read_only_capability_context_changed';
+      step.evidence = {
+        ...step.evidence,
+        type: 'historical-interrupted-execution',
+        ok: false,
+        recoveredAt: new Date(this.now()).toISOString(),
+        interruptedModelCallId: startedCalls[0]?.id ?? null,
+        retryAvailable: false,
+        historicalRecovery: true,
+        capabilityContext: {
+          savedRegistryFingerprint: observed.registryFingerprint,
+          activeRegistryFingerprint: this.registry.fingerprint,
+          savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
+          activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+          savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
+          activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
+        }
+      };
+      saved.status = WorkflowStepStatus.BLOCKED;
+      saved.pausedAt = null;
+      saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
+    }, { deadlineAt: deadlineCapAt });
+
+    if (capabilityContextChanged &&
+        observed.workspace.managed === true &&
+        !existsSync(observed.workspace.path)) {
+      return retireForCapabilityContextChange();
+    }
+
     const workspaceProject = projectAtWorkspace(project, observed.workspace.path);
 
     let current = null;
@@ -4314,7 +4410,9 @@ export class WorkflowEngine {
       current.currentBranch !== expected.branch ||
       current.initialHead !== expected.head ||
       current.remote !== expected.remote;
-    const filesChanged = Boolean(changeSet?.paths?.length) ||
+    const filesChanged =
+      !changeSet ||
+      changeSet.changeSetFingerprint !== interruptedStep.evidence?.workspaceBeforeFingerprint ||
       !protectedIgnored ||
       protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
 
@@ -4340,49 +4438,8 @@ export class WorkflowEngine {
       }, { deadlineAt: deadlineCapAt });
     }
 
-    const capabilityContextChanged =
-      observed.registryFingerprint !== this.registry.fingerprint ||
-      observed.specialistRegistryFingerprint !== this.specialistRegistry.fingerprint ||
-      observed.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {});
     if (capabilityContextChanged) {
-      return this.update(id, (saved) => {
-        const step = saved.steps.find((item) => item.id === interruptedStep.id);
-        if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
-          throw new Error('historical_interrupted_read_only_recovery_state_changed');
-        }
-        const startedCalls = saved.modelUsage.entries.filter((entry) =>
-          entry.status === 'started' &&
-          entry.surface === 'workflow' &&
-          entry.stepId === step.id &&
-          entry.attempt === step.attempts
-        );
-        if (startedCalls.length > 1) throw new Error('interrupted_read_only_model_reservation_ambiguous');
-        if (startedCalls.length === 1) {
-          completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
-        }
-        step.status = WorkflowStepStatus.BLOCKED;
-        step.error = 'historical_interrupted_read_only_capability_context_changed';
-        step.evidence = {
-          ...step.evidence,
-          type: 'historical-interrupted-execution',
-          ok: false,
-          recoveredAt: new Date(this.now()).toISOString(),
-          interruptedModelCallId: startedCalls[0]?.id ?? null,
-          retryAvailable: false,
-          historicalRecovery: true,
-          capabilityContext: {
-            savedRegistryFingerprint: observed.registryFingerprint,
-            activeRegistryFingerprint: this.registry.fingerprint,
-            savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
-            activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
-            savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
-            activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
-          }
-        };
-        saved.status = WorkflowStepStatus.BLOCKED;
-        saved.pausedAt = null;
-        saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
-      }, { deadlineAt: deadlineCapAt });
+      return retireForCapabilityContextChange();
     }
 
     return this.update(id, (saved) => {

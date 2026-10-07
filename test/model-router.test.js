@@ -222,13 +222,15 @@ def fake_run(args,**kwargs):
     captured["args"]=args
     captured["password"]=kwargs.get("env",{}).get("OPENCODE_PASSWORD")
     captured["timeout"]=kwargs.get("timeout")
+    captured["input"]=kwargs.get("input_text")
     return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
 m._run=fake_run
+large_prompt="x"*300000
 value=m.opencode_structured(
-  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  large_prompt,{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
   cwd=tempfile.mkdtemp(),model="opencode/ling-3.0-flash-fin-free"
 )
-print(json.dumps({"value":value,"args":captured["args"],"password":captured["password"],"timeout":captured["timeout"]}))
+print(json.dumps({"value":value,"args":captured["args"],"password":captured["password"],"timeout":captured["timeout"],"inputLength":len(captured.get("input") or "")}))
 `);
   assert.equal(result.value.ok,true);
   assert.equal(result.password,'secret-value');
@@ -237,6 +239,53 @@ print(json.dumps({"value":value,"args":captured["args"],"password":captured["pas
   assert.ok(result.args.includes('http://127.0.0.1:49374'));
   assert.ok(!result.args.includes('--standalone'));
   assert.ok(!result.args.includes('secret-value'));
+  assert.ok(result.inputLength > 300000);
+  assert.ok(result.args.every(arg => arg.length < 10000));
+});
+
+test('provider schema and output temp files never dirty the project workspace', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+workdir=Path(tempfile.mkdtemp()).resolve()
+m.antigravity_authenticated=lambda: True
+agy_seen={}
+class P:
+    returncode=0
+    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","structured_output":{"ok":True}}})
+    stderr=''
+def agy_run(args,**kwargs):
+    agy_seen["schema"]=args[args.index("--json-schema")+1]
+    return P()
+m._run=agy_run
+schema={"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}
+m.antigravity_structured("x",schema,cwd=str(workdir),model="gemini-3.1-pro-high")
+
+fd,codex_path=tempfile.mkstemp(); os.close(fd)
+m.CODEX=codex_path
+codex_seen={}
+def codex_run(args,**kwargs):
+    codex_seen["schema"]=args[args.index("--output-schema")+1]
+    codex_seen["output"]=args[args.index("-o")+1]
+    Path(codex_seen["output"]).write_text('{"ok":true}',encoding="utf-8")
+    return subprocess.CompletedProcess(args,0,stdout="",stderr="")
+m._run=codex_run
+m.codex_structured("x",schema,cwd=str(workdir))
+os.unlink(codex_path)
+print(json.dumps({
+  "workspaceFiles":sorted(p.name for p in workdir.iterdir()),
+  "agySchemaParent":str(Path(agy_seen["schema"]).parent),
+  "codexSchemaParent":str(Path(codex_seen["schema"]).parent),
+  "codexOutputParent":str(Path(codex_seen["output"]).parent),
+  "workdir":str(workdir)
+}))
+`);
+  assert.deepEqual(result.workspaceFiles,[]);
+  assert.notEqual(result.agySchemaParent,result.workdir);
+  assert.notEqual(result.codexSchemaParent,result.workdir);
+  assert.notEqual(result.codexOutputParent,result.workdir);
 });
 
 test('Copilot Free provider is opt-in and disabled by default', () => {

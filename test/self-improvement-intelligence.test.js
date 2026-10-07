@@ -58,6 +58,28 @@ test('executor attempt exhaustion is classified as model execution debt', () => 
   assert.match(analysis.directive, /codex_home/);
 });
 
+test('business lanes keep orchestrator failures visible but do not spend commercial cycles on them', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('callflow') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'skill_executor_attempt_budget_exhausted', failureDetail: 'no_role_candidate_available', changedPaths: [] },
+      { status: 'failed', error: 'workflow_budget_deadline_exceeded', changedPaths: [] },
+      { status: 'failed', error: 'provider_temporarily_unavailable', changedPaths: [] },
+      { status: 'blocked', error: 'stale_autoranking_replan', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'continuous-improvement:opportunity');
+  for (const kind of ['reliability:model-execution', 'reliability:runtime-timeout', 'reliability:model-availability', 'reliability:other']) {
+    const signal = analysis.signals.find((item) => item.kind === kind);
+    assert.ok(signal);
+    assert.equal(signal.actionable, false);
+    assert.match(signal.evidence, /self lane/);
+  }
+  const throughput = analysis.signals.find((item) => item.kind === 'throughput:no-recent-success');
+  assert.equal(throughput.actionable, false);
+});
+
 test('implementation no-change failures become a concrete autonomous priority', () => {
   const intelligence = new AutonomousGapIntelligence({ project: project('callflow') });
   const analysis = intelligence.analyze({

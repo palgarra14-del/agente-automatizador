@@ -2338,7 +2338,7 @@ test('execution lease release is idempotent when the write succeeded but the res
   let attempts = 0;
   store.mutate = async (mutator) => {
     attempts += 1;
-    const result = mutator(state);
+    mutator(state);
     throw new Error('injected_response_loss_after_release');
   };
   store.readSnapshot = async () => ({ state });

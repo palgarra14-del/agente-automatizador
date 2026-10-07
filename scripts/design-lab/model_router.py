@@ -168,7 +168,7 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
     workdir.mkdir(parents=True,exist_ok=True)
     schema_file=None
     try:
-        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="agy-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="agy-schema-",delete=False,encoding="utf-8") as f:
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
         cmd=[
@@ -302,8 +302,8 @@ def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
     env["OPENCODE_PASSWORD"]=password
     proc=_run([
         OPENCODE,"run","--server",server,"--auto",
-        "--model",str(model),"--format","json",task
-    ],cwd=workdir,timeout=min(timeout,OPENCODE_FREE_TIMEOUT),env=env)
+        "--model",str(model),"--format","json"
+    ],cwd=workdir,timeout=min(timeout,OPENCODE_FREE_TIMEOUT),input_text=task,env=env)
     if proc.returncode!=0:
         raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(_opencode_text(proc.stdout),schema)
@@ -360,10 +360,10 @@ def codex_structured(prompt,schema,cwd=None,timeout=180,model=None,effort=None,i
     schema_file=None
     output_file=None
     try:
-        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="codex-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="codex-schema-",delete=False,encoding="utf-8") as f:
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
-        fd,output_file=tempfile.mkstemp(suffix=".json",prefix="codex-output-",dir=workdir)
+        fd,output_file=tempfile.mkstemp(suffix=".json",prefix="codex-output-")
         os.close(fd)
         cmd=_codex_base(workdir,model=model)
         if effort:
