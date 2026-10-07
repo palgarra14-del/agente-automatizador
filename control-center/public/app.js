@@ -337,7 +337,7 @@ function renderAttention(data) {
   }
 
   for (const provider of data.aiHealth?.providers || []) {
-    if (provider.state === 'cooldown' && provider.reasonCategory === 'auth') {
+    if ((provider.state === 'cooldown' && provider.reasonCategory === 'auth') || provider.state === 'auth_required') {
       items.push({
         severity:'bad',
         title:provider.label + ' requiere autenticación',
@@ -574,18 +574,21 @@ function renderStats(data) {
 }
 
 function renderLanes(data) {
+  const controlKnown = data.remoteControl?.known !== false;
   const globalPaused = data.remoteControl?.globalPaused === true;
   const pausedLanes = new Set(data.remoteControl?.pausedLanes || []);
   $('lanes').innerHTML = Object.keys(laneNames).map((lane) => {
     const s = laneState(data, lane);
     const lanePaused = pausedLanes.has(lane);
-    const pauseButton = globalPaused
-      ? '<button class="ghost" disabled>Pausa global activa</button>'
-      : (lanePaused
-        ? '<button class="primary" data-lane-pause="'+lane+'" data-paused="false">Reanudar carril</button>'
-        : '<button class="ghost" data-lane-pause="'+lane+'" data-paused="true">Pausar carril</button>');
-    const wakeButton = globalPaused || lanePaused
-      ? '<button disabled>Reactivar / comprobar · pausado</button>'
+    const pauseButton = !controlKnown
+      ? '<button class="ghost" disabled>Control sin confirmar</button>'
+      : globalPaused
+        ? '<button class="ghost" disabled>Pausa global activa</button>'
+        : (lanePaused
+          ? '<button class="primary" data-lane-pause="'+lane+'" data-paused="false">Reanudar carril</button>'
+          : '<button class="ghost" data-lane-pause="'+lane+'" data-paused="true">Pausar carril</button>');
+    const wakeButton = !controlKnown || globalPaused || lanePaused
+      ? '<button disabled>Reactivar / comprobar · '+(!controlKnown ? 'estado desconocido' : 'pausado')+'</button>'
       : '<button data-wake="'+lane+'">Reactivar / comprobar</button>';
     return '<article class="lane">'+
       '<div class="lane-head"><h3><span class="dot '+s.cls+'"></span>'+esc(laneNames[lane])+'</h3><span class="badge '+s.cls+'">'+esc(s.state)+'</span></div>'+
