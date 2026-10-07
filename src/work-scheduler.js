@@ -75,8 +75,9 @@ export function planWork(items = [], {
   let selfHeavy = normalizedRunning.filter((item) => item.heavy && item.lane === 'self').length;
   const selected = [];
   const deferred = [];
+  const ranked = rankWork(items);
 
-  for (const item of rankWork(items)) {
+  for (const item of ranked) {
     if (item.blocked || item.humanGate) {
       deferred.push({ item, reason: item.humanGate ? 'human_gate' : 'blocked' });
       continue;
@@ -125,6 +126,15 @@ export function planWork(items = [], {
     version: 1,
     limits: { maxHeavy, maxBusinessHeavy, maxSelfHeavy },
     running: normalizedRunning,
+    ranking: ranked.map((item, index) => ({
+      rank: index + 1,
+      id: item.id,
+      lane: item.lane,
+      band: item.band,
+      score: scoreWork(item),
+      blocked: item.blocked,
+      humanGate: item.humanGate
+    })),
     selected,
     deferred,
     yieldCandidates
@@ -139,6 +149,7 @@ export function schedulingPolicySnapshot() {
     businessLanes: [...BUSINESS_LANES].sort(),
     principles: [
       'operator work outranks autonomous work',
+      'runnable work is re-ranked from current evidence at every dispatch boundary',
       'business throughput outranks self-improvement',
       'self-improvement consumes only spare capacity after runnable business work',
       'human gates never block independent runnable work',

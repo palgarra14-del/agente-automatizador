@@ -95,9 +95,31 @@ test('lightweight tasks do not consume heavy concurrency slots', () => {
   assert.deepEqual(result.selected.map((item) => item.id), ['status']);
 });
 
+
+test('scheduler exposes the autoranking used at each dispatch boundary', () => {
+  const result = planWork([
+    { id:'self-rank', lane:'self', businessImpact:20 },
+    { id:'lead-rank', lane:'leadfinder', businessImpact:5 },
+    { id:'call-rank', lane:'callflow', urgency:10 }
+  ], { maxHeavy:1, maxBusinessHeavy:1, maxSelfHeavy:1 });
+
+  assert.deepEqual(result.ranking.map((item) => ({
+    rank:item.rank,
+    id:item.id,
+    lane:item.lane
+  })), [
+    { rank:1, id:'call-rank', lane:'callflow' },
+    { rank:2, id:'lead-rank', lane:'leadfinder' },
+    { rank:3, id:'self-rank', lane:'self' }
+  ]);
+  assert.ok(result.ranking[0].score > result.ranking[1].score);
+  assert.deepEqual(result.selected.map((item) => item.id), ['call-rank']);
+});
+
 test('policy snapshot documents the sustainable scheduling contract', () => {
   const policy = schedulingPolicySnapshot();
   assert.equal(policy.version, 1);
+  assert.ok(policy.principles.includes('runnable work is re-ranked from current evidence at every dispatch boundary'));
   assert.ok(policy.principles.includes('business throughput outranks self-improvement'));
   assert.ok(policy.principles.includes('self-improvement consumes only spare capacity after runnable business work'));
 });

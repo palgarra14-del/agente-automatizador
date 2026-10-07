@@ -130,6 +130,22 @@ test('heartbeat fills all runner capacity with business before self', () => {
   assert.deepEqual(plan.deferred,[{lane:'self',priority:'maintenance',reason:'global_capacity'}]);
 });
 
+
+test('heartbeat surfaces the current autoranking before dispatch', () => {
+  const plan=planHeartbeat([
+    {lane:'self',hasWork:true},
+    {lane:'website-pilot',hasWork:true},
+    {lane:'leadfinder',hasWork:true},
+    {lane:'callflow',hasWork:true}
+  ],{maxHeavy:2,maxBusinessHeavy:2,maxSelfHeavy:1});
+
+  assert.deepEqual(plan.ranking.map((item)=>item.lane),[
+    'callflow','leadfinder','website-pilot','self'
+  ]);
+  assert.deepEqual(plan.ranking.map((item)=>item.rank),[1,2,3,4]);
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder']);
+});
+
 test('active business work leaves the last runner for waiting business before self', () => {
   const plan=planHeartbeat([
     {lane:'callflow',active:true},

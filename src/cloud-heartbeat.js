@@ -126,6 +126,12 @@ export function planHeartbeat(observations = [], limits = {}) {
     version:1,
     classified,
     running,
+    ranking:plan.ranking.map((item) => ({
+      rank:item.rank,
+      lane:item.lane,
+      priority:item.band,
+      score:item.score
+    })),
     dispatch:plan.selected.map((item) => ({
       lane:item.lane,
       priority:item.band,

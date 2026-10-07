@@ -287,3 +287,96 @@ test('completed autonomous outcomes are learned by the selected gap before the n
   assert.equal(learned.failureCount, 0);
   assert.equal(learned.lastCompletedAt, '2026-09-30T00:10:00.000Z');
 });
+
+test('every terminal autonomous cycle persists an autoranking and the next iteration consumes it', async () => {
+  const now = Date.parse('2026-09-30T01:00:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-rank-source',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-09-30T00:50:00.000Z'],
+      history: [],
+      lastIntelligence: {
+        version: 1,
+        projectId: 'self',
+        primary: 'reliability:verification',
+        signals: []
+      },
+      nextRanking: null,
+      gapMemory: [],
+      suspendedUntil: null,
+      updatedAt: '2026-09-30T00:50:00.000Z'
+    }
+  });
+  let analyzeCalls = 0;
+  let created = null;
+  const intelligence = {
+    analyze({ history, memory }) {
+      analyzeCalls += 1;
+      assert.equal(history.at(-1).workflowId, 'workflow-rank-source');
+      assert.equal(history.at(-1).status, 'completed');
+      const learned = memory.find((entry) => entry.kind === 'reliability:verification');
+      assert.equal(learned?.lastOutcome, 'completed');
+      return {
+        version: 1,
+        projectId: 'self',
+        primary: 'continuous-improvement:opportunity',
+        signals: [{
+          kind: 'continuous-improvement:opportunity',
+          score: 20,
+          actionable: true,
+          evidence: 'rank after terminal workflow'
+        }],
+        directive: 'Autoranking next iteration: improve the highest-evidence bounded opportunity.'
+      };
+    }
+  };
+  const workflowEngine = {
+    async get() {
+      return {
+        id: 'workflow-rank-source',
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'completed',
+        result: null,
+        steps: [
+          { id: 'implementation', evidence: { changeSet: { paths: ['src/ranked.js'] } } },
+          { id: 'publication', evidence: null }
+        ]
+      };
+    },
+    async create(input) {
+      created = input;
+      return { id: 'workflow-rank-next' };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine,
+    operatorRevision: REV,
+    projectId: 'self',
+    intelligence,
+    now: () => now
+  });
+
+  const settled = await autopilot.tick();
+  assert.equal(settled.status, 'completed');
+  assert.equal(analyzeCalls, 1);
+  const ranking = store.state.autopilotSelfImprovement.nextRanking;
+  assert.equal(ranking.primary, 'continuous-improvement:opportunity');
+  assert.equal(ranking.trigger, 'workflow_terminal');
+  assert.equal(ranking.afterWorkflowId, 'workflow-rank-source');
+  assert.equal(ranking.generatedAt, '2026-09-30T01:00:00.000Z');
+
+  const nextId = await autopilot.createWorkflow();
+  assert.equal(nextId, 'workflow-rank-next');
+  assert.equal(analyzeCalls, 1);
+  assert.match(created.goal, /Autoranking next iteration/);
+  assert.equal(store.state.autopilotSelfImprovement.nextRanking, null);
+  assert.equal(
+    store.state.autopilotSelfImprovement.lastIntelligence.primary,
+    'continuous-improvement:opportunity'
+  );
+});
