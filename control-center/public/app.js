@@ -13,7 +13,6 @@ let loading = false;
 let lastData = null;
 let deferredInstallPrompt = null;
 let refreshTimer = null;
-let authConfig = null;
 
 function esc(value='') {
   return String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -60,18 +59,18 @@ function bytesToBase64url(value) {
   const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  return globalThis.btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
 
 function base64urlToBytes(value) {
   const base64 = String(value).replace(/-/g,'+').replace(/_/g,'/');
   const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
-  const binary = atob(padded);
+  const binary = globalThis.atob(padded);
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
 function creationOptionsFromJSON(options) {
-  if (globalThis.PublicKeyCredential?.parseCreationOptionsFromJSON) return PublicKeyCredential.parseCreationOptionsFromJSON(options);
+  if (globalThis.PublicKeyCredential?.parseCreationOptionsFromJSON) return globalThis.PublicKeyCredential.parseCreationOptionsFromJSON(options);
   return {
     ...options,
     challenge: base64urlToBytes(options.challenge),
@@ -81,7 +80,7 @@ function creationOptionsFromJSON(options) {
 }
 
 function requestOptionsFromJSON(options) {
-  if (globalThis.PublicKeyCredential?.parseRequestOptionsFromJSON) return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  if (globalThis.PublicKeyCredential?.parseRequestOptionsFromJSON) return globalThis.PublicKeyCredential.parseRequestOptionsFromJSON(options);
   return {
     ...options,
     challenge: base64urlToBytes(options.challenge),
@@ -126,7 +125,7 @@ async function authApi(path, options={}) {
     headers:{'content-type':'application/json', ...(options.headers || {})}
   });
   let data = {};
-  try { data = await response.json(); } catch {}
+  try { data = await response.json(); } catch { /* optional JSON body */ }
   if (!response.ok) {
     const error = new Error(data.error || ('HTTP ' + response.status));
     error.status = response.status;
@@ -141,7 +140,6 @@ function webAuthnSupported() {
 }
 
 function renderAuthConfig(config) {
-  authConfig = config;
   const supported = webAuthnSupported();
   const enabled = config?.passkey?.enabled === true;
   $('passkeyLoginBtn').classList.toggle('hidden', !supported || !enabled);
@@ -193,7 +191,7 @@ async function enrollPasskey() {
 }
 
 async function logout() {
-  try { await api('/api/logout', {method:'POST',body:'{}'}); } catch {}
+  try { await api('/api/logout', {method:'POST',body:'{}'}); } catch { /* logout is best-effort */ }
   lastData = null;
   $('login').classList.remove('hidden');
   $('logoutBtn').classList.add('hidden');
@@ -212,16 +210,16 @@ function formatBytes(value) {
 }
 
 async function showLocalNotification(title, body) {
-  if (!('Notification' in globalThis) || Notification.permission !== 'granted') return;
+  if (!('Notification' in globalThis) || globalThis.Notification.permission !== 'granted') return;
   try {
     const registration = await navigator.serviceWorker?.ready;
     if (registration) return registration.showNotification(title, {body,icon:'/icon-192.png',tag:'agent-control-event'});
-  } catch {}
-  new Notification(title, {body});
+  } catch { /* fall back to window notification */ }
+  new globalThis.Notification(title, {body});
 }
 
 function notifyTransitions(previous, current) {
-  if (!previous || Notification.permission !== 'granted') return;
+  if (!previous || globalThis.Notification?.permission !== 'granted') return;
   const before = new Map((previous.queue?.records || []).map((item) => [item.issueNumber,item]));
   for (const record of current.queue?.records || []) {
     const old = before.get(record.issueNumber);
@@ -1064,7 +1062,7 @@ syncInstallButtons();
 
 $('notifyBtn')?.addEventListener('click', async () => {
   if (!('Notification' in globalThis)) return toast('Este navegador no admite notificaciones');
-  const permission = await Notification.requestPermission();
+  const permission = await globalThis.Notification.requestPermission();
   $('notifyBtn').textContent = permission === 'granted' ? 'Notificaciones activas' : 'Activar notificaciones';
   toast(permission === 'granted' ? 'Avisos locales activados' : 'Notificaciones no autorizadas');
 });
