@@ -162,7 +162,7 @@ export function summarizeGithubRateLimit(payload = {}, nowMs = Date.now()) {
   };
 }
 
-export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit, laneTelemetry, remoteControl} = {}) {
+export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit, remoteControl} = {}) {
   let score = 100;
   const reasons = [];
   if (!service?.active) { score -= 45; reasons.push('service_offline'); }
