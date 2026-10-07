@@ -6,12 +6,14 @@ const laneNames = {
   'website-pilot': 'Website Pilot'
 };
 const activeStates = new Set(['admitted','initializing','running','pending_approval','awaiting_start_approval','awaiting_workflow_approval','execution_deferred','active']);
-const terminalStates = new Set(['completed','failed','blocked','rejected']);
+const terminalStates = new Set(['completed','failed','blocked','rejected','cancelled']);
 const priorityNames = {high:'Alta', normal:'Normal', low:'Baja'};
 const priorityOrder = {high:0, normal:1, low:2};
 let loading = false;
 let lastData = null;
 let deferredInstallPrompt = null;
+let refreshTimer = null;
+let authConfig = null;
 
 function esc(value='') {
   return String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -26,7 +28,7 @@ function age(value) {
 }
 function statusClass(value) {
   const s = String(value || '').toLowerCase();
-  if (['success','completed','active','running','working','trabajando','queued','admitted','initializing','available'].includes(s)) return 'good';
+  if (['success','completed','active','running','working','trabajando','queued','admitted','initializing','available','sleeping','standby'].includes(s)) return 'good';
   if (['failure','failed','cancelled','blocked','rejected','offline'].includes(s)) return 'bad';
   return 'warn';
 }
@@ -53,6 +55,187 @@ function toast(text) {
   $('toast').classList.add('show');
   setTimeout(() => $('toast').classList.remove('show'), 2600);
 }
+
+function bytesToBase64url(value) {
+  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+function base64urlToBytes(value) {
+  const base64 = String(value).replace(/-/g,'+').replace(/_/g,'/');
+  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function creationOptionsFromJSON(options) {
+  if (globalThis.PublicKeyCredential?.parseCreationOptionsFromJSON) return PublicKeyCredential.parseCreationOptionsFromJSON(options);
+  return {
+    ...options,
+    challenge: base64urlToBytes(options.challenge),
+    user: { ...options.user, id: base64urlToBytes(options.user.id) },
+    excludeCredentials: (options.excludeCredentials || []).map((item) => ({ ...item, id:base64urlToBytes(item.id) }))
+  };
+}
+
+function requestOptionsFromJSON(options) {
+  if (globalThis.PublicKeyCredential?.parseRequestOptionsFromJSON) return PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  return {
+    ...options,
+    challenge: base64urlToBytes(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map((item) => ({ ...item, id:base64urlToBytes(item.id) }))
+  };
+}
+
+function registrationResponseJSON(credential) {
+  return {
+    id: credential.id,
+    rawId: bytesToBase64url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    response: {
+      clientDataJSON: bytesToBase64url(credential.response.clientDataJSON),
+      attestationObject: bytesToBase64url(credential.response.attestationObject),
+      transports: credential.response.getTransports?.() || []
+    }
+  };
+}
+
+function authenticationResponseJSON(credential) {
+  return {
+    id: credential.id,
+    rawId: bytesToBase64url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    response: {
+      clientDataJSON: bytesToBase64url(credential.response.clientDataJSON),
+      authenticatorData: bytesToBase64url(credential.response.authenticatorData),
+      signature: bytesToBase64url(credential.response.signature),
+      userHandle: credential.response.userHandle ? bytesToBase64url(credential.response.userHandle) : undefined
+    }
+  };
+}
+
+async function authApi(path, options={}) {
+  const response = await fetch(path, {
+    ...options,
+    headers:{'content-type':'application/json', ...(options.headers || {})}
+  });
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) {
+    const error = new Error(data.error || ('HTTP ' + response.status));
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+function webAuthnSupported() {
+  return Boolean(globalThis.PublicKeyCredential && navigator.credentials);
+}
+
+function renderAuthConfig(config) {
+  authConfig = config;
+  const supported = webAuthnSupported();
+  const enabled = config?.passkey?.enabled === true;
+  $('passkeyLoginBtn').classList.toggle('hidden', !supported || !enabled);
+  $('recoveryToggleBtn').classList.remove('hidden');
+  $('loginLead').textContent = enabled && supported
+    ? 'Accede con la biometría o bloqueo seguro de tu dispositivo.'
+    : enabled
+      ? 'Este navegador no admite la credencial biométrica registrada. Usa recuperación.'
+      : 'Primera configuración: entra con recuperación y activa la huella dentro de la app.';
+  if (!enabled || !supported) $('loginForm').classList.remove('hidden');
+}
+
+async function loadAuthConfig() {
+  try {
+    renderAuthConfig(await authApi('/api/auth/config'));
+  } catch {
+    $('loginLead').textContent = 'No se ha podido comprobar el acceso biométrico.';
+    $('recoveryToggleBtn').classList.remove('hidden');
+  }
+}
+
+async function loginWithPasskey() {
+  if (!webAuthnSupported()) throw new Error('WebAuthn no disponible en este dispositivo');
+  const flow = await authApi('/api/auth/passkey/options', {method:'POST',body:'{}'});
+  const credential = await navigator.credentials.get({ publicKey:requestOptionsFromJSON(flow.options) });
+  await authApi('/api/auth/passkey/verify', {
+    method:'POST',
+    body:JSON.stringify({flowId:flow.flowId,response:authenticationResponseJSON(credential)})
+  });
+  $('loginError').textContent = '';
+  await refresh();
+}
+
+async function enrollPasskey() {
+  if (!webAuthnSupported()) throw new Error('Este dispositivo no admite WebAuthn');
+  const flow = await api('/api/auth/passkey/register/options', {method:'POST',body:'{}'});
+  const credential = await navigator.credentials.create({ publicKey:creationOptionsFromJSON(flow.options) });
+  const result = await api('/api/auth/passkey/register/verify', {
+    method:'POST',
+    body:JSON.stringify({flowId:flow.flowId,response:registrationResponseJSON(credential)})
+  });
+  if (result.recoveryKey) {
+    $('recoveryKeyResult').classList.remove('hidden');
+    $('recoveryKeyResult').innerHTML = '<strong>Guarda esta clave de recuperación:</strong><br><code>'+esc(result.recoveryKey)+'</code><br><span class="meta">Solo se muestra ahora. El acceso normal será biométrico.</span>';
+  }
+  toast('Huella / biometría registrada');
+  await loadAuthConfig();
+  await refresh();
+}
+
+async function logout() {
+  try { await api('/api/logout', {method:'POST',body:'{}'}); } catch {}
+  lastData = null;
+  $('login').classList.remove('hidden');
+  $('logoutBtn').classList.add('hidden');
+  $('loginForm').classList.add('hidden');
+  await loadAuthConfig();
+}
+
+function formatBytes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const units = ['B','KB','MB','GB','TB'];
+  let current = n;
+  let unit = 0;
+  while (current >= 1024 && unit < units.length - 1) { current /= 1024; unit += 1; }
+  return (unit >= 3 ? current.toFixed(1) : Math.round(current)) + ' ' + units[unit];
+}
+
+async function showLocalNotification(title, body) {
+  if (!('Notification' in globalThis) || Notification.permission !== 'granted') return;
+  try {
+    const registration = await navigator.serviceWorker?.ready;
+    if (registration) return registration.showNotification(title, {body,icon:'/icon-192.png',tag:'agent-control-event'});
+  } catch {}
+  new Notification(title, {body});
+}
+
+function notifyTransitions(previous, current) {
+  if (!previous || Notification.permission !== 'granted') return;
+  const before = new Map((previous.queue?.records || []).map((item) => [item.issueNumber,item]));
+  for (const record of current.queue?.records || []) {
+    const old = before.get(record.issueNumber);
+    if (!old) continue;
+    if (!old.pendingApproval && record.pendingApproval) {
+      showLocalNotification('Agent Control · aprobación necesaria', 'La tarea #' + record.issueNumber + ' necesita tu decisión.');
+    } else if (old.status !== record.status && ['failed','blocked','rejected'].includes(record.status)) {
+      showLocalNotification('Agent Control · tarea bloqueada', 'La tarea #' + record.issueNumber + ' está ' + record.status + '.');
+    } else if (old.status !== record.status && record.status === 'completed') {
+      showLocalNotification('Agent Control · tarea terminada', 'La tarea #' + record.issueNumber + ' ha finalizado.');
+    }
+  }
+}
+
 async function api(path, options={}) {
   const response = await fetch(path, {
     ...options,
@@ -250,8 +433,19 @@ function renderMission(data) {
     health.state === 'strong' || health.state === 'good' ? 'success' :
       health.state === 'critical' ? 'failure' : 'warning'
   );
-  $('missionMeta').textContent = (business.healthy ?? 0) + '/' + (business.total ?? 3) + ' carriles comerciales recientes · ' +
-    (health.reasons?.length ? health.reasons.join(' · ') : 'sin alertas sistémicas');
+  const reasonLabels = {
+    service_offline:'servicio parado',
+    queue_unavailable:'cola no disponible',
+    local_runners_offline:'runner local offline',
+    local_runner_capacity_full:'runner local ocupado',
+    runners_offline:'runners offline',
+    runner_capacity_full:'capacidad ocupada',
+    github_core_critical:'GitHub REST crítico',
+    github_core_low:'GitHub REST bajo',
+    control_state_unknown:'estado de control desconocido'
+  };
+  $('missionMeta').textContent = 'Actividad comercial 24 h: ' + (business.recentlyActive ?? 0) + '/' + (business.total ?? 3) + ' carriles · ' +
+    (health.reasons?.length ? health.reasons.map((reason) => reasonLabels[reason] || reason).join(' · ') : 'sistema operativo sin alertas');
 
   $('missionGrid').innerHTML = Object.keys(laneNames).map((lane) => {
     const live = laneState(data, lane);
@@ -313,18 +507,21 @@ function renderInfrastructure(data) {
 
 function renderRemoteControl(data) {
   const control = data.remoteControl || {};
+  const known = control.known !== false;
   const paused = control.pausedLanes || [];
   const globalPaused = control.globalPaused === true;
-  const partial = !globalPaused && paused.length > 0;
-  $('controlMode').textContent = globalPaused ? 'PAUSADO' : (partial ? 'PARCIAL' : 'AUTÓNOMO');
-  $('controlMode').className = 'badge ' + (globalPaused || partial ? 'warn' : 'good');
-  $('controlNote').textContent = globalPaused
-    ? 'No se lanzarán nuevas ejecuciones. Los trabajos que ya estaban en curso pueden terminar de forma segura.'
-    : (partial
-      ? 'Carriles pausados: ' + paused.map((lane) => laneNames[lane] || lane).join(', ') + '. El resto sigue autónomo.'
-      : 'Todos los carriles pueden trabajar de forma autónoma. Puedes pausar sin matar tareas a medias.');
-  $('pauseAllBtn').disabled = globalPaused;
-  $('resumeAllBtn').disabled = !globalPaused && paused.length === 0;
+  const partial = known && !globalPaused && paused.length > 0;
+  $('controlMode').textContent = !known ? 'DESCONOCIDO' : globalPaused ? 'PAUSADO' : (partial ? 'PARCIAL' : 'AUTÓNOMO');
+  $('controlMode').className = 'badge ' + (!known ? 'bad' : (globalPaused || partial ? 'warn' : 'good'));
+  $('controlNote').textContent = !known
+    ? 'GitHub no ha podido confirmar el estado de pausa. Agent Control no asumirá que la autonomía está activa.'
+    : globalPaused
+      ? 'No se lanzarán nuevas ejecuciones. Los trabajos que ya estaban en curso pueden terminar de forma segura.'
+      : (partial
+        ? 'Carriles pausados: ' + paused.map((lane) => laneNames[lane] || lane).join(', ') + '. El resto sigue autónomo.'
+        : 'Todos los carriles pueden trabajar de forma autónoma. Puedes pausar sin matar tareas a medias.');
+  $('pauseAllBtn').disabled = !known || globalPaused;
+  $('resumeAllBtn').disabled = !known || (!globalPaused && paused.length === 0);
 }
 
 function renderNightMode(data) {
@@ -347,25 +544,33 @@ function renderStats(data) {
   const runners = data.runnerTelemetry || {};
   const business = data.laneTelemetry?.business || {};
   const corePct = data.githubRateLimit?.core?.remainingPercent;
-  const operatorPaused = data.remoteControl?.globalPaused === true;
-  const autonomous = data.service?.active && data.autonomy?.heartbeatActive && Number(runners.localOnline ?? runners.msiOnline ?? 0) > 0 && !operatorPaused;
+  const control = data.remoteControl || {};
+  const known = control.known !== false;
+  const operatorPaused = control.globalPaused === true;
+  const partial = known && !operatorPaused && (control.pausedLanes || []).length > 0;
+  const autonomous = known && data.service?.active && data.autonomy?.heartbeatActive && Number(runners.localOnline ?? runners.msiOnline ?? 0) > 0 && !operatorPaused;
+  const agentLabel = !known ? 'DESCONOCIDO' : operatorPaused ? 'PAUSADO' : partial ? 'PARCIAL' : autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE');
   const values = [
-    [operatorPaused ? 'PAUSADO' : (autonomous ? 'AUTÓNOMO' : (data.service?.active ? 'ONLINE' : 'OFFLINE')),'Agente'],
+    [agentLabel,'Agente'],
     [String(runners.localOnline ?? runners.msiOnline ?? '—'),'Runners locales'],
-    [(business.healthy ?? '—') + '/' + (business.total ?? 3),'Negocio sano'],
+    [(business.recentlyActive ?? '—') + '/' + (business.total ?? 3),'Actividad 24 h'],
     [Number.isFinite(corePct) ? corePct + '%' : '—','GitHub REST']
   ];
   $('stats').innerHTML = values.map(([v,l]) => '<div class="stat"><div class="value">'+esc(v)+'</div><div class="label">'+esc(l)+'</div></div>').join('');
-  $('heroTitle').textContent = operatorPaused
-    ? 'Autonomía pausada por ti'
-    : (autonomous
-      ? 'Agente autónomo activo'
-      : (data.service?.active ? 'Agente online, autonomía degradada' : 'El servicio del agente está parado'));
+  $('heroTitle').textContent = !known
+    ? 'Estado de autonomía sin confirmar'
+    : operatorPaused
+      ? 'Autonomía pausada por ti'
+      : partial
+        ? 'Autonomía parcial'
+        : (autonomous
+          ? 'Agente autónomo activo'
+          : (data.service?.active ? 'Agente online, autonomía degradada' : 'El servicio del agente está parado'));
   $('heroSub').textContent = (data.git?.branch || 'sin rama') + ' · ' + (data.git?.commit || 'sin commit') + (data.git?.dirty ? ' · cambios locales' : '') +
     ' · heartbeat ' + (data.autonomy?.heartbeatActive ? 'cada ' + (data.autonomy.heartbeatIntervalSeconds || 120) + ' s' : 'no disponible') +
     ' · ' + active + ' tarea(s) activas';
-  $('liveDot').className = autonomous ? 'good' : (data.service?.active ? 'warn' : 'bad');
-  $('liveText').textContent = operatorPaused ? 'Pausa manual activa' : (autonomous ? 'Autonomía activa' : (data.service?.active ? 'Online con vigilancia degradada' : 'Servicio parado'));
+  $('liveDot').className = !known ? 'bad' : (autonomous ? 'good' : (data.service?.active ? 'warn' : 'bad'));
+  $('liveText').textContent = !known ? 'Control no confirmado' : operatorPaused ? 'Pausa manual activa' : partial ? 'Autonomía parcial' : (autonomous ? 'Autonomía activa' : (data.service?.active ? 'Online con vigilancia degradada' : 'Servicio parado'));
 }
 
 function renderLanes(data) {
@@ -390,6 +595,23 @@ function renderLanes(data) {
   }).join('');
 }
 
+function renderHostResources(data) {
+  const resources = data.hostResources || {};
+  const memory = resources.memory || {};
+  const cpu = resources.cpu || {};
+  const battery = resources.battery;
+  const disk = resources.disk;
+  const cards = [
+    ['RAM', Number.isFinite(memory.usedPercent) ? memory.usedPercent + '%' : '—', formatBytes(memory.usedBytes) + ' / ' + formatBytes(memory.totalBytes)],
+    ['CPU', Number.isFinite(cpu.loadPercent) ? cpu.loadPercent + '%' : '—', 'carga 1 min · ' + (cpu.cores || '—') + ' núcleos'],
+    ['Batería', battery && Number.isFinite(battery.percent) ? battery.percent + '%' : '—', battery?.status || 'sin telemetría'],
+    ['Temperatura', Number.isFinite(resources.temperatureC) ? resources.temperatureC + ' °C' : '—', disk && Number.isFinite(disk.usedPercent) ? 'Disco ' + disk.usedPercent + '% usado' : 'sin temperatura']
+  ];
+  $('hostResources').innerHTML = cards.map(([label,value,detail]) =>
+    '<div class="resource-item"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(detail)+'</small></div>'
+  ).join('');
+}
+
 function renderAiHealth(data) {
   const health = data.aiHealth || {};
   const providers = health.providers || [];
@@ -406,10 +628,17 @@ function renderAiHealth(data) {
       ? 'Motivo: '+esc(provider.reasonCategory || 'unknown')+' · reintento en '+duration(provider.retryInSeconds)
       : provider.id === 'codex'
         ? (provider.authenticated ? 'CLI autenticado con ChatGPT · listo para routing' : (provider.installed ? 'CLI instalado · requiere autenticación' : 'CLI no detectado'))
-        : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
+        : provider.id === 'ollama'
+          ? (provider.state === 'sleeping' ? 'En reposo para ahorrar recursos' : provider.state === 'standby' ? 'Servicio listo · sin modelo cargado' : 'Modelo(s) cargados: '+esc(String(provider.loadedModels || 0)))
+          : provider.id === 'antigravity'
+            ? (provider.installed ? 'CLI detectado · disponible para routing salvo cooldown' : 'CLI no detectado')
+            : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Instalado y disponible bajo demanda') : 'Elegible para routing');
+    const controls = provider.id === 'ollama'
+      ? '<div class="approval"><button data-ollama="'+(provider.state === 'sleeping' ? 'wake' : 'sleep')+'">'+(provider.state === 'sleeping' ? 'Despertar Ollama' : 'Dormir Ollama')+'</button></div>'
+      : '';
     cards.push('<article class="health-item">'+
       '<div class="item-top"><strong>'+esc(provider.label)+'</strong><span class="badge '+statusClass(provider.state)+'">'+esc(provider.state)+'</span></div>'+
-      '<div class="meta">'+esc(provider.kind)+'<br>'+detail+'</div></article>');
+      '<div class="meta">'+esc(provider.kind)+'<br>'+detail+'</div>'+controls+'</article>');
   }
   $('aiHealth').innerHTML = cards.join('') || '<div class="meta">Sin telemetría de modelos disponible.</div>';
 }
@@ -476,11 +705,18 @@ function renderTasks(data) {
   let rows = taskRows(data).sort(rowSort);
   if (laneFilter !== 'all') rows = rows.filter((row) => row.lane === laneFilter);
   if (viewFilter === 'attention') rows = rows.filter(rowNeedsAttention);
-  if (viewFilter === 'active') rows = rows.filter((row) => activeStates.has(row.state));
+  if (viewFilter === 'active') rows = rows.filter((row) => row.record && !terminalStates.has(row.state));
+  if (viewFilter === 'historical') rows = rows.filter((row) => !row.record || terminalStates.has(row.state));
   if (viewFilter === 'high') rows = rows.filter((row) => row.priority === 'high');
+  const totalMatching = rows.length;
   rows = rows.slice(0, 16);
 
-  $('taskCount').textContent = String(rows.length);
+  const summary = data.taskSummary || {};
+  $('taskCount').textContent = totalMatching + ' / ' + (summary.openGithub ?? totalMatching);
+  $('taskSummary').innerHTML =
+    '<span><strong>'+esc(String(summary.active ?? '—'))+'</strong> activas</span>'+
+    '<span><strong>'+esc(String(summary.approvals ?? '—'))+'</strong> aprobación</span>'+
+    '<span><strong>'+esc(String(summary.historical ?? '—'))+'</strong> históricas abiertas</span>';
   if (!rows.length) {
     $('tasks').innerHTML = '<div class="meta">No hay tareas que coincidan con este filtro.</div>';
     return;
@@ -543,12 +779,15 @@ function renderRuns(data) {
 }
 
 function render(data) {
+  const previous = lastData;
   lastData = data;
+  notifyTransitions(previous, data);
   renderStats(data);
   renderRemoteControl(data);
   renderNightMode(data);
   renderMission(data);
   renderInfrastructure(data);
+  renderHostResources(data);
   renderAttention(data);
   renderQueueView(data);
   renderLanes(data);
@@ -558,11 +797,30 @@ function render(data) {
   renderRuns(data);
   $('processes').textContent = (data.processes || []).join('\n') || 'No hay procesos de trabajo visibles ahora mismo.';
   $('logs').textContent = (data.logs || []).slice(-70).join('\n') || 'Sin logs.';
+  const passkey = data.auth || {};
+  $('passkeyStatus').textContent = passkey.enabled
+    ? passkey.count + ' credencial(es) biométrica(s) registrada(s). El acceso normal usa el autenticador seguro del dispositivo.'
+    : 'Aún no hay biometría registrada. Actívala en este dispositivo.';
   $('login').classList.add('hidden');
+  $('logoutBtn').classList.remove('hidden');
+}
+
+function refreshDelay(data) {
+  const records = data?.queue?.records || [];
+  const active = records.some((record) => activeStates.has(record.status) || record.pendingApproval);
+  return active ? 7000 : 20000;
+}
+
+function scheduleRefresh(delay) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, delay);
 }
 
 async function refresh() {
-  if (loading || document.hidden) return;
+  if (loading || document.hidden) {
+    scheduleRefresh(20000);
+    return;
+  }
   loading = true;
   try {
     render(await api('/api/status'));
@@ -573,18 +831,33 @@ async function refresh() {
     }
   } finally {
     loading = false;
+    scheduleRefresh(refreshDelay(lastData));
   }
 }
+
+$('passkeyLoginBtn').addEventListener('click', async () => {
+  $('loginError').textContent = '';
+  $('passkeyLoginBtn').disabled = true;
+  try { await loginWithPasskey(); }
+  catch (e) { $('loginError').textContent = e.data?.retryAfterSeconds ? 'Demasiados intentos. Reintenta en '+e.data.retryAfterSeconds+' s.' : 'No se pudo validar la biometría.'; }
+  finally { $('passkeyLoginBtn').disabled = false; }
+});
+
+$('recoveryToggleBtn').addEventListener('click', () => {
+  $('loginForm').classList.toggle('hidden');
+});
 
 $('loginForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   $('loginError').textContent = '';
   try {
-    await api('/api/login', {method:'POST', body:JSON.stringify({pin:$('pin').value})});
+    await authApi('/api/login', {method:'POST', body:JSON.stringify({pin:$('pin').value})});
     $('pin').value = '';
     await refresh();
   } catch (e) {
-    $('loginError').textContent = e.message === 'unauthorized' ? 'Clave incorrecta.' : e.message;
+    $('loginError').textContent = e.data?.retryAfterSeconds
+      ? 'Acceso temporalmente limitado. Reintenta en '+e.data.retryAfterSeconds+' s.'
+      : 'Clave de recuperación incorrecta.';
   }
 });
 
@@ -618,7 +891,13 @@ $('taskForm').addEventListener('submit', async (event) => {
         businessName:$('businessName').value,
         category:$('category').value,
         location:$('location').value,
-        services:$('services').value
+        services:$('services').value,
+        phone:$('businessPhone').value,
+        whatsapp:$('businessWhatsapp').value,
+        currentWebsite:$('currentWebsite').value,
+        bookingUrl:$('bookingUrl').value,
+        instagramUrl:$('instagramUrl').value,
+        address:$('businessAddress').value
       };
     }
     const result = await api('/api/task', {
@@ -646,6 +925,7 @@ document.addEventListener('click', async (event) => {
   const reject = event.target.closest('[data-reject]');
   const cancel = event.target.closest('[data-cancel-workflow]');
   const lanePause = event.target.closest('[data-lane-pause]');
+  const ollama = event.target.closest('[data-ollama]');
   const jump = event.target.closest('[data-jump]');
   if (jump) {
     const id = jump.dataset.jump;
@@ -695,6 +975,13 @@ document.addEventListener('click', async (event) => {
       toast(paused ? 'Carril pausado de forma segura' : 'Carril reanudado');
       setTimeout(refresh, 700);
     }
+    if (ollama) {
+      ollama.disabled = true;
+      const enabled = ollama.dataset.ollama === 'wake';
+      await api('/api/control/ollama',{method:'POST',body:JSON.stringify({enabled})});
+      toast(enabled ? 'Ollama despertado' : 'Ollama en reposo');
+      setTimeout(refresh, 700);
+    }
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
@@ -702,6 +989,7 @@ document.addEventListener('click', async (event) => {
     if (retry) retry.disabled = false;
     if (cancel) cancel.disabled = false;
     if (lanePause) lanePause.disabled = false;
+    if (ollama) ollama.disabled = false;
   }
 });
 
@@ -720,42 +1008,74 @@ $('pinChangeForm').addEventListener('submit', async (event) => {
     await api('/api/change-pin', {method:'POST', body:JSON.stringify({pin})});
     $('newPin').value = '';
     $('confirmPin').value = '';
-    toast('PIN actualizado');
+    toast('Clave de recuperación actualizada');
   } catch (e) {
     toast('Error: ' + e.message);
   } finally {
     button.disabled = false;
-    button.textContent = 'Cambiar PIN';
+    button.textContent = 'Cambiar recuperación';
   }
 });
 
 $('refreshBtn').addEventListener('click', refresh);
 
+function standaloneMode() {
+  return globalThis.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+function syncInstallButtons() {
+  const isiOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const shouldShow = !standaloneMode() && (Boolean(deferredInstallPrompt) || isiOS);
+  $('installAppBtn')?.classList.toggle('hidden', !shouldShow);
+  $('mobileInstallBtn')?.classList.toggle('hidden', standaloneMode());
+}
+
 globalThis.addEventListener('beforeinstallprompt', (event) => {
   event.preventDefault();
   deferredInstallPrompt = event;
-  $('installAppBtn')?.classList.remove('hidden');
+  syncInstallButtons();
 });
 
 globalThis.addEventListener('appinstalled', () => {
   deferredInstallPrompt = null;
-  $('installAppBtn')?.classList.add('hidden');
+  syncInstallButtons();
   toast('Agent Control instalado');
 });
 
-$('installAppBtn')?.addEventListener('click', async () => {
+async function installApp() {
   if (deferredInstallPrompt) {
     const prompt = deferredInstallPrompt;
     deferredInstallPrompt = null;
-    $('installAppBtn').classList.add('hidden');
     await prompt.prompt();
     const choice = await prompt.userChoice;
-    if (choice?.outcome !== 'accepted') $('installAppBtn').classList.remove('hidden');
+    if (choice?.outcome !== 'accepted') deferredInstallPrompt = prompt;
+    syncInstallButtons();
     return;
   }
   const isiOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
   toast(isiOS ? 'Safari: Compartir → Añadir a pantalla de inicio' : 'Usa el menú del navegador → Instalar app');
+}
+$('installAppBtn')?.addEventListener('click', installApp);
+$('mobileInstallBtn')?.addEventListener('click', installApp);
+syncInstallButtons();
+
+$('notifyBtn')?.addEventListener('click', async () => {
+  if (!('Notification' in globalThis)) return toast('Este navegador no admite notificaciones');
+  const permission = await Notification.requestPermission();
+  $('notifyBtn').textContent = permission === 'granted' ? 'Notificaciones activas' : 'Activar notificaciones';
+  toast(permission === 'granted' ? 'Avisos locales activados' : 'Notificaciones no autorizadas');
 });
+
+$('enrollPasskeyBtn').addEventListener('click', async () => {
+  const button = $('enrollPasskeyBtn');
+  button.disabled = true;
+  try { await enrollPasskey(); }
+  catch (e) { toast('No se pudo registrar la biometría: ' + e.message); }
+  finally { button.disabled = false; }
+});
+
+$('logoutBtn').addEventListener('click', logout);
+$('logoutSecurityBtn').addEventListener('click', logout);
 
 $('pauseAllBtn').addEventListener('click', async () => {
   if (!globalThis.confirm('Pausar nuevas ejecuciones? Los trabajos que ya estén en curso podrán terminar de forma segura.')) return;
@@ -838,5 +1158,5 @@ $('restartServiceBtn').addEventListener('click', async () => {
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+loadAuthConfig();
 refresh();
-setInterval(refresh, 7000);
