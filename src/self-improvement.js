@@ -252,6 +252,19 @@ function nextBillingBackoffMs(state) {
   );
 }
 
+function workflowCanReplanBeforeImplementation(plan) {
+  const implementation = plan?.steps?.find((step) => step.id === 'implementation');
+  return Boolean(
+    plan &&
+    !TERMINAL.has(plan.status) &&
+    implementation &&
+    ['pending', 'ready'].includes(implementation.status) &&
+    implementation.attempts === 0 &&
+    implementation.evidence === null &&
+    implementation.error === null
+  );
+}
+
 function resultSummary(plan) {
   const implementation = plan?.steps?.find((step) => step.id === 'implementation');
   const publication = plan?.steps?.find((step) => step.id === 'publication');
@@ -581,6 +594,35 @@ export class AutonomousProjectImprovement {
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
         return { ...resultSummary(plan), status: plan.status };
+      }
+
+      if (this.projectId !== 'self' &&
+          this.intelligence &&
+          state.lastIntelligence?.primary &&
+          workflowCanReplanBeforeImplementation(plan) &&
+          typeof this.workflowEngine.cancel === 'function') {
+        const refreshed = this.intelligence.analyze({
+          history: state.history,
+          recentProposalPaths: this.recentProposalPaths(state),
+          memory: state.gapMemory
+        });
+        const previousSignal = refreshed?.signals?.find((signal) =>
+          signal.kind === state.lastIntelligence.primary
+        );
+        if (previousSignal?.actionable === false) {
+          const stalePrimary = state.lastIntelligence.primary;
+          const cancelled = await this.workflowEngine.cancel(workflowId, {
+            reason: 'stale_autoranking_replan',
+            deadlineCapAt: tickDeadlineAt
+          });
+          await this.settle(cancelled, { baseRevision });
+          return {
+            ...resultSummary(cancelled),
+            status: cancelled.status,
+            replanRecommended: true,
+            stalePrimary
+          };
+        }
       }
 
       if (plan.status === 'awaiting_approval') {

@@ -16,7 +16,8 @@ const FAILURE_CLASSES = Object.freeze([
   ['model-execution', /(skill_executor|model[_ -]?call|gateway|executor_attempt_budget|codex_home|path aliases)/i],
   ['implementation-noop', /(implementation_no_changes|implementation.*no changes|no changes.*implementation)/i],
   ['verification', /(test|lint|build|verification|typecheck|ci_failed)/i],
-  ['human-gate', /(human_gate|approval|required)/i]
+  ['human-gate', /(human_gate|approval|required)/i],
+  ['control-plane', /(stale_autoranking_replan|autonomous_workflow_registry_changed|autonomous_maintenance_human_gate_required|workflow_binding_invalid|operator_update_pending|historical_[a-z0-9_:-]*(?:recovery|changed))/i]
 ]);
 
 const ORCHESTRATOR_FAILURE_CLASSES = new Set([
@@ -26,7 +27,7 @@ const ORCHESTRATOR_FAILURE_CLASSES = new Set([
   'model-availability',
   'model-execution',
   'human-gate',
-  'other'
+  'control-plane'
 ]);
 
 function failureActionableInProject(projectId, kind) {
