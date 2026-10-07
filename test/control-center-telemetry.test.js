@@ -25,7 +25,7 @@ test('lane parser accepts only explicit lane-scoped cloud runs', () => {
   assert.equal(laneFromRun({displayTitle:'Agent Cloud Worker (callflow); rm -rf'}), null);
 });
 
-test('lane summary exposes current work, recent reliability and business health', () => {
+test('lane summary exposes current work, reliability and honest recent activity', () => {
   const now = Date.parse('2026-10-02T20:10:00Z');
   const summary = summarizeLaneRuns([
     run('callflow'),
@@ -37,8 +37,8 @@ test('lane summary exposes current work, recent reliability and business health'
   assert.equal(summary.lanes.leadfinder.successRate, 50);
   assert.equal(summary.lanes.leadfinder.recentFailures, 1);
   assert.equal(summary.lanes['website-pilot'].current.status, 'in_progress');
-  assert.equal(summary.business.healthy, 3);
-  assert.equal(summary.business.allHealthy, true);
+  assert.equal(summary.business.recentlyActive, 3);
+  assert.equal(summary.business.activityWindowMs, 24 * 60 * 60 * 1000);
 });
 
 test('runner summary separates local heavy capacity from auxiliary runners', () => {
@@ -80,7 +80,7 @@ test('control health scores local heavy capacity instead of being masked by an a
     queue:{error:null},
     runnerTelemetry:{online:1,busy:0,free:1,msiTotal:3,msiOnline:0,msiBusy:0,msiFree:0,auxiliaryOnline:1},
     rateLimit:{core:{remainingPercent:80}},
-    laneTelemetry:{business:{healthy:3}}
+    laneTelemetry:{business:{recentlyActive:3}}
   });
   assert.equal(health.score, 60);
   assert.equal(health.state, 'degraded');
@@ -93,7 +93,7 @@ test('control health ignores stale registered runners but reports exhausted live
     queue:{error:null},
     runnerTelemetry:{online:3,busy:2,free:1,msiTotal:7,msiOnline:2,msiBusy:2,msiFree:0,auxiliaryOnline:1},
     rateLimit:{core:{remainingPercent:4}},
-    laneTelemetry:{business:{healthy:3}}
+    laneTelemetry:{business:{recentlyActive:3}}
   });
   assert.equal(health.score, 75);
   assert.equal(health.state, 'good');
@@ -106,7 +106,7 @@ test('control health stays strong with one healthy native runner despite stale o
     queue:{error:null},
     runnerTelemetry:{online:1,busy:0,free:1,msiTotal:6,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
     rateLimit:{core:{remainingPercent:80}},
-    laneTelemetry:{business:{healthy:3}}
+    laneTelemetry:{business:{recentlyActive:3}}
   });
   assert.equal(health.score, 100);
   assert.equal(health.state, 'strong');
@@ -114,16 +114,30 @@ test('control health stays strong with one healthy native runner despite stale o
 });
 
 
-test('control health does not treat intentionally paused business lanes as stale', () => {
+test('control health does not penalize idle business lanes', () => {
   const health = deriveControlHealth({
     service:{active:true},
     queue:{error:null},
     runnerTelemetry:{online:1,busy:0,free:1,msiTotal:1,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
     rateLimit:{core:{remainingPercent:80}},
-    laneTelemetry:{business:{healthy:0}},
-    remoteControl:{globalPaused:true}
+    laneTelemetry:{business:{recentlyActive:0}},
+    remoteControl:{globalPaused:false,known:true}
   });
   assert.equal(health.score,100);
   assert.equal(health.state,'strong');
   assert.deepEqual(health.reasons,[]);
+});
+
+test('control health fails visibly when pause state is unknown', () => {
+  const health = deriveControlHealth({
+    service:{active:true},
+    queue:{error:null},
+    runnerTelemetry:{online:1,busy:0,free:1,msiTotal:1,msiOnline:1,msiBusy:0,msiFree:1,auxiliaryOnline:0},
+    rateLimit:{core:{remainingPercent:80}},
+    laneTelemetry:{business:{recentlyActive:3}},
+    remoteControl:{known:false}
+  });
+  assert.equal(health.score,80);
+  assert.equal(health.state,'good');
+  assert.deepEqual(health.reasons,['control_state_unknown']);
 });

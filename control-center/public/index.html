@@ -16,14 +16,18 @@
 </head>
 <body>
   <div id="login" class="overlay">
-    <form id="loginForm" class="login-card">
+    <div class="login-card">
       <div class="logo">A</div>
       <h1>Agent Control</h1>
-      <p>Acceso privado al agente local en Arch.</p>
-      <label>Clave de acceso<input id="pin" autocomplete="current-password" type="password" required></label>
-      <button class="primary" type="submit">Entrar</button>
+      <p id="loginLead">Comprobando acceso biométrico…</p>
+      <button id="passkeyLoginBtn" class="primary hidden" type="button">Entrar con huella / biometría</button>
+      <button id="recoveryToggleBtn" class="ghost hidden" type="button">Usar clave de recuperación</button>
+      <form id="loginForm" class="login-recovery hidden">
+        <label>Clave de recuperación<input id="pin" autocomplete="current-password" type="password" required></label>
+        <button class="ghost" type="submit">Entrar con recuperación</button>
+      </form>
       <small id="loginError"></small>
-    </form>
+    </div>
   </div>
 
   <header class="topbar">
@@ -31,7 +35,10 @@
       <p class="eyebrow">ARCH · ORCHESTRATOR</p>
       <h1>Agent Control</h1>
     </div>
-    <div class="live"><span id="liveDot"></span><strong id="liveText">Conectando</strong></div>
+    <div class="top-actions">
+      <div class="live"><span id="liveDot"></span><strong id="liveText">Conectando</strong></div>
+      <button id="logoutBtn" class="mini hidden" type="button">Salir</button>
+    </div>
   </header>
 
   <main>
@@ -41,7 +48,7 @@
         <h2 id="heroTitle">Comprobando el agente…</h2>
         <p id="heroSub">Esperando telemetría del nodo local.</p>
       </div>
-      <div class="hero-actions"><button id="installAppBtn" class="primary hidden">Instalar app</button><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
+      <div class="hero-actions"><button id="nightModeQuickBtn" class="primary">Modo noche</button><button id="installAppBtn" class="primary hidden">Instalar app</button><button id="restartServiceBtn" class="ghost">Reiniciar agente</button><button id="refreshBtn" class="ghost">Actualizar</button></div>
     </section>
 
     <section id="stats" class="stats"></section>
@@ -54,6 +61,21 @@
       <div class="hero-actions">
         <button id="pauseAllBtn" class="danger">Pausar nuevas ejecuciones</button>
         <button id="resumeAllBtn" class="primary">Reanudar todo</button>
+      </div>
+    </section>
+
+    <section id="nightMode" class="card">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">MODO NOCHE</p>
+          <h2>Producción con el portátil sin uso</h2>
+          <p id="nightModeNote" class="section-sub">Solo se activa cuando tú lo ordenas. No cierra aplicaciones.</p>
+        </div>
+        <span id="nightModeBadge" class="badge warn">cargando</span>
+      </div>
+      <div class="hero-actions">
+        <button id="activateNightModeBtn" class="primary">Activar modo noche</button>
+        <button id="deactivateNightModeBtn" class="ghost">Salir de modo noche</button>
       </div>
     </section>
 
@@ -79,6 +101,24 @@
           <span id="infraFreshness" class="counter">—</span>
         </div>
         <div id="githubBudget" class="budget-list"></div>
+      </article>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">EQUIPO</p><h2>Recursos del portátil</h2><p class="section-sub">Consumo real para que el agente conviva con tu uso diario.</p></div>
+        </div>
+        <div id="hostResources" class="resource-grid"></div>
+      </article>
+      <article class="card">
+        <div class="section-title">
+          <div><p class="eyebrow">MÓVIL</p><h2>App y avisos</h2><p class="section-sub">Instalación y notificaciones locales mientras Agent Control está activo.</p></div>
+        </div>
+        <div class="hero-actions mobile-tools">
+          <button id="notifyBtn" class="ghost" type="button">Activar notificaciones</button>
+          <button id="mobileInstallBtn" class="ghost" type="button">Instalar app</button>
+        </div>
       </article>
     </section>
 
@@ -156,6 +196,18 @@
             <label>Localidad<input id="location" placeholder="Madrid"></label>
             <label>Servicios<input id="services" placeholder="Corte, color, mechas"></label>
           </div>
+          <div class="form-row">
+            <label>Teléfono<input id="businessPhone" placeholder="+34 …"></label>
+            <label>WhatsApp<input id="businessWhatsapp" placeholder="+34 …"></label>
+          </div>
+          <div class="form-row">
+            <label>Web actual<input id="currentWebsite" inputmode="url" placeholder="https://…"></label>
+            <label>Reserva / Booksy / Fresha<input id="bookingUrl" inputmode="url" placeholder="https://…"></label>
+          </div>
+          <div class="form-row">
+            <label>Instagram<input id="instagramUrl" inputmode="url" placeholder="https://instagram.com/…"></label>
+            <label>Dirección<input id="businessAddress" placeholder="Calle…, ciudad"></label>
+          </div>
         </div>
         <label>Tarea
           <textarea id="goal" rows="6" maxlength="1000" placeholder="Ej.: revisa por qué Callflow falla al cargar leads, encuentra la causa, corrígela, prueba y continúa hasta dejarlo estable." required></textarea>
@@ -174,6 +226,7 @@
           <div><p class="eyebrow">TRABAJO</p><h2>Tareas abiertas</h2></div>
           <span id="taskCount" class="counter">0</span>
         </div>
+        <div id="taskSummary" class="task-summary"></div>
         <div class="task-filters">
           <select id="taskLaneFilter" aria-label="Filtrar tareas por carril">
             <option value="all">Todos los carriles</option>
@@ -184,8 +237,9 @@
           </select>
           <select id="taskViewFilter" aria-label="Filtrar tareas por estado">
             <option value="all">Todas</option>
+            <option value="active">Activas / en cola</option>
             <option value="attention">Requieren atención</option>
-            <option value="active">Activas</option>
+            <option value="historical">Históricas abiertas</option>
             <option value="high">Prioridad alta</option>
           </select>
         </div>
@@ -203,20 +257,29 @@
 
     <section class="card">
       <div class="section-title">
-        <div><p class="eyebrow">SEGURIDAD</p><h2>Cambiar PIN de acceso</h2></div>
+        <div>
+          <p class="eyebrow">SEGURIDAD</p>
+          <h2>Huella / biometría y recuperación</h2>
+          <p id="passkeyStatus" class="section-sub">Comprobando credenciales del dispositivo…</p>
+        </div>
       </div>
-      <form id="pinChangeForm">
+      <div class="hero-actions security-actions">
+        <button id="enrollPasskeyBtn" class="primary" type="button">Activar huella en este dispositivo</button>
+        <button id="logoutSecurityBtn" class="ghost" type="button">Cerrar sesión</button>
+      </div>
+      <div id="recoveryKeyResult" class="result hidden"></div>
+      <form id="pinChangeForm" class="recovery-form">
         <div class="form-row">
-          <label>Nuevo PIN
-            <input id="newPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          <label>Nueva clave de recuperación
+            <input id="newPin" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
           </label>
-          <label>Repetir PIN
-            <input id="confirmPin" type="password" minlength="5" maxlength="128" autocomplete="new-password" required>
+          <label>Repetir clave
+            <input id="confirmPin" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
           </label>
         </div>
         <div class="composer-actions">
-          <span>La sesión se renovará automáticamente al cambiarlo.</span>
-          <button id="changePinBtn" class="ghost" type="submit">Cambiar PIN</button>
+          <span>La recuperación es secundaria. El acceso normal será con la biometría del dispositivo.</span>
+          <button id="changePinBtn" class="ghost" type="submit">Cambiar recuperación</button>
         </div>
       </form>
     </section>

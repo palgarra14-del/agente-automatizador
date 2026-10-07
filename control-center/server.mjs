@@ -1,8 +1,8 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { homedir } from 'node:os';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { cpus, freemem, homedir, loadavg, totalmem } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import {
   summarizeRunners
 } from './telemetry.mjs';
 import { globalPauseEnabled, parsePausedLanes, serializePausedLanes } from '../src/operator-control.js';
+import { PasskeyAuth } from './passkeys.mjs';
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -21,11 +22,19 @@ const agentRoot = resolve(process.env.AGENT_ROOT || join(here, '..', '..', 'agen
 const host = process.env.AGENT_CONTROL_HOST || '127.0.0.1';
 const port = Number(process.env.AGENT_CONTROL_PORT || 8787);
 const repo = process.env.AGENT_CONTROL_REPO || 'palgarra14-del/agente-automatizador';
+const nightModeUnit = 'agent-night-mode.service';
 const tokenFile = process.env.AGENT_CONTROL_TOKEN_FILE || join(homedir(), '.config', 'agent-control-center', 'access-token');
+const passkeyFile = process.env.AGENT_CONTROL_PASSKEY_FILE || join(homedir(), '.config', 'agent-control-center', 'passkeys.json');
+const canonicalOrigin = process.env.AGENT_CONTROL_ORIGIN || 'https://agente-automatizador.vercel.app';
+const rpID = process.env.AGENT_CONTROL_RP_ID || new URL(canonicalOrigin).hostname;
+const passkeyAuth = new PasskeyAuth({ filePath: passkeyFile, rpID, origin: canonicalOrigin });
 const marker = '<!-- agent-request:v1 -->';
 const cloudStatusCache = new Map();
 const cloudStatusCacheMs = 45_000;
 const telemetryCache = new Map();
+const authFailures = new Map();
+const activeSessions = new Map();
+const SESSION_TTL_MS = Math.max(15 * 60 * 1000, Number(process.env.AGENT_CONTROL_SESSION_TTL_MS || 12 * 60 * 60 * 1000));
 
 async function cachedTelemetry(key, ttlMs, loader) {
   const now = Date.now();
@@ -52,6 +61,40 @@ async function cachedTelemetry(key, ttlMs, loader) {
 function telemetryAgeMs(key) {
   const entry = telemetryCache.get(key);
   return entry?.at ? Math.max(0, Date.now() - entry.at) : null;
+}
+
+function invalidateTelemetry(key) {
+  telemetryCache.delete(key);
+}
+
+function authSource(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim().slice(0, 120);
+}
+
+function authGate(req) {
+  const key = authSource(req);
+  const state = authFailures.get(key);
+  const now = Date.now();
+  if (!state?.lockedUntil || state.lockedUntil <= now) return { allowed:true, retryAfterSeconds:0 };
+  return { allowed:false, retryAfterSeconds:Math.ceil((state.lockedUntil - now) / 1000) };
+}
+
+function recordAuthFailure(req) {
+  const key = authSource(req);
+  const now = Date.now();
+  const existing = authFailures.get(key);
+  const fresh = !existing || now - existing.firstAt > 10 * 60 * 1000;
+  const state = fresh ? { count:0, firstAt:now, lockedUntil:0 } : existing;
+  state.count += 1;
+  if (state.count >= 5) {
+    state.lockedUntil = now + Math.min(15 * 60 * 1000, 30_000 * (2 ** Math.min(5, state.count - 5)));
+  }
+  authFailures.set(key, state);
+  return state;
+}
+
+function clearAuthFailures(req) {
+  authFailures.delete(authSource(req));
 }
 
 const laneScopes = Object.freeze({
@@ -82,13 +125,38 @@ async function ensureToken() {
 }
 
 let accessToken = await ensureToken();
-function deriveSessionValue(token) {
-  return createHmac('sha256', token).update('agent-control-session-v1').digest('base64url');
-}
-let sessionValue = deriveSessionValue(accessToken);
 
-function setSessionCookie(res) {
-  res.setHeader('set-cookie', `agent_session=${encodeURIComponent(sessionValue)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`);
+function pruneSessions() {
+  const now = Date.now();
+  for (const [token, session] of activeSessions) {
+    if (!session || session.expiresAt <= now) activeSessions.delete(token);
+  }
+}
+
+function clearSessions() {
+  activeSessions.clear();
+}
+
+function issueSession(res, method = 'unknown') {
+  pruneSessions();
+  const token = randomBytes(32).toString('base64url');
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  activeSessions.set(token, { expiresAt, method });
+  res.setHeader('set-cookie', `agent_session=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  return { expiresAt:new Date(expiresAt).toISOString(), method };
+}
+
+async function setAccessToken(value) {
+  await mkdir(dirname(tokenFile), { recursive:true, mode:0o700 });
+  await writeFile(tokenFile, value + '\n', { mode:0o600 });
+  accessToken = value;
+  clearSessions();
+}
+
+async function rotateRecoveryKey() {
+  const value = randomBytes(24).toString('base64url');
+  await setAccessToken(value);
+  return value;
 }
 
 function equalText(a, b) {
@@ -107,7 +175,26 @@ function cookieValue(req, name) {
 }
 
 function authorized(req) {
-  return equalText(cookieValue(req, 'agent_session'), sessionValue);
+  pruneSessions();
+  const token = cookieValue(req, 'agent_session');
+  if (!token) return false;
+  const session = activeSessions.get(token);
+  return Boolean(session && session.expiresAt > Date.now());
+}
+
+function revokeSession(req) {
+  const token = cookieValue(req, 'agent_session');
+  if (token) activeSessions.delete(token);
+}
+
+function securityHeaders() {
+  return {
+    'content-security-policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'geolocation=(), camera=(), microphone=(), publickey-credentials-get=(self), publickey-credentials-create=(self)'
+  };
 }
 
 async function bodyJson(req, max = 32 * 1024) {
@@ -123,7 +210,11 @@ async function bodyJson(req, max = 32 * 1024) {
 
 function sendJson(res, status, value) {
   const data = Buffer.from(JSON.stringify(value));
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(status, {
+    ...securityHeaders(),
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store'
+  });
   res.end(data);
 }
 
@@ -160,7 +251,7 @@ function requestFromIssue(issue) {
 
 async function getOpenTasks() {
   return cachedTelemetry('tasks', 30_000, async () => {
-    const result = await run('gh', ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '60',
+    const result = await run('gh', ['issue', 'list', '--repo', repo, '--state', 'open', '--limit', '200',
       '--json', 'number,title,body,createdAt,updatedAt,url']);
     const issues = parseJsonOutput(result, []);
     return issues.map((issue) => ({ ...issue, request: requestFromIssue(issue) }))
@@ -189,22 +280,29 @@ async function getRunners() {
 
 async function getRepoVariable(name) {
   const result = await run('gh', ['api', `repos/${repo}/actions/variables/${name}`, '--jq', '.value'], { timeout: 8_000 });
-  if (result.ok) return result.stdout;
-  if (/HTTP 404|Not Found/i.test(result.stderr)) return '';
-  return '';
+  if (result.ok) return { known:true, value:result.stdout, error:null };
+  if (/HTTP 404|Not Found/i.test(result.stderr)) return { known:true, value:'', error:null };
+  return { known:false, value:null, error:result.stderr || 'github_variable_unavailable' };
 }
 
 async function getRemoteControl() {
-  const lanes = Object.keys(laneScopes);
-  const [globalValue, pausedValue] = await Promise.all([
-    getRepoVariable('AGENT_GLOBAL_PAUSE'),
-    getRepoVariable('AGENT_PAUSED_LANES')
-  ]);
-  return {
-    globalPaused: globalPauseEnabled(globalValue),
-    pausedLanes: parsePausedLanes(pausedValue, lanes),
-    mode: globalPauseEnabled(globalValue) ? 'paused' : 'autonomous'
-  };
+  return cachedTelemetry('remote-control', 10_000, async () => {
+    const lanes = Object.keys(laneScopes);
+    const [globalSource, pausedSource] = await Promise.all([
+      getRepoVariable('AGENT_GLOBAL_PAUSE'),
+      getRepoVariable('AGENT_PAUSED_LANES')
+    ]);
+    const known = globalSource.known && pausedSource.known;
+    const globalPaused = known ? globalPauseEnabled(globalSource.value) : false;
+    const pausedLanes = known ? parsePausedLanes(pausedSource.value, lanes) : [];
+    return {
+      known,
+      globalPaused,
+      pausedLanes,
+      mode: !known ? 'unknown' : globalPaused ? 'paused' : pausedLanes.length ? 'partial' : 'autonomous',
+      error: known ? null : [globalSource.error, pausedSource.error].filter(Boolean).join(' | ')
+    };
+  });
 }
 
 async function setRepoVariable(name, value) {
@@ -221,6 +319,7 @@ async function wakeHeartbeat() {
 async function setGlobalPause(input) {
   const paused = input?.paused === true;
   await setRepoVariable('AGENT_GLOBAL_PAUSE', paused ? 'true' : 'false');
+  invalidateTelemetry('remote-control');
   if (!paused) await wakeHeartbeat();
   return { ...(await getRemoteControl()), changed: true };
 }
@@ -230,10 +329,12 @@ async function setLanePause(input) {
   if (!Object.hasOwn(laneScopes, lane)) throw new Error('lane_invalid');
   const paused = input?.paused === true;
   const current = await getRemoteControl();
+  if (!current.known) throw new Error('control_state_unknown');
   const lanes = new Set(current.pausedLanes);
   if (paused) lanes.add(lane);
   else lanes.delete(lane);
   await setRepoVariable('AGENT_PAUSED_LANES', serializePausedLanes([...lanes]) || '-');
+  invalidateTelemetry('remote-control');
   if (!paused && !current.globalPaused) await wakeHeartbeat();
   return { ...(await getRemoteControl()), lane, changed: true };
 }
@@ -315,6 +416,32 @@ async function getAiHealth(processes = []) {
     const result = await run(process.env.OPENCODE_BIN || 'opencode', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
     return { available: result.ok, version: result.ok ? result.stdout : null };
   });
+  const antigravityProbe = await cachedTelemetry('antigravity-availability', 60_000, async () => {
+    const result = await run(process.env.ANTIGRAVITY_CLI || 'agy', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    return { available: result.ok, version: result.ok ? result.stdout : null };
+  });
+  const ollamaProbe = await cachedTelemetry('ollama-availability', 60_000, async () => {
+    const version = await run(process.env.OLLAMA_BIN || 'ollama', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    const processActive = processes.join('\n').toLowerCase().includes('ollama');
+    let loadedModels = 0;
+    if (version.ok && processActive) {
+      const ps = await run(process.env.OLLAMA_BIN || 'ollama', ['ps'], { cwd:'/', timeout:2_000, maxBuffer:64_000 });
+      if (ps.ok) loadedModels = Math.max(0, ps.stdout.split('\n').filter(Boolean).length - 1);
+    }
+    return { installed:version.ok, version:version.ok ? version.stdout : null, processActive, loadedModels };
+  });
+  const codexProbe = await cachedTelemetry('codex-availability', 60_000, async () => {
+    const binary = process.env.CODEX_BIN || 'codex';
+    const version = await run(binary, ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    if (!version.ok) return { available:false, authenticated:false, version:null };
+    const auth = await run(binary, ['login', 'status'], { cwd:'/', timeout:3_000, maxBuffer:32_000 });
+    const authText = [auth.stdout, auth.stderr].filter(Boolean).join('\n');
+    return {
+      available: true,
+      authenticated: auth.ok && /logged in/i.test(authText),
+      version: version.stdout || null
+    };
+  });
   const now = Date.now() / 1000;
   let runtime = { providers: {}, candidates: {} };
   try {
@@ -324,10 +451,22 @@ async function getAiHealth(processes = []) {
   const localText = processes.join('\n').toLowerCase();
   const providers = [
     {
+      id: 'codex',
+      label: 'Codex',
+      kind: 'cloud/ChatGPT',
+      local: false,
+      installed: codexProbe.available,
+      authenticated: codexProbe.authenticated,
+      version: codexProbe.version,
+      processActive: localText.includes('codex')
+    },
+    {
       id: 'antigravity',
       label: 'Antigravity',
       kind: 'cloud-free',
       local: false,
+      installed: antigravityProbe.available,
+      version: antigravityProbe.version,
       processActive: localText.includes('antigravity')
     },
     {
@@ -344,7 +483,10 @@ async function getAiHealth(processes = []) {
       label: 'Ollama',
       kind: 'local/free',
       local: true,
-      processActive: localText.includes('ollama')
+      installed: ollamaProbe.installed,
+      version: ollamaProbe.version,
+      processActive: ollamaProbe.processActive,
+      loadedModels: ollamaProbe.loadedModels
     }
   ].map((provider) => {
     const persisted = runtime.providers?.[provider.id] ?? null;
@@ -354,9 +496,15 @@ async function getAiHealth(processes = []) {
       ...provider,
       state: cooldown
         ? 'cooldown'
-        : provider.id === 'opencode'
-          ? (provider.installed ? 'available' : 'offline')
-          : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
+        : provider.id === 'codex'
+          ? (!provider.installed ? 'offline' : (provider.authenticated ? 'available' : 'auth_required'))
+          : provider.id === 'opencode'
+            ? (provider.installed ? 'available' : 'offline')
+            : provider.id === 'antigravity'
+              ? (provider.installed ? 'available' : 'offline')
+              : provider.id === 'ollama'
+                ? (!provider.installed ? 'offline' : (!provider.processActive ? 'sleeping' : provider.loadedModels > 0 ? 'available' : 'standby'))
+                : 'offline',
       reasonCategory: cooldown ? providerFailureCategory(persisted?.reason) : null,
       cooldownUntil: cooldown ? new Date(untilEpoch * 1000).toISOString() : null,
       retryInSeconds: cooldown ? Math.max(0, Math.ceil(untilEpoch - now)) : 0
@@ -424,7 +572,9 @@ function getWorkActivity(rows = []) {
     const commands = tree.map((item) => item.command.toLowerCase());
     const backend = commands.some((command) => command.includes('antigravity'))
       ? 'Antigravity'
-      : commands.some((command) => command.includes('opencode'))
+      : commands.some((command) => command.includes('codex'))
+        ? 'Codex'
+        : commands.some((command) => command.includes('opencode'))
         ? 'OpenCode'
         : commands.some((command) => command.includes('llama-server') || command.includes('ollama'))
           ? 'Ollama'
@@ -498,6 +648,86 @@ function getCloudOperations(workActivity = []) {
   });
 }
 
+async function getHostResources() {
+  const memoryTotal = totalmem();
+  const memoryFree = freemem();
+  const memoryUsed = Math.max(0, memoryTotal - memoryFree);
+  const coreCount = Math.max(1, cpus().length);
+  const load1 = loadavg()[0];
+  let battery = null;
+  try {
+    const supplies = await readdir('/sys/class/power_supply');
+    const name = supplies.find((item) => /^BAT/i.test(item));
+    if (name) {
+      const base = '/sys/class/power_supply/' + name;
+      battery = {
+        percent: Number((await readFile(join(base, 'capacity'), 'utf8')).trim()),
+        status: (await readFile(join(base, 'status'), 'utf8')).trim()
+      };
+    }
+  } catch { /* battery optional */ }
+
+  let temperatureC = null;
+  try {
+    const zones = (await readdir('/sys/class/thermal')).filter((item) => /^thermal_zone\d+$/.test(item));
+    for (const zone of zones) {
+      const raw = Number((await readFile(join('/sys/class/thermal', zone, 'temp'), 'utf8')).trim());
+      if (Number.isFinite(raw) && raw > 0) {
+        temperatureC = Math.round((raw / 1000) * 10) / 10;
+        break;
+      }
+    }
+  } catch { /* temperature optional */ }
+
+  let disk = null;
+  const df = await run('df', ['-Pk', agentRoot], { cwd:'/', timeout:3_000, maxBuffer:32_000 });
+  if (df.ok) {
+    const line = df.stdout.split('\n').filter(Boolean).at(-1);
+    const parts = line?.trim().split(/\s+/) || [];
+    if (parts.length >= 6) {
+      disk = {
+        totalBytes: Number(parts[1]) * 1024,
+        usedBytes: Number(parts[2]) * 1024,
+        usedPercent: Number(String(parts[4]).replace('%',''))
+      };
+    }
+  }
+
+  return {
+    memory: {
+      totalBytes: memoryTotal,
+      usedBytes: memoryUsed,
+      usedPercent: memoryTotal ? Math.round((memoryUsed / memoryTotal) * 100) : null
+    },
+    cpu: {
+      cores: coreCount,
+      load1,
+      loadPercent: Math.round(Math.min(999, (load1 / coreCount) * 100))
+    },
+    battery,
+    temperatureC,
+    disk
+  };
+}
+
+function summarizeTaskState(tasks = [], queue = { records:[] }) {
+  const terminal = new Set(['completed','failed','blocked','rejected','cancelled']);
+  const records = Array.isArray(queue.records) ? queue.records : [];
+  const byIssue = new Map(records.map((record) => [record.issueNumber, record]));
+  let active = 0;
+  let approvals = 0;
+  let historical = 0;
+  for (const task of tasks) {
+    const record = byIssue.get(task.number);
+    if (!record || terminal.has(record.status)) historical += 1;
+    else {
+      active += 1;
+      if (record.pendingApproval) approvals += 1;
+    }
+  }
+  return { openGithub:tasks.length, active, approvals, historical };
+}
+
 async function getLogs(limit = 80) {
   const count = Math.max(10, Math.min(300, Number(limit) || 80));
   const result = await run('journalctl', ['--user', '-u', 'engineering-orchestrator-inbox.service',
@@ -507,8 +737,8 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs, remoteControl] = await Promise.all([
-    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70), getRemoteControl()
+  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs, remoteControl, nightMode, hostResources, auth] = await Promise.all([
+    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70), getRemoteControl(), getNightMode(), getHostResources(), passkeyAuth.status()
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
@@ -521,7 +751,8 @@ async function snapshot() {
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations, remoteControl,
+    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations, remoteControl, nightMode, hostResources, auth,
+    taskSummary: summarizeTaskState(tasks, queue),
     laneTelemetry,
     runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
     githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
@@ -557,10 +788,31 @@ function validateTask(input) {
     const location = String(source.location || '').trim();
     const services = String(source.services || '').split(/[\n,]+/).map((v) => v.trim()).filter(Boolean);
     if (!businessName || !category || !location || !services.length) throw new Error('business_brief_incomplete');
+    const optional = (value, max=500) => String(value || '').trim().slice(0, max);
+    const phone = optional(source.phone, 80);
+    const whatsapp = optional(source.whatsapp, 80);
+    const currentWebsite = optional(source.currentWebsite, 500);
+    const bookingUrl = optional(source.bookingUrl, 500);
+    const instagramUrl = optional(source.instagramUrl, 500);
+    const address = optional(source.address, 500);
     businessBrief = {
       version: 1, businessName, category, summary: goal, locations: [location],
-      services, contact: {}, brand: {},
-      website: { primaryGoal: 'Conseguir contactos', requiredPages: ['home','services','contact'], requiredFeatures: [] },
+      services,
+      contact: {
+        ...(phone ? { phone } : {}),
+        ...(whatsapp ? { whatsapp } : {}),
+        ...(address ? { address } : {})
+      },
+      brand: {
+        ...(instagramUrl ? { instagramUrl } : {})
+      },
+      website: {
+        primaryGoal: 'Conseguir contactos',
+        requiredPages: ['home','services','contact'],
+        requiredFeatures: [],
+        ...(currentWebsite ? { currentUrl: currentWebsite } : {}),
+        ...(bookingUrl ? { bookingUrl } : {})
+      },
       facts: [], contentRestrictions: [], assets: {}
     };
   }
@@ -601,15 +853,68 @@ async function restartAgentService() {
   return { restarted: true, active: active.stdout === 'active' };
 }
 
+async function getNightMode() {
+  const active = await run('systemctl', ['--user', 'is-active', nightModeUnit], { cwd:'/', timeout:4_000 });
+  return {
+    active: active.stdout === 'active',
+    unit: nightModeUnit,
+    behavior: { preventsSuspend:true, locksSession:true, displayOff:true, closesApps:false }
+  };
+}
+
+async function hyprDispatch(expression) {
+  return run('/usr/bin/hyprctl', ['-i', '0', 'dispatch', expression], {
+    cwd:'/',
+    timeout:5_000,
+    env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || ('/run/user/' + process.getuid()) }
+  });
+}
+
+async function setNightMode(input) {
+  if (typeof input?.enabled !== 'boolean') throw new Error('night_mode_enabled_invalid');
+
+  if (input.enabled) {
+    const started = await run('systemctl', ['--user', 'start', nightModeUnit], { cwd:'/', timeout:8_000 });
+    if (!started.ok) throw new Error('night_mode_inhibitor_start_failed:' + (started.stderr || started.stdout));
+
+    const locked = await hyprDispatch('hl.dsp.global("caelestia:lock")');
+    if (!locked.ok) {
+      await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+      throw new Error('night_mode_lock_failed:' + (locked.stderr || locked.stdout));
+    }
+
+    const display = await hyprDispatch('hl.dsp.dpms(false)');
+    if (!display.ok) {
+      await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+      throw new Error('night_mode_display_off_failed:' + (display.stderr || display.stdout));
+    }
+  } else {
+    const stopped = await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+    if (!stopped.ok) throw new Error('night_mode_inhibitor_stop_failed:' + (stopped.stderr || stopped.stdout));
+    const display = await hyprDispatch('hl.dsp.dpms(true)');
+    if (!display.ok) throw new Error('night_mode_display_on_failed:' + (display.stderr || display.stdout));
+  }
+
+  return getNightMode();
+}
+
 
 async function changeAccessPin(input) {
   const pin = String(input?.pin ?? '').trim();
-  if (pin.length < 5 || pin.length > 128 || /[\r\n\0]/.test(pin)) throw new Error('pin_invalid');
-  await mkdir(dirname(tokenFile), { recursive:true, mode:0o700 });
-  await writeFile(tokenFile, pin + '\n', { mode:0o600 });
-  accessToken = pin;
-  sessionValue = deriveSessionValue(pin);
-  return { changed:true };
+  const passkey = await passkeyAuth.status();
+  const minLength = passkey.enabled ? 12 : 5;
+  if (pin.length < minLength || pin.length > 128 || /[\r\n\0]/.test(pin)) throw new Error('recovery_key_invalid');
+  await setAccessToken(pin);
+  return { changed:true, minLength };
+}
+
+async function setOllama(input) {
+  if (typeof input?.enabled !== 'boolean') throw new Error('ollama_enabled_invalid');
+  const action = input.enabled ? 'start' : 'stop';
+  const result = await run('systemctl', ['--user', action, 'ollama-local.service'], { cwd:'/', timeout:10_000 });
+  if (!result.ok) throw new Error('ollama_control_failed:' + (result.stderr || result.stdout));
+  invalidateTelemetry('ollama-availability');
+  return { enabled:input.enabled, changed:true };
 }
 
 async function approveTask(input) {
@@ -654,6 +959,7 @@ async function serveStatic(req, res) {
     if (!info.isFile()) throw new Error('not_file');
     const data = await readFile(file);
     res.writeHead(200, {
+      ...securityHeaders(),
       'content-type': mime[extname(file)] || 'application/octet-stream',
       'cache-control': pathname === '/index.html' ? 'no-store' : 'public, max-age=300'
     });
@@ -666,14 +972,70 @@ async function serveStatic(req, res) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
+
+    if (req.method === 'GET' && url.pathname === '/api/auth/config') {
+      return sendJson(res, 200, { passkey:await passkeyAuth.status(), canonicalOrigin, recoveryAvailable:true });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/passkey/options') {
+      try { return sendJson(res, 200, await passkeyAuth.authenticationOptions()); }
+      catch (error) { return sendJson(res, 409, { error:String(error.message || error) }); }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/passkey/verify') {
+      const gate = authGate(req);
+      if (!gate.allowed) return sendJson(res, 429, { error:'auth_rate_limited', retryAfterSeconds:gate.retryAfterSeconds });
+      try {
+        const input = await bodyJson(req);
+        await passkeyAuth.verifyAuthentication(input.flowId, input.response);
+        clearAuthFailures(req);
+        const session = issueSession(res, 'passkey');
+        return sendJson(res, 200, { ok:true, session });
+      } catch {
+        const state = recordAuthFailure(req);
+        return sendJson(res, 401, {
+          error:'passkey_authentication_failed',
+          retryAfterSeconds:state.lockedUntil > Date.now() ? Math.ceil((state.lockedUntil - Date.now()) / 1000) : 0
+        });
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/login') {
+      const gate = authGate(req);
+      if (!gate.allowed) return sendJson(res, 429, { error:'auth_rate_limited', retryAfterSeconds:gate.retryAfterSeconds });
       const input = await bodyJson(req);
-      if (!equalText(input.pin, accessToken)) return sendJson(res, 401, { error: 'pin_incorrecto' });
-      setSessionCookie(res);
-      return sendJson(res, 200, { ok: true });
+      if (!equalText(input.pin, accessToken)) {
+        const state = recordAuthFailure(req);
+        return sendJson(res, 401, {
+          error:'recovery_key_incorrect',
+          retryAfterSeconds:state.lockedUntil > Date.now() ? Math.ceil((state.lockedUntil - Date.now()) / 1000) : 0
+        });
+      }
+      clearAuthFailures(req);
+      const session = issueSession(res, 'recovery');
+      return sendJson(res, 200, { ok: true, session });
     }
 
     if (url.pathname.startsWith('/api/') && !authorized(req)) return sendJson(res, 401, { error: 'unauthorized' });
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/passkey/register/options') {
+      return sendJson(res, 200, await passkeyAuth.registrationOptions());
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/passkey/register/verify') {
+      try {
+        const before = await passkeyAuth.status();
+        const input = await bodyJson(req);
+        const result = await passkeyAuth.verifyRegistration(input.flowId, input.response);
+        let recoveryKey = null;
+        if (!before.enabled) {
+          recoveryKey = await rotateRecoveryKey();
+          issueSession(res, 'passkey-registration');
+        }
+        return sendJson(res, 200, { ...result, recoveryKey });
+      } catch (error) {
+        return sendJson(res, 400, { error:String(error.message || error) });
+      }
+    }
     if (req.method === 'GET' && url.pathname === '/api/status') return sendJson(res, 200, await snapshot());
     if (req.method === 'GET' && url.pathname === '/api/logs') return sendJson(res, 200, { logs: await getLogs(url.searchParams.get('limit')) });
     if (req.method === 'POST' && url.pathname === '/api/task') return sendJson(res, 201, await createTask(await bodyJson(req)));
@@ -684,15 +1046,18 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
     if (req.method === 'POST' && url.pathname === '/api/control/global') return sendJson(res, 200, await setGlobalPause(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/control/lane') return sendJson(res, 200, await setLanePause(await bodyJson(req)));
+    if (req.method === 'POST' && url.pathname === '/api/control/night-mode') return sendJson(res, 200, await setNightMode(await bodyJson(req)));
+    if (req.method === 'POST' && url.pathname === '/api/control/ollama') return sendJson(res, 200, await setOllama(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/change-pin') {
       const result = await changeAccessPin(await bodyJson(req));
-      setSessionCookie(res);
-      return sendJson(res, 200, result);
+      const session = issueSession(res, 'recovery-rotation');
+      return sendJson(res, 200, { ...result, session });
     }
     if (req.method === 'POST' && url.pathname === '/api/approve') return sendJson(res, 200, await approveTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/retry') return sendJson(res, 200, await retryRun(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/cancel-task') return sendJson(res, 200, await cancelTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/logout') {
+      revokeSession(req);
       res.setHeader('set-cookie', 'agent_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0');
       return sendJson(res, 200, { ok: true });
     }

@@ -34,7 +34,17 @@ test('control center serves UI and protects API', async () => {
     const base = 'http://127.0.0.1:' + port;
     const homeResponse = await waitFor(base + '/');
     assert.equal(homeResponse.status, 200);
-    assert.match(await homeResponse.text(), /Agent Control/);
+    const homeHtml = await homeResponse.text();
+    assert.match(homeHtml, /Agent Control/);
+    assert.match(homeHtml, /MODO NOCHE/);
+    assert.match(homeHtml, /activateNightModeBtn/);
+
+    const nightModeDenied = await fetch(base + '/api/control/night-mode', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({enabled:true})
+    });
+    assert.equal(nightModeDenied.status, 401);
 
     const denied = await fetch(base + '/api/status');
     assert.equal(denied.status, 401);
