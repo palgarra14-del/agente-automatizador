@@ -327,6 +327,20 @@ function renderRemoteControl(data) {
   $('resumeAllBtn').disabled = !globalPaused && paused.length === 0;
 }
 
+function renderNightMode(data) {
+  const mode = data.nightMode || {};
+  const active = mode.active === true;
+  $('nightModeBadge').textContent = active ? 'NOCHE ACTIVA' : 'NOCHE OFF';
+  $('nightModeBadge').className = 'badge ' + (active ? 'good' : 'warn');
+  $('nightModeNote').textContent = active
+    ? 'Suspensión bloqueada. La sesión queda bloqueada y la pantalla apagada hasta que salgas del modo noche.'
+    : 'Solo se activa cuando tú lo ordenas. Mantiene el equipo despierto, bloquea la sesión y apaga la pantalla. No cierra aplicaciones.';
+  $('activateNightModeBtn').disabled = active;
+  $('deactivateNightModeBtn').disabled = !active;
+  $('nightModeQuickBtn').textContent = active ? 'Salir modo noche' : 'Modo noche';
+  $('nightModeQuickBtn').className = active ? 'ghost' : 'primary';
+}
+
 function renderStats(data) {
   const records = data.queue?.records || [];
   const active = records.filter((r) => activeStates.has(r.status)).length;
@@ -390,7 +404,9 @@ function renderAiHealth(data) {
   for (const provider of providers) {
     const detail = provider.state === 'cooldown'
       ? 'Motivo: '+esc(provider.reasonCategory || 'unknown')+' · reintento en '+duration(provider.retryInSeconds)
-      : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
+      : provider.id === 'codex'
+        ? (provider.authenticated ? 'CLI autenticado con ChatGPT · listo para routing' : (provider.installed ? 'CLI instalado · requiere autenticación' : 'CLI no detectado'))
+        : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
     cards.push('<article class="health-item">'+
       '<div class="item-top"><strong>'+esc(provider.label)+'</strong><span class="badge '+statusClass(provider.state)+'">'+esc(provider.state)+'</span></div>'+
       '<div class="meta">'+esc(provider.kind)+'<br>'+detail+'</div></article>');
@@ -530,6 +546,7 @@ function render(data) {
   lastData = data;
   renderStats(data);
   renderRemoteControl(data);
+  renderNightMode(data);
   renderMission(data);
   renderInfrastructure(data);
   renderAttention(data);
@@ -772,6 +789,38 @@ $('resumeAllBtn').addEventListener('click', async () => {
   }
 });
 
+$('nightModeQuickBtn').addEventListener('click', () => {
+  const active = lastData?.nightMode?.active === true;
+  $(active ? 'deactivateNightModeBtn' : 'activateNightModeBtn').click();
+});
+
+$('activateNightModeBtn').addEventListener('click', async () => {
+  if (!globalThis.confirm('¿Activar modo noche? Se bloqueará la sesión y se apagará la pantalla, pero el agente seguirá trabajando. No se cerrarán tus aplicaciones.')) return;
+  const button = $('activateNightModeBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/night-mode', {method:'POST', body:JSON.stringify({enabled:true})});
+    toast('Modo noche activado');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    setTimeout(refresh, 700);
+  }
+});
+
+$('deactivateNightModeBtn').addEventListener('click', async () => {
+  const button = $('deactivateNightModeBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/night-mode', {method:'POST', body:JSON.stringify({enabled:false})});
+    toast('Modo noche desactivado');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    setTimeout(refresh, 700);
+  }
+});
+
 $('restartServiceBtn').addEventListener('click', async () => {
   const button = $('restartServiceBtn');
   button.disabled = true;
@@ -788,6 +837,6 @@ $('restartServiceBtn').addEventListener('click', async () => {
   }
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { updateViaCache:'none' }).then((registration) => registration.update()).catch(() => {});
 refresh();
 setInterval(refresh, 7000);
