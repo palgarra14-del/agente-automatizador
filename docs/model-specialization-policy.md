@@ -13,13 +13,37 @@ This policy exists to prevent one model from becoming the default for every task
 | Antigravity + Gemini 3.1 Pro | Independent concept challenger, complex multimodal reasoning and review | Google positions Gemini 3.1 Pro for complex tasks requiring broad world knowledge and advanced reasoning across modalities. |
 | Antigravity + Gemini 3.8 Flash | Autonomous orchestration, long-horizon implementation, research/audit, blocker diagnosis and fast QA | Google describes Gemini 3.8 Flash as engineered for long-horizon software engineering, autonomous agents and complex enterprise workflows, and now uses it as Antigravity's default model. |
 | Antigravity + GPT-OSS 120B | Text-only structured reasoning, independent logic review and blocker analysis | OpenAI describes gpt-oss-120b as an open-weight reasoning model with tool use, structured outputs and agentic capabilities. Keep it out of visual authority. |
-| OpenCode + MiMo V2.6 Flash Free | High-frequency structured work, quick QA and large-context text/code analysis | Xiaomi positions MiMo V2.6 Flash as a high-intelligence, low-cost model for high-frequency professional workflows, with 1M context, tool calls and structured output. |
-| OpenCode + Space Bunny / LongCat | Low-stakes fallback and empirical exploration | Free hosted options are useful redundancy, but their authority is intentionally limited until our own outcome ledger proves a stronger specialty. |
+| OpenCode + Muse Spark 1.3 Contributor Free | Structured bulk work, quick QA and first-pass blocker diagnosis | Best measured latency/accuracy balance in the 2026-10-07 local benchmark: 4/4 representative tasks at ~3.5 s mean. |
+| OpenCode + MiMo V2.6 Flash Free | Structured work, quick QA, blocker diagnosis and coding-oriented review | 4/4 representative tasks at ~6.7 s mean; reliable general OpenCode workhorse. |
+| OpenCode + Nemotron 3 Ultra Free | Research/audit, blocker diagnosis and independent text review | 4/4 representative tasks at ~8.6 s mean; reserve more authority for reasoning than for pure throughput. |
+| OpenCode + LongCat 2.5 Preview Free | Structured work, QA and diagnosis fallback | 4/4 representative tasks at ~9.5 s mean; reliable but slower than Muse/MiMo. |
+| OpenCode + Nemotron 3.5 Lightning Free | Harder orchestration/review/diagnosis fallback | 4/4 representative tasks but ~24 s mean; accurate enough to keep, too slow for routine bulk work. |
+| OpenCode + Ling 3.1 Flash Free | Selective blocker diagnosis and research fallback | Passed QA, diagnosis and commercial-scope reasoning but timed out on structured extraction. |
+| OpenCode + Space Bunny Free | Very fast factual extraction and low-stakes QA | Extremely fast, but missed blocker diagnosis and one QA classification; never use as final authority. |
 | GitHub Copilot Auto | Reliability fallback for straightforward QA/triage | GitHub Auto selects models using task complexity plus real-time health/availability. The underlying model is opaque, so it is not a final authority. |
-| Ollama + Qwen2.5-Coder 3B | Private/offline triage, classification, normalization and simple code checks | Local execution has zero external inference and is ideal for cheap repetitive pre-processing. Its small size makes it inappropriate for architecture or final review. |
+| Ollama + Qwen2.5-Coder 3B | Offline/private necessity only | Local model loading consumed ~2.2 GB during the 2026-10-07 benchmark. Normal work must prefer hosted-free routes; local requests set `keep_alive=0` so model memory is released immediately afterward. |
 | Codex + GPT-6 Astra | Hardest end-to-end implementation, deep analysis and final audit when explicitly enabled | OpenAI positions Astra as its highest-capability model for complex reasoning, software engineering, browsing and computer use. |
 | Codex + GPT-6 Sol | Demanding everyday coding and agentic workflows when explicitly enabled | OpenAI positions Sol as the strong everyday driver for demanding reasoning/coding with a better efficiency balance. |
 | Codex + GPT-6 Luna | Focused repeatable/high-volume tasks when explicitly enabled | OpenAI positions Luna for scoped, frequent, efficient automation. |
+
+## OpenCode empirical gate — 2026-10-07
+
+Representative tests covered factual extraction, JavaScript QA, provider-failure diagnosis and commercial scope discipline. They are a routing seed, not a permanent benchmark: production outcomes remain more authoritative and can move priors gradually.
+
+| Free model exposed by OpenCode | Result | Routing decision |
+| --- | --- | --- |
+| Muse Spark 1.3 Contributor | 4/4; ~3.45 s mean | Preferred high-volume hosted worker. |
+| MiMo V2.6 Flash | 4/4; ~6.73 s | General hosted workhorse. |
+| Nemotron 3 Ultra | 4/4; ~8.62 s | Research/diagnosis/review. |
+| LongCat 2.5 Preview | 4/4; ~9.49 s | Reliable fallback. |
+| Nemotron 3.5 Lightning | 4/4; ~24.07 s | Harder reasoning only; avoid bulk latency. |
+| Ling 3.1 Flash | 3/4; ~16.37 s | Selective diagnosis/research; avoid bulk extraction. |
+| Space Bunny | partial 3/4-equivalent; ~4.13 s | Fast extraction/low-stakes QA only. |
+| Ling 3.0 Flash Fin | endpoint unavailable | Do not route until a later probe proves availability. |
+| Fledge Alpha | region unavailable in Spain | Do not route. |
+| Exo | four 35 s timeouts | Do not route until a later probe proves useful latency. |
+
+The OpenCode catalogue can also expose `ollama/*` models. Those are **not** hosted-free capacity and must never be treated as a substitute for the hosted models above; they still execute locally and inherit the Ollama heavy-local policy.
 
 ## Workflow allocation
 
@@ -36,31 +60,31 @@ This policy exists to prevent one model from becoming the default for every task
 
 ### Callflow
 
-1. Private/local triage: Qwen local.
-2. Diagnosis: Gemini 3.8 Flash.
+1. Private/offline triage: Qwen local only when locality is actually required; unload it immediately afterward.
+2. Diagnosis: Gemini 3.8 Flash first; Muse/MiMo/Nemotron hosted-free fallbacks.
 3. UI work: Sonnet 4.6.
 4. Core/refactor work: Gemini 3.8 Flash; Opus for deep refactors.
-5. Bulk regression classification: Qwen or MiMo.
-6. Independent review: Opus / Gemini 3.1 Pro from a different family.
+5. Bulk regression classification: Muse first, then MiMo/Space Bunny/Nemotron/LongCat; Ollama only as the final heavy-local fallback.
+6. Independent review: Opus / Gemini 3.1 Pro; Nemotron/LongCat provide hosted-free text-review redundancy.
 7. Final gate: Opus.
 
 ### Lead Finder
 
-1. Research/enrichment reasoning: Gemini 3.8 Flash.
-2. Bulk normalization/scoring preparation: Qwen local or MiMo.
-3. Ranking/quality diagnosis: Gemini 3.8 Flash.
+1. Research/enrichment reasoning: Gemini 3.8 Flash; Nemotron 3 Ultra/LongCat as hosted-free fallbacks.
+2. Bulk normalization/scoring preparation: Muse first, then MiMo/Space Bunny/Nemotron/LongCat.
+3. Ranking/quality diagnosis: Gemini 3.8 Flash; Muse/MiMo/Nemotron hosted-free fallbacks.
 4. Core implementation: Gemini 3.8 Flash.
-5. Independent review: Opus or Gemini 3.1 Pro.
+5. Independent review: Opus or Gemini 3.1 Pro; hosted Nemotron/LongCat when deeper free quota is unavailable.
 6. Final gate: Opus.
 
 ### Autonomous self-improvement
 
-1. Cheap local triage: Qwen local.
-2. Blocker diagnosis: Gemini 3.8 Flash.
-3. Plan/delegate: Gemini 3.8 Flash; Opus for unusually difficult coordination.
+1. Cheap triage: Muse/MiMo hosted-free; Qwen local only for genuine offline/private necessity.
+2. Blocker diagnosis: Gemini 3.8 Flash, then Muse/MiMo/Nemotron/LongCat.
+3. Plan/delegate: Gemini 3.8 Flash; Nemotron 3.5 Lightning is the slower hosted-free fallback for harder orchestration; Opus for unusually difficult coordination.
 4. Bounded implementation: Gemini 3.8 Flash.
 5. Large refactor: Opus.
-6. Fast validation: Gemini 3.8 / MiMo / deterministic tests.
+6. Fast validation: Muse / MiMo / Gemini 3.8 / deterministic tests.
 7. Independent review: different model family from the implementer.
 8. Final audit: Opus.
 

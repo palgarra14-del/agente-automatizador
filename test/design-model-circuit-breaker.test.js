@@ -51,8 +51,9 @@ print(json.dumps({
   "fallbackErrors":value["fallbackErrors"]
 }))
 `);
-  assert.equal(result.selected, 'oc-mimo-2.6-flash');
-  assert.deepEqual(result.calls, ['ag-gemini-3.8-flash', 'oc-mimo-2.6-flash']);
+  assert.equal(result.calls[0], 'ag-gemini-3.8-flash');
+  assert.equal(result.selected, result.calls[1]);
+  assert.ok(!result.calls.includes('ag-gemini-3.1-pro'));
   assert.equal(result.scope, 'provider');
   assert.match(result.fallbackErrors[0], /quota exceeded/);
 });

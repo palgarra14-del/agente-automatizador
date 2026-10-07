@@ -127,6 +127,32 @@ print(json.dumps(m.generate_structured("x",{"required":["ok"]},providers=("antig
   assert.match(result.errors[0],/antigravity/);
 });
 
+test('Ollama requests unload the local model immediately by default', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.ollama_ready=lambda: True
+captured={}
+class Response:
+    status=200
+    def __enter__(self): return self
+    def __exit__(self,*args): return False
+    def read(self,*args): return json.dumps({"response":json.dumps({"ok":True})}).encode("utf-8")
+def fake_urlopen(request,timeout=None):
+    captured["payload"]=json.loads(request.data.decode("utf-8"))
+    return Response()
+m.urllib.request.urlopen=fake_urlopen
+value=m.ollama_structured(
+  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  num_predict=64
+)
+print(json.dumps({"value":value,"keepAlive":captured["payload"].get("keep_alive")}))
+`);
+  assert.equal(result.value.ok,true);
+  assert.equal(String(result.keepAlive),'0');
+});
+
 test('provider binaries prefer native PATH before legacy WSL fallbacks', () => {
   const result=python(`
 import importlib.util,json,os,tempfile
@@ -211,20 +237,24 @@ os.unlink(path)
   ]);
 });
 
-test('OpenCode free-only guard accepts only local or explicitly free hosted models', () => {
+test('OpenCode free-only guard blocks hidden local models unless explicitly enabled', () => {
   const result=python(`
 import importlib.util,json
 spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+local_default=m.opencode_model_is_free("ollama/qwen2.5-coder:3b")
+m.OPENCODE_LOCAL_MODELS_ENABLED=True
 print(json.dumps({
   "hostedFree":m.opencode_model_is_free("opencode/ling-3.0-flash-fin-free"),
-  "local":m.opencode_model_is_free("ollama/qwen2.5-coder:3b"),
+  "localDefault":local_default,
+  "localOptIn":m.opencode_model_is_free("ollama/qwen2.5-coder:3b"),
   "ambiguous":m.opencode_model_is_free("opencode/big-pickle"),
   "paidLike":m.opencode_model_is_free("openai/gpt-5")
 }))
 `);
   assert.equal(result.hostedFree,true);
-  assert.equal(result.local,true);
+  assert.equal(result.localDefault,false);
+  assert.equal(result.localOptIn,true);
   assert.equal(result.ambiguous,false);
   assert.equal(result.paidLike,false);
 });

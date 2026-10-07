@@ -8,9 +8,11 @@ def _tool_path(env_name, command, legacy_fallback):
 AGY=_tool_path("ANTIGRAVITY_CLI","agy","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
+OLLAMA_KEEP_ALIVE=os.environ.get("OLLAMA_KEEP_ALIVE","0")
 CODEX=_tool_path("CODEX_BIN","codex","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 OPENCODE=_tool_path("OPENCODE_BIN","opencode","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
+OPENCODE_LOCAL_MODELS_ENABLED=os.environ.get("OPENCODE_LOCAL_MODELS_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT=_tool_path("COPILOT_BIN","copilot","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
@@ -204,8 +206,10 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
 
 def opencode_model_is_free(model):
     value=str(model or "")
-    return value.startswith("ollama/") or (
+    return (
         value.startswith("opencode/") and value.endswith("-free")
+    ) or (
+        OPENCODE_LOCAL_MODELS_ENABLED and value.startswith("ollama/")
     )
 
 def _opencode_models_snapshot():
@@ -448,6 +452,7 @@ def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None,num_predict=
       "prompt":prompt,
       "stream":False,
       "format":schema,
+      "keep_alive":OLLAMA_KEEP_ALIVE,
       "options":{"temperature":0.1,"num_predict":predict_limit}
     }
     request=urllib.request.Request(
