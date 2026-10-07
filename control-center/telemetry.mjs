@@ -43,6 +43,8 @@ export function summarizeLaneRuns(runs = [], nowMs = Date.now()) {
     const lastFailure = recent.find(completedFailure) || null;
     const successRate = completed.length ? Math.round((successes.length / completed.length) * 100) : null;
     const lastSuccessAgeMs = lastSuccess ? Math.max(0, nowMs - Date.parse(lastSuccess.updatedAt || lastSuccess.createdAt || '')) : null;
+    const lastActivityAt = latest?.updatedAt || latest?.createdAt || null;
+    const lastActivityAgeMs = lastActivityAt ? Math.max(0, nowMs - Date.parse(lastActivityAt)) : null;
     const durations = successes.map(durationMs).filter(Number.isFinite);
     const avgSuccessDurationMs = durations.length
       ? Math.round(durations.reduce((sum,value) => sum + value, 0) / durations.length)
@@ -75,20 +77,23 @@ export function summarizeLaneRuns(runs = [], nowMs = Date.now()) {
       lastSuccessAgeMs,
       lastFailureAt: lastFailure?.updatedAt || lastFailure?.createdAt || null,
       lastFailureConclusion: lastFailure?.conclusion || null,
-      avgSuccessDurationMs
+      avgSuccessDurationMs,
+      lastActivityAt,
+      lastActivityAgeMs
     };
   }
 
   const business = [...BUSINESS_LANES].map((lane) => lanes[lane]);
-  const healthyBusiness = business.filter((item) =>
-    item.current || (item.lastSuccessAgeMs !== null && item.lastSuccessAgeMs <= 20 * 60 * 1000)
+  const activityWindowMs = 24 * 60 * 60 * 1000;
+  const recentlyActive = business.filter((item) =>
+    item.current || (item.lastActivityAgeMs !== null && item.lastActivityAgeMs <= activityWindowMs)
   ).length;
   return {
     lanes,
     business: {
-      healthy: healthyBusiness,
+      recentlyActive,
       total: business.length,
-      allHealthy: healthyBusiness === business.length
+      activityWindowMs
     }
   };
 }
@@ -188,11 +193,9 @@ export function deriveControlHealth({service, queue, runnerTelemetry, rateLimit,
   const corePct = rateLimit?.core?.remainingPercent;
   if (Number.isFinite(corePct) && corePct <= 5) { score -= 20; reasons.push('github_core_critical'); }
   else if (Number.isFinite(corePct) && corePct <= 15) { score -= 10; reasons.push('github_core_low'); }
-  const healthyBusiness = laneTelemetry?.business?.healthy;
-  const monitoringBusinessLiveness = remoteControl?.globalPaused !== true;
-  if (monitoringBusinessLiveness && Number.isFinite(healthyBusiness) && healthyBusiness < 3) {
-    score -= (3 - healthyBusiness) * 8;
-    reasons.push('business_lane_stale');
+  if (remoteControl && remoteControl.known === false) {
+    score -= 20;
+    reasons.push('control_state_unknown');
   }
   return {
     score: Math.max(0, Math.min(100, score)),
