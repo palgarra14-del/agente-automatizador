@@ -21,6 +21,7 @@ const agentRoot = resolve(process.env.AGENT_ROOT || join(here, '..', '..', 'agen
 const host = process.env.AGENT_CONTROL_HOST || '127.0.0.1';
 const port = Number(process.env.AGENT_CONTROL_PORT || 8787);
 const repo = process.env.AGENT_CONTROL_REPO || 'palgarra14-del/agente-automatizador';
+const nightModeUnit = 'agent-night-mode.service';
 const tokenFile = process.env.AGENT_CONTROL_TOKEN_FILE || join(homedir(), '.config', 'agent-control-center', 'access-token');
 const marker = '<!-- agent-request:v1 -->';
 const cloudStatusCache = new Map();
@@ -315,6 +316,18 @@ async function getAiHealth(processes = []) {
     const result = await run(process.env.OPENCODE_BIN || 'opencode', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
     return { available: result.ok, version: result.ok ? result.stdout : null };
   });
+  const codexProbe = await cachedTelemetry('codex-availability', 60_000, async () => {
+    const binary = process.env.CODEX_BIN || 'codex';
+    const version = await run(binary, ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    if (!version.ok) return { available:false, authenticated:false, version:null };
+    const auth = await run(binary, ['login', 'status'], { cwd:'/', timeout:3_000, maxBuffer:32_000 });
+    const authText = [auth.stdout, auth.stderr].filter(Boolean).join('\n');
+    return {
+      available: true,
+      authenticated: auth.ok && /logged in/i.test(authText),
+      version: version.stdout || null
+    };
+  });
   const now = Date.now() / 1000;
   let runtime = { providers: {}, candidates: {} };
   try {
@@ -323,6 +336,16 @@ async function getAiHealth(processes = []) {
 
   const localText = processes.join('\n').toLowerCase();
   const providers = [
+    {
+      id: 'codex',
+      label: 'Codex',
+      kind: 'cloud/ChatGPT',
+      local: false,
+      installed: codexProbe.available,
+      authenticated: codexProbe.authenticated,
+      version: codexProbe.version,
+      processActive: localText.includes('codex')
+    },
     {
       id: 'antigravity',
       label: 'Antigravity',
@@ -354,9 +377,11 @@ async function getAiHealth(processes = []) {
       ...provider,
       state: cooldown
         ? 'cooldown'
-        : provider.id === 'opencode'
-          ? (provider.installed ? 'available' : 'offline')
-          : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
+        : provider.id === 'codex'
+          ? (!provider.installed ? 'offline' : (provider.authenticated ? 'available' : 'auth_required'))
+          : provider.id === 'opencode'
+            ? (provider.installed ? 'available' : 'offline')
+            : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
       reasonCategory: cooldown ? providerFailureCategory(persisted?.reason) : null,
       cooldownUntil: cooldown ? new Date(untilEpoch * 1000).toISOString() : null,
       retryInSeconds: cooldown ? Math.max(0, Math.ceil(untilEpoch - now)) : 0
@@ -507,8 +532,8 @@ async function getLogs(limit = 80) {
 
 async function snapshot() {
   const started = Date.now();
-  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs, remoteControl] = await Promise.all([
-    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70), getRemoteControl()
+  const [service, autonomy, git, queue, tasks, runs, runnerSource, rateLimitSource, processSnapshot, logs, remoteControl, nightMode] = await Promise.all([
+    getService(), getAutonomy(), getGit(), getQueue(), getOpenTasks(), getRuns(), getRunners(), getGithubRateLimit(), getProcessSnapshot(), getLogs(70), getRemoteControl(), getNightMode()
   ]);
   const processes = processSnapshot.visible;
   const aiHealth = await getAiHealth(processes);
@@ -521,7 +546,7 @@ async function snapshot() {
   return {
     now: new Date().toISOString(),
     latencyMs: Date.now() - started,
-    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations, remoteControl,
+    service, autonomy, git, queue, tasks, runs, processes, logs, aiHealth, workActivity, cloudOperations, remoteControl, nightMode,
     laneTelemetry,
     runnerTelemetry: { ...runnerTelemetry, error: runnerSource.error },
     githubRateLimit: { ...githubRateLimit, error: rateLimitSource.error },
@@ -599,6 +624,51 @@ async function restartAgentService() {
   if (!result.ok) throw new Error(`service_restart_failed:${result.stderr}`);
   const active = await run('systemctl', ['--user', 'is-active', 'engineering-orchestrator-inbox.service'], { cwd: '/' });
   return { restarted: true, active: active.stdout === 'active' };
+}
+
+async function getNightMode() {
+  const active = await run('systemctl', ['--user', 'is-active', nightModeUnit], { cwd:'/', timeout:4_000 });
+  return {
+    active: active.stdout === 'active',
+    unit: nightModeUnit,
+    behavior: { preventsSuspend:true, locksSession:true, displayOff:true, closesApps:false }
+  };
+}
+
+async function hyprDispatch(expression) {
+  return run('/usr/bin/hyprctl', ['-i', '0', 'dispatch', expression], {
+    cwd:'/',
+    timeout:5_000,
+    env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || ('/run/user/' + process.getuid()) }
+  });
+}
+
+async function setNightMode(input) {
+  if (typeof input?.enabled !== 'boolean') throw new Error('night_mode_enabled_invalid');
+
+  if (input.enabled) {
+    const started = await run('systemctl', ['--user', 'start', nightModeUnit], { cwd:'/', timeout:8_000 });
+    if (!started.ok) throw new Error('night_mode_inhibitor_start_failed:' + (started.stderr || started.stdout));
+
+    const locked = await hyprDispatch('hl.dsp.global("caelestia:lock")');
+    if (!locked.ok) {
+      await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+      throw new Error('night_mode_lock_failed:' + (locked.stderr || locked.stdout));
+    }
+
+    const display = await hyprDispatch('hl.dsp.dpms(false)');
+    if (!display.ok) {
+      await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+      throw new Error('night_mode_display_off_failed:' + (display.stderr || display.stdout));
+    }
+  } else {
+    const stopped = await run('systemctl', ['--user', 'stop', nightModeUnit], { cwd:'/', timeout:8_000 });
+    if (!stopped.ok) throw new Error('night_mode_inhibitor_stop_failed:' + (stopped.stderr || stopped.stdout));
+    const display = await hyprDispatch('hl.dsp.dpms(true)');
+    if (!display.ok) throw new Error('night_mode_display_on_failed:' + (display.stderr || display.stdout));
+  }
+
+  return getNightMode();
 }
 
 
@@ -684,6 +754,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/restart-service') return sendJson(res, 200, await restartAgentService());
     if (req.method === 'POST' && url.pathname === '/api/control/global') return sendJson(res, 200, await setGlobalPause(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/control/lane') return sendJson(res, 200, await setLanePause(await bodyJson(req)));
+    if (req.method === 'POST' && url.pathname === '/api/control/night-mode') return sendJson(res, 200, await setNightMode(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/change-pin') {
       const result = await changeAccessPin(await bodyJson(req));
       setSessionCookie(res);
