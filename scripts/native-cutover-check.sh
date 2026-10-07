@@ -72,11 +72,26 @@ fi
 if systemctl is-active --quiet docker.service; then ok "Docker active"; else fail "Docker inactive"; fi
 if systemctl is-enabled --quiet docker.service; then ok "Docker enabled"; else fail "Docker not enabled"; fi
 
-for unit in   actions-runner-arch.service   engineering-orchestrator-inbox.service   engineering-orchestrator-cloud-heartbeat.timer   agent-control-center.service   agent-control-tunnel.service   ollama-local.service
+for unit in   actions-runner-arch.service   engineering-orchestrator-inbox.service   engineering-orchestrator-cloud-heartbeat.timer   agent-control-center.service   agent-control-tunnel.service
 do
   check_active "$unit"
   check_enabled "$unit"
 done
+
+if systemctl --user cat ollama-local.service >/dev/null 2>&1; then
+  ok "Ollama fallback unit installed"
+else
+  fail "Ollama fallback unit missing"
+fi
+if systemctl --user is-active --quiet ollama-local.service; then
+  if curl -fsS --max-time 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+    ok "Ollama fallback active and healthy"
+  else
+    fail "Ollama fallback active but API unavailable"
+  fi
+else
+  ok "Ollama fallback cold by policy"
+fi
 
 if [[ "$PHASE" == "pre" ]]; then
   if systemctl --user is-active --quiet engineering-orchestrator-upgrade.timer; then
@@ -92,12 +107,6 @@ fi
 for cmd in node npm git gh codex opencode agy; do
   if command -v "$cmd" >/dev/null 2>&1; then ok "$cmd available"; else fail "$cmd unavailable"; fi
 done
-
-if curl -fsS --max-time 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
-  ok "Ollama local API healthy"
-else
-  fail "Ollama local API unavailable"
-fi
 
 if curl -fsS --max-time 4 http://127.0.0.1:11434/api/tags 2>/dev/null | grep -q '"name":"qwen2.5-coder:3b"'; then
   ok "qwen2.5-coder:3b available"
