@@ -56,7 +56,7 @@ test('every business lane has an explicit bounded autonomous policy', () => {
     assert.ok(policy.goal.length > 80, projectId);
     assert.ok(policy.scope.allowedPaths.length > 0, projectId);
     assert.ok(policy.scope.forbiddenPaths.length > 0, projectId);
-    assert.equal(policy.maxStartsPer24h, 24);
+    assert.equal(policy.maxStartsPer24h, projectId === 'self' ? 6 : 12);
   }
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.callflow.scope.forbiddenPaths.includes('google-apps-script'), true);
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.leadfinder.scope.forbiddenPaths.includes('.github'), true);
