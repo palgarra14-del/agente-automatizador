@@ -33,6 +33,8 @@ const cloudStatusCache = new Map();
 const cloudStatusCacheMs = 45_000;
 const telemetryCache = new Map();
 const authFailures = new Map();
+const activeSessions = new Map();
+const SESSION_TTL_MS = Math.max(15 * 60 * 1000, Number(process.env.AGENT_CONTROL_SESSION_TTL_MS || 12 * 60 * 60 * 1000));
 
 async function cachedTelemetry(key, ttlMs, loader) {
   const now = Date.now();
@@ -123,26 +125,38 @@ async function ensureToken() {
 }
 
 let accessToken = await ensureToken();
-function deriveSessionValue(token) {
-  return createHmac('sha256', token).update('agent-control-session-v1').digest('base64url');
+
+function pruneSessions() {
+  const now = Date.now();
+  for (const [token, session] of activeSessions) {
+    if (!session || session.expiresAt <= now) activeSessions.delete(token);
+  }
 }
-let sessionValue = deriveSessionValue(accessToken);
+
+function clearSessions() {
+  activeSessions.clear();
+}
+
+function issueSession(res, method = 'unknown') {
+  pruneSessions();
+  const token = randomBytes(32).toString('base64url');
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  activeSessions.set(token, { expiresAt, method });
+  res.setHeader('set-cookie', `agent_session=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  return { expiresAt:new Date(expiresAt).toISOString(), method };
+}
 
 async function setAccessToken(value) {
   await mkdir(dirname(tokenFile), { recursive:true, mode:0o700 });
   await writeFile(tokenFile, value + '\n', { mode:0o600 });
   accessToken = value;
-  sessionValue = deriveSessionValue(value);
+  clearSessions();
 }
 
 async function rotateRecoveryKey() {
   const value = randomBytes(24).toString('base64url');
   await setAccessToken(value);
   return value;
-}
-
-function setSessionCookie(res) {
-  res.setHeader('set-cookie', `agent_session=${encodeURIComponent(sessionValue)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`);
 }
 
 function equalText(a, b) {
@@ -161,7 +175,26 @@ function cookieValue(req, name) {
 }
 
 function authorized(req) {
-  return equalText(cookieValue(req, 'agent_session'), sessionValue);
+  pruneSessions();
+  const token = cookieValue(req, 'agent_session');
+  if (!token) return false;
+  const session = activeSessions.get(token);
+  return Boolean(session && session.expiresAt > Date.now());
+}
+
+function revokeSession(req) {
+  const token = cookieValue(req, 'agent_session');
+  if (token) activeSessions.delete(token);
+}
+
+function securityHeaders() {
+  return {
+    'content-security-policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'geolocation=(), camera=(), microphone=(), publickey-credentials-get=(self), publickey-credentials-create=(self)'
+  };
 }
 
 async function bodyJson(req, max = 32 * 1024) {
@@ -177,7 +210,11 @@ async function bodyJson(req, max = 32 * 1024) {
 
 function sendJson(res, status, value) {
   const data = Buffer.from(JSON.stringify(value));
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(status, {
+    ...securityHeaders(),
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store'
+  });
   res.end(data);
 }
 
@@ -922,6 +959,7 @@ async function serveStatic(req, res) {
     if (!info.isFile()) throw new Error('not_file');
     const data = await readFile(file);
     res.writeHead(200, {
+      ...securityHeaders(),
       'content-type': mime[extname(file)] || 'application/octet-stream',
       'cache-control': pathname === '/index.html' ? 'no-store' : 'public, max-age=300'
     });
@@ -951,8 +989,8 @@ const server = createServer(async (req, res) => {
         const input = await bodyJson(req);
         await passkeyAuth.verifyAuthentication(input.flowId, input.response);
         clearAuthFailures(req);
-        setSessionCookie(res);
-        return sendJson(res, 200, { ok:true });
+        const session = issueSession(res, 'passkey');
+        return sendJson(res, 200, { ok:true, session });
       } catch {
         const state = recordAuthFailure(req);
         return sendJson(res, 401, {
@@ -974,8 +1012,8 @@ const server = createServer(async (req, res) => {
         });
       }
       clearAuthFailures(req);
-      setSessionCookie(res);
-      return sendJson(res, 200, { ok: true });
+      const session = issueSession(res, 'recovery');
+      return sendJson(res, 200, { ok: true, session });
     }
 
     if (url.pathname.startsWith('/api/') && !authorized(req)) return sendJson(res, 401, { error: 'unauthorized' });
@@ -991,7 +1029,7 @@ const server = createServer(async (req, res) => {
         let recoveryKey = null;
         if (!before.enabled) {
           recoveryKey = await rotateRecoveryKey();
-          setSessionCookie(res);
+          issueSession(res, 'passkey-registration');
         }
         return sendJson(res, 200, { ...result, recoveryKey });
       } catch (error) {
@@ -1012,13 +1050,14 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/control/ollama') return sendJson(res, 200, await setOllama(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/change-pin') {
       const result = await changeAccessPin(await bodyJson(req));
-      setSessionCookie(res);
-      return sendJson(res, 200, result);
+      const session = issueSession(res, 'recovery-rotation');
+      return sendJson(res, 200, { ...result, session });
     }
     if (req.method === 'POST' && url.pathname === '/api/approve') return sendJson(res, 200, await approveTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/retry') return sendJson(res, 200, await retryRun(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/cancel-task') return sendJson(res, 200, await cancelTask(await bodyJson(req)));
     if (req.method === 'POST' && url.pathname === '/api/logout') {
+      revokeSession(req);
       res.setHeader('set-cookie', 'agent_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0');
       return sendJson(res, 200, { ok: true });
     }
