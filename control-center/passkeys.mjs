@@ -72,7 +72,7 @@ export class PasskeyAuth {
       rpName: this.rpName,
       rpID: this.rpID,
       userName: this.userName,
-      userID: new TextEncoder().encode('agent-control-owner'),
+      userID: Buffer.from('agent-control-owner'),
       attestationType: 'none',
       excludeCredentials: store.credentials.map((credential) => ({
         id: credential.id,
