@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   AUTONOMOUS_MAINTENANCE_GOAL,
   AUTONOMOUS_MAINTENANCE_SCOPE,
+  AUTONOMOUS_PROJECT_POLICIES,
   AutonomousProjectImprovement,
   AutonomousSelfImprovement,
   autonomousSensitiveImplementationAllowed
@@ -27,11 +28,15 @@ function fakeStore(initial = {}) {
   };
 }
 
-function pendingPlan(id = 'workflow-auto-1') {
+function pendingPlan(id = 'workflow-auto-1', projectId = 'self') {
+  const scope = projectId === 'self'
+    ? AUTONOMOUS_MAINTENANCE_SCOPE
+    : AUTONOMOUS_PROJECT_POLICIES[projectId]?.scope;
   return {
     id,
     profile: 'autonomous-maintenance',
-    projectId: 'self',
+    projectId,
+    scope: clone(scope),
     status: 'pending',
     result: null,
     steps: [
@@ -212,6 +217,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
     id: 'workflow-sensitive',
     profile: 'autonomous-maintenance',
     projectId: 'self',
+    scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
     status: 'awaiting_approval',
     result: null,
     steps: [sensitiveImplementation({ paths: ['src/recovery.js', 'test/autonomous/recovery.test.js'], reason: 'sensitive_change:src/recovery.js' })]
@@ -248,6 +254,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
         id: 'workflow-sensitive',
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'awaiting_approval',
         result: null,
         steps: [sensitiveImplementation({
@@ -267,6 +274,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
         id,
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'blocked',
         result: { error: options.reason },
         steps: []
@@ -302,8 +310,7 @@ test('autopilot retires a pristine historical workflow after a registry fingerpr
     }
   });
   const plan = {
-    ...pendingPlan('workflow-historical'),
-    projectId: 'website-pilot',
+    ...pendingPlan('workflow-historical', 'website-pilot'),
     workspace: null,
     outputBytes: 0,
     modelUsage: { calls: 0 },
@@ -366,8 +373,7 @@ test('autopilot never retires a workflow for an unrelated execution failure', as
   const engine = {
     async get() {
       return {
-        ...pendingPlan('workflow-real-failure'),
-        projectId: 'website-pilot'
+        ...pendingPlan('workflow-real-failure', 'website-pilot')
       };
     },
     async run() { throw new Error('repository_integrity_check_failed'); },
@@ -421,6 +427,7 @@ test('completed autonomous PRs do not halt the loop and their files are excluded
         id: 'workflow-new',
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'failed',
         result: { error: 'fixture_stop' },
         steps: []
@@ -520,6 +527,7 @@ test('completed failed cycle can retry immediately so intelligence can adapt on 
           id: 'workflow-recovery',
           profile: 'autonomous-maintenance',
           projectId: 'self',
+          scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
           status: 'failed',
           result: { error: 'fixture_stop' },
           steps: []
@@ -547,6 +555,7 @@ test('completed failed cycle can retry immediately so intelligence can adapt on 
           id: 'workflow-new',
           profile: 'autonomous-maintenance',
           projectId: 'self',
+          scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
           status: 'failed',
           result: { error: 'fixture_stop' },
           steps: []
@@ -604,6 +613,7 @@ test('fresh-main retry remains eligible for bounded adaptive recovery after a fa
           id: 'workflow-fresh-main',
           profile: 'autonomous-maintenance',
           projectId: 'self',
+          scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
           status: 'failed',
           result: { error: 'fixture_stop' },
           steps: []
@@ -641,6 +651,7 @@ test('billing failures back off instead of creating a costly retry loop', async 
         id: 'workflow-billing',
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'blocked',
         result: { error: 'model_billing_unavailable' },
         steps: []
@@ -685,6 +696,7 @@ test('repeated billing failures back off exponentially and cap at 24 hours', asy
         id: 'workflow-billing',
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'blocked',
         result: { error: 'model_billing_unavailable' },
         steps: []
@@ -737,6 +749,7 @@ test('a non-billing terminal result clears an expired billing suspension', async
           id: 'workflow-normal-failure',
           profile: 'autonomous-maintenance',
           projectId: 'self',
+          scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
           status: 'failed',
           result: { error: 'read_only_repository_context_failed' },
           steps: []
@@ -779,6 +792,7 @@ test('resumed pristine autonomous workflow refreshes its execution deadline at f
     id: 'workflow-pristine-resume',
     profile: 'autonomous-maintenance',
     projectId: 'self',
+    scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
     status: 'pending',
     result: null,
     deadlineAt: now - 1,
@@ -837,6 +851,7 @@ test('partially started autonomous workflow can never refresh its deadline', asy
     id: 'workflow-started-resume',
     profile: 'autonomous-maintenance',
     projectId: 'self',
+    scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
     status: 'pending',
     result: null,
     deadlineAt: now - 1,
@@ -892,6 +907,7 @@ test('autonomous maintenance never exceeds an inherited drain deadline', async (
     id: 'workflow-bounded-by-drain',
     profile: 'autonomous-maintenance',
     projectId: 'self',
+    scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
     status: 'pending',
     result: null,
     deadlineAt: now + 300_000,
