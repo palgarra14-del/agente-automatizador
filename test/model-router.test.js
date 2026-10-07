@@ -175,6 +175,42 @@ os.unlink(path)
   assert.deepEqual(result.models,['opencode/mimo-v2.6-flash-free','opencode/space-bunny-free']);
 });
 
+test('OpenCode service connection self-heals one stopped local service', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+home=Path(tempfile.mkdtemp())
+(home/".config/opencode").mkdir(parents=True)
+(home/".config/opencode/service.json").write_text(json.dumps({"password":"secret-value"}))
+m.Path.home=lambda: home
+fd,path=tempfile.mkstemp(); os.close(fd)
+m.OPENCODE=path
+calls=[]
+def fake_run(args,**kwargs):
+    calls.append(args[1:])
+    if args[1:]==["service","status"] and calls.count(["service","status"])==1:
+        return subprocess.CompletedProcess(args,1,stdout="",stderr="stopped")
+    if args[1:]==["service","start"]:
+        return subprocess.CompletedProcess(args,0,stdout="",stderr="")
+    if args[1:]==["service","status"]:
+        return subprocess.CompletedProcess(args,0,stdout="http://127.0.0.1:49374\\n",stderr="")
+    raise AssertionError(args)
+m._run=fake_run
+url,password=m._opencode_service_connection()
+print(json.dumps({"url":url,"password":password,"calls":calls}))
+os.unlink(path)
+`);
+  assert.equal(result.url,'http://127.0.0.1:49374');
+  assert.equal(result.password,'secret-value');
+  assert.deepEqual(result.calls,[
+    ['service','status'],
+    ['service','start'],
+    ['service','status']
+  ]);
+});
+
 test('OpenCode free-only guard accepts only local or explicitly free hosted models', () => {
   const result=python(`
 import importlib.util,json
