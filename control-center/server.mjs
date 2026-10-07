@@ -864,9 +864,11 @@ async function setNightMode(input) {
 
 async function changeAccessPin(input) {
   const pin = String(input?.pin ?? '').trim();
-  if (pin.length < 12 || pin.length > 128 || /[\r\n\0]/.test(pin)) throw new Error('recovery_key_invalid');
+  const passkey = await passkeyAuth.status();
+  const minLength = passkey.enabled ? 12 : 5;
+  if (pin.length < minLength || pin.length > 128 || /[\r\n\0]/.test(pin)) throw new Error('recovery_key_invalid');
   await setAccessToken(pin);
-  return { changed:true };
+  return { changed:true, minLength };
 }
 
 async function setOllama(input) {
