@@ -104,6 +104,9 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
       GH_CONFIG_DIR: '/home/pablo/.config/gh-custom',
       CODEX_HOME: '/home/pablo/.codex-custom',
       MODEL_COST_POLICY: 'subscription_included',
+      CODEX_SUBSCRIPTION_REMAINING_PERCENT: '42',
+      CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '37',
+      CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1',
       ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
       CODEX_BIN: '/usr/bin/codex',
       OPENCODE_BIN: '/usr/bin/opencode',
@@ -122,6 +125,9 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
   assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
   assert.match(unit, /MODEL_COST_POLICY=subscription_included/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_REMAINING_PERCENT=42/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_HEADROOM_PERCENT=37/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_RESERVE_OVERRIDE=1/);
   assert.match(unit, /ANTIGRAVITY_CLI=\/home\/pablo\/\.local\/bin\/agy/);
   assert.match(unit, /CODEX_BIN=\/usr\/bin\/codex/);
   assert.match(unit, /OPENCODE_BIN=\/usr\/bin\/opencode/);
@@ -132,6 +138,9 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
 test('systemd transient jobs inherit only approved non-secret provider configuration', () => {
   const args = systemdRunEnvironmentArgs({
     MODEL_COST_POLICY: 'subscription_included',
+    CODEX_SUBSCRIPTION_REMAINING_PERCENT: '21',
+    CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '22',
+    CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1',
     ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
     CODEX_BIN: '/usr/bin/codex',
     OPENCODE_BIN: '/usr/bin/opencode',
@@ -143,6 +152,9 @@ test('systemd transient jobs inherit only approved non-secret provider configura
   });
   assert.deepEqual(args, [
     '--setenv=MODEL_COST_POLICY=subscription_included',
+    '--setenv=CODEX_SUBSCRIPTION_REMAINING_PERCENT=21',
+    '--setenv=CODEX_SUBSCRIPTION_HEADROOM_PERCENT=22',
+    '--setenv=CODEX_SUBSCRIPTION_RESERVE_OVERRIDE=1',
     '--setenv=ANTIGRAVITY_CLI=/home/pablo/.local/bin/agy',
     '--setenv=CODEX_BIN=/usr/bin/codex',
     '--setenv=OPENCODE_BIN=/usr/bin/opencode',

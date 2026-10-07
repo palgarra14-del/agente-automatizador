@@ -8,6 +8,9 @@ test('native heartbeat installer is explicit, local-primary, and secret-free', (
   assert.match(script, /managed-by=engineering-orchestrator:native-heartbeat:v1/);
   assert.match(script, /AGENT_HEARTBEAT_EXECUTION_MODE=local-primary/);
   assert.match(script, /MODEL_COST_POLICY/);
+  assert.match(script, /CODEX_SUBSCRIPTION_REMAINING_PERCENT/);
+  assert.match(script, /CODEX_SUBSCRIPTION_HEADROOM_PERCENT/);
+  assert.match(script, /CODEX_SUBSCRIPTION_RESERVE_OVERRIDE/);
   assert.match(script, /--enable/);
   assert.match(script, /OnCalendar=\*-\*-\* \*:0\/2:00/);
   assert.match(script, /XDG_RUNTIME_DIR="\/run\/user\/\$\(id -u\)"/);
