@@ -262,7 +262,12 @@ def _opencode_service_connection():
         raise ProviderUnavailable("opencode_service_password_missing")
     proc=_run([OPENCODE,"service","status"],timeout=10)
     if proc.returncode!=0:
-        raise ProviderUnavailable("opencode_service_unavailable")
+        started=_run([OPENCODE,"service","start"],timeout=15)
+        if started.returncode!=0:
+            raise ProviderUnavailable("opencode_service_unavailable")
+        proc=_run([OPENCODE,"service","status"],timeout=10)
+        if proc.returncode!=0:
+            raise ProviderUnavailable("opencode_service_unavailable")
     server=(proc.stdout or "").strip().splitlines()
     if not server:
         raise ProviderUnavailable("opencode_service_url_missing")
