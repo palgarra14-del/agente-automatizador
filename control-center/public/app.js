@@ -837,6 +837,6 @@ $('restartServiceBtn').addEventListener('click', async () => {
   }
 });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { updateViaCache:'none' }).then((registration) => registration.update()).catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 refresh();
 setInterval(refresh, 7000);
