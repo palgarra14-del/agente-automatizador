@@ -751,10 +751,31 @@ function validateTask(input) {
     const location = String(source.location || '').trim();
     const services = String(source.services || '').split(/[\n,]+/).map((v) => v.trim()).filter(Boolean);
     if (!businessName || !category || !location || !services.length) throw new Error('business_brief_incomplete');
+    const optional = (value, max=500) => String(value || '').trim().slice(0, max);
+    const phone = optional(source.phone, 80);
+    const whatsapp = optional(source.whatsapp, 80);
+    const currentWebsite = optional(source.currentWebsite, 500);
+    const bookingUrl = optional(source.bookingUrl, 500);
+    const instagramUrl = optional(source.instagramUrl, 500);
+    const address = optional(source.address, 500);
     businessBrief = {
       version: 1, businessName, category, summary: goal, locations: [location],
-      services, contact: {}, brand: {},
-      website: { primaryGoal: 'Conseguir contactos', requiredPages: ['home','services','contact'], requiredFeatures: [] },
+      services,
+      contact: {
+        ...(phone ? { phone } : {}),
+        ...(whatsapp ? { whatsapp } : {}),
+        ...(address ? { address } : {})
+      },
+      brand: {
+        ...(instagramUrl ? { instagramUrl } : {})
+      },
+      website: {
+        primaryGoal: 'Conseguir contactos',
+        requiredPages: ['home','services','contact'],
+        requiredFeatures: [],
+        ...(currentWebsite ? { currentUrl: currentWebsite } : {}),
+        ...(bookingUrl ? { bookingUrl } : {})
+      },
       facts: [], contentRestrictions: [], assets: {}
     };
   }
