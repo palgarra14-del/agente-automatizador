@@ -185,6 +185,22 @@ function pathAllowedForAutopilot(path, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
   return allowed && !forbidden;
 }
 
+export function autonomousWorkflowScopeCompatible(workflowScope = {}, policyScope = AUTONOMOUS_MAINTENANCE_SCOPE) {
+  const workflowAllowed = Array.isArray(workflowScope?.allowedPaths) ? workflowScope.allowedPaths : [];
+  const workflowForbidden = Array.isArray(workflowScope?.forbiddenPaths) ? workflowScope.forbiddenPaths : [];
+  const currentAllowed = Array.isArray(policyScope?.allowedPaths) ? policyScope.allowedPaths : [];
+  const currentForbidden = Array.isArray(policyScope?.forbiddenPaths) ? policyScope.forbiddenPaths : [];
+  if (!workflowAllowed.length || !currentAllowed.length) return false;
+  if (!workflowAllowed.every((root) => typeof root === 'string' && pathAllowedForAutopilot(root, policyScope))) return false;
+  return currentForbidden.every((forbiddenRoot) => {
+    const reachable = workflowAllowed.some((allowedRoot) => pathWithin(allowedRoot, forbiddenRoot));
+    if (!reachable) return true;
+    return workflowForbidden.some((blockedRoot) =>
+      typeof blockedRoot === 'string' && pathWithin(blockedRoot, forbiddenRoot)
+    );
+  });
+}
+
 function pristineWorkflowForDeadlineRefresh(plan) {
   return Boolean(
     plan &&
@@ -525,6 +541,22 @@ export class AutonomousProjectImprovement {
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
         return { ...resultSummary(plan), status: plan.status };
+      }
+
+      if (!autonomousWorkflowScopeCompatible(plan.scope, this.scope)) {
+        if (typeof this.workflowEngine.cancel !== 'function') {
+          throw new Error('autonomous_workflow_scope_policy_changed');
+        }
+        const cancelled = await this.workflowEngine.cancel(workflowId, {
+          reason: 'autonomous_workflow_scope_policy_changed',
+          deadlineCapAt: tickDeadlineAt
+        });
+        await this.settle(cancelled, { baseRevision });
+        return {
+          ...resultSummary(cancelled),
+          status: cancelled.status,
+          scopePolicyChanged: true
+        };
       }
 
       if (plan.status === 'awaiting_approval') {
