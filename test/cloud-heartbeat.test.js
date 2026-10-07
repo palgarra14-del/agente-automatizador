@@ -27,6 +27,17 @@ test('heartbeat defers expired local GitHub auth to scheduled cloud recovery', (
   });
 });
 
+test('local-primary heartbeat can hand one lane to the governed drain without a duplicate deep peek', () => {
+  const state=classifyLaneObservation({lane:'callflow',localPrimaryProbe:true,operatorRequested:true});
+  assert.deepEqual(state,{
+    lane:'callflow',
+    state:'pending',
+    runnable:true,
+    reason:'local_primary_probe',
+    operatorRequested:true
+  });
+});
+
 test('heartbeat defers lanes it could not observe within the cycle budget', () => {
   const state=classifyLaneObservation({lane:'website-pilot',observationSkipped:true});
   assert.deepEqual(state,{

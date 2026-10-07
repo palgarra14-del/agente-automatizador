@@ -189,6 +189,33 @@ test('cloud rehydration fails closed if the remote working branch moved', async 
   assert.equal(calls.some((call) => call[0] === 'git' && call[1] === 'switch'), false);
 });
 
+test('capped durable run performs interrupted read-only recovery before normal execution', async () => {
+  const instance = Object.create(DurableCloudWorkflowEngine.prototype);
+  instance.preparingDurableCheckpoints = new Set();
+  instance.suppressDurability = 0;
+  instance.now = () => 0;
+  const calls = [];
+  instance.recoverInterruptedReadOnlyStepForRun = async (id, options) => {
+    calls.push(['recover', id, options.deadlineCapAt]);
+    return { id, status: WorkflowStepStatus.BLOCKED, result: { historicalRecovery:true } };
+  };
+  instance.store = {
+    async withExecutionLease(collection, id, kind, operation, options) {
+      calls.push(['lease', collection, id, kind, options.deadlineAt]);
+      return operation();
+    }
+  };
+
+  const result = await instance.run('workflow-stale-readonly', { deadlineCapAt: 1_000 });
+
+  assert.equal(result.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(result.result.historicalRecovery, true);
+  assert.deepEqual(calls, [
+    ['lease', 'workflows', 'workflow-stale-readonly', 'workflow', 1_000],
+    ['recover', 'workflow-stale-readonly', 1_000]
+  ]);
+});
+
 test('durable deadline cap blocks get and resume before any prework when already expired', async () => {
   const instance = Object.create(DurableCloudWorkflowEngine.prototype);
   instance.preparingDurableCheckpoints = new Set();

@@ -149,9 +149,29 @@ const observationStartedAt=Date.now();
 const observationRotation = Math.floor(Date.now() / 60_000);
 let deepObservations = 0;
 const maxDeepObservations = 1;
+let localPrimaryProbeAssigned = false;
 for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRotation)) {
   if (active.has(lane) || cooldown.has(lane)) {
     observations.push(await observeLane(lane,active,cooldown,operatorLanes,1_000));
+    continue;
+  }
+  if (executionMode === 'local-primary') {
+    if (!localPrimaryProbeAssigned) {
+      localPrimaryProbeAssigned = true;
+      observations.push({
+        lane,
+        active:false,
+        operatorRequested:operatorLanes.has(lane),
+        localPrimaryProbe:true
+      });
+    } else {
+      observations.push({
+        lane,
+        active:false,
+        operatorRequested:operatorLanes.has(lane),
+        observationSkipped:true
+      });
+    }
     continue;
   }
   const remainingMs=observationBudgetMs-(Date.now()-observationStartedAt);

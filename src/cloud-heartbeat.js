@@ -95,6 +95,9 @@ export function classifyLaneObservation(observation) {
   if (observation.observationSkipped === true) {
     return { lane, state:'deferred', runnable:false, reason:'observation_budget', operatorRequested };
   }
+  if (observation.localPrimaryProbe === true) {
+    return { lane, state:'pending', runnable:true, reason:'local_primary_probe', operatorRequested };
+  }
   if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected', operatorRequested };
   if (observation.error && RECOVERABLE.test(String(observation.error))) {
     return { lane, state:'recovery', runnable:true, reason:'recoverable_control_error', operatorRequested };

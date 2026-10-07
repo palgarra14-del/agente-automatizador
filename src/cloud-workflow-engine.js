@@ -153,7 +153,15 @@ export class DurableCloudWorkflowEngine extends WorkflowEngine {
         'workflows',
         id,
         'workflow',
-        async () => super.runUnlocked(id, options),
+        async () => {
+          const recovered = await this.recoverInterruptedReadOnlyStepForRun(id, {
+            deadlineCapAt: this.executionDeadlineCap(id, options.deadlineCapAt)
+          });
+          if (recovered && [WorkflowStepStatus.FAILED, WorkflowStepStatus.BLOCKED].includes(recovered.status)) {
+            return recovered;
+          }
+          return super.runUnlocked(id, options);
+        },
         {
           beforeClaimCommit: () => this.assertExecutionDeadline(id),
           deadlineAt: this.executionDeadlineCap(id, options.deadlineCapAt)
