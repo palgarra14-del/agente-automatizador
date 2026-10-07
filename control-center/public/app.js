@@ -337,6 +337,8 @@ function renderNightMode(data) {
     : 'Solo se activa cuando tú lo ordenas. Mantiene el equipo despierto, bloquea la sesión y apaga la pantalla. No cierra aplicaciones.';
   $('activateNightModeBtn').disabled = active;
   $('deactivateNightModeBtn').disabled = !active;
+  $('nightModeQuickBtn').textContent = active ? 'Salir modo noche' : 'Modo noche';
+  $('nightModeQuickBtn').className = active ? 'ghost' : 'primary';
 }
 
 function renderStats(data) {
@@ -402,7 +404,9 @@ function renderAiHealth(data) {
   for (const provider of providers) {
     const detail = provider.state === 'cooldown'
       ? 'Motivo: '+esc(provider.reasonCategory || 'unknown')+' · reintento en '+duration(provider.retryInSeconds)
-      : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
+      : provider.id === 'codex'
+        ? (provider.authenticated ? 'CLI autenticado con ChatGPT · listo para routing' : (provider.installed ? 'CLI instalado · requiere autenticación' : 'CLI no detectado'))
+        : (provider.local ? (provider.processActive ? 'Proceso local activo' : 'Proceso local no detectado') : 'Elegible para routing');
     cards.push('<article class="health-item">'+
       '<div class="item-top"><strong>'+esc(provider.label)+'</strong><span class="badge '+statusClass(provider.state)+'">'+esc(provider.state)+'</span></div>'+
       '<div class="meta">'+esc(provider.kind)+'<br>'+detail+'</div></article>');
@@ -783,6 +787,11 @@ $('resumeAllBtn').addEventListener('click', async () => {
   } finally {
     button.disabled = false;
   }
+});
+
+$('nightModeQuickBtn').addEventListener('click', () => {
+  const active = lastData?.nightMode?.active === true;
+  $(active ? 'deactivateNightModeBtn' : 'activateNightModeBtn').click();
 });
 
 $('activateNightModeBtn').addEventListener('click', async () => {

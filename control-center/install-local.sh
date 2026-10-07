@@ -62,7 +62,7 @@ cat > "$UNITS/agent-control-tunnel.service" <<EOF
 [Unit]
 Description=Agent mobile control public tunnel
 After=network-online.target agent-control-center.service
-Requires=agent-control-center.service
+Wants=agent-control-center.service
 
 [Service]
 Type=simple

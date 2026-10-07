@@ -316,6 +316,18 @@ async function getAiHealth(processes = []) {
     const result = await run(process.env.OPENCODE_BIN || 'opencode', ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
     return { available: result.ok, version: result.ok ? result.stdout : null };
   });
+  const codexProbe = await cachedTelemetry('codex-availability', 60_000, async () => {
+    const binary = process.env.CODEX_BIN || 'codex';
+    const version = await run(binary, ['--version'], { cwd:'/', timeout:2_000, maxBuffer:32_000 });
+    if (!version.ok) return { available:false, authenticated:false, version:null };
+    const auth = await run(binary, ['login', 'status'], { cwd:'/', timeout:3_000, maxBuffer:32_000 });
+    const authText = [auth.stdout, auth.stderr].filter(Boolean).join('\n');
+    return {
+      available: true,
+      authenticated: auth.ok && /logged in/i.test(authText),
+      version: version.stdout || null
+    };
+  });
   const now = Date.now() / 1000;
   let runtime = { providers: {}, candidates: {} };
   try {
@@ -324,6 +336,16 @@ async function getAiHealth(processes = []) {
 
   const localText = processes.join('\n').toLowerCase();
   const providers = [
+    {
+      id: 'codex',
+      label: 'Codex',
+      kind: 'cloud/ChatGPT',
+      local: false,
+      installed: codexProbe.available,
+      authenticated: codexProbe.authenticated,
+      version: codexProbe.version,
+      processActive: localText.includes('codex')
+    },
     {
       id: 'antigravity',
       label: 'Antigravity',
@@ -355,9 +377,11 @@ async function getAiHealth(processes = []) {
       ...provider,
       state: cooldown
         ? 'cooldown'
-        : provider.id === 'opencode'
-          ? (provider.installed ? 'available' : 'offline')
-          : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
+        : provider.id === 'codex'
+          ? (!provider.installed ? 'offline' : (provider.authenticated ? 'available' : 'auth_required'))
+          : provider.id === 'opencode'
+            ? (provider.installed ? 'available' : 'offline')
+            : (provider.local ? (provider.processActive ? 'available' : 'offline') : 'available'),
       reasonCategory: cooldown ? providerFailureCategory(persisted?.reason) : null,
       cooldownUntil: cooldown ? new Date(untilEpoch * 1000).toISOString() : null,
       retryInSeconds: cooldown ? Math.max(0, Math.ceil(untilEpoch - now)) : 0
