@@ -87,6 +87,23 @@ test('heartbeat rotates ordinary business observation order so a slow earlier la
   );
 });
 
+test('heartbeat rotates multiple operator-requested business lanes instead of starving later lanes', () => {
+  const lanes=['self','website-pilot','leadfinder','callflow'];
+  const operator=new Set(['callflow','leadfinder','website-pilot']);
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,0),
+    ['callflow','leadfinder','website-pilot','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,1),
+    ['leadfinder','website-pilot','callflow','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,2),
+    ['website-pilot','callflow','leadfinder','self']
+  );
+});
+
 test('heartbeat observation rotation is bounded for large and negative counters', () => {
   const lanes=['callflow','leadfinder','website-pilot','self'];
   assert.deepEqual(
@@ -128,6 +145,22 @@ test('heartbeat fills all runner capacity with business before self', () => {
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder','website-pilot']);
   assert.deepEqual(plan.deferred,[{lane:'self',priority:'maintenance',reason:'global_capacity'}]);
+});
+
+
+test('heartbeat surfaces the current autoranking before dispatch', () => {
+  const plan=planHeartbeat([
+    {lane:'self',hasWork:true},
+    {lane:'website-pilot',hasWork:true},
+    {lane:'leadfinder',hasWork:true},
+    {lane:'callflow',hasWork:true}
+  ],{maxHeavy:2,maxBusinessHeavy:2,maxSelfHeavy:1});
+
+  assert.deepEqual(plan.ranking.map((item)=>item.lane),[
+    'callflow','leadfinder','website-pilot','self'
+  ]);
+  assert.deepEqual(plan.ranking.map((item)=>item.rank),[1,2,3,4]);
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder']);
 });
 
 test('active business work leaves the last runner for waiting business before self', () => {

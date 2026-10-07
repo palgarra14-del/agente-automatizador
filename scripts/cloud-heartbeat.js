@@ -17,8 +17,8 @@ function boundedDuration(name, fallback, min, max) {
   return Math.round(value);
 }
 
-const timeoutMs = boundedDuration('AGENT_HEARTBEAT_PEEK_TIMEOUT_MS', 20_000, 1_000, 60_000);
-const observationBudgetMs = boundedDuration('AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS', 35_000, 5_000, 120_000);
+const timeoutMs = boundedDuration('AGENT_HEARTBEAT_PEEK_TIMEOUT_MS', 60_000, 1_000, 60_000);
+const observationBudgetMs = boundedDuration('AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS', 65_000, 5_000, 120_000);
 const dryRun = ['1','true','yes','on'].includes(String(process.env.AGENT_HEARTBEAT_DRY_RUN || '').toLowerCase());
 const executionMode = heartbeatExecutionMode(process.env.AGENT_HEARTBEAT_EXECUTION_MODE || 'cloud');
 
@@ -147,13 +147,15 @@ const operatorLanes=new Set(operatorRequestedLanes(operatorIssues,config));
 const observations=[];
 const observationStartedAt=Date.now();
 const observationRotation = Math.floor(Date.now() / 60_000);
+let deepObservations = 0;
+const maxDeepObservations = 1;
 for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRotation)) {
-  if (active.has(lane)) {
+  if (active.has(lane) || cooldown.has(lane)) {
     observations.push(await observeLane(lane,active,cooldown,operatorLanes,1_000));
     continue;
   }
   const remainingMs=observationBudgetMs-(Date.now()-observationStartedAt);
-  if (remainingMs < 1_000) {
+  if (deepObservations >= maxDeepObservations || remainingMs < 1_000) {
     observations.push({
       lane,
       active:false,
@@ -162,6 +164,7 @@ for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRota
     });
     continue;
   }
+  deepObservations += 1;
   observations.push(await observeLane(lane,active,cooldown,operatorLanes,Math.min(timeoutMs,remainingMs)));
 }
 

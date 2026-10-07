@@ -34,13 +34,14 @@ export function heartbeatObservationOrder(lanes = [], operatorLanes = [], rotati
   const self = ordinary.filter((lane) => lane === 'self');
   const business = ordinary.filter((lane) => lane !== 'self');
   const numericRotation = Number.isFinite(Number(rotation)) ? Math.trunc(Number(rotation)) : 0;
-  const offset = business.length
-    ? ((numericRotation % business.length) + business.length) % business.length
-    : 0;
+  const rotate = (values) => {
+    if (!values.length) return [];
+    const offset = ((numericRotation % values.length) + values.length) % values.length;
+    return [...values.slice(offset), ...values.slice(0, offset)];
+  };
   return [
-    ...operatorFirst,
-    ...business.slice(offset),
-    ...business.slice(0, offset),
+    ...rotate(operatorFirst),
+    ...rotate(business),
     ...self
   ];
 }
@@ -126,6 +127,12 @@ export function planHeartbeat(observations = [], limits = {}) {
     version:1,
     classified,
     running,
+    ranking:plan.ranking.map((item) => ({
+      rank:item.rank,
+      lane:item.lane,
+      priority:item.band,
+      score:item.score
+    })),
     dispatch:plan.selected.map((item) => ({
       lane:item.lane,
       priority:item.band,

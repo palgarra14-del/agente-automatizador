@@ -2323,6 +2323,64 @@ test('run recovers an orphaned read-only model reservation without refunding mod
   assert.ok(waiting.deadlineAt > clock);
 });
 
+test('historical interrupted read-only workflow is retired after capability drift when workspace is unchanged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-historical-interrupted-readonly-'));
+  const configured = managedProject('historical-interrupted-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retire stale interrupted read-only work'
+  });
+  await instance.workspaceProject(created.id, configured);
+  const staleRegistryFingerprint = '1'.repeat(64);
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    plan.registryFingerprint = staleRegistryFingerprint;
+    plan.status = WorkflowStepStatus.RUNNING;
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: staleRegistryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+  });
+
+  const retired = await instance.run(created.id);
+  const inspect = retired.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(retired.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(retired.result.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(retired.result.historicalRecovery, true);
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(inspect.evidence.type, 'historical-interrupted-execution');
+  assert.equal(inspect.evidence.historicalRecovery, true);
+  assert.equal(inspect.evidence.retryAvailable, false);
+});
+
 test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
   const configured = configFrom({
     id: 'readonly-transient-model',

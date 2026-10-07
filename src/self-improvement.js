@@ -99,6 +99,7 @@ function emptyAutopilot() {
     starts: [],
     history: [],
     lastIntelligence: null,
+    nextRanking: null,
     gapMemory: [],
     suspendedUntil: null,
     updatedAt: null
@@ -388,8 +389,10 @@ export class AutonomousProjectImprovement {
       latest.baseRevision.toLowerCase() !== this.operatorRevision;
   }
 
-  async hasWork() {
-    const state = await this.readState();
+  async hasWork(rootState = null) {
+    const state = rootState === null
+      ? await this.readState()
+      : normalizeAutopilot(rootState?.[this.stateKey], this.maxStartsPer24h);
     if (state.activeWorkflowId) return true;
     if (state.suspendedUntil &&
         Date.parse(state.suspendedUntil) > this.now() &&
@@ -404,26 +407,66 @@ export class AutonomousProjectImprovement {
     const summary = resultSummary(plan);
     const billingUnavailable = billingUnavailableError(summary.error);
     const completedAt = new Date(this.now()).toISOString();
-    return this.writeState((state) => ({
-      ...state,
-      activeWorkflowId: null,
-      activeBaseRevision: null,
-      history: [...state.history, {
+    return this.writeState((state) => {
+      const history = [...state.history, {
         ...summary,
         baseRevision,
         completedAt
-      }].slice(-HISTORY_LIMIT),
-      gapMemory: rememberGapOutcome(
+      }].slice(-HISTORY_LIMIT);
+      const gapMemory = rememberGapOutcome(
         state.gapMemory,
         state.lastIntelligence?.primary ?? null,
         summary.status,
         completedAt,
         summary.error
-      ),
-      suspendedUntil: billingUnavailable
-        ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
-        : null
-    }));
+      );
+      const settledState = {
+        ...state,
+        history,
+        gapMemory
+      };
+      let nextRanking = null;
+      if (this.intelligence) {
+        try {
+          const analysis = this.intelligence.analyze({
+            history,
+            recentProposalPaths: this.recentProposalPaths(settledState),
+            memory: gapMemory
+          });
+          nextRanking = analysis ? {
+            version: analysis.version,
+            projectId: analysis.projectId,
+            primary: analysis.primary,
+            signals: analysis.signals,
+            directive: analysis.directive,
+            generatedAt: completedAt,
+            trigger: 'workflow_terminal',
+            afterWorkflowId: summary.workflowId
+          } : null;
+        } catch (error) {
+          nextRanking = {
+            version: 1,
+            projectId: this.projectId,
+            primary: null,
+            signals: [],
+            directive: null,
+            generatedAt: completedAt,
+            trigger: 'workflow_terminal',
+            afterWorkflowId: summary.workflowId,
+            error: String(error?.message ?? error).replace(/\s+/g, ' ').trim().slice(0, 240)
+          };
+        }
+      }
+      return {
+        ...settledState,
+        activeWorkflowId: null,
+        activeBaseRevision: null,
+        nextRanking,
+        suspendedUntil: billingUnavailable
+          ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
+          : null
+      };
+    });
   }
 
   async createWorkflow() {
@@ -437,7 +480,19 @@ export class AutonomousProjectImprovement {
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
-    const gapAnalysis = this.intelligence?.analyze({
+    const queuedRanking = state.nextRanking &&
+      state.nextRanking.projectId === this.projectId &&
+      state.nextRanking.primary &&
+      typeof state.nextRanking.directive === 'string'
+      ? {
+          version: state.nextRanking.version,
+          projectId: state.nextRanking.projectId,
+          primary: state.nextRanking.primary,
+          signals: Array.isArray(state.nextRanking.signals) ? state.nextRanking.signals : [],
+          directive: state.nextRanking.directive
+        }
+      : null;
+    const gapAnalysis = queuedRanking ?? this.intelligence?.analyze({
       history: state.history,
       recentProposalPaths,
       memory: state.gapMemory
@@ -475,6 +530,7 @@ export class AutonomousProjectImprovement {
         primary: gapAnalysis.primary,
         signals: gapAnalysis.signals
       } : null,
+      nextRanking: null,
       gapMemory: gapAnalysis
         ? rememberGapAnalysis(current.gapMemory, gapAnalysis, startedAt)
         : current.gapMemory,

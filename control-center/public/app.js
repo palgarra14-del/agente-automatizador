@@ -327,6 +327,18 @@ function renderRemoteControl(data) {
   $('resumeAllBtn').disabled = !globalPaused && paused.length === 0;
 }
 
+function renderNightMode(data) {
+  const mode = data.nightMode || {};
+  const active = mode.active === true;
+  $('nightModeBadge').textContent = active ? 'NOCHE ACTIVA' : 'NOCHE OFF';
+  $('nightModeBadge').className = 'badge ' + (active ? 'good' : 'warn');
+  $('nightModeNote').textContent = active
+    ? 'Suspensión bloqueada. La sesión queda bloqueada y la pantalla apagada hasta que salgas del modo noche.'
+    : 'Solo se activa cuando tú lo ordenas. Mantiene el equipo despierto, bloquea la sesión y apaga la pantalla. No cierra aplicaciones.';
+  $('activateNightModeBtn').disabled = active;
+  $('deactivateNightModeBtn').disabled = !active;
+}
+
 function renderStats(data) {
   const records = data.queue?.records || [];
   const active = records.filter((r) => activeStates.has(r.status)).length;
@@ -530,6 +542,7 @@ function render(data) {
   lastData = data;
   renderStats(data);
   renderRemoteControl(data);
+  renderNightMode(data);
   renderMission(data);
   renderInfrastructure(data);
   renderAttention(data);
@@ -769,6 +782,33 @@ $('resumeAllBtn').addEventListener('click', async () => {
     toast('Error: ' + e.message);
   } finally {
     button.disabled = false;
+  }
+});
+
+$('activateNightModeBtn').addEventListener('click', async () => {
+  if (!globalThis.confirm('¿Activar modo noche? Se bloqueará la sesión y se apagará la pantalla, pero el agente seguirá trabajando. No se cerrarán tus aplicaciones.')) return;
+  const button = $('activateNightModeBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/night-mode', {method:'POST', body:JSON.stringify({enabled:true})});
+    toast('Modo noche activado');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    setTimeout(refresh, 700);
+  }
+});
+
+$('deactivateNightModeBtn').addEventListener('click', async () => {
+  const button = $('deactivateNightModeBtn');
+  button.disabled = true;
+  try {
+    await api('/api/control/night-mode', {method:'POST', body:JSON.stringify({enabled:false})});
+    toast('Modo noche desactivado');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    setTimeout(refresh, 700);
   }
 });
 

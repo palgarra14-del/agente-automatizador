@@ -48,6 +48,16 @@ RestartSec=3
 WantedBy=default.target
 EOF
 
+cat > "$UNITS/agent-night-mode.service" <<EOF
+[Unit]
+Description=Agent night mode sleep inhibitor
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/systemd-inhibit --what=sleep --why=Agent-night-mode --mode=block /usr/bin/sleep infinity
+Restart=no
+EOF
+
 cat > "$UNITS/agent-control-tunnel.service" <<EOF
 [Unit]
 Description=Agent mobile control public tunnel

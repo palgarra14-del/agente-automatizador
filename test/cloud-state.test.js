@@ -2298,6 +2298,56 @@ test('global lease release still fails closed when authoritative state retains t
   assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
 });
 
+test('execution lease release retries after a verified transient cloud-state write failure', async () => {
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, { sleep: async (ms) => { sleeps.push(ms); } });
+  const state = {
+    runs: {
+      one: {
+        id: 'one',
+        executionLease: { leaseId:'lease-1', kind:'run', pid:123, createdAt:'2026-09-17T00:00:00.000Z', ownerIdentity:'github:1:1' }
+      }
+    }
+  };
+  let attempts = 0;
+  store.mutate = async (mutator) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('injected_execution_lease_release_failure');
+    return mutator(state);
+  };
+  store.readSnapshot = async () => ({ state });
+
+  assert.equal(await store.releaseExecutionLease('runs', 'one', 'lease-1'), true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [250]);
+  assert.equal(state.runs.one.executionLease, null);
+});
+
+test('execution lease release is idempotent when the write succeeded but the response failed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const state = {
+    runs: {
+      one: {
+        id: 'one',
+        executionLease: { leaseId:'lease-1', kind:'run', pid:123, createdAt:'2026-09-17T00:00:00.000Z', ownerIdentity:'github:1:1' }
+      }
+    }
+  };
+  let attempts = 0;
+  store.mutate = async (mutator) => {
+    attempts += 1;
+    const result = mutator(state);
+    throw new Error('injected_response_loss_after_release');
+  };
+  store.readSnapshot = async () => ({ state });
+
+  assert.equal(await store.releaseExecutionLease('runs', 'one', 'lease-1'), true);
+  assert.equal(attempts, 1);
+  assert.equal(state.runs.one.executionLease, null);
+});
+
 test('execution lease abandonment fails closed when owner run cannot be verified', async () => {
   let now = Date.parse('2026-09-17T00:00:00Z');
   const fake = fakeGitHub();

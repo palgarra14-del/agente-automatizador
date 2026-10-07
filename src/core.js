@@ -4340,6 +4340,51 @@ export class WorkflowEngine {
       }, { deadlineAt: deadlineCapAt });
     }
 
+    const capabilityContextChanged =
+      observed.registryFingerprint !== this.registry.fingerprint ||
+      observed.specialistRegistryFingerprint !== this.specialistRegistry.fingerprint ||
+      observed.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {});
+    if (capabilityContextChanged) {
+      return this.update(id, (saved) => {
+        const step = saved.steps.find((item) => item.id === interruptedStep.id);
+        if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
+          throw new Error('historical_interrupted_read_only_recovery_state_changed');
+        }
+        const startedCalls = saved.modelUsage.entries.filter((entry) =>
+          entry.status === 'started' &&
+          entry.surface === 'workflow' &&
+          entry.stepId === step.id &&
+          entry.attempt === step.attempts
+        );
+        if (startedCalls.length > 1) throw new Error('interrupted_read_only_model_reservation_ambiguous');
+        if (startedCalls.length === 1) {
+          completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
+        }
+        step.status = WorkflowStepStatus.BLOCKED;
+        step.error = 'historical_interrupted_read_only_capability_context_changed';
+        step.evidence = {
+          ...step.evidence,
+          type: 'historical-interrupted-execution',
+          ok: false,
+          recoveredAt: new Date(this.now()).toISOString(),
+          interruptedModelCallId: startedCalls[0]?.id ?? null,
+          retryAvailable: false,
+          historicalRecovery: true,
+          capabilityContext: {
+            savedRegistryFingerprint: observed.registryFingerprint,
+            activeRegistryFingerprint: this.registry.fingerprint,
+            savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
+            activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+            savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
+            activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
+          }
+        };
+        saved.status = WorkflowStepStatus.BLOCKED;
+        saved.pausedAt = null;
+        saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
+      }, { deadlineAt: deadlineCapAt });
+    }
+
     return this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === interruptedStep.id);
       if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {

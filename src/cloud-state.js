@@ -2407,6 +2407,38 @@ export class GitHubStateStore extends JsonStore {
     throw new Error('cloud_state_direct_save_forbidden');
   }
 
+  async releaseExecutionLease(collection, id, leaseId) {
+    const retryDelaysMs = [250, 750];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await super.releaseExecutionLease(collection, id, leaseId);
+      } catch (error) {
+        let snapshot;
+        try {
+          snapshot = await this.readSnapshot({ repair: true });
+        } catch {
+          if (attempt < retryDelaysMs.length) {
+            this.hotLeaseSnapshot = null;
+            await this.sleep(retryDelaysMs[attempt]);
+            continue;
+          }
+          throw error;
+        }
+        const entity = snapshot.state?.[collection]?.[id];
+        if (!entity) throw error;
+        const currentLease = entity.executionLease ?? null;
+        this.cacheSnapshotForActiveLease(snapshot);
+        if (!currentLease) return true;
+        if (currentLease.leaseId !== leaseId) return false;
+        if (attempt < retryDelaysMs.length) {
+          await this.sleep(retryDelaysMs[attempt]);
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
   async mutateInternal(mutator, { requireLease, beforeCommit = null, deadlineAt = null }) {
     if (beforeCommit !== null && typeof beforeCommit !== 'function') throw new Error('cloud_state_before_commit_invalid');
     if (deadlineAt !== null && (!Number.isFinite(deadlineAt) || deadlineAt <= 0)) throw new Error('cloud_state_deadline_invalid');

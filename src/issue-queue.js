@@ -1017,8 +1017,8 @@ export class SupervisedIssueQueue {
     };
   }
 
-  async hasExecutionWork() {
-    const state = await this.store.load();
+  async hasExecutionWork(rootState = null) {
+    const state = rootState ?? await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     return Object.entries(state.requests ?? {}).some(([key, record]) =>
       key.startsWith(keyPrefix) &&
@@ -2256,8 +2256,8 @@ export class SupervisedIssueQueue {
       : this.initializeIssue(issue, parsed);
   }
 
-  async hasWork() {
-    const state = await this.store.load();
+  async hasWork(rootState = null, pendingAdmissionIntents = null) {
+    const state = rootState ?? await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
 
@@ -2267,7 +2267,12 @@ export class SupervisedIssueQueue {
       if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
     }
 
-    if (this.includedProjectIds !== null) return (await this.pendingAdmissionIntents()).length > 0;
+    if (this.includedProjectIds !== null) {
+      const intents = Array.isArray(pendingAdmissionIntents)
+        ? pendingAdmissionIntents
+        : await this.pendingAdmissionIntents();
+      return intents.length > 0;
+    }
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;

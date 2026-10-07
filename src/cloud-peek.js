@@ -12,24 +12,27 @@ export async function cloudPeekHasWork({
 }) {
   if (!store || !queue) throw new Error('cloud_peek_dependencies_required');
 
+  let admissionIntents = null;
   if (typeof queue.pendingAdmissionIntents === 'function') {
-    const intents = await queue.pendingAdmissionIntents();
-    if (Array.isArray(intents) && intents.length > 0) return true;
+    admissionIntents = await queue.pendingAdmissionIntents();
+    if (Array.isArray(admissionIntents) && admissionIntents.length > 0) return true;
   }
 
+  let snapshot;
   try {
-    await store.readSnapshot({ repair: true });
+    snapshot = await store.readSnapshot({ repair: true });
   } catch (error) {
     if (error?.message === 'cloud_state_conflict') return true;
     throw error;
   }
 
   try {
+    const rootState = snapshot?.state ?? null;
     const queueWork = executionOnly
-      ? await queue.hasExecutionWork()
-      : await queue.hasWork();
+      ? await queue.hasExecutionWork(rootState)
+      : await queue.hasWork(rootState, admissionIntents);
     const autonomousWork = autonomousSelfImprovement
-      ? await autonomousSelfImprovement.hasWork()
+      ? await autonomousSelfImprovement.hasWork(rootState)
       : false;
     return Boolean(queueWork || autonomousWork);
   } catch (error) {
