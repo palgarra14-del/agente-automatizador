@@ -1628,7 +1628,8 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   }
   const fallbackResult = await new CodexSdkWorker({
     CodexClient: QuotaThenApiCodex,
-    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }),
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1', PAID_MODELS_EXPLICITLY_ENABLED: '1' }),
     codexHomeFactory: (env) => isolatedHome(env, true),
     platform: 'linux'
   }).execute({ objective: 'fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
@@ -1648,7 +1649,8 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   }
   const noSessionResult = await new CodexSdkWorker({
     CodexClient: ApiOnlyCodex,
-    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey }),
+    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1', PAID_MODELS_EXPLICITLY_ENABLED: '1' }),
     codexHomeFactory: (env) => isolatedHome(env, false),
     platform: 'linux'
   }).execute({ objective: 'no session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
@@ -1657,6 +1659,23 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   assert.equal(noSessionResult.paidApiUsed, true);
   assert.equal(noSessionOptions.length, 1);
   assert.equal(noSessionOptions[0].apiKey, openAiKey);
+
+  const blockedOptions = [];
+  class BlockedApiFallbackCodex {
+    constructor(options) { blockedOptions.push(options); }
+    startThread() { return { id: 'thread-blocked', run: async () => { throw new Error('usage limit reached'); } }; }
+  }
+  const blockedResult = await new CodexSdkWorker({
+    CodexClient: BlockedApiFallbackCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1' }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'blocked fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(blockedResult.status, 'failed');
+  assert.match(blockedResult.output, /usage limit reached/);
+  assert.equal(blockedOptions.length, 1);
+  assert.equal(Object.hasOwn(blockedOptions[0], 'apiKey'), false);
 
   const transientOptions = [];
   class TransientCodex {
@@ -1681,7 +1700,7 @@ test('both writing and read-only Codex surfaces share the session-first cost rou
   const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
   assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
   assert.match(source, /refreshAuthFromSource/);
-  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
+  assert.match(source, /if \(signal\?\.aborted \|\| !apiFallbackEnabled \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
   assert.match(source, /paidApiUsed: authentication === 'api'/);
   assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
   assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);

@@ -20,6 +20,7 @@ os.environ["MODEL_COST_POLICY"] = (
     "subscription_included" if _requested_cost_policy == "subscription_included" else "free_only"
 )
 os.environ["PAID_MODELS_EXPLICITLY_ENABLED"] = "0"
+os.environ["CODEX_PAID_API_FALLBACK_ENABLED"] = "0"
 os.environ["CODEX_API_KEY"] = ""
 os.environ["OPENAI_API_KEY"] = ""
 os.environ.setdefault("OPENCODE_FREE_ENABLED", "1")
@@ -101,6 +102,7 @@ def _result_envelope(result):
         "resourceClass": result.get("resourceClass"),
         "providerSlot": result.get("providerSlot"),
         "routingScore": result.get("routingScore"),
+        "subscriptionQuota": result.get("subscriptionQuota"),
         "elapsedSeconds": result.get("elapsedSeconds"),
         "fallbackErrors": result.get("fallbackErrors") or [],
         **({"value": result.get("value")} if "value" in result else {}),

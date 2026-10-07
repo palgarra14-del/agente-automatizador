@@ -4,6 +4,12 @@ Research date: 2026-09-29.
 
 This policy exists to prevent one model from becoming the default for every task. Routing stays adaptive: local outcome evidence may overturn these priors, but each model starts from work that matches its published strengths. Cost policy remains authoritative; subscription/paid candidates stay unavailable while `MODEL_COST_POLICY=free_only`.
 
+## Cost and quota governance
+
+Paid API inference is hard-disabled in the multi-model gateway. The gateway strips both `CODEX_API_KEY` and `OPENAI_API_KEY`; Codex candidates use session authentication only. `subscription_quota` is a distinct resource class from generic paid inference and is eligible only under `MODEL_COST_POLICY=subscription_included`.
+
+Codex subscription headroom is currently an environment-fed control because this runtime has no stable machine-readable quota endpoint. Operators or future telemetry may set `CODEX_SUBSCRIPTION_REMAINING_PERCENT` (or the equivalent `CODEX_SUBSCRIPTION_HEADROOM_PERCENT`). The governor reserves 20% by default and blocks subscription candidates when known remaining headroom is at or below that reserve. `CODEX_SUBSCRIPTION_RESERVE_OVERRIDE=1` is an explicit emergency override. Unknown headroom remains usable under `subscription_included`, but routing metadata and policy snapshots report it as `unknown`; no interactive terminal UI is scraped.
+
 ## Evidence-backed assignments
 
 | Model / route | Primary jobs | Why |
@@ -46,6 +52,14 @@ Representative tests covered factual extraction, JavaScript QA, provider-failure
 The OpenCode catalogue can also expose `ollama/*` models. Those are **not** hosted-free capacity and must never be treated as a substitute for the hosted models above; they still execute locally and inherit the Ollama heavy-local policy.
 
 ## Workflow allocation
+
+### Implementation role envelope
+
+Implementation routing is derived from an inspectable structured task envelope: workflow profile, allowed scope paths, validated inspection/diagnosis relevant paths, and an approved plan when present. Website builds remain `frontend_implementation`. A validated one- or two-file bounded evidence set routes to `code_fix`; broader app and self-improvement changes route to `long_horizon_implementation`. `deep_refactor` is reserved for an explicit structured scope/classification signal such as `changeScope=deep_refactor`, `broad`, or `large_refactor`; prose keywords alone never select it.
+
+### Quota-preserving waves
+
+For `quick_qa` and `structured_bulk`, routing waves are: hosted-free OpenCode first, workhorse-free Antigravity/Copilot second, subscription Codex third, deeper free models fourth, and local Ollama last. Implementation roles do not use these throughput waves: subscription Codex is eligible and can rank highly under `subscription_included`, while `free_only` behavior is unchanged.
 
 ### Website production
 
@@ -96,6 +110,7 @@ The OpenCode catalogue can also expose `ollama/*` models. Those are **not** host
 - Opaque or stealth models can earn more authority only through repeated successful local outcomes.
 - Public/synthetic data can use free hosted fallback models. Personal, confidential or commercially sensitive data should prefer local/private routes unless the provider's handling is explicitly acceptable.
 - Deterministic tests, browser QA and repository policy remain authoritative over model confidence.
+- Quality remains dominant, but measured latency has a materially larger objective weight for `quick_qa` and `structured_bulk` than for `research_and_audit`, `final_audit`, or `deep_refactor`. Learning remains conservative: evidence influence is capped and requires repeated samples, so a faster equally-successful bulk worker can eventually beat a slightly higher prior without turning speed into authority for final review.
 
 ## Research sources
 

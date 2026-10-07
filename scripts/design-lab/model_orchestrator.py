@@ -48,6 +48,55 @@ PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
     "PAID_MODELS_EXPLICITLY_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
 FREE_COST_CLASSES = {"free_quota", "free_hosted", "local_zero_external"}
+SUBSCRIPTION_RESERVE_DEFAULT_PERCENT = 20.0
+
+
+def _env_bool(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def subscription_quota_snapshot():
+    """Return machine-readable, fail-closed subscription headroom state.
+
+    Codex does not currently expose a stable quota endpoint here. Runtime
+    telemetry can feed either percent variable later; no interactive CLI UI is
+    scraped. Unknown headroom remains usable only because the operator opted
+    into subscription_included, and is surfaced in every routing snapshot.
+    """
+    supplied = [
+        (name, os.environ[name])
+        for name in (
+            "CODEX_SUBSCRIPTION_REMAINING_PERCENT",
+            "CODEX_SUBSCRIPTION_HEADROOM_PERCENT",
+        )
+        if name in os.environ
+    ]
+    remaining = None
+    invalid = False
+    for _name, value in supplied:
+        try:
+            parsed = float(value)
+            if not math.isfinite(parsed) or not 0 <= parsed <= 100:
+                invalid = True
+            elif remaining is None:
+                remaining = round(parsed, 3)
+        except (TypeError, ValueError):
+            invalid = True
+    reserve = SUBSCRIPTION_RESERVE_DEFAULT_PERCENT
+    override = _env_bool("CODEX_SUBSCRIPTION_RESERVE_OVERRIDE")
+    if override:
+        reserve = 0.0
+    return {
+        "source": "environment" if supplied else "unknown",
+        "remainingPercent": remaining,
+        "reservePercent": reserve,
+        "reserveOverride": override,
+        "state": "invalid" if invalid else ("known" if remaining is not None else "unknown"),
+        "reserveReached": remaining is not None and remaining <= reserve,
+        "eligible": COST_POLICY == "subscription_included" and (
+            override or (not invalid and (remaining is None or remaining > reserve))
+        ),
+    }
 
 PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS", "300"))
@@ -133,7 +182,7 @@ def cost_allowed(spec):
     if cost_class in FREE_COST_CLASSES:
         return True
     if cost_class == "subscription_quota" and COST_POLICY == "subscription_included":
-        return True
+        return subscription_quota_snapshot()["eligible"]
     return COST_POLICY == "allow_all" and PAID_MODELS_EXPLICITLY_ENABLED
 
 
@@ -148,6 +197,8 @@ def candidate_resource_class(candidate):
         if candidate in {"ag-opus-4.6", "ag-sonnet-4.6", "ag-gemini-3.1-pro"}:
             return "deep_free"
         return "workhorse_free"
+    if cost_class == "subscription_quota":
+        return "subscription_quota"
     return "paid"
 
 
@@ -643,15 +694,17 @@ ROLE_POLICY = {
 # still reachable automatically if the cheaper workhorse wave is unavailable.
 ROLE_RESOURCE_WAVES = {
     "quick_qa": [
-        {"workhorse_free", "hosted_free"},
+        {"hosted_free"},
+        {"workhorse_free"},
+        {"subscription_quota"},
         {"deep_free"},
-        {"paid"},
         {"local"},
     ],
     "structured_bulk": [
-        {"workhorse_free", "hosted_free"},
+        {"hosted_free"},
+        {"workhorse_free"},
+        {"subscription_quota"},
         {"deep_free"},
-        {"paid"},
         {"local"},
     ],
     "research_and_audit": [
@@ -669,6 +722,17 @@ ROLE_RESOURCE_WAVES = {
         {"deep_free"},
         {"local"},
     ],
+}
+
+# Quality remains the primary signal. These small role-specific latency
+# weights make throughput roles responsive to measured speed while keeping
+# final/research/deep decisions overwhelmingly quality-led.
+ROLE_OBJECTIVE_WEIGHTS = {
+    "quick_qa": {"latency": 0.30},
+    "structured_bulk": {"latency": 0.30},
+    "final_audit": {"latency": 0.015},
+    "research_and_audit": {"latency": 0.025},
+    "deep_refactor": {"latency": 0.015},
 }
 
 VISUAL_ROLES = {
@@ -947,8 +1011,10 @@ def outcome_reward(row):
         reward -= 0.03
     elapsed = row.get("elapsedSeconds")
     if isinstance(elapsed, (int, float)) and elapsed > 0:
-        # Tiny latency preference; quality remains dominant.
-        reward += 0.04 * _clamp((600.0 - elapsed) / 600.0)
+        latency_weight = ROLE_OBJECTIVE_WEIGHTS.get(
+            row.get("role"), {}
+        ).get("latency", 0.04)
+        reward += latency_weight * _clamp((600.0 - elapsed) / 600.0)
     return _clamp(reward)
 
 
@@ -1119,6 +1185,7 @@ def rank_candidates(
             "routingScore": score,
             "prior": prior,
             "stats": stats,
+            "subscriptionQuota": subscription_quota_snapshot(),
             **spec,
         })
     return sorted(
@@ -1195,6 +1262,7 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
         "provider": provider,
         "model": spec["model"],
         "resourceClass": candidate_resource_class(candidate),
+        "subscriptionQuota": subscription_quota_snapshot(),
         "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "value": value,
@@ -1280,6 +1348,7 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
         "provider": provider,
         "model": spec["model"],
         "resourceClass": candidate_resource_class(candidate),
+        "subscriptionQuota": subscription_quota_snapshot(),
         "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "result": result,
@@ -1568,6 +1637,8 @@ def policy_snapshot():
         "costPolicy": COST_POLICY,
         "paidModelsExplicitlyEnabled": PAID_MODELS_EXPLICITLY_ENABLED,
         "freeCostClasses": sorted(FREE_COST_CLASSES),
+        "subscriptionQuota": subscription_quota_snapshot(),
+        "roleObjectiveWeights": ROLE_OBJECTIVE_WEIGHTS,
         "runtimeFailureCooldownSeconds": {
             "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
             "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,

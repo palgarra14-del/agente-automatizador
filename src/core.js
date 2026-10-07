@@ -5167,6 +5167,8 @@ function multiModelGatewayEnvironment(environment = process.env) {
     'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME',
     'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
     'CODEX_BIN',
+    'CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT',
+    'CODEX_SUBSCRIPTION_RESERVE_OVERRIDE',
     'OLLAMA_URL', 'OLLAMA_MODEL',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
     'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
@@ -5182,6 +5184,7 @@ function multiModelGatewayEnvironment(environment = process.env) {
     ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
     MODEL_COST_POLICY: requestedCostPolicy,
     PAID_MODELS_EXPLICITLY_ENABLED: '0',
+    CODEX_PAID_API_FALLBACK_ENABLED: '0',
     OPENCODE_FREE_ENABLED: '1',
     COPILOT_FREE_ENABLED: '1',
     CODEX_API_KEY: '',
@@ -5189,8 +5192,67 @@ function multiModelGatewayEnvironment(environment = process.env) {
   };
 }
 
+function boundedPathList(value) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .filter((path) => typeof path === 'string' && path.trim())
+    .map((path) => path.trim()))].sort();
+}
+
+function evidencePaths(task) {
+  return boundedPathList([
+    ...(Array.isArray(task?.inspectionEvidence?.inspectionEvidence?.relevantPaths)
+      ? task.inspectionEvidence.inspectionEvidence.relevantPaths : []),
+    ...(Array.isArray(task?.diagnosis?.diagnosis?.relevantPaths)
+      ? task.diagnosis.diagnosis.relevantPaths : [])
+  ]);
+}
+
+export function implementationTaskEnvelope(task = {}) {
+  const workflowProfile = task?.workflow?.profile ?? null;
+  const allowedPaths = boundedPathList(task?.scope?.allowedPaths);
+  const relevantPaths = evidencePaths(task);
+  const evidenceSources = [
+    task?.inspectionEvidence?.inspectionEvidence ? 'inspection' : null,
+    task?.diagnosis?.diagnosis ? 'diagnosis' : null,
+    task?.approvedPlanChange ? 'approved_plan' : null
+  ].filter(Boolean);
+  const explicitScale = [
+    task?.implementationEvidence?.changeScope,
+    task?.implementationEvidence?.role,
+    task?.changeScope,
+    task?.approvedPlanChange?.changeScope,
+    task?.approvedPlanChange?.role,
+    task?.diagnosis?.diagnosis?.changeScope
+  ].find((value) => typeof value === 'string' && value.trim()) ?? null;
+  const explicitDeepRefactor = [
+    explicitScale,
+    task?.implementationEvidence?.classification,
+    task?.approvedPlanChange?.classification
+  ].some((value) => ['deep_refactor', 'broad', 'large_refactor'].includes(String(value).trim().toLowerCase()));
+  const pathsWithinScope = relevantPaths.length > 0 && relevantPaths.every((path) =>
+    allowedPaths.length === 0 || allowedPaths.some((root) => path === root || path.startsWith(`${root.replace(/\/$/, '')}/`))
+  );
+  const boundedEvidence = relevantPaths.length >= 1 && relevantPaths.length <= 2 &&
+    pathsWithinScope && (evidenceSources.includes('diagnosis') || evidenceSources.includes('inspection'));
+  return {
+    workflowProfile,
+    allowedPaths,
+    relevantPaths,
+    evidenceSources,
+    approvedPlanAvailable: Boolean(task?.approvedPlanChange),
+    explicitScale,
+    pathsWithinScope,
+    boundedEvidence,
+    explicitDeepRefactor,
+    websiteBuild: workflowProfile === 'website-build' || task?.projectId === 'website-pilot'
+  };
+}
+
 function multiModelRoleForTask(task = {}) {
-  if (task?.workflow?.profile === 'website-build' || task?.projectId === 'website-pilot') return 'frontend_implementation';
+  const envelope = implementationTaskEnvelope(task);
+  if (envelope.websiteBuild) return 'frontend_implementation';
+  if (envelope.explicitDeepRefactor) return 'deep_refactor';
+  if (envelope.boundedEvidence) return 'code_fix';
   return 'long_horizon_implementation';
 }
 
@@ -5371,6 +5433,7 @@ export class MultiModelGatewayClient {
           resourceClass: parsed.resourceClass ?? null,
           providerSlot: parsed.providerSlot ?? null,
           routingScore: parsed.routingScore ?? null,
+          subscriptionQuota: parsed.subscriptionQuota ?? null,
           fallbackErrors: Array.isArray(parsed.fallbackErrors) ? parsed.fallbackErrors.slice(-8) : []
         }
       };
@@ -5695,6 +5758,11 @@ export function codexPaidFallbackEligible(message) {
   return /(?:\b429\b|rate[ _-]?limit|usage[ _-]?limit|too many requests|login required|not logged in|sign[ -]?in required|session expired|authentication required|authorization required|quota exceeded|plan limit)/i.test(text);
 }
 
+function codexPaidApiFallbackEnabled(environment = {}) {
+  return environment.CODEX_PAID_API_FALLBACK_ENABLED === '1' &&
+    environment.PAID_MODELS_EXPLICITLY_ENABLED === '1';
+}
+
 export function resolveCodexCliEntryPath({
   resolvePackage = (specifier) => codexModuleRequire.resolve(specifier)
 } = {}) {
@@ -5743,7 +5811,8 @@ async function runCostAwareCodexCliTurn({
   processRunner = runProcess,
   cliEntryPath = resolveCodexCliEntryPath()
 }) {
-  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const apiFallbackEnabled = codexPaidApiFallbackEnabled(sourceEnvironment);
+  const apiKey = apiFallbackEnabled ? codexApiKeyFromEnvironment(sourceEnvironment) : null;
   const sessionAvailable = isolatedHome?.authAvailable !== false;
   const deadlineAt = Date.now() + timeoutMs;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
@@ -5842,7 +5911,7 @@ async function runCostAwareCodexCliTurn({
     }
   }
 
-  if (sessionError?.timedOut || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  if (sessionError?.timedOut || !apiFallbackEnabled || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
   return run('api');
 }
 
@@ -5855,7 +5924,8 @@ async function runCostAwareCodexTurn({
   prompt,
   signal
 }) {
-  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const apiFallbackEnabled = codexPaidApiFallbackEnabled(sourceEnvironment);
+  const apiKey = apiFallbackEnabled ? codexApiKeyFromEnvironment(sourceEnvironment) : null;
   const sessionAvailable = isolatedHome?.authAvailable !== false;
 
   const run = async (authentication) => {
@@ -5928,7 +5998,7 @@ async function runCostAwareCodexTurn({
     }
   }
 
-  if (signal?.aborted || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  if (signal?.aborted || !apiFallbackEnabled || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
   return run('api');
 }
 

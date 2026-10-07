@@ -7,8 +7,32 @@ import test from 'node:test';
 import {
   MultiModelCodingWorker,
   MultiModelGatewayClient,
-  MultiModelReadOnlySkillExecutor
+  MultiModelReadOnlySkillExecutor,
+  implementationTaskEnvelope
 } from '../src/core.js';
+
+test('implementation routing exposes a structured, evidence-backed task envelope', () => {
+  const bounded = {
+    projectId: 'callflow',
+    workflow: { profile: 'autonomous-maintenance' },
+    scope: { allowedPaths: ['src'] },
+    inspectionEvidence: { inspectionEvidence: { relevantPaths: ['src/feature.js'] } },
+    diagnosis: { diagnosis: { relevantPaths: ['src/feature.js'] } },
+    approvedPlanChange: { approvedAt: '2026-10-07T00:00:00Z' }
+  };
+  const envelope = implementationTaskEnvelope(bounded);
+  assert.deepEqual(envelope.relevantPaths, ['src/feature.js']);
+  assert.deepEqual(envelope.evidenceSources, ['inspection', 'diagnosis', 'approved_plan']);
+  assert.equal(envelope.boundedEvidence, true);
+  assert.equal(envelope.explicitDeepRefactor, false);
+  assert.equal(implementationTaskEnvelope({
+    ...bounded,
+    implementationEvidence: { changeScope: 'deep_refactor' }
+  }).explicitDeepRefactor, true);
+  assert.equal(implementationTaskEnvelope({
+    objective: 'please refactor everything broadly'
+  }).explicitDeepRefactor, false);
+});
 
 test('multi-model gateway hardens child environment to free-only and strips orchestrator credentials', async () => {
   let observed = null;
@@ -59,6 +83,7 @@ test('multi-model gateway hardens child environment to free-only and strips orch
   assert.equal(observed.options.restrictEnvironment, true);
   assert.equal(observed.options.env.MODEL_COST_POLICY, 'free_only');
   assert.equal(observed.options.env.PAID_MODELS_EXPLICITLY_ENABLED, '0');
+  assert.equal(observed.options.env.CODEX_PAID_API_FALLBACK_ENABLED, '0');
   assert.equal(observed.options.env.OPENAI_API_KEY, '');
   assert.equal(observed.options.env.CODEX_API_KEY, '');
   assert.equal(Object.hasOwn(observed.options.env, 'GITHUB_TOKEN'), false);
@@ -113,6 +138,7 @@ test('multi-model gateway permits explicit subscription quota without exposing A
 
   assert.equal(observed.options.env.MODEL_COST_POLICY, 'subscription_included');
   assert.equal(observed.options.env.PAID_MODELS_EXPLICITLY_ENABLED, '0');
+  assert.equal(observed.options.env.CODEX_PAID_API_FALLBACK_ENABLED, '0');
   assert.equal(observed.options.env.CODEX_BIN, '/usr/bin/codex');
   assert.equal(observed.options.env.OPENAI_API_KEY, '');
   assert.equal(observed.options.env.CODEX_API_KEY, '');
@@ -155,9 +181,19 @@ test('coding worker gives website work to frontend routing and app work to long-
     workflow: { profile: 'autonomous-maintenance' },
     scope: {}
   }, { workspace: '/tmp/callflow', timeoutMs: 120_000 });
+  const boundedFix = await worker.execute({
+    objective: 'Fix the diagnosed edge case.',
+    projectId: 'callflow',
+    workflow: { profile: 'autonomous-maintenance' },
+    scope: { allowedPaths: ['src'] },
+    inspectionEvidence: { inspectionEvidence: { relevantPaths: ['src/feature.js'] } },
+    diagnosis: { diagnosis: { relevantPaths: ['src/feature.js'] } }
+  }, { workspace: '/tmp/callflow-fix', timeoutMs: 120_000 });
 
   assert.equal(calls[0].role, 'frontend_implementation');
   assert.equal(calls[1].role, 'long_horizon_implementation');
+  assert.equal(calls[2].role, 'code_fix');
+  assert.equal(boundedFix.status, 'completed');
   assert.equal(website.modelRouting.candidate, 'ag-sonnet-4.6');
   assert.equal(callflow.modelRouting.candidate, 'ag-gemini-3.8-flash');
   assert.equal(website.paidApiUsed, false);
@@ -334,6 +370,7 @@ test('python workflow gateway is a hard free-only boundary', () => {
   const gateway = readFileSync(new URL('../scripts/model-gateway.py', import.meta.url), 'utf8');
   assert.match(gateway, /MODEL_COST_POLICY.*free_only/);
   assert.match(gateway, /PAID_MODELS_EXPLICITLY_ENABLED.*0/);
+  assert.match(gateway, /CODEX_PAID_API_FALLBACK_ENABLED.*0/);
   assert.match(gateway, /CODEX_API_KEY.*""/);
   assert.match(gateway, /OPENAI_API_KEY.*""/);
   assert.match(gateway, /MAX_STDIN_BYTES = 1536 \* 1024/);
