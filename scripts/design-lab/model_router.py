@@ -8,6 +8,8 @@ def _tool_path(env_name, command, legacy_fallback):
 AGY=_tool_path("ANTIGRAVITY_CLI","agy","/home/pablo/.local/bin/agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
+OLLAMA_AUTOSTART=os.environ.get("OLLAMA_AUTOSTART","1").strip().lower() in {"1","true","yes","on"}
+OLLAMA_START_TIMEOUT=max(1.0,min(8.0,float(os.environ.get("OLLAMA_START_TIMEOUT","4"))))
 CODEX=_tool_path("CODEX_BIN","codex","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
 OPENCODE=_tool_path("OPENCODE_BIN","opencode","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
@@ -429,8 +431,26 @@ def ollama_ready():
     except Exception:
         return False
 
+def ensure_ollama_ready():
+    if ollama_ready():
+        return True
+    if not OLLAMA_AUTOSTART:
+        return False
+    try:
+        proc=_run(["systemctl","--user","start","ollama-local.service"],timeout=5)
+    except ProviderUnavailable:
+        return False
+    if proc.returncode!=0:
+        return False
+    deadline=time.monotonic()+OLLAMA_START_TIMEOUT
+    while time.monotonic()<deadline:
+        if ollama_ready():
+            return True
+        time.sleep(0.2)
+    return False
+
 def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None,num_predict=700):
-    if not ollama_ready():
+    if not ensure_ollama_ready():
         raise ProviderUnavailable("ollama_unavailable")
     try:
         predict_limit=int(num_predict)
@@ -443,6 +463,7 @@ def ollama_structured(prompt,schema,cwd=None,timeout=180,model=None,num_predict=
       "prompt":prompt,
       "stream":False,
       "format":schema,
+      "keep_alive":0,
       "options":{"temperature":0.1,"num_predict":predict_limit}
     }
     request=urllib.request.Request(
