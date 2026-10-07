@@ -58,11 +58,19 @@ print(json.dumps({
   "sonnet":snapshot["candidates"]["ag-sonnet-4.6"]["specialization"]["primary"],
   "gemini38":snapshot["candidates"]["ag-gemini-3.8-flash"]["specialization"]["primary"],
   "opus":snapshot["candidates"]["ag-opus-4.6"]["specialization"]["primary"],
-  "qwen":snapshot["candidates"]["ollama-qwen-3b"]["specialization"]["primary"]
+  "muse":snapshot["candidates"]["oc-muse-spark-1.3"]["specialization"]["primary"],
+  "nemotron":snapshot["candidates"]["oc-nemotron-3.5-lightning"]["specialization"]["primary"],
+  "spaceAvoid":snapshot["candidates"]["oc-space-bunny"]["specialization"]["avoid"],
+  "qwen":snapshot["candidates"]["ollama-qwen-3b"]["specialization"]
 }))
 `);
   assert.ok(result.sonnet.includes('frontend_implementation'));
   assert.ok(result.gemini38.includes('autonomous_orchestration'));
   assert.ok(result.opus.includes('final_audit'));
-  assert.ok(result.qwen.includes('offline_analysis'));
+  assert.ok(result.muse.includes('structured_bulk'));
+  assert.ok(result.muse.includes('blocker_diagnosis'));
+  assert.ok(result.nemotron.includes('autonomous_orchestration'));
+  assert.ok(result.spaceAvoid.includes('blocker_diagnosis'));
+  assert.deepEqual(result.qwen.primary, ['offline_analysis']);
+  assert.ok(result.qwen.avoid.includes('structured_bulk'));
 });

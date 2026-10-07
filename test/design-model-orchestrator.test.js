@@ -73,7 +73,7 @@ print(json.dumps({
   assert.equal(result.frontend, 'ag-sonnet-4.6');
   assert.equal(result.orchestration, 'ag-gemini-3.8-flash');
   assert.equal(result.refactor, 'ag-opus-4.6');
-  assert.equal(result.bulk, 'ollama-qwen-3b');
+  assert.equal(result.bulk, 'oc-muse-spark-1.3');
 });
 
 test('subscription_included unlocks subscription quota without enabling generic paid candidates', () => {

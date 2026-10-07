@@ -146,3 +146,29 @@ print(json.dumps({
     assert.equal(ranked[firstDeep].wave, 1);
   }
 });
+
+
+test('normal high-volume roles keep Ollama in the final heavy-local wave', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="free_only"
+def order(role):
+  return [{"candidate":x["candidate"],"wave":x["resourceWave"]} for x in m.rank_candidates(role)]
+print(json.dumps({"quick":order("quick_qa"),"bulk":order("structured_bulk")}))
+`);
+  for (const role of ['quick','bulk']) {
+    const ranked = result[role];
+    const ollama = ranked.find((item) => item.candidate === 'ollama-qwen-3b');
+    assert.ok(ollama);
+    assert.equal(ollama.wave, Math.max(...ranked.map((item) => item.wave)));
+    assert.notEqual(ranked[0].candidate, 'ollama-qwen-3b');
+  }
+  assert.equal(result.bulk[0].candidate, 'oc-muse-spark-1.3');
+});
