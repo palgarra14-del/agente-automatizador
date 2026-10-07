@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { cpus, freemem, homedir, loadavg, totalmem } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
