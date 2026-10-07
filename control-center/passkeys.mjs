@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
@@ -19,7 +20,7 @@ function pruneFlows(map) {
 }
 
 function flowId() {
-  return crypto.randomUUID();
+  return randomUUID();
 }
 
 export class PasskeyAuth {
