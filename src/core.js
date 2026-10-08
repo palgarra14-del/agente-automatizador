@@ -5837,6 +5837,19 @@ export function codexClientOptions(sourceEnvironment, isolatedHome, configOverri
   };
 }
 
+export function codexSubscriptionSessionFallbackEligible(environment = {}) {
+  if (environment.MODEL_COST_POLICY !== 'subscription_included') return false;
+  const override = /^(1|true|yes|on)$/i.test(String(environment.CODEX_SUBSCRIPTION_RESERVE_OVERRIDE ?? '').trim());
+  const supplied = ['CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT']
+    .filter((name) => Object.hasOwn(environment, name));
+  const values = supplied.map((name) => {
+    const raw = String(environment[name] ?? '').trim();
+    return raw === '' ? NaN : Number(raw);
+  });
+  if (!override && values.some((value) => !Number.isFinite(value) || value < 0 || value > 100)) return false;
+  return override || values.length === 0 || values[0] > 20;
+}
+
 export function codexPaidFallbackEligible(message) {
   const text = String(message ?? '');
   if (!text) return false;
