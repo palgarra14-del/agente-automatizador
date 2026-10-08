@@ -222,16 +222,34 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.equal(configured.get('leadfinder').budgets.maxModelCalls, 6);
   assert.equal(configured.get('callflow').budgets.maxModelCalls, 6);
   for (const id of ['self', 'leadfinder', 'callflow', 'website-pilot']) {
-    assert.equal(configured.get(id).businessContext.version, 1);
-    assert.match(configured.get(id).businessContext.model, /LeadFinder.*Callflow.*website-pilot/i);
-    assert.ok(configured.get(id).businessContext.currentFocus.includes('Peluquerías'));
-    assert.ok(configured.get(id).businessContext.constraints.some((item) => /precios|ofertas|descuentos/i.test(item)));
+    const context = configured.get(id).businessContext;
+    assert.equal(context.version, 2);
+    assert.match(context.model, /LeadFinder.*Callflow.*Website Pilot/i);
+    assert.ok(context.currentFocus.includes('Peluquerías'));
+    assert.ok(context.constraints.some((item) => /APIs o servicios de pago/i.test(item)));
+    assert.equal(context.offer.currency, 'EUR');
+    assert.equal(context.offer.essential.minPrice, 350);
+    assert.equal(context.offer.essential.revisions, 1);
+    assert.equal(context.offer.professional.minPrice, 650);
+    assert.equal(context.offer.professional.revisions, 2);
+    assert.equal(context.offer.supportDays, 15);
+    assert.match(context.offer.paymentTerms, /50 % al inicio.*50 % antes/i);
+    assert.match(context.offer.deliveryWindow, /1–3 semanas/);
+    assert.ok(context.offer.extras.includes('SEO ampliado/local'));
   }
   assert.match(configured.get('leadfinder').businessContext.projectRole, /captación|prospectos/i);
   assert.match(configured.get('callflow').businessContext.projectRole, /llamadas|seguimiento/i);
   assert.match(configured.get('website-pilot').businessContext.projectRole, /demos|webs/i);
   assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
   assert.throws(() => project({ businessContext: { version: 1, model: 'x', projectRole: 'y', unknown: true } }), /businessContext contains unknown fields/);
+  assert.throws(() => project({ businessContext: { version: 2, model: 'x', projectRole: 'y' } }), /offer is required/);
+  assert.equal(project({
+    businessContext: {
+      version: 1,
+      model: 'legacy compatible context',
+      projectRole: 'legacy role'
+    }
+  }).businessContext.version, 1);
 });
 
 test('self control-plane source and configuration require sensitive approval', async () => {
