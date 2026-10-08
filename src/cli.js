@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, codexSubscriptionSessionFallbackEligible, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
@@ -34,9 +34,12 @@ if (command === 'doctor') {
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
+const subscriptionSessionFallback = codexSubscriptionSessionFallbackEligible(process.env);
 const workflowModelExecutors = {
-  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: false }),
-  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: false })
+  // Only an explicitly included subscription may use Codex session auth.
+  // API-paid fallback stays disabled in the gateway and individual workers.
+  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: subscriptionSessionFallback }),
+  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: subscriptionSessionFallback })
 };
 const workflows = new WorkflowEngine({ store, projects, ...workflowModelExecutors });
 
