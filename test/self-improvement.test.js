@@ -985,3 +985,91 @@ test('three consecutive same-revision failures trigger cooldown instead of thras
   assert.equal(await autopilot.hasWork(), false);
   assert.equal((await autopilot.tick()).status, 'idle');
 });
+
+
+test('autonomous business lane backs off model candidate exhaustion without blocking operator issues', async () => {
+  const now = Date.parse('2026-10-08T17:00:00.000Z');
+  const store = fakeStore();
+  const autopilot = new AutonomousProjectImprovement({
+    store, workflowEngine: {}, operatorRevision: REV_A,
+    projectId: 'leadfinder', now: () => now
+  });
+  const terminal = {
+    id: 'workflow-no-model', status: 'failed',
+    result: { error: 'skill_executor_attempt_budget_exhausted', stepId: 'read-only-analysis' },
+    steps: [{ id: 'read-only-analysis', status: 'failed', evidence: {
+      error: 'read_only_multimodel_failed:no_role_candidate_available;offline_analysis_failed:no_role_candidate_available'
+    } }]
+  };
+  await autopilot.settle(terminal, { baseRevision: REV_A });
+  const suspended = store.state.autopilotProjectImprovement;
+  assert.equal(suspended.suspensionReason, 'model_capacity_unavailable');
+  assert.equal(Date.parse(suspended.suspendedUntil), now + 30 * 60 * 1000);
+  assert.equal(await autopilot.hasWork(), false);
+
+  // Changing the operating revision cannot refill exhausted provider capacity.
+  const newerRevision = new AutonomousProjectImprovement({
+    store, workflowEngine: {}, operatorRevision: REV_B,
+    projectId: 'leadfinder', now: () => now
+  });
+  assert.equal(await newerRevision.hasWork(), false);
+  const resumed = new AutonomousProjectImprovement({
+    store, workflowEngine: {}, operatorRevision: REV_B,
+    projectId: 'leadfinder', now: () => now + 30 * 60 * 1000 + 1
+  });
+  assert.equal(await resumed.hasWork(), true);
+});
+
+test('repeated model capacity failures get a bounded backoff while ordinary failures do not', async () => {
+  const now = Date.parse('2026-10-08T17:00:00.000Z');
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      starts: [],
+      history: [{
+        status: 'failed', error: 'skill_executor_attempt_budget_exhausted',
+        failureDetail: 'read_only_multimodel_failed:no_role_candidate_available',
+        baseRevision: REV_A, completedAt: '2026-10-08T16:00:00.000Z'
+      }]
+    }
+  });
+  const autopilot = new AutonomousProjectImprovement({
+    store, workflowEngine: {}, operatorRevision: REV_A,
+    projectId: 'website-pilot', now: () => now
+  });
+  const plan = {
+    id: 'workflow-no-model-2', status: 'failed',
+    result: { error: 'skill_executor_attempt_budget_exhausted', stepId: 'review' },
+    steps: [{ id: 'review', status: 'failed', evidence: {
+      error: 'read_only_multimodel_failed:provider_capacity_timeout'
+    } }]
+  };
+  await autopilot.settle(plan, { baseRevision: REV_A });
+  assert.equal(store.state.autopilotProjectImprovement.suspensionReason, 'model_capacity_unavailable');
+  assert.equal(Date.parse(store.state.autopilotProjectImprovement.suspendedUntil), now + 60 * 60 * 1000);
+
+  await autopilot.settle({
+    id: 'workflow-normal-failure', status: 'failed',
+    result: { error: 'workflow_test_failed' }, steps: []
+  }, { baseRevision: REV_A });
+  assert.equal(store.state.autopilotProjectImprovement.suspendedUntil, null);
+  assert.equal(store.state.autopilotProjectImprovement.suspensionReason, null);
+});
+
+test('quota exhaustion buried in worker evidence receives the existing six-hour guard', async () => {
+  const now = Date.parse('2026-10-08T17:00:00.000Z');
+  const store = fakeStore();
+  const autopilot = new AutonomousProjectImprovement({
+    store, workflowEngine: {}, operatorRevision: REV_A,
+    projectId: 'callflow', now: () => now
+  });
+  await autopilot.settle({
+    id: 'workflow-quota', status: 'failed',
+    result: { error: 'skill_executor_attempt_budget_exhausted', stepId: 'review' },
+    steps: [{ id: 'review', status: 'failed', evidence: {
+      error: 'read_only_multimodel_failed:RESOURCE_EXHAUSTED (code 429): Individual quota reached'
+    } }]
+  }, { baseRevision: REV_A });
+  assert.equal(store.state.autopilotProjectImprovement.suspensionReason, 'billing_or_auth_unavailable');
+  assert.equal(Date.parse(store.state.autopilotProjectImprovement.suspendedUntil), now + 6 * 60 * 60 * 1000);
+  assert.equal(await autopilot.hasWork(), false);
+});
