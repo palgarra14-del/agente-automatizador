@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
@@ -1147,6 +1147,45 @@ test('pristine managed workflow reallocates a missing workspace from a previous 
   assert.equal(persisted.workspace.path, expected);
   assert.equal(manager.prepared.length, 2);
   assert.equal(persisted.status, WorkflowStepStatus.PENDING);
+  assert.equal(persisted.modelUsage.calls, 0);
+  assert.ok(persisted.steps.every((step) => step.attempts === 0));
+});
+
+
+test('pristine managed workflow reallocates a stale symlinked workspace without following it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-reallocate-symlink-'));
+  const configured = managedProject('reallocate-symlink', root);
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'resume pristine work without following stale symlink'
+  });
+
+  await instance.workspaceProject(created.id, configured);
+  const expected = manager.describe(configured, created.id).workspace;
+  const staleTarget = join(root, 'legacy-target');
+  const stalePath = join(root, 'legacy-workspace-link');
+  await mkdir(staleTarget, { recursive: true });
+  await writeFile(join(staleTarget, 'sentinel.txt'), 'do-not-touch');
+  await symlink(staleTarget, stalePath, 'dir');
+
+  await instance.update(created.id, (plan) => {
+    plan.workspace = { ...plan.workspace, path: stalePath };
+  });
+
+  const rebound = await instance.workspaceProject(created.id, configured);
+  const persisted = await instance.get(created.id);
+
+  assert.equal(rebound.workspace, expected);
+  assert.equal(persisted.workspace.path, expected);
+  assert.equal(manager.prepared.length, 2);
+  assert.equal((await lstat(stalePath)).isSymbolicLink(), true);
+  assert.equal(existsSync(join(staleTarget, 'sentinel.txt')), true);
   assert.equal(persisted.modelUsage.calls, 0);
   assert.ok(persisted.steps.every((step) => step.attempts === 0));
 });
@@ -2474,6 +2513,72 @@ test('historical interrupted read-only workflow is retired after capability drif
   assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
   assert.equal(inspect.evidence.type, 'historical-interrupted-execution');
   assert.equal(inspect.evidence.historicalRecovery, true);
+});
+
+
+test('historical interrupted read-only workflow retires safely when its old managed workspace is now a symlink', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-historical-symlink-readonly-'));
+  const configured = managedProject('historical-symlink-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retire stale interrupted read-only work after runtime relocation'
+  });
+  await instance.workspaceProject(created.id, configured);
+
+  const staleRegistryFingerprint = '3'.repeat(64);
+  const staleTarget = join(root, 'legacy-runtime-target');
+  const staleWorkspace = join(root, 'legacy-runtime-link');
+  await mkdir(staleTarget, { recursive: true });
+  await writeFile(join(staleTarget, 'sentinel.txt'), 'do-not-touch');
+  await symlink(staleTarget, staleWorkspace, 'dir');
+
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    plan.registryFingerprint = staleRegistryFingerprint;
+    plan.workspace = { ...plan.workspace, path: staleWorkspace };
+    plan.status = WorkflowStepStatus.RUNNING;
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: staleRegistryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: staleWorkspace,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+  });
+
+  const retired = await instance.run(created.id);
+  const inspect = retired.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(retired.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(retired.result.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(retired.result.historicalRecovery, true);
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.evidence.historicalRecovery, true);
+  assert.equal((await lstat(staleWorkspace)).isSymbolicLink(), true);
+  assert.equal(existsSync(join(staleTarget, 'sentinel.txt')), true);
 });
 
 test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
