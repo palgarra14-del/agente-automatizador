@@ -334,7 +334,6 @@ def copilot_structured(prompt,schema,cwd=None,timeout=180,model=None):
     selected=str(model or COPILOT_FREE_MODEL)
     cmd=[
         COPILOT,
-        "-p",task,
         "-s",
         "--output-format","text",
         "--model",selected,
@@ -346,7 +345,7 @@ def copilot_structured(prompt,schema,cwd=None,timeout=180,model=None):
         "--no-ask-user",
         "-C",str(workdir),
     ]
-    proc=_run(cmd,cwd=workdir,timeout=timeout)
+    proc=_run(cmd,cwd=workdir,timeout=timeout,input_text=task)
     if proc.returncode!=0:
         raise ProviderUnavailable("copilot_free_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(proc.stdout,schema)
