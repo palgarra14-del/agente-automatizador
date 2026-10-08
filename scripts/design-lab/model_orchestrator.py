@@ -1056,6 +1056,7 @@ def _runtime_cooldown(candidate):
 def _remember_unavailability(candidate, exc):
     reason = str(exc)
     lowered = reason.lower()
+    capacity_timeout = lowered.startswith("provider_capacity_timeout:")
     provider_markers = (
         "not_authenticated", "please sign in", "sign in", "unauthorized",
         "authentication", "forbidden", "quota", "rate limit", "rate_limit",
@@ -1063,10 +1064,13 @@ def _remember_unavailability(candidate, exc):
         "service_unavailable", "service unavailable", "connection refused",
         "credits exhausted", "credit exhausted",
     )
-    provider_wide = any(marker in lowered for marker in provider_markers)
+    provider_wide = capacity_timeout or any(marker in lowered for marker in provider_markers)
     ttl = (
-        PROVIDER_FAILURE_COOLDOWN_SECONDS
-        if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        if capacity_timeout else (
+            PROVIDER_FAILURE_COOLDOWN_SECONDS
+            if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        )
     )
     if ttl <= 0:
         return None
