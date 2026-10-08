@@ -230,6 +230,7 @@ test('every cloud lane gets an autonomous project improvement worker', () => {
 test('cloud-once emits queue and autonomous results separately for auditability', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
   assert.match(cli, /let autonomousResult = null/);
+  assert.match(cli, /autonomousFallbackAllowed\(queueResult\)/);
   assert.match(cli, /autonomousResult = await autonomousSelfImprovement\.tick\(\)/);
   assert.match(cli, /return \{ queueResult, autonomousResult \}/);
   assert.match(cli, /queue: view\(result\.queueResult\)/);
