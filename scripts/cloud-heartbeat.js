@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { criticalCiDemand, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 import { systemdRunEnvironmentArgs } from '../src/service.js';
@@ -203,6 +203,7 @@ for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRota
 }
 
 const maxHeavy=Number(process.env.AGENT_MAX_HEAVY || 3);
+const externalPriorityDemand = await queuedCriticalCiDemand();
 const plan=planHeartbeat(observations,{
   maxHeavy,
   maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || maxHeavy),
