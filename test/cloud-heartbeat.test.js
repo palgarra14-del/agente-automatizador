@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, criticalCiDemand, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 
 test('critical CI demand counts only waiting CI runs', () => {
   assert.equal(criticalCiDemand([
