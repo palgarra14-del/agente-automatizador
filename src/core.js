@@ -884,8 +884,17 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
 
 export async function loadProjects(file, registry = defaultToolSkillRegistry) {
   const data = JSON.parse(await readFile(file, 'utf8'));
+  const sharedBusinessContext = data.businessContext ?? null;
   return new Map(data.projects.map((project) => {
-    const configured = configFrom(project, dirname(file), registry);
+    const projectBusinessContext = project.businessContext ?? null;
+    const businessContext = sharedBusinessContext
+      ? { ...sharedBusinessContext, ...(projectBusinessContext ?? {}) }
+      : projectBusinessContext;
+    const configured = configFrom(
+      businessContext ? { ...project, businessContext } : project,
+      dirname(file),
+      registry
+    );
     return [configured.id, configured];
   }));
 }
@@ -1149,23 +1158,59 @@ function assertObjectKeys(value, allowed, label) {
   if (unexpected.length) throw new Error(`${label} contains unknown fields: ${unexpected.join(', ')}`);
 }
 
+function normalizeBusinessOffer(value) {
+  if (value === undefined || value === null) return null;
+  assertObjectKeys(
+    value,
+    new Set(['currency', 'essential', 'professional', 'extras', 'paymentTerms', 'deliveryWindow', 'clientResponsibilities', 'ownership', 'supportDays']),
+    'businessContext.offer'
+  );
+  const packageFrom = (input, label) => {
+    assertObjectKeys(input, new Set(['minPrice', 'scope', 'revisions']), label);
+    const minPrice = Number(input.minPrice);
+    const revisions = Number(input.revisions);
+    if (!Number.isInteger(minPrice) || minPrice < 0) throw new Error(`${label}.minPrice must be a non-negative integer`);
+    if (!Number.isInteger(revisions) || revisions < 0 || revisions > 10) throw new Error(`${label}.revisions must be an integer between 0 and 10`);
+    return {
+      minPrice,
+      scope: boundedTextList(input.scope ?? [], `${label}.scope`, { required: true, max: 20, itemMax: 260 }),
+      revisions
+    };
+  };
+  return safeJson({
+    currency: boundedText(value.currency ?? 'EUR', 'businessContext.offer.currency', { required: true, max: 8 }),
+    essential: packageFrom(value.essential, 'businessContext.offer.essential'),
+    professional: packageFrom(value.professional, 'businessContext.offer.professional'),
+    extras: boundedTextList(value.extras ?? [], 'businessContext.offer.extras', { max: 20, itemMax: 180 }),
+    paymentTerms: boundedText(value.paymentTerms, 'businessContext.offer.paymentTerms', { required: true, max: 280 }),
+    deliveryWindow: boundedText(value.deliveryWindow, 'businessContext.offer.deliveryWindow', { required: true, max: 220 }),
+    clientResponsibilities: boundedTextList(value.clientResponsibilities ?? [], 'businessContext.offer.clientResponsibilities', { max: 12, itemMax: 240 }),
+    ownership: boundedText(value.ownership, 'businessContext.offer.ownership', { required: true, max: 280 }),
+    supportDays: positiveInteger(value.supportDays, 15, 'businessContext.offer.supportDays', 0)
+  });
+}
+
 export function normalizeBusinessContext(value) {
   if (value === undefined || value === null) return null;
   assertObjectKeys(
     value,
-    new Set(['version', 'model', 'projectRole', 'currentFocus', 'funnel', 'priorities', 'metrics', 'constraints']),
+    new Set(['version', 'model', 'projectRole', 'currentFocus', 'funnel', 'priorities', 'metrics', 'constraints', 'offer']),
     'businessContext'
   );
-  if (value.version !== undefined && value.version !== 1) throw new Error('businessContext.version must be 1');
+  const version = value.version ?? 1;
+  if (![1, 2].includes(version)) throw new Error('businessContext.version must be 1 or 2');
+  const offer = normalizeBusinessOffer(value.offer);
+  if (version === 2 && !offer) throw new Error('businessContext.offer is required for version 2');
   return safeJson({
-    version: 1,
+    version,
     model: boundedText(value.model, 'businessContext.model', { required: true, max: 1_500 }),
     projectRole: boundedText(value.projectRole, 'businessContext.projectRole', { required: true, max: 900 }),
     currentFocus: boundedTextList(value.currentFocus ?? [], 'businessContext.currentFocus', { max: 12, itemMax: 180 }),
     funnel: boundedTextList(value.funnel ?? [], 'businessContext.funnel', { max: 12, itemMax: 300 }),
     priorities: boundedTextList(value.priorities ?? [], 'businessContext.priorities', { max: 20, itemMax: 400 }),
     metrics: boundedTextList(value.metrics ?? [], 'businessContext.metrics', { max: 20, itemMax: 180 }),
-    constraints: boundedTextList(value.constraints ?? [], 'businessContext.constraints', { max: 20, itemMax: 400 })
+    constraints: boundedTextList(value.constraints ?? [], 'businessContext.constraints', { max: 20, itemMax: 400 }),
+    ...(offer ? { offer } : {})
   });
 }
 
