@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
@@ -31,6 +32,17 @@ function baseBundle() {
     latestRun:{path:null,files:[],traces:{}}
   };
 }
+
+test('design-lab installer is portable and cannot self-trip its five-minute start cadence', () => {
+  const installer = readFileSync(resolve('scripts/design-lab/install-blocker-doctor.sh'), 'utf8');
+  assert.match(installer, /\$HOME\/\.local\/state\/engineering-orchestrator\/design-lab/);
+  assert.match(installer, /XDG_CONFIG_HOME/);
+  assert.doesNotMatch(installer, /\/home\/pablo/);
+  assert.match(installer, /StartLimitIntervalSec=300/);
+  assert.match(installer, /StartLimitBurst=4/);
+  assert.match(installer, /RestartSec=90s/);
+  assert.match(installer, /reset-failed engineering-orchestrator-design-lab\.service/);
+});
 
 test('doctor treats quota as a wait condition instead of destructive repair', () => {
   const bundle=baseBundle();
