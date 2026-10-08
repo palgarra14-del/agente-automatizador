@@ -1073,3 +1073,36 @@ test('quota exhaustion buried in worker evidence receives the existing six-hour 
   assert.equal(Date.parse(store.state.autopilotProjectImprovement.suspendedUntil), now + 6 * 60 * 60 * 1000);
   assert.equal(await autopilot.hasWork(), false);
 });
+
+
+test('a new operating revision cannot bypass the rolling autonomous daily start cap', async () => {
+  const now = Date.parse('2026-10-08T17:00:00.000Z');
+  const oldRevision = REV_A;
+  const starts = Array.from({ length: 12 }, (_, index) =>
+    new Date(now - (12 - index) * 60 * 60 * 1000).toISOString()
+  );
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      activeWorkflowId: null,
+      starts,
+      history: [{
+        status: 'failed',
+        error: 'workflow_budget_deadline_exceeded',
+        baseRevision: oldRevision,
+        completedAt: new Date(now - 30 * 60 * 1000).toISOString()
+      }],
+      suspendedUntil: null
+    }
+  });
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine: {
+      async create() { throw new Error('daily cap should forbid new autonomous work'); }
+    },
+    operatorRevision: REV_B,
+    projectId: 'website-pilot',
+    now: () => now
+  });
+  assert.equal(await autopilot.hasWork(), false);
+  assert.equal((await autopilot.tick()).status, 'idle');
+});
