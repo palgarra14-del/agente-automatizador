@@ -6911,7 +6911,7 @@ export class CodexReadOnlySkillExecutor {
     return current;
   }
 
-  async execute(request, { workspace, timeoutMs }) {
+  async execute(request, { workspace, timeoutMs, allowPaidApiFallback = true }) {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
     if (request.skill === 'code.inspect' && request.context?.deterministicInspection) {
       try {
@@ -6963,7 +6963,10 @@ export class CodexReadOnlySkillExecutor {
         };
       }
     }
-    const sourceEnvironment = this.environment();
+    const baseEnvironment = this.environment();
+    const sourceEnvironment = allowPaidApiFallback
+      ? baseEnvironment
+      : Object.fromEntries(Object.entries(baseEnvironment).filter(([name]) => !['CODEX_API_KEY', 'OPENAI_API_KEY'].includes(name)));
     const security = codexWorkerSecurityConfig({ writeAccess: false, pathValue: sourceEnvironment.PATH ?? '', platform: this.platform });
     if (!security.supported) {
       return { status: 'failed', ok: false, timedOut: false, outputBytes: 0, error: security.error };
@@ -7109,7 +7112,7 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
       };
     } catch (error) {
       if (this.allowSessionFallback) {
-        const fallback = await super.execute(request, { workspace, timeoutMs });
+        const fallback = await super.execute(request, { workspace, timeoutMs, allowPaidApiFallback: false });
         return {
           ...fallback,
           modelRouting: {
