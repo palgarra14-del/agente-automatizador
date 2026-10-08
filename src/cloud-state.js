@@ -480,13 +480,15 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          // A rate-limit reset beyond this job's deadline belongs to the
+          // delayed scheduler, not an in-run sleep or a generic timeout.
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           if (deadlineAt !== null) {
             if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
             const remainingMs = Math.floor(deadlineAt - this.now());
-            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
-          }
-          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
-            throw rateLimitError(response.status, delayMs);
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw rateLimitError(response.status, delayMs);
           }
           await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
@@ -584,13 +586,15 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          // A rate-limit reset beyond this job's deadline belongs to the
+          // delayed scheduler, not an in-run sleep or a generic timeout.
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           if (deadlineAt !== null) {
             if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
             const remainingMs = Math.floor(deadlineAt - this.now());
-            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
-          }
-          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
-            throw rateLimitError(response.status, delayMs);
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw rateLimitError(response.status, delayMs);
           }
           await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
