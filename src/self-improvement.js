@@ -9,6 +9,8 @@ const SELF_COOLDOWN_MS = 30 * 60 * 1000;
 const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
+const PROVIDER_BACKOFF_BASE_MS = 30 * 60 * 1000;
+const PROVIDER_BACKOFF_MAX_MS = 2 * 60 * 60 * 1000;
 const SELF_MAX_STARTS_PER_24H = 6;
 const PROJECT_MAX_STARTS_PER_24H = 12;
 const MAX_CONSECUTIVE_FAILURE_RETRIES = 3;
@@ -103,6 +105,7 @@ function emptyAutopilot() {
     nextRanking: null,
     gapMemory: [],
     suspendedUntil: null,
+    suspensionReason: null,
     updatedAt: null
   };
 }
@@ -257,16 +260,29 @@ function billingUnavailableError(error) {
   return /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(error ?? ''));
 }
 
-function nextBillingBackoffMs(state) {
+function failureText(summary) {
+  return [summary?.error, summary?.failureDetail].filter(Boolean).join(' | ');
+}
+
+function providerCapacityUnavailableError(error) {
+  return /no_role_candidate_available|provider_capacity_timeout|runtime_cooldown|no_eligible_model_candidate/i.test(String(error ?? ''));
+}
+
+function consecutiveUnavailabilityBackoffMs(state, predicate, baseMs, maxMs) {
   let consecutivePriorFailures = 0;
   for (let index = state.history.length - 1; index >= 0; index -= 1) {
-    if (!billingUnavailableError(state.history[index]?.error)) break;
+    if (!predicate(failureText(state.history[index]))) break;
     consecutivePriorFailures += 1;
   }
-  return Math.min(
-    BILLING_BACKOFF_BASE_MS * (2 ** Math.min(consecutivePriorFailures, 2)),
-    BILLING_BACKOFF_MAX_MS
-  );
+  return Math.min(baseMs * (2 ** Math.min(consecutivePriorFailures, 3)), maxMs);
+}
+
+function nextBillingBackoffMs(state) {
+  return consecutiveUnavailabilityBackoffMs(state, billingUnavailableError, BILLING_BACKOFF_BASE_MS, BILLING_BACKOFF_MAX_MS);
+}
+
+function nextProviderBackoffMs(state) {
+  return consecutiveUnavailabilityBackoffMs(state, providerCapacityUnavailableError, PROVIDER_BACKOFF_BASE_MS, PROVIDER_BACKOFF_MAX_MS);
 }
 
 function workflowCanReplanBeforeImplementation(plan) {
@@ -413,6 +429,8 @@ export class AutonomousProjectImprovement {
   }
 
   revisionAdvanceBypassesSuspension(state) {
+    // A code revision does not replenish a model's exhausted capacity or quota.
+    if (['billing_or_auth_unavailable', 'model_capacity_unavailable'].includes(state.suspensionReason)) return false;
     const latest = state.history.at(-1);
     return typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
@@ -435,7 +453,9 @@ export class AutonomousProjectImprovement {
 
   async settle(plan, { baseRevision }) {
     const summary = resultSummary(plan);
-    const billingUnavailable = billingUnavailableError(summary.error);
+    const terminalFailure = failureText(summary);
+    const billingUnavailable = billingUnavailableError(terminalFailure);
+    const providerUnavailable = !billingUnavailable && providerCapacityUnavailableError(terminalFailure);
     const completedAt = new Date(this.now()).toISOString();
     return this.writeState((state) => {
       const history = [...state.history, {
@@ -494,7 +514,12 @@ export class AutonomousProjectImprovement {
         nextRanking,
         suspendedUntil: billingUnavailable
           ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
-          : null
+          : providerUnavailable
+            ? new Date(this.now() + nextProviderBackoffMs(state)).toISOString()
+            : null,
+        suspensionReason: billingUnavailable
+          ? 'billing_or_auth_unavailable'
+          : providerUnavailable ? 'model_capacity_unavailable' : null
       };
     });
   }
@@ -564,7 +589,8 @@ export class AutonomousProjectImprovement {
       gapMemory: gapAnalysis
         ? rememberGapAnalysis(current.gapMemory, gapAnalysis, startedAt)
         : current.gapMemory,
-      suspendedUntil: null
+      suspendedUntil: null,
+      suspensionReason: null
     }));
     return workflow.id;
   }
