@@ -97,3 +97,31 @@ print(json.dumps({
   assert.equal(result.scope, 'candidate');
   assert.equal(result.siblingBlocked, false);
 });
+
+
+test('provider capacity timeout cools down sibling models briefly without opening the long provider circuit', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile,time
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.STATE=Path(tempfile.mkdtemp())
+m.RUNTIME_HEALTH=m.STATE/"runtime-health.json"
+m.PROVIDER_FAILURE_COOLDOWN_SECONDS=300
+m.CANDIDATE_FAILURE_COOLDOWN_SECONDS=90
+m._RUNTIME_FAILURES={"candidates":{},"providers":{}}
+m._remember_unavailability("ag-gemini-3.8-flash", m.ProviderUnavailable("provider_capacity_timeout:antigravity"))
+sibling=m._runtime_cooldown("ag-gemini-3.1-pro")
+provider=m._RUNTIME_FAILURES["providers"].get("antigravity")
+print(json.dumps({
+  "siblingBlocked": bool(sibling),
+  "providerTtl": round(provider["until"] - time.monotonic()),
+  "scope": m._remember_unavailability("ag-gemini-3.8-flash", m.ProviderUnavailable("provider_capacity_timeout:antigravity"))
+}))
+`);
+  assert.equal(result.siblingBlocked, true);
+  assert.equal(result.scope, 'provider');
+  assert.ok(result.providerTtl <= 90 && result.providerTtl > 0);
+});
