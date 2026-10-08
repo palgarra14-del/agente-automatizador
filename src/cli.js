@@ -11,6 +11,7 @@ import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
 import { cloudRateLimitDeferral, runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
+import { autonomousFallbackAllowed } from './cloud-drain.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
 import { schedulerYieldRequested } from './scheduler-yield.js';
 
@@ -376,7 +377,7 @@ try {
           await queue.ingestAdmissionIntents();
           const queueResult = await queue.tick();
           let autonomousResult = null;
-          if (autonomousSelfImprovement && (!queueResult || ['awaiting_start_approval', 'awaiting_workflow_approval'].includes(queueResult.status))) {
+          if (autonomousSelfImprovement && autonomousFallbackAllowed(queueResult)) {
             autonomousResult = await autonomousSelfImprovement.tick();
           }
           return { queueResult, autonomousResult };
