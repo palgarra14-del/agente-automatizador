@@ -358,10 +358,11 @@ test('website planning uses the creative lead rather than the generic research r
   assert.equal(result.modelRouting.candidate, 'ag-sonnet-4.6');
 });
 
-test('CLI wires the free multimodel executors into local and durable workflow engines', () => {
+test('CLI wires subscription-safe multimodel recovery into local and durable engines', () => {
   const cli = readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
-  assert.match(cli, /new MultiModelReadOnlySkillExecutor\(\{ allowSessionFallback: false \}\)/);
-  assert.match(cli, /new MultiModelCodingWorker\(\{ allowSessionFallback: false \}\)/);
+  assert.match(cli, /codexSubscriptionSessionFallbackEligible\(process\.env\)/);
+  assert.match(cli, /new MultiModelReadOnlySkillExecutor\(\{ allowSessionFallback: subscriptionSessionFallback \}\)/);
+  assert.match(cli, /new MultiModelCodingWorker\(\{ allowSessionFallback: subscriptionSessionFallback \}\)/);
   assert.match(cli, /new WorkflowEngine\(\{ store, projects, \.\.\.workflowModelExecutors \}\)/);
   assert.match(cli, /new DurableCloudWorkflowEngine\(\{ store: activeStore, projects, \.\.\.workflowModelExecutors \}\)/);
 });
