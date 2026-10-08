@@ -415,19 +415,6 @@ export class AutonomousProjectImprovement {
     return true;
   }
 
-  revisionAdvanceBypassesDailyCap(state, starts = this.recentStarts(state)) {
-    if (starts.length < this.maxStartsPer24h) return false;
-    const latest = state.history.at(-1);
-    const lastStartAt = Date.parse(starts.at(-1) ?? '');
-    const completedAt = Date.parse(latest?.completedAt ?? '');
-    return Number.isFinite(lastStartAt) &&
-      Number.isFinite(completedAt) &&
-      completedAt >= lastStartAt &&
-      typeof latest?.baseRevision === 'string' &&
-      /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
-      latest.baseRevision.toLowerCase() !== this.operatorRevision;
-  }
-
   revisionAdvanceBypassesSuspension(state) {
     // A code revision does not replenish a model's exhausted capacity or quota.
     if (['billing_or_auth_unavailable', 'model_capacity_unavailable'].includes(state.suspensionReason)) return false;
@@ -446,7 +433,7 @@ export class AutonomousProjectImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return false;
     const starts = this.recentStarts(state);
-    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
+    if (starts.length >= this.maxStartsPer24h) return false;
     if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
@@ -531,7 +518,7 @@ export class AutonomousProjectImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return null;
     const starts = this.recentStarts(state);
-    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
+    if (starts.length >= this.maxStartsPer24h) return null;
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
