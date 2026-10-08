@@ -4424,6 +4424,88 @@ test('interrupted implementation with observed changes cannot be silently retrie
 });
 
 
+
+test('historical interrupted review is retired when implementation evidence belongs to the pre-migration workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-review-relocated-'));
+  const configured = managedProject('review-relocated', root, {
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/feature.js']);
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit: stableLocalGit({ async inspectChangeSet() { return governed; } })
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Do not review an implementation from a different historical workspace'
+  });
+  await instance.workspaceProject(created.id, configured);
+
+  let originalWorkspace = null;
+  const relocatedWorkspace = join(root, 'new-runner', created.id);
+  await instance.update(created.id, (plan) => {
+    originalWorkspace = plan.workspace.path;
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = originalWorkspace;
+    implementation.evidence.repositoryState = {
+      branch: configured.defaultBranch,
+      head: 'deadbeef',
+      remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`
+    };
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+    implementation.evidence.workerEvidence = { status: 'completed' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+    completeStep(plan, 'dependency-refresh');
+
+    plan.workspace = { ...plan.workspace, path: relocatedWorkspace };
+    const review = plan.steps.find((step) => step.id === 'review');
+    review.status = WorkflowStepStatus.RUNNING;
+    review.attempts = 1;
+    review.evidence = {
+      type: 'executor-start',
+      skill: review.skill,
+      specialist: review.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: relocatedWorkspace,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`
+      },
+      workspaceBeforeFingerprint: governed.changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+
+  const recovered = await instance.run(created.id);
+  const review = recovered.steps.find((step) => step.id === 'review');
+
+  assert.equal(recovered.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(recovered.result.error, 'historical_interrupted_read_only_workspace_reallocated');
+  assert.equal(recovered.result.historicalRecovery, true);
+  assert.equal(review.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(review.error, 'historical_interrupted_read_only_workspace_reallocated');
+  assert.equal(review.evidence.historicalRecovery, true);
+  assert.deepEqual(review.evidence.workspaceRecovery, {
+    observedWorkspacePath: relocatedWorkspace,
+    implementationWorkspacePath: originalWorkspace
+  });
+});
+
 test('interrupted change critic can retry when the implementation diff is exactly unchanged', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-interrupted-critic-clean-'));
   const configured = managedProject('interrupted-critic-clean', root, {
