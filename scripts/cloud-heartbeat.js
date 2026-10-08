@@ -10,6 +10,7 @@ import { systemdRunEnvironmentArgs } from '../src/service.js';
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
 const workflow = process.env.AGENT_CLOUD_WORKFLOW || 'agent-cloud.yml';
+const ciWorkflow = process.env.AGENT_CI_WORKFLOW || 'ci.yml';
 const cli = process.execPath;
 function boundedDuration(name, fallback, min, max) {
   const value = Number(process.env[name] || fallback);
@@ -103,6 +104,19 @@ async function activeLanes(lanes) {
   return active;
 }
 
+async function queuedCriticalCiDemand() {
+  const result = await run('gh',[
+    'run','list','--repo',repo,'--workflow',ciWorkflow,'--limit','20',
+    '--json','name,status,event'
+  ],{timeout:15_000});
+  if (!result.ok) return 0;
+  try {
+    return Math.min(1, criticalCiDemand(JSON.parse(result.stdout)));
+  } catch {
+    return 0;
+  }
+}
+
 async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=timeoutMs) {
   const operatorRequested = operatorLanes.has(lane);
   if (active.has(lane)) return {lane,active:true,operatorRequested};
@@ -192,7 +206,8 @@ const maxHeavy=Number(process.env.AGENT_MAX_HEAVY || 3);
 const plan=planHeartbeat(observations,{
   maxHeavy,
   maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || maxHeavy),
-  maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1)
+  maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1),
+  reserveForExternal:externalPriorityDemand
 });
 
 const yieldRequests = dryRun
