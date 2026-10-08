@@ -593,6 +593,20 @@ export function workflowFailureSummary(workflow) {
   };
 }
 
+export function githubRateLimitRetryAfterMs(response, nowMs = Date.now()) {
+  const header = (name) => response?.headers?.get?.(name) ?? null;
+  const retryAfter = header('retry-after');
+  if (retryAfter !== null && /^\d+(?:\.\d+)?$/.test(String(retryAfter).trim())) {
+    return Math.max(1_000, Math.ceil(Number(retryAfter) * 1_000));
+  }
+  const remaining = header('x-ratelimit-remaining');
+  const reset = Number(header('x-ratelimit-reset'));
+  if (String(remaining).trim() === '0' && Number.isFinite(reset) && reset > 0) {
+    return Math.max(1_000, Math.ceil((reset * 1_000) - nowMs + 1_000));
+  }
+  return null;
+}
+
 export class GitHubIssueChannel {
   constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 12_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
@@ -643,6 +657,8 @@ export class GitHubIssueChannel {
         if (!response.ok) {
           const error = new Error(`GitHub issue queue request failed: ${response.status}`);
           error.status = response.status;
+          const retryAfterMs = githubRateLimitRetryAfterMs(response);
+          if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
           throw error;
         }
         if (response.status === 204) return null;
@@ -651,8 +667,9 @@ export class GitHubIssueChannel {
         if (options.signal?.aborted) throw error;
         lastError = timeoutSignal.aborted ? new Error('github_issue_queue_request_timeout', { cause: error }) : error;
         const status = Number(error?.status ?? 0);
-        const transient = timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
-          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? ''));
+        const rateLimited = Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0;
+        const transient = !rateLimited && (timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
+          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? '')));
         if (!transient || attempt >= retryDelaysMs.length) throw lastError;
       } finally {
         clearTimeout(timeout);
@@ -991,6 +1008,7 @@ export class SupervisedIssueQueue {
     this.operatorBranch = operatorBranch;
     this.executionEnabled = executionEnabled;
     this.now = now;
+    this.parkedScanOffset = 0;
   }
 
   ownsProject(projectId) {
@@ -2315,7 +2333,7 @@ export class SupervisedIssueQueue {
       }
     }
     let parkedResult = null;
-    const maxParkedScans = 20;
+    const parkedScanBudget = 3;
     const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
     const activeEntries = Object.entries(state.requests ?? {})
       .filter(([key, record]) =>
@@ -2329,9 +2347,13 @@ export class SupervisedIssueQueue {
     const activeKeys = new Set(activeEntries.map(([key]) => key));
     const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
     const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
-    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
-      ? []
-      : allParkedEntries.slice(0, maxParkedScans);
+    let parkedEntries = [];
+    if (allParkedEntries.length > 0 && !(runnableEntries.length > 0 && allParkedEntries.length > parkedScanBudget)) {
+      const count = Math.min(parkedScanBudget, allParkedEntries.length);
+      const offset = this.parkedScanOffset % allParkedEntries.length;
+      parkedEntries = Array.from({ length: count }, (_value, index) => allParkedEntries[(offset + index) % allParkedEntries.length]);
+      this.parkedScanOffset = (offset + count) % allParkedEntries.length;
+    }
     for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
@@ -2408,10 +2430,13 @@ export class SupervisedIssueQueue {
   }
 }
 
-export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs) {
+export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, retryAfterMs = 0) {
   if (!Number.isInteger(failureStreak) || failureStreak < 1) throw new Error('issue_queue_failure_streak_invalid');
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
-  return Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
+  if (!Number.isFinite(retryAfterMs) || retryAfterMs < 0) throw new Error('issue_queue_retry_after_invalid');
+  const ordinaryBackoffMs = Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
+  const boundedRetryAfterMs = Math.min(6 * 60 * 60 * 1_000, Math.ceil(retryAfterMs));
+  return Math.max(ordinaryBackoffMs, boundedRetryAfterMs);
 }
 
 export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
@@ -2435,7 +2460,7 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
         await onTick?.(result);
       } catch (error) {
         failureStreak += 1;
-        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs);
+        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, error?.retryAfterMs ?? 0);
         await onError?.(error);
       }
       if (signal?.aborted) break;
