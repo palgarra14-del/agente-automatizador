@@ -9,11 +9,12 @@ const SELF_COOLDOWN_MS = 30 * 60 * 1000;
 const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_MAX_STARTS_PER_24H = 24;
+const SELF_MAX_STARTS_PER_24H = 6;
+const PROJECT_MAX_STARTS_PER_24H = 12;
 const MAX_CONSECUTIVE_FAILURE_RETRIES = 3;
 const HISTORY_LIMIT = 20;
 const GAP_MEMORY_LIMIT = 12;
-const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
+const MAX_STARTS_PER_24H = SELF_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
   allowedPaths: Object.freeze(['src', 'test/autonomous']),
@@ -44,7 +45,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   self: Object.freeze({
     stateKey: SELF_STATE_KEY,
     cooldownMs: SELF_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: SELF_MAX_STARTS_PER_24H,
     goal: AUTONOMOUS_MAINTENANCE_GOAL,
     scope: AUTONOMOUS_MAINTENANCE_SCOPE,
     allowSensitiveImplementation: true
@@ -52,7 +53,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   leadfinder: Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative LeadFinder main and implement exactly one bounded improvement that increases qualified lead throughput, contact-data quality, niche targeting, deduplication, prioritization, observability or reliable handoff into Callflow. Prefer measurable fixes and regression coverage over speculative refactors. Work only on safe application/docs paths, never secrets, workflow control, dependencies, deployment configuration or production data. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['src', 'docs']),
@@ -63,7 +64,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   callflow: Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative Callflow main and implement exactly one bounded improvement that increases sales-call throughput, lead prioritization, outcome capture, follow-up discipline, operator usability or feedback quality back to LeadFinder. Prefer deterministic UX/data-quality fixes with tests. Do not touch Apps Script, API/config secrets, deployment configuration, package metadata or external communications. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['app.js', 'prospect.js', 'prospect-utils.js', 'callflow-navigation.js', 'index.html', 'styles.css', 'closing.css', 'tests']),
@@ -74,7 +75,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   'website-pilot': Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative Website Pilot main and implement exactly one bounded improvement that makes the existing demo/site portfolio more professional, responsive, accessible, conversion-oriented, distinctive or faster to reuse for qualified local-business leads. Preserve factual honesty and existing routes. Prefer fixes supported by tests or rendered evidence. Do not touch dependency, deployment or secret-bearing control files. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['index.html', 'assets', 'barberia', 'galeria', 'servicios', 'test', 'docs', '404.html', 'robots.txt', 'sitemap.xml']),
