@@ -75,7 +75,8 @@ test('self autopilot allows up to 6 autonomous filler starts per day and still f
       completedAt: new Date(Date.parse(lastStart) + 1_000).toISOString()
     }]
   }));
-  assert.equal(await advanced.hasWork(), true);
+  // A new revision must not reset an exhausted rolling daily start budget.
+  assert.equal(await advanced.hasWork(), false);
 });
 
 
