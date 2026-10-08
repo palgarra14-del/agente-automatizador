@@ -25,6 +25,7 @@ import {
   codexWorkerSecurityConfig,
   codexTurnFailureDiagnostics,
   codexApiKeyFromEnvironment,
+  codexSubscriptionSessionFallbackEligible,
   collectReadOnlyRepositoryContext,
   configFrom,
   doctor,
@@ -3122,4 +3123,18 @@ test('git control fingerprint detects temporary ref tampering even when final HE
   assert.notEqual(after.fingerprint, before.fingerprint);
   assert.ok(after.paths.some((path) => path === `refs/heads/${branchName}`));
   assert.ok(after.paths.some((path) => path === `logs/refs/heads/${branchName}`));
+});
+
+
+test('Codex session rescue requires approved subscription policy and respects the 20-percent reserve', () => {
+  const allowed = codexSubscriptionSessionFallbackEligible;
+  assert.equal(allowed({ MODEL_COST_POLICY: 'free_only' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '21' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '20' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '19' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: 'invalid' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '31', CODEX_SUBSCRIPTION_HEADROOM_PERCENT: 'invalid' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '20', CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'free_only', CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1' }), false);
 });
