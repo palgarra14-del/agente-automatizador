@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -2248,6 +2248,20 @@ export function evaluateDefinitionOfDone(plan) {
   return { ok: requirements.every((requirement) => requirement.ok), requirements };
 }
 
+function managedWorkspacePathState(path) {
+  try {
+    const details = lstatSync(path);
+    return details.isSymbolicLink() ? 'symlink' : 'present';
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    throw error;
+  }
+}
+
+function managedWorkspacePathUnavailable(path) {
+  return ['missing', 'symlink'].includes(managedWorkspacePathState(path));
+}
+
 function historicalWorkspaceIsRecoverable(workspace) {
   if (workspace === null) return true;
   if (!workspace || typeof workspace !== 'object' || workspace.managed !== true) return false;
@@ -2257,7 +2271,7 @@ function historicalWorkspaceIsRecoverable(workspace) {
   if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch) return false;
   if (!/^[a-f0-9]{40}$/i.test(workspace.baseHead ?? '')) return false;
   if (typeof workspace.remote !== 'string' || !workspace.remote) return false;
-  return !existsSync(workspace.path);
+  return managedWorkspacePathUnavailable(workspace.path);
 }
 
 function pristineWorkflowForWorkspaceReallocation(plan) {
@@ -4212,7 +4226,7 @@ export class WorkflowEngine {
         plan.workspace.managed === true &&
         typeof plan.workspace.path === 'string' &&
         resolve(plan.workspace.path) === plan.workspace.path &&
-        !existsSync(plan.workspace.path) &&
+        managedWorkspacePathUnavailable(plan.workspace.path) &&
         pristineWorkflowForWorkspaceReallocation(plan);
       if (safelyReallocatable) {
         const staleWorkspacePath = plan.workspace.path;
@@ -4220,7 +4234,7 @@ export class WorkflowEngine {
           if (!pristineWorkflowForWorkspaceReallocation(saved) ||
               saved.workspace?.managed !== true ||
               saved.workspace.path !== staleWorkspacePath ||
-              existsSync(saved.workspace.path)) {
+              !managedWorkspacePathUnavailable(saved.workspace.path)) {
             throw new Error('workflow_workspace_reallocation_state_changed');
           }
           saved.workspace = null;
@@ -4383,7 +4397,7 @@ export class WorkflowEngine {
 
     if (capabilityContextChanged &&
         observed.workspace.managed === true &&
-        !existsSync(observed.workspace.path)) {
+        managedWorkspacePathUnavailable(observed.workspace.path)) {
       return retireForCapabilityContextChange();
     }
 
