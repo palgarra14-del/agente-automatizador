@@ -5847,7 +5847,7 @@ export function codexSubscriptionSessionFallbackEligible(environment = {}) {
     return raw === '' ? NaN : Number(raw);
   });
   if (!override && values.some((value) => !Number.isFinite(value) || value < 0 || value > 100)) return false;
-  return override || values.length === 0 || values[0] > 20;
+  return override || values.length === 0 || values.every((value) => value > 20);
 }
 
 export function codexPaidFallbackEligible(message) {
