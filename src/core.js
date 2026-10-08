@@ -4355,8 +4355,15 @@ export class WorkflowEngine {
       observed.registryFingerprint !== this.registry.fingerprint ||
       observed.specialistRegistryFingerprint !== this.specialistRegistry.fingerprint ||
       observed.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {});
+    const implementation = observed.steps.find((step) => step.id === 'implementation');
+    const historicalWorkspaceEvidenceMismatch =
+      observed.workspace.managed === true &&
+      interruptedStep.skill === 'code.review' &&
+      implementation?.status === WorkflowStepStatus.COMPLETED &&
+      typeof implementation.evidence?.workspacePath === 'string' &&
+      implementation.evidence.workspacePath !== observed.workspace.path;
 
-    const retireForCapabilityContextChange = () => this.update(id, (saved) => {
+    const retireInterruptedReadOnly = (reason, extraEvidence = {}) => this.update(id, (saved) => {
       const step = saved.steps.find((item) => item.id === interruptedStep.id);
       if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
         throw new Error('historical_interrupted_read_only_recovery_state_changed');
@@ -4372,7 +4379,7 @@ export class WorkflowEngine {
         completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
       }
       step.status = WorkflowStepStatus.BLOCKED;
-      step.error = 'historical_interrupted_read_only_capability_context_changed';
+      step.error = reason;
       step.evidence = {
         ...step.evidence,
         type: 'historical-interrupted-execution',
@@ -4381,6 +4388,26 @@ export class WorkflowEngine {
         interruptedModelCallId: startedCalls[0]?.id ?? null,
         retryAvailable: false,
         historicalRecovery: true,
+        ...extraEvidence
+      };
+      saved.status = WorkflowStepStatus.BLOCKED;
+      saved.pausedAt = null;
+      saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
+    }, { deadlineAt: deadlineCapAt });
+
+    if (historicalWorkspaceEvidenceMismatch) {
+      return retireInterruptedReadOnly('historical_interrupted_read_only_workspace_reallocated', {
+        workspaceRecovery: {
+          observedWorkspacePath: observed.workspace.path,
+          implementationWorkspacePath: implementation.evidence.workspacePath
+        }
+      });
+    }
+
+    if (capabilityContextChanged &&
+        observed.workspace.managed === true &&
+        managedWorkspacePathUnavailable(observed.workspace.path)) {
+      return retireInterruptedReadOnly('historical_interrupted_read_only_capability_context_changed', {
         capabilityContext: {
           savedRegistryFingerprint: observed.registryFingerprint,
           activeRegistryFingerprint: this.registry.fingerprint,
@@ -4389,16 +4416,7 @@ export class WorkflowEngine {
           savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
           activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
         }
-      };
-      saved.status = WorkflowStepStatus.BLOCKED;
-      saved.pausedAt = null;
-      saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
-    }, { deadlineAt: deadlineCapAt });
-
-    if (capabilityContextChanged &&
-        observed.workspace.managed === true &&
-        managedWorkspacePathUnavailable(observed.workspace.path)) {
-      return retireForCapabilityContextChange();
+      });
     }
 
     const workspaceProject = projectAtWorkspace(project, observed.workspace.path);
@@ -4453,7 +4471,16 @@ export class WorkflowEngine {
     }
 
     if (capabilityContextChanged) {
-      return retireForCapabilityContextChange();
+      return retireInterruptedReadOnly('historical_interrupted_read_only_capability_context_changed', {
+        capabilityContext: {
+          savedRegistryFingerprint: observed.registryFingerprint,
+          activeRegistryFingerprint: this.registry.fingerprint,
+          savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
+          activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+          savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
+          activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
+        }
+      });
     }
 
     return this.update(id, (saved) => {
