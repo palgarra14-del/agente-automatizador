@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   AUTONOMOUS_MAINTENANCE_GOAL,
   AUTONOMOUS_MAINTENANCE_SCOPE,
+  AUTONOMOUS_PROJECT_POLICIES,
   AutonomousProjectImprovement,
   AutonomousSelfImprovement,
   autonomousSensitiveImplementationAllowed
@@ -27,11 +28,15 @@ function fakeStore(initial = {}) {
   };
 }
 
-function pendingPlan(id = 'workflow-auto-1') {
+function pendingPlan(id = 'workflow-auto-1', projectId = 'self') {
+  const scope = projectId === 'self'
+    ? AUTONOMOUS_MAINTENANCE_SCOPE
+    : AUTONOMOUS_PROJECT_POLICIES[projectId]?.scope;
   return {
     id,
     profile: 'autonomous-maintenance',
-    projectId: 'self',
+    projectId,
+    scope: clone(scope),
     status: 'pending',
     result: null,
     steps: [
@@ -212,6 +217,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
     id: 'workflow-sensitive',
     profile: 'autonomous-maintenance',
     projectId: 'self',
+    scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
     status: 'awaiting_approval',
     result: null,
     steps: [sensitiveImplementation({ paths: ['src/recovery.js', 'test/autonomous/recovery.test.js'], reason: 'sensitive_change:src/recovery.js' })]
@@ -248,6 +254,7 @@ test('autopilot may approve an exact bounded src implementation but never auth/s
         id: 'workflow-sensitive',
         profile: 'autonomous-maintenance',
         projectId: 'self',
+        scope: clone(AUTONOMOUS_MAINTENANCE_SCOPE),
         status: 'awaiting_approval',
         result: null,
         steps: [sensitiveImplementation({
@@ -302,8 +309,7 @@ test('autopilot retires a pristine historical workflow after a registry fingerpr
     }
   });
   const plan = {
-    ...pendingPlan('workflow-historical'),
-    projectId: 'website-pilot',
+    ...pendingPlan('workflow-historical', 'website-pilot'),
     workspace: null,
     outputBytes: 0,
     modelUsage: { calls: 0 },
@@ -366,8 +372,7 @@ test('autopilot never retires a workflow for an unrelated execution failure', as
   const engine = {
     async get() {
       return {
-        ...pendingPlan('workflow-real-failure'),
-        projectId: 'website-pilot'
+        ...pendingPlan('workflow-real-failure', 'website-pilot')
       };
     },
     async run() { throw new Error('repository_integrity_check_failed'); },
