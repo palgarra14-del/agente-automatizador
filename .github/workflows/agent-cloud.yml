@@ -196,6 +196,11 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Pin managed workspace storage outside transient Actions checkouts
+        shell: bash
+        run: |
+          echo "AGENT_MANAGED_WORKSPACE_ROOT=$HOME/.local/share/engineering-orchestrator-managed-workspaces" >> "$GITHUB_ENV"
+
       - name: Install frozen dependencies
         run: npm ci --ignore-scripts
 

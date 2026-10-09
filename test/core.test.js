@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   CodexReadOnlySkillExecutor,
   CodexSdkWorker,
@@ -51,7 +52,8 @@ import {
   transition,
   websiteBlueprintForBrief,
   websiteBlueprintIdForCategory,
-  managedWorkspacePath
+  managedWorkspacePath,
+  trustedManagedWorkspaceRoot
 } from '../src/core.js';
 
 function project(overrides = {}) {
@@ -2258,6 +2260,51 @@ test('managed workspaces are isolated under the configured root and clone only t
   assert.deepEqual(calls[0].args.slice(0, 6), ['clone', '--origin', 'origin', '--branch', 'main', 'https://github.com/owner/leadfinder.git']);
   assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
   assert.throws(() => managedWorkspacePath(configured, '../other-project'));
+});
+
+test('trusted persistent managed workspace root is outside Actions checkout and rejects arbitrary overrides', () => {
+  const projectRoot = resolve(tmpdir(), 'agent-fixture-checkout');
+  const trusted = resolve(homedir(), '.local/share/engineering-orchestrator-managed-workspaces');
+  assert.equal(trustedManagedWorkspaceRoot(projectRoot), resolve(projectRoot, '.agent-workspaces'));
+  assert.equal(trustedManagedWorkspaceRoot(projectRoot, '.agent-workspaces', trusted), trusted);
+  assert.throws(
+    () => trustedManagedWorkspaceRoot(projectRoot, '../../outside', trusted),
+    /managedWorkspaceRoot must stay below the project root/
+  );
+  for (const override of ['.agent-workspaces', '', '/tmp/agent-workspaces', trusted + '-other', null]) {
+    assert.throws(
+      () => trustedManagedWorkspaceRoot(projectRoot, '.agent-workspaces', override),
+      /managedWorkspaceRoot_external_override_untrusted/
+    );
+  }
+});
+
+test('persistent managed workspace survives real Git checkout cleanup', async () => {
+  const fixture = await mkdtemp(join(tmpdir(), 'agent-persistent-clean-'));
+  const checkout = join(fixture, 'runner', '_work', 'repo');
+  const home = join(fixture, 'home');
+  const persistent = join(home, '.local', 'share', 'engineering-orchestrator-managed-workspaces');
+  try {
+    await mkdir(checkout, { recursive: true });
+    const created = spawnSync('git', ['init', '--quiet', checkout], { encoding: 'utf8' });
+    assert.equal(created.status, 0, created.stderr);
+    await writeFile(join(checkout, '.gitignore'), '.agent-workspaces/\n');
+    const ephemeral = join(checkout, '.agent-workspaces', 'leadfinder', 'run-123');
+    const durable = join(persistent, 'leadfinder', 'run-123');
+    await mkdir(ephemeral, { recursive: true });
+    await mkdir(durable, { recursive: true });
+    await writeFile(join(ephemeral, 'evidence.json'), '{"temporary":true}\n');
+    await writeFile(join(durable, 'evidence.json'), '{"persistent":true}\n');
+    assert.equal(trustedManagedWorkspaceRoot(checkout, '.agent-workspaces', persistent, home), persistent);
+
+    const clean = spawnSync('git', ['-C', checkout, 'clean', '-ffdx'], { encoding: 'utf8' });
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.equal(existsSync(ephemeral), false, 'transient ignored workspace must be cleaned');
+    assert.equal(existsSync(durable), true, 'out-of-checkout workspace must survive');
+    assert.equal((await readFile(join(durable, 'evidence.json'), 'utf8')).trim(), '{"persistent":true}');
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });
 
 test('managed workspace prepare reuses a valid interrupted clone and quarantines a partial clone', async () => {

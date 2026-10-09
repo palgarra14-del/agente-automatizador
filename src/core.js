@@ -3,7 +3,7 @@ import { createReadStream, existsSync, lstatSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { delimiter, dirname, parse, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, parse, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { URL, URLSearchParams } from 'node:url';
 import { TextDecoder } from 'node:util';
@@ -815,6 +815,21 @@ export function assertAllowedWorkingBranch(project, branch) {
   }
 }
 
+export function trustedManagedWorkspaceRoot(projectRoot, configuredRoot = '.agent-workspaces', overrideRoot = undefined, home = homedir()) {
+  const configured = resolve(projectRoot, configuredRoot);
+  if (!isWithin(projectRoot, configured) || configured === resolve(projectRoot)) {
+    throw new Error('managedWorkspaceRoot must stay below the project root');
+  }
+  if (overrideRoot === undefined) return configured;
+  // Only the single operator-controlled persistent root is permitted outside a checkout.
+  // Its physical path is checked again by assertSafePathChain before any clone or reuse.
+  const trusted = resolve(home, '.local', 'share', 'engineering-orchestrator-managed-workspaces');
+  if (typeof overrideRoot !== 'string' || !isAbsolute(overrideRoot) || resolve(overrideRoot) !== trusted) {
+    throw new Error('managedWorkspaceRoot_external_override_untrusted');
+  }
+  return trusted;
+}
+
 export function configFrom(input, baseDirectory = process.cwd(), registry = defaultToolSkillRegistry) {
   if (!input?.id || !/^[a-z0-9-]+$/.test(input.id)) throw new Error('Invalid project id');
   if (!input.repository?.owner || !input.repository?.name) throw new Error('repository owner/name required');
@@ -830,8 +845,11 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
   if (!isWithin(projectRoot, workspace)) throw new Error('workspace must stay within the configured project root');
   const workspaceStrategy = input.workspaceStrategy ?? 'host';
   if (!['host', 'managed'].includes(workspaceStrategy)) throw new Error('workspaceStrategy must be host or managed');
-  const managedWorkspaceRoot = resolve(projectRoot, input.managedWorkspaceRoot ?? '.agent-workspaces');
-  if (!isWithin(projectRoot, managedWorkspaceRoot) || managedWorkspaceRoot === projectRoot) throw new Error('managedWorkspaceRoot must stay below the project root');
+  const managedWorkspaceRoot = trustedManagedWorkspaceRoot(
+    projectRoot,
+    input.managedWorkspaceRoot ?? '.agent-workspaces',
+    workspaceStrategy === 'managed' ? process.env.AGENT_MANAGED_WORKSPACE_ROOT : undefined
+  );
   const acceptance = input.acceptance?.require ?? defaultAcceptance;
   if (!Array.isArray(acceptance) || !acceptance.length || acceptance.some((name) => !allowedAcceptance.has(name))) throw new Error('Invalid acceptance requirements');
   if (input.acceptance && acceptance.some((name) => !['ci', 'deployment'].includes(name) && !input.commands[name])) throw new Error('Acceptance command is not allowlisted');
