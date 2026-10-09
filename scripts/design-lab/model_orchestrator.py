@@ -1225,6 +1225,41 @@ def rank_candidates(
     )
 
 
+def role_unavailability_summary(
+    role, *, disabled_providers=None, require_visual=False,
+    excluded_families=None, excluded_candidates=None,
+):
+    """Bounded, non-secret reasons for an empty model pool; never runs inference."""
+    if role not in ROLE_POLICY:
+        raise ValueError("unknown_role")
+    disabled = set(disabled_providers or ())
+    excluded = set(excluded_families or ())
+    omitted = set(excluded_candidates or ())
+    counts = {}
+    for candidate, _prior in ROLE_POLICY[role]:
+        spec = CANDIDATES[candidate]
+        if candidate in omitted:
+            reason = "candidate_excluded"
+        elif candidate_family(candidate) in excluded:
+            reason = "family_excluded"
+        elif require_visual and not spec.get("visual"):
+            reason = "visual_capability_missing"
+        elif not cost_allowed(spec):
+            reason = "quota_or_cost_policy"
+        elif spec["provider"] in disabled:
+            reason = "provider_disabled"
+        elif not candidate_resource_safe(candidate):
+            reason = "memory_unavailable"
+        elif _runtime_cooldown(candidate) is not None:
+            reason = "cooldown"
+        elif not provider_available(spec["provider"], spec.get("model")):
+            reason = "provider_unavailable"
+        else:
+            reason = "eligible"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
 def choose_candidate(role, **kwargs):
     ranked = rank_candidates(role, **kwargs)
     return ranked[0] if ranked else None
@@ -1312,13 +1347,24 @@ def run_role_structured(
 ):
     require_visual = bool(images) or role in VISUAL_ROLES
     errors = []
-    for item in rank_candidates(
+    ranked = rank_candidates(
         role,
         disabled_providers=disabled_providers,
         require_visual=require_visual,
         excluded_families=excluded_families,
         excluded_candidates=excluded_candidates,
-    ):
+    )
+    if not ranked:
+        categories = role_unavailability_summary(
+            role,
+            disabled_providers=disabled_providers,
+            require_visual=require_visual,
+            excluded_families=excluded_families,
+            excluded_candidates=excluded_candidates,
+        )
+        detail = ",".join(f"{key}={value}" for key, value in sorted(categories.items()))
+        raise ProviderUnavailable("no_role_candidate_available:" + detail)
+    for item in ranked:
         if require_premium and item["provider"] == "ollama":
             continue
         candidate = item["candidate"]
