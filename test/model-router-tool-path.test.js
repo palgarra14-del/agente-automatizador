@@ -83,3 +83,30 @@ test('unavailable Antigravity is probed once per routing wave and rechecked afte
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('no model candidate reports safe grouped causes without attempting inference', () => {
+  const script = [
+    'import sys',
+    'sys.path.insert(0, sys.argv[1])',
+    'import model_orchestrator as orchestrator',
+    'orchestrator.provider_available = lambda provider, model=None: False',
+    'role = "quick_qa"',
+    'summary = orchestrator.role_unavailability_summary(role)',
+    'assert sum(summary.values()) == len(orchestrator.ROLE_POLICY[role]), summary',
+    'assert summary.get("provider_unavailable", 0) > 0, summary',
+    'try:',
+    '    orchestrator.run_role_structured(role, "test", {}, use_role_agent=False)',
+    'except orchestrator.ProviderUnavailable as error:',
+    '    assert str(error).startswith("no_role_candidate_available:"), error',
+    '    assert "provider_unavailable=" in str(error), error',
+    'else:',
+    '    raise AssertionError("empty candidate pool incorrectly attempted work")',
+    'print("ok")'
+  ].join('\n');
+  const run = spawnSync('python3', ['-c', script, routerDir], {
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', MODEL_COST_POLICY: 'free_only' },
+    encoding: 'utf8', timeout: 15_000
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout.trim(), 'ok');
+});
