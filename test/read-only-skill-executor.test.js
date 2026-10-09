@@ -75,6 +75,46 @@ test('read-only skill executor uses a read-only offline Codex thread and validat
   assert.match(invocation.prompt, /If repository access is blocked/);
 });
 
+test('read-only executor can disable paid API fallback while preserving session auth', async () => {
+  const invocations = [];
+  class SessionOnlyCodex {
+    constructor(options) { invocations.push(options); }
+    startThread() {
+      return {
+        id: 'session-only-thread',
+        run: async () => { throw new Error('session expired'); }
+      };
+    }
+  }
+  const executor = new CodexReadOnlySkillExecutor({
+    CodexClient: SessionOnlyCodex,
+    environment: () => ({
+      PATH: '/safe/bin',
+      CODEX_API_KEY: 'x'.repeat(32),
+      OPENAI_API_KEY: 'y'.repeat(32)
+    }),
+    codexHomeFactory: async () => ({
+      path: '/isolated/codex-home',
+      authAvailable: true,
+      cleanup: async () => {}
+    }),
+    platform: 'linux'
+  });
+  const result = await executor.execute({
+    skill: 'code.inspect',
+    goal: 'Inspect without paid fallback',
+    contract: defaultToolSkillRegistry.getSkill('code.inspect').contract,
+    context: {}
+  }, { workspace: '/safe/workspace', timeoutMs: 500, allowPaidApiFallback: false });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.authMode, 'session');
+  assert.equal(result.paidApiUsed, false);
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].apiKey, undefined);
+  assert.match(result.error, /session expired/);
+});
+
 test('isolated Codex session persists rotated auth back to the canonical home', async () => {
   const sourceHome = await mkdtemp(join(tmpdir(), 'agent-codex-source-'));
   const sourceAuth = join(sourceHome, 'auth.json');

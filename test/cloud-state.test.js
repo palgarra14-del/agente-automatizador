@@ -801,7 +801,7 @@ test('cloud-state read request is aborted at the active workflow deadline', asyn
   assert.equal(reads, 1);
 });
 
-test('cloud-state rate-limit retry cannot sleep past the active workflow deadline', async () => {
+test('cloud-state classifies a rate-limit beyond the workflow deadline for delayed retry', async () => {
   const sleeps = [];
   const store = new GitHubStateStore({
     repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
@@ -816,8 +816,35 @@ test('cloud-state rate-limit retry cannot sleep past the active workflow deadlin
       10_050,
       () => store.request('/git/ref/tags/test')
     ),
-    /workflow_deadline_cap_exceeded/
+    (error) => error?.message === 'cloud_state_github_rate_limited:429' && error?.retryAfterMs === 60_000
   );
+  assert.deepEqual(sleeps, []);
+});
+
+
+
+test('GraphQL ref reads also defer a rate limit instead of exhausting their workflow deadline', async () => {
+  let reads = 0;
+  const sleeps = [];
+  const store = new GitHubStateStore({
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    token: 'test-token-not-a-real-secret',
+    ownerId: 'github:deadline:graphql-rate-limit',
+    now: () => 10_000,
+    sleep: async (ms) => { sleeps.push(ms); },
+    fetchImpl: async () => {
+      reads += 1;
+      return response(429, {});
+    }
+  });
+  await assert.rejects(
+    () => store.mutationDeadlineContext.run(
+      10_050,
+      () => store.readRefs()
+    ),
+    (error) => error?.message === 'cloud_state_github_rate_limited:429' && error?.retryAfterMs === 60_000
+  );
+  assert.equal(reads, 1);
   assert.deepEqual(sleeps, []);
 });
 
@@ -839,7 +866,7 @@ test('cloud-state yields immediately on a long GitHub rate-limit reset', async (
           get(name) {
             const key = String(name).toLowerCase();
             if (key === 'x-ratelimit-remaining') return '0';
-            if (key === 'x-ratelimit-reset') return '70';
+            if (key === 'x-ratelimit-reset') return '3600';
             return null;
           }
         },
@@ -852,7 +879,7 @@ test('cloud-state yields immediately on a long GitHub rate-limit reset', async (
 
   await assert.rejects(
     () => store.refSha('tags/test'),
-    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 61_000
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 3_591_000
   );
   assert.equal(reads, 1);
   assert.deepEqual(sleeps, []);
@@ -2296,6 +2323,56 @@ test('global lease release still fails closed when authoritative state retains t
   const state = await store.load();
   assert.equal(state.cloudExecutionLease?.leaseId, lease.leaseId);
   assert.equal(state.cloudExecutionLease?.ownerId, 'github:77:3');
+});
+
+test('execution lease release retries after a verified transient cloud-state write failure', async () => {
+  const fake = fakeGitHub();
+  const sleeps = [];
+  const store = storeFor(fake, { sleep: async (ms) => { sleeps.push(ms); } });
+  const state = {
+    runs: {
+      one: {
+        id: 'one',
+        executionLease: { leaseId:'lease-1', kind:'run', pid:123, createdAt:'2026-09-17T00:00:00.000Z', ownerIdentity:'github:1:1' }
+      }
+    }
+  };
+  let attempts = 0;
+  store.mutate = async (mutator) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('injected_execution_lease_release_failure');
+    return mutator(state);
+  };
+  store.readSnapshot = async () => ({ state });
+
+  assert.equal(await store.releaseExecutionLease('runs', 'one', 'lease-1'), true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(sleeps, [250]);
+  assert.equal(state.runs.one.executionLease, null);
+});
+
+test('execution lease release is idempotent when the write succeeded but the response failed', async () => {
+  const fake = fakeGitHub();
+  const store = storeFor(fake);
+  const state = {
+    runs: {
+      one: {
+        id: 'one',
+        executionLease: { leaseId:'lease-1', kind:'run', pid:123, createdAt:'2026-09-17T00:00:00.000Z', ownerIdentity:'github:1:1' }
+      }
+    }
+  };
+  let attempts = 0;
+  store.mutate = async (mutator) => {
+    attempts += 1;
+    mutator(state);
+    throw new Error('injected_response_loss_after_release');
+  };
+  store.readSnapshot = async () => ({ state });
+
+  assert.equal(await store.releaseExecutionLease('runs', 'one', 'lease-1'), true);
+  assert.equal(attempts, 1);
+  assert.equal(state.runs.one.executionLease, null);
 });
 
 test('execution lease abandonment fails closed when owner run cannot be verified', async () => {

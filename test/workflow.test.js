@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { JsonStore, WorkflowEngine, WorkflowPublicationBridge, WorkflowStepStatus, configFrom, createWorkflowPlan, evaluateChangePolicy, evaluateDefinitionOfDone, fingerprintChangeSet, humanApprovalDependencyFingerprint, normalizeBusinessBrief, validateWorkflowPlan, websiteBlueprintForBrief } from '../src/core.js';
@@ -1114,6 +1114,80 @@ test('Callflow and LeadFinder workflows bind every command to their selected man
   assert.equal(calls.some((call) => call.id === 'callflow' && call.name === 'install'), false);
   assert.notEqual(expectedCallflow, expectedLeadfinder);
   assert.equal(manager.prepared.length, 2);
+});
+
+test('pristine managed workflow reallocates a missing workspace from a previous runner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-reallocate-runner-'));
+  const configured = managedProject('reallocate-runner', root);
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'resume pristine work on the current runner'
+  });
+
+  await instance.workspaceProject(created.id, configured);
+  const expected = manager.describe(configured, created.id).workspace;
+  const stalePath = join(root, 'old-runner', created.id);
+  assert.notEqual(stalePath, expected);
+  assert.equal(existsSync(stalePath), false);
+
+  await instance.update(created.id, (plan) => {
+    plan.workspace = { ...plan.workspace, path: stalePath };
+  });
+
+  const rebound = await instance.workspaceProject(created.id, configured);
+  const persisted = await instance.get(created.id);
+
+  assert.equal(rebound.workspace, expected);
+  assert.equal(persisted.workspace.path, expected);
+  assert.equal(manager.prepared.length, 2);
+  assert.equal(persisted.status, WorkflowStepStatus.PENDING);
+  assert.equal(persisted.modelUsage.calls, 0);
+  assert.ok(persisted.steps.every((step) => step.attempts === 0));
+});
+
+
+test('pristine managed workflow reallocates a stale symlinked workspace without following it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-reallocate-symlink-'));
+  const configured = managedProject('reallocate-symlink', root);
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'resume pristine work without following stale symlink'
+  });
+
+  await instance.workspaceProject(created.id, configured);
+  const expected = manager.describe(configured, created.id).workspace;
+  const staleTarget = join(root, 'legacy-target');
+  const stalePath = join(root, 'legacy-workspace-link');
+  await mkdir(staleTarget, { recursive: true });
+  await writeFile(join(staleTarget, 'sentinel.txt'), 'do-not-touch');
+  await symlink(staleTarget, stalePath, 'dir');
+
+  await instance.update(created.id, (plan) => {
+    plan.workspace = { ...plan.workspace, path: stalePath };
+  });
+
+  const rebound = await instance.workspaceProject(created.id, configured);
+  const persisted = await instance.get(created.id);
+
+  assert.equal(rebound.workspace, expected);
+  assert.equal(persisted.workspace.path, expected);
+  assert.equal(manager.prepared.length, 2);
+  assert.equal((await lstat(stalePath)).isSymbolicLink(), true);
+  assert.equal(existsSync(join(staleTarget, 'sentinel.txt')), true);
+  assert.equal(persisted.modelUsage.calls, 0);
+  assert.ok(persisted.steps.every((step) => step.attempts === 0));
 });
 
 test('workflow rejects persisted workspace escape, cross-project substitution, and managed symlink before commands', async () => {
@@ -2321,6 +2395,190 @@ test('run recovers an orphaned read-only model reservation without refunding mod
     ['code.diagnose', 'completed']
   ]);
   assert.ok(waiting.deadlineAt > clock);
+});
+
+test('historical interrupted read-only workflow is retired after capability drift when workspace is unchanged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-historical-interrupted-readonly-'));
+  const configured = managedProject('historical-interrupted-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retire stale interrupted read-only work'
+  });
+  await instance.workspaceProject(created.id, configured);
+  const staleRegistryFingerprint = '1'.repeat(64);
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    plan.registryFingerprint = staleRegistryFingerprint;
+    plan.status = WorkflowStepStatus.RUNNING;
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: staleRegistryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+  });
+
+  const retired = await instance.run(created.id);
+  const inspect = retired.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(retired.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(retired.result.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(retired.result.historicalRecovery, true);
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(inspect.evidence.type, 'historical-interrupted-execution');
+  assert.equal(inspect.evidence.historicalRecovery, true);
+  assert.equal(inspect.evidence.retryAvailable, false);
+});
+
+test('historical interrupted read-only workflow is retired after capability drift when its managed workspace disappeared', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-historical-missing-readonly-'));
+  const configured = managedProject('historical-missing-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retire stale interrupted read-only work after workspace cleanup'
+  });
+  await instance.workspaceProject(created.id, configured);
+  const staleRegistryFingerprint = '2'.repeat(64);
+  const missingWorkspace = join(root, 'already-cleaned-workspace');
+  assert.equal(existsSync(missingWorkspace), false);
+
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    plan.registryFingerprint = staleRegistryFingerprint;
+    plan.workspace = { ...plan.workspace, path: missingWorkspace };
+    plan.status = WorkflowStepStatus.RUNNING;
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: staleRegistryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: missingWorkspace,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+  });
+
+  const retired = await instance.run(created.id);
+  const inspect = retired.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(retired.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(retired.result.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(retired.result.historicalRecovery, true);
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.evidence.type, 'historical-interrupted-execution');
+  assert.equal(inspect.evidence.historicalRecovery, true);
+});
+
+
+test('historical interrupted read-only workflow retires safely when its old managed workspace is now a symlink', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-historical-symlink-readonly-'));
+  const configured = managedProject('historical-symlink-readonly', root, {
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'human.approval', 'project.verify'], deny: [] },
+    budgets: { maxAttempts: 2, maxModelCalls: 6 }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Retire stale interrupted read-only work after runtime relocation'
+  });
+  await instance.workspaceProject(created.id, configured);
+
+  const staleRegistryFingerprint = '3'.repeat(64);
+  const staleTarget = join(root, 'legacy-runtime-target');
+  const staleWorkspace = join(root, 'legacy-runtime-link');
+  await mkdir(staleTarget, { recursive: true });
+  await writeFile(join(staleTarget, 'sentinel.txt'), 'do-not-touch');
+  await symlink(staleTarget, staleWorkspace, 'dir');
+
+  await instance.update(created.id, (plan) => {
+    const inspect = plan.steps.find((step) => step.id === 'inspect-project');
+    plan.registryFingerprint = staleRegistryFingerprint;
+    plan.workspace = { ...plan.workspace, path: staleWorkspace };
+    plan.status = WorkflowStepStatus.RUNNING;
+    inspect.status = WorkflowStepStatus.RUNNING;
+    inspect.attempts = 1;
+    inspect.evidence = {
+      type: 'executor-start',
+      skill: inspect.skill,
+      specialist: inspect.specialist,
+      registryFingerprint: staleRegistryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: staleWorkspace,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: 'https://github.com/' + configured.repository.owner + '/' + configured.repository.name + '.git'
+      },
+      workspaceBeforeFingerprint: emptyChangeSet().changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint,
+      repositoryContextFingerprint: null,
+      repositoryContextPaths: []
+    };
+  });
+
+  const retired = await instance.run(created.id);
+  const inspect = retired.steps.find((step) => step.id === 'inspect-project');
+
+  assert.equal(retired.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(retired.result.error, 'historical_interrupted_read_only_capability_context_changed');
+  assert.equal(retired.result.historicalRecovery, true);
+  assert.equal(inspect.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(inspect.evidence.historicalRecovery, true);
+  assert.equal((await lstat(staleWorkspace)).isSymbolicLink(), true);
+  assert.equal(existsSync(join(staleTarget, 'sentinel.txt')), true);
 });
 
 test('read-only transient model failure remains retryable within the configured attempt budget', async () => {
@@ -4165,6 +4423,143 @@ test('interrupted implementation with observed changes cannot be silently retrie
   await assert.rejects(instance.approve(created.id, 'implementation'), /not awaiting human approval/);
 });
 
+
+
+test('historical interrupted review is retired when implementation evidence belongs to the pre-migration workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-review-relocated-'));
+  const configured = managedProject('review-relocated', root, {
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/feature.js']);
+  const instance = await engine({
+    projects: new Map([[configured.id, configured]]),
+    workspaceManager: manager,
+    localGit: stableLocalGit({ async inspectChangeSet() { return governed; } })
+  });
+  const created = await instance.create({
+    profile: 'app-improvement',
+    projectId: configured.id,
+    goal: 'Do not review an implementation from a different historical workspace'
+  });
+  await instance.workspaceProject(created.id, configured);
+
+  let originalWorkspace = null;
+  const relocatedWorkspace = join(root, 'new-runner', created.id);
+  await instance.update(created.id, (plan) => {
+    originalWorkspace = plan.workspace.path;
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = originalWorkspace;
+    implementation.evidence.repositoryState = {
+      branch: configured.defaultBranch,
+      head: 'deadbeef',
+      remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`
+    };
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+    implementation.evidence.workerEvidence = { status: 'completed' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+    completeStep(plan, 'dependency-refresh');
+
+    plan.workspace = { ...plan.workspace, path: relocatedWorkspace };
+    const review = plan.steps.find((step) => step.id === 'review');
+    review.status = WorkflowStepStatus.RUNNING;
+    review.attempts = 1;
+    review.evidence = {
+      type: 'executor-start',
+      skill: review.skill,
+      specialist: review.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: relocatedWorkspace,
+      repositoryState: {
+        branch: configured.defaultBranch,
+        head: 'deadbeef',
+        remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git`
+      },
+      workspaceBeforeFingerprint: governed.changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+
+  const recovered = await instance.run(created.id);
+  const review = recovered.steps.find((step) => step.id === 'review');
+
+  assert.equal(recovered.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(recovered.result.error, 'historical_interrupted_read_only_workspace_reallocated');
+  assert.equal(recovered.result.historicalRecovery, true);
+  assert.equal(review.status, WorkflowStepStatus.BLOCKED);
+  assert.equal(review.error, 'historical_interrupted_read_only_workspace_reallocated');
+  assert.equal(review.evidence.historicalRecovery, true);
+  assert.deepEqual(review.evidence.workspaceRecovery, {
+    observedWorkspacePath: relocatedWorkspace,
+    implementationWorkspacePath: originalWorkspace
+  });
+});
+
+test('interrupted change critic can retry when the implementation diff is exactly unchanged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-workflow-interrupted-critic-clean-'));
+  const configured = managedProject('interrupted-critic-clean', root, {
+    commands: { test: 'node --version', typecheck: 'node --version', lint: 'node --version', build: 'node --version' },
+    skills: { allow: ['workspace.prepare', 'code.inspect', 'code.diagnose', 'code.implement', 'code.review', 'human.approval', 'project.verify'], deny: [] }
+  });
+  const manager = new FakeWorkflowWorkspaceManager();
+  const governed = changedChangeSet(['src/feature.js']);
+  const localGit = stableLocalGit({ async inspectChangeSet() { return governed; } });
+  const instance = await engine({ projects: new Map([[configured.id, configured]]), workspaceManager: manager, localGit });
+  const created = await instance.create({ profile: 'app-improvement', projectId: configured.id, goal: 'Recover unchanged critic safely' });
+  await instance.workspaceProject(created.id, configured);
+  await instance.update(created.id, (plan) => {
+    completeStep(plan, 'inspect-project');
+    completeStep(plan, 'diagnose');
+    completeStep(plan, 'plan-change');
+    const implementation = completeStep(plan, 'implementation');
+    implementation.evidence.workspacePath = plan.workspace.path;
+    implementation.evidence.repositoryState = { branch: configured.defaultBranch, head: 'deadbeef', remote: `https://github.com/${configured.repository.owner}/${configured.repository.name}.git` };
+    implementation.evidence.changeSet = governed;
+    implementation.evidence.changeSetFingerprint = governed.changeSetFingerprint;
+    implementation.evidence.changePolicy = { ok: true, classification: 'normal' };
+    implementation.evidence.workerEvidence = { status: 'completed', summary: 'fixture' };
+    implementation.evidence.protectedIgnoredFingerprint = emptyProtectedIgnoredState().fingerprint;
+    implementation.evidence.repositoryControlFingerprint = emptyRepositoryControlState().fingerprint;
+
+    completeStep(plan, 'dependency-refresh');
+    const review = plan.steps.find((step) => step.id === 'review');
+    review.status = WorkflowStepStatus.RUNNING;
+    review.attempts = 1;
+    review.evidence = {
+      type: 'executor-start',
+      skill: review.skill,
+      specialist: review.specialist,
+      registryFingerprint: plan.registryFingerprint,
+      projectSkillPolicyFingerprint: plan.projectSkillPolicyFingerprint,
+      specialistRegistryFingerprint: plan.specialistRegistryFingerprint,
+      workspacePath: plan.workspace.path,
+      repositoryState: implementation.evidence.repositoryState,
+      workspaceBeforeFingerprint: governed.changeSetFingerprint,
+      protectedIgnoredFingerprint: emptyProtectedIgnoredState().fingerprint,
+      repositoryControlFingerprint: emptyRepositoryControlState().fingerprint
+    };
+    plan.status = WorkflowStepStatus.RUNNING;
+  });
+
+  const recovered = await instance.recoverInterruptedReadOnlyStepForRun(created.id);
+  const review = recovered.steps.find((step) => step.id === 'review');
+
+  assert.equal(recovered.status, WorkflowStepStatus.PENDING);
+  assert.equal(review.status, WorkflowStepStatus.READY);
+  assert.equal(review.error, 'interrupted_read_only_retry_available');
+  assert.equal(review.evidence.retryAvailable, true);
+});
 
 test('interrupted change critic with observed changes cannot be approved or retried', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-workflow-interrupted-critic-'));

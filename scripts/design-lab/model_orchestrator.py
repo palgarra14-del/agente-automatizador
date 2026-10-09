@@ -48,6 +48,55 @@ PAID_MODELS_EXPLICITLY_ENABLED = os.environ.get(
     "PAID_MODELS_EXPLICITLY_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
 FREE_COST_CLASSES = {"free_quota", "free_hosted", "local_zero_external"}
+SUBSCRIPTION_RESERVE_DEFAULT_PERCENT = 20.0
+
+
+def _env_bool(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def subscription_quota_snapshot():
+    """Return machine-readable, fail-closed subscription headroom state.
+
+    Codex does not currently expose a stable quota endpoint here. Runtime
+    telemetry can feed either percent variable later; no interactive CLI UI is
+    scraped. Unknown headroom remains usable only because the operator opted
+    into subscription_included, and is surfaced in every routing snapshot.
+    """
+    supplied = [
+        (name, os.environ[name])
+        for name in (
+            "CODEX_SUBSCRIPTION_REMAINING_PERCENT",
+            "CODEX_SUBSCRIPTION_HEADROOM_PERCENT",
+        )
+        if name in os.environ
+    ]
+    remaining = None
+    invalid = False
+    for _name, value in supplied:
+        try:
+            parsed = float(value)
+            if not math.isfinite(parsed) or not 0 <= parsed <= 100:
+                invalid = True
+            elif remaining is None:
+                remaining = round(parsed, 3)
+        except (TypeError, ValueError):
+            invalid = True
+    reserve = SUBSCRIPTION_RESERVE_DEFAULT_PERCENT
+    override = _env_bool("CODEX_SUBSCRIPTION_RESERVE_OVERRIDE")
+    if override:
+        reserve = 0.0
+    return {
+        "source": "environment" if supplied else "unknown",
+        "remainingPercent": remaining,
+        "reservePercent": reserve,
+        "reserveOverride": override,
+        "state": "invalid" if invalid else ("known" if remaining is not None else "unknown"),
+        "reserveReached": remaining is not None and remaining <= reserve,
+        "eligible": COST_POLICY == "subscription_included" and (
+            override or (not invalid and (remaining is None or remaining > reserve))
+        ),
+    }
 
 PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_PROVIDER_FAILURE_COOLDOWN_SECONDS", "300"))
@@ -55,6 +104,11 @@ PROVIDER_FAILURE_COOLDOWN_SECONDS = max(
 CANDIDATE_FAILURE_COOLDOWN_SECONDS = max(
     0.0, float(os.environ.get("MODEL_CANDIDATE_FAILURE_COOLDOWN_SECONDS", "90"))
 )
+
+try:
+    OLLAMA_7B_MIN_AVAILABLE_MB = max(0, int(os.environ.get("OLLAMA_7B_MIN_AVAILABLE_MB", "7000")))
+except (TypeError, ValueError):
+    OLLAMA_7B_MIN_AVAILABLE_MB = 7000
 PROVIDER_SLOT_WAIT_SECONDS = max(
     0.1, float(os.environ.get("MODEL_PROVIDER_SLOT_WAIT_SECONDS", "45"))
 )
@@ -133,7 +187,7 @@ def cost_allowed(spec):
     if cost_class in FREE_COST_CLASSES:
         return True
     if cost_class == "subscription_quota" and COST_POLICY == "subscription_included":
-        return True
+        return subscription_quota_snapshot()["eligible"]
     return COST_POLICY == "allow_all" and PAID_MODELS_EXPLICITLY_ENABLED
 
 
@@ -148,6 +202,8 @@ def candidate_resource_class(candidate):
         if candidate in {"ag-opus-4.6", "ag-sonnet-4.6", "ag-gemini-3.1-pro"}:
             return "deep_free"
         return "workhorse_free"
+    if cost_class == "subscription_quota":
+        return "subscription_quota"
     return "paid"
 
 
@@ -291,6 +347,42 @@ CANDIDATES = {
         "visual": False,
         "editing": False,
     },
+    "oc-muse-spark-1.3": {
+        "provider": "opencode",
+        "model": "opencode/muse-spark-1.3-contributor-free",
+        "agent": None,
+        "effort": "low",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
+    "oc-nemotron-3-ultra": {
+        "provider": "opencode",
+        "model": "opencode/nemotron-3-ultra-free",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
+    "oc-nemotron-3.5-lightning": {
+        "provider": "opencode",
+        "model": "opencode/nemotron-3.5-lightning-free",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
+    "oc-ling-3.1-flash": {
+        "provider": "opencode",
+        "model": "opencode/ling-3.1-flash-free",
+        "agent": None,
+        "effort": "medium",
+        "costClass": "free_hosted",
+        "visual": False,
+        "editing": False,
+    },
     "copilot-free-auto": {
         "provider": "copilot",
         "model": os.environ.get("COPILOT_FREE_MODEL", "auto"),
@@ -386,6 +478,10 @@ MODEL_FAMILY = {
     "oc-longcat-2.5": "longcat",
     "oc-mimo-2.6-flash": "xiaomi",
     "oc-space-bunny": "opencode-stealth",
+    "oc-muse-spark-1.3": "muse",
+    "oc-nemotron-3-ultra": "nvidia",
+    "oc-nemotron-3.5-lightning": "nvidia",
+    "oc-ling-3.1-flash": "ling",
     "copilot-free-auto": "copilot-auto",
     "codex-astra": "openai",
     "codex-sol": "openai",
@@ -479,7 +575,12 @@ ROLE_POLICY = {
         ("ag-gpt-oss-120b", 0.945),
         ("ag-sonnet-4.6", 0.93),
         ("ag-gemini-3.8-flash", 0.92),
-        ("oc-mimo-2.6-flash", 0.90),
+        ("oc-nemotron-3.5-lightning", 0.915),
+        ("oc-nemotron-3-ultra", 0.91),
+        ("oc-longcat-2.5", 0.90),
+        ("oc-ling-3.1-flash", 0.89),
+        ("oc-mimo-2.6-flash", 0.88),
+        ("oc-muse-spark-1.3", 0.87),
     ],
     "visual_fix": [
         ("ag-sonnet-4.6", 0.99),
@@ -499,28 +600,35 @@ ROLE_POLICY = {
         ("codex-5.6-terra", 0.87),
     ],
 
-    # Fast/high-volume work should not consume the deepest reviewers.
+    # Fast/high-volume work should prefer hosted-free models. Ollama remains
+    # a cold local fallback so normal batch work cannot pin a multi-GB model in RAM.
     "quick_qa": [
         ("ag-gemini-3.8-flash", 0.98),
-        ("oc-mimo-2.6-flash", 0.94),
-        ("copilot-free-auto", 0.92),
-        ("oc-space-bunny", 0.90),
-        ("ag-gpt-oss-120b", 0.89),
-        ("ollama-qwen-3b", 0.86),
-        ("oc-longcat-2.5", 0.84),
+        ("oc-muse-spark-1.3", 0.97),
+        ("oc-mimo-2.6-flash", 0.96),
         ("codex-luna", 0.95),
-        ("codex-5.6-luna", 0.88),
-        ("ag-gemini-3.7-flash", 0.87),
-        ("ag-gemini-3.6-flash", 0.82),
+        ("oc-space-bunny", 0.93),
+        ("oc-nemotron-3-ultra", 0.92),
+        ("oc-longcat-2.5", 0.91),
+        ("oc-ling-3.1-flash", 0.88),
+        ("copilot-free-auto", 0.87),
+        ("ag-gpt-oss-120b", 0.86),
+        ("codex-5.6-luna", 0.84),
+        ("ag-gemini-3.7-flash", 0.83),
+        ("ag-gemini-3.6-flash", 0.80),
+        ("ollama-qwen-3b", 0.55),
     ],
     "structured_bulk": [
-        ("ollama-qwen-3b", 0.97),
-        ("oc-mimo-2.6-flash", 0.96),
-        ("copilot-free-auto", 0.92),
-        ("oc-space-bunny", 0.89),
-        ("oc-longcat-2.5", 0.87),
+        ("oc-muse-spark-1.3", 1.00),
+        ("oc-mimo-2.6-flash", 0.98),
+        ("oc-space-bunny", 0.94),
+        ("oc-nemotron-3-ultra", 0.93),
+        ("oc-longcat-2.5", 0.92),
+        ("copilot-free-auto", 0.90),
+        ("oc-nemotron-3.5-lightning", 0.88),
         ("ag-gemini-3.8-flash", 0.86),
         ("codex-luna", 0.95),
+        ("ollama-qwen-3b", 0.50),
     ],
     "final_audit": [
         ("ag-opus-4.6", 0.995),
@@ -535,8 +643,13 @@ ROLE_POLICY = {
         ("ag-gemini-3.1-pro", 0.97),
         ("ag-opus-4.6", 0.95),
         ("ag-sonnet-4.6", 0.93),
+        ("oc-nemotron-3-ultra", 0.92),
+        ("oc-longcat-2.5", 0.91),
         ("ag-gpt-oss-120b", 0.90),
-        ("oc-mimo-2.6-flash", 0.88),
+        ("oc-ling-3.1-flash", 0.90),
+        ("oc-mimo-2.6-flash", 0.89),
+        ("oc-muse-spark-1.3", 0.88),
+        ("oc-nemotron-3.5-lightning", 0.87),
         ("codex-astra", 0.985),
     ],
     "autonomous_orchestration": [
@@ -544,8 +657,12 @@ ROLE_POLICY = {
         ("ag-opus-4.6", 0.97),
         ("ag-sonnet-4.6", 0.95),
         ("ag-gemini-3.1-pro", 0.94),
+        ("oc-nemotron-3.5-lightning", 0.91),
+        ("oc-nemotron-3-ultra", 0.90),
         ("ag-gpt-oss-120b", 0.90),
+        ("oc-longcat-2.5", 0.89),
         ("oc-mimo-2.6-flash", 0.88),
+        ("oc-muse-spark-1.3", 0.86),
         ("codex-astra", 0.995),
         ("codex-sol", 0.985),
     ],
@@ -564,13 +681,16 @@ ROLE_POLICY = {
     ],
     "blocker_diagnosis": [
         ("ag-gemini-3.8-flash", 0.98),
+        ("oc-muse-spark-1.3", 0.96),
         ("ag-gemini-3.1-pro", 0.95),
+        ("oc-mimo-2.6-flash", 0.94),
         ("ag-gpt-oss-120b", 0.93),
-        ("oc-mimo-2.6-flash", 0.91),
+        ("oc-nemotron-3-ultra", 0.93),
+        ("oc-longcat-2.5", 0.91),
+        ("oc-ling-3.1-flash", 0.90),
+        ("oc-nemotron-3.5-lightning", 0.89),
         ("copilot-free-auto", 0.88),
-        ("oc-space-bunny", 0.86),
-        ("ollama-qwen-3b", 0.84),
-        ("oc-longcat-2.5", 0.82),
+        ("ollama-qwen-3b", 0.50),
     ],
 }
 
@@ -578,6 +698,20 @@ ROLE_POLICY = {
 # extra reasoning/visual quality has the highest marginal value. A later wave is
 # still reachable automatically if the cheaper workhorse wave is unavailable.
 ROLE_RESOURCE_WAVES = {
+    "quick_qa": [
+        {"hosted_free"},
+        {"workhorse_free"},
+        {"subscription_quota"},
+        {"deep_free"},
+        {"local"},
+    ],
+    "structured_bulk": [
+        {"hosted_free"},
+        {"workhorse_free"},
+        {"subscription_quota"},
+        {"deep_free"},
+        {"local"},
+    ],
     "research_and_audit": [
         {"workhorse_free", "hosted_free"},
         {"deep_free"},
@@ -593,6 +727,17 @@ ROLE_RESOURCE_WAVES = {
         {"deep_free"},
         {"local"},
     ],
+}
+
+# Quality remains the primary signal. These small role-specific latency
+# weights make throughput roles responsive to measured speed while keeping
+# final/research/deep decisions overwhelmingly quality-led.
+ROLE_OBJECTIVE_WEIGHTS = {
+    "quick_qa": {"latency": 0.30},
+    "structured_bulk": {"latency": 0.30},
+    "final_audit": {"latency": 0.015},
+    "research_and_audit": {"latency": 0.025},
+    "deep_refactor": {"latency": 0.015},
 }
 
 VISUAL_ROLES = {
@@ -661,23 +806,47 @@ SPECIALIZATION_POLICY = {
         "avoid": ["visual_review", "visual_fix"],
         "rationale": "Text-only structured reasoning, tool use and schema-constrained analysis.",
     },
-    "oc-mimo-2.6-flash": {
-        "primary": ["structured_bulk", "quick_qa"],
-        "secondary": ["blocker_diagnosis", "independent_review", "research_and_audit"],
-        "avoid": ["visual_review", "visual_fix"],
-        "rationale": "High-frequency structured work, large context and coding-oriented text analysis.",
+    "oc-muse-spark-1.3": {
+        "primary": ["structured_bulk", "quick_qa", "blocker_diagnosis"],
+        "secondary": ["research_and_audit", "independent_review"],
+        "avoid": ["visual_review", "visual_fix", "deep_refactor"],
+        "rationale": "Best Oct-2026 local benchmark latency/accuracy balance: 4/4 representative tasks at ~3.5 s mean.",
     },
-    "oc-space-bunny": {
-        "primary": [],
-        "secondary": ["quick_qa", "blocker_diagnosis"],
-        "avoid": ["final_audit", "deep_refactor"],
-        "rationale": "Opaque free model; keep it as empirical low-stakes fallback rather than authority.",
+    "oc-mimo-2.6-flash": {
+        "primary": ["structured_bulk", "quick_qa", "blocker_diagnosis"],
+        "secondary": ["independent_review", "research_and_audit", "autonomous_orchestration"],
+        "avoid": ["visual_review", "visual_fix"],
+        "rationale": "Reliable coding-oriented hosted model: 4/4 representative tasks at ~6.7 s mean.",
+    },
+    "oc-nemotron-3-ultra": {
+        "primary": ["blocker_diagnosis", "research_and_audit", "independent_review"],
+        "secondary": ["structured_bulk", "quick_qa", "autonomous_orchestration"],
+        "avoid": ["visual_review", "visual_fix"],
+        "rationale": "Consistent deeper text reasoning: 4/4 representative tasks at ~8.6 s mean.",
     },
     "oc-longcat-2.5": {
-        "primary": [],
-        "secondary": ["structured_bulk", "quick_qa", "blocker_diagnosis"],
-        "avoid": ["final_audit"],
-        "rationale": "Free hosted fallback whose authority should be earned from local outcomes.",
+        "primary": ["structured_bulk", "quick_qa", "blocker_diagnosis"],
+        "secondary": ["research_and_audit", "independent_review", "autonomous_orchestration"],
+        "avoid": ["visual_review", "visual_fix", "final_audit"],
+        "rationale": "Reliable hosted fallback: 4/4 representative tasks at ~9.5 s mean.",
+    },
+    "oc-nemotron-3.5-lightning": {
+        "primary": ["autonomous_orchestration", "independent_review", "blocker_diagnosis"],
+        "secondary": ["research_and_audit"],
+        "avoid": ["structured_bulk", "quick_qa", "visual_review", "visual_fix"],
+        "rationale": "Accurate 4/4 but slower (~24 s mean); reserve for harder reasoning rather than throughput work.",
+    },
+    "oc-ling-3.1-flash": {
+        "primary": ["blocker_diagnosis", "research_and_audit"],
+        "secondary": ["independent_review", "quick_qa"],
+        "avoid": ["structured_bulk", "visual_review", "visual_fix"],
+        "rationale": "Good diagnosis/reasoning but timed out on structured extraction; use selectively.",
+    },
+    "oc-space-bunny": {
+        "primary": ["structured_bulk"],
+        "secondary": ["quick_qa"],
+        "avoid": ["blocker_diagnosis", "final_audit", "deep_refactor", "visual_review", "visual_fix"],
+        "rationale": "Very fast low-stakes extractor, but benchmark missed diagnosis and one QA classification; never use as authority.",
     },
     "copilot-free-auto": {
         "primary": [],
@@ -686,10 +855,10 @@ SPECIALIZATION_POLICY = {
         "rationale": "Availability-aware fallback for straightforward tasks; selected underlying model is opaque.",
     },
     "ollama-qwen-3b": {
-        "primary": ["offline_analysis", "structured_bulk"],
-        "secondary": ["quick_qa", "blocker_diagnosis"],
-        "avoid": ["deep_refactor", "final_audit", "visual_review"],
-        "rationale": "Private local triage, classification and simple code checks with zero external inference.",
+        "primary": ["offline_analysis"],
+        "secondary": ["local_patch"],
+        "avoid": ["structured_bulk", "quick_qa", "blocker_diagnosis", "deep_refactor", "final_audit", "visual_review"],
+        "rationale": "Heavy local fallback reserved for offline/private necessity; hosted-free models should absorb normal work and the model is unloaded after each request.",
     },
     "codex-astra": {
         "primary": ["implementation", "frontend_implementation", "long_horizon_implementation", "deep_refactor", "final_audit"],
@@ -847,8 +1016,10 @@ def outcome_reward(row):
         reward -= 0.03
     elapsed = row.get("elapsedSeconds")
     if isinstance(elapsed, (int, float)) and elapsed > 0:
-        # Tiny latency preference; quality remains dominant.
-        reward += 0.04 * _clamp((600.0 - elapsed) / 600.0)
+        latency_weight = ROLE_OBJECTIVE_WEIGHTS.get(
+            row.get("role"), {}
+        ).get("latency", 0.04)
+        reward += latency_weight * _clamp((600.0 - elapsed) / 600.0)
     return _clamp(reward)
 
 
@@ -890,6 +1061,7 @@ def _runtime_cooldown(candidate):
 def _remember_unavailability(candidate, exc):
     reason = str(exc)
     lowered = reason.lower()
+    capacity_timeout = lowered.startswith("provider_capacity_timeout:")
     provider_markers = (
         "not_authenticated", "please sign in", "sign in", "unauthorized",
         "authentication", "forbidden", "quota", "rate limit", "rate_limit",
@@ -897,10 +1069,13 @@ def _remember_unavailability(candidate, exc):
         "service_unavailable", "service unavailable", "connection refused",
         "credits exhausted", "credit exhausted",
     )
-    provider_wide = any(marker in lowered for marker in provider_markers)
+    provider_wide = capacity_timeout or any(marker in lowered for marker in provider_markers)
     ttl = (
-        PROVIDER_FAILURE_COOLDOWN_SECONDS
-        if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        if capacity_timeout else (
+            PROVIDER_FAILURE_COOLDOWN_SECONDS
+            if provider_wide else CANDIDATE_FAILURE_COOLDOWN_SECONDS
+        )
     )
     if ttl <= 0:
         return None
@@ -944,6 +1119,23 @@ def candidate_family(candidate):
     return MODEL_FAMILY.get(candidate, CANDIDATES[candidate]["provider"])
 
 
+def available_memory_mb():
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def candidate_resource_safe(candidate):
+    if candidate != "ollama-qwen-7b":
+        return True
+    available = available_memory_mb()
+    return available is not None and available >= OLLAMA_7B_MIN_AVAILABLE_MB
+
+
 def candidate_available(
     candidate,
     disabled_providers=None,
@@ -959,6 +1151,7 @@ def candidate_available(
         and candidate_family(candidate) not in excluded_family_set
         and cost_allowed(spec)
         and spec["provider"] not in disabled
+        and candidate_resource_safe(candidate)
         and _runtime_cooldown(candidate) is None
         and provider_available(spec["provider"], spec.get("model"))
     )
@@ -1019,6 +1212,7 @@ def rank_candidates(
             "routingScore": score,
             "prior": prior,
             "stats": stats,
+            "subscriptionQuota": subscription_quota_snapshot(),
             **spec,
         })
     return sorted(
@@ -1029,6 +1223,41 @@ def rank_candidates(
             item["candidate"],
         ),
     )
+
+
+def role_unavailability_summary(
+    role, *, disabled_providers=None, require_visual=False,
+    excluded_families=None, excluded_candidates=None,
+):
+    """Bounded, non-secret reasons for an empty model pool; never runs inference."""
+    if role not in ROLE_POLICY:
+        raise ValueError("unknown_role")
+    disabled = set(disabled_providers or ())
+    excluded = set(excluded_families or ())
+    omitted = set(excluded_candidates or ())
+    counts = {}
+    for candidate, _prior in ROLE_POLICY[role]:
+        spec = CANDIDATES[candidate]
+        if candidate in omitted:
+            reason = "candidate_excluded"
+        elif candidate_family(candidate) in excluded:
+            reason = "family_excluded"
+        elif require_visual and not spec.get("visual"):
+            reason = "visual_capability_missing"
+        elif not cost_allowed(spec):
+            reason = "quota_or_cost_policy"
+        elif spec["provider"] in disabled:
+            reason = "provider_disabled"
+        elif not candidate_resource_safe(candidate):
+            reason = "memory_unavailable"
+        elif _runtime_cooldown(candidate) is not None:
+            reason = "cooldown"
+        elif not provider_available(spec["provider"], spec.get("model")):
+            reason = "provider_unavailable"
+        else:
+            reason = "eligible"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
 
 
 def choose_candidate(role, **kwargs):
@@ -1095,6 +1324,7 @@ def run_structured_candidate(candidate, prompt, schema, *, cwd=None, timeout=240
         "provider": provider,
         "model": spec["model"],
         "resourceClass": candidate_resource_class(candidate),
+        "subscriptionQuota": subscription_quota_snapshot(),
         "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "value": value,
@@ -1117,13 +1347,24 @@ def run_role_structured(
 ):
     require_visual = bool(images) or role in VISUAL_ROLES
     errors = []
-    for item in rank_candidates(
+    ranked = rank_candidates(
         role,
         disabled_providers=disabled_providers,
         require_visual=require_visual,
         excluded_families=excluded_families,
         excluded_candidates=excluded_candidates,
-    ):
+    )
+    if not ranked:
+        categories = role_unavailability_summary(
+            role,
+            disabled_providers=disabled_providers,
+            require_visual=require_visual,
+            excluded_families=excluded_families,
+            excluded_candidates=excluded_candidates,
+        )
+        detail = ",".join(f"{key}={value}" for key, value in sorted(categories.items()))
+        raise ProviderUnavailable("no_role_candidate_available:" + detail)
+    for item in ranked:
         if require_premium and item["provider"] == "ollama":
             continue
         candidate = item["candidate"]
@@ -1180,6 +1421,7 @@ def run_edit_candidate(candidate, prompt, *, cwd, timeout=600, agent_override=No
         "provider": provider,
         "model": spec["model"],
         "resourceClass": candidate_resource_class(candidate),
+        "subscriptionQuota": subscription_quota_snapshot(),
         "providerSlot": resource_slot,
         "elapsedSeconds": round(time.monotonic() - started, 2),
         "result": result,
@@ -1468,6 +1710,8 @@ def policy_snapshot():
         "costPolicy": COST_POLICY,
         "paidModelsExplicitlyEnabled": PAID_MODELS_EXPLICITLY_ENABLED,
         "freeCostClasses": sorted(FREE_COST_CLASSES),
+        "subscriptionQuota": subscription_quota_snapshot(),
+        "roleObjectiveWeights": ROLE_OBJECTIVE_WEIGHTS,
         "runtimeFailureCooldownSeconds": {
             "provider": PROVIDER_FAILURE_COOLDOWN_SECONDS,
             "candidate": CANDIDATE_FAILURE_COOLDOWN_SECONDS,

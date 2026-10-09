@@ -2,9 +2,18 @@ import { planWork } from './work-scheduler.js';
 
 const RECOVERABLE = /cloud_state_(conflict|rollback|partial_publication|generation_election_failed|github_request_failed|state_recovery_failed|checkpoint_recovery_failed|witness_recovery_failed)|cloud_global_lease_(busy|lost|release_failed)|workflow_deadline_cap_exceeded|timeout|deadline/i;
 const REQUEST_MARKER = '<!-- agent-request:v1 -->';
+const CRITICAL_CI_WAITING_STATUSES = new Set(['queued', 'pending', 'waiting']);
+
+export function criticalCiDemand(runs = []) {
+  if (!Array.isArray(runs)) throw new Error('ci_runs_invalid');
+  return runs.filter((run) =>
+    run?.name === 'CI' &&
+    CRITICAL_CI_WAITING_STATUSES.has(String(run?.status ?? '').toLowerCase())
+  ).length;
+}
 const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
 const HEARTBEAT_EXECUTION_MODES = new Set(['cloud','local-primary']);
-const CONTROL_AUTH_UNAVAILABLE = /github_cli_auth_required|GitHub issue queue request failed: (?:401|403)|bad credentials|requires authentication|token[^\n]{0,80}invalid/i;
+const CONTROL_AUTH_UNAVAILABLE = /github_cli_auth_required|GitHub issue queue request failed: 401|bad credentials|requires authentication|token[^\n]{0,80}invalid/i;
 
 export function heartbeatExecutionMode(value = 'cloud') {
   const mode = String(value || 'cloud').trim().toLowerCase();
@@ -34,13 +43,14 @@ export function heartbeatObservationOrder(lanes = [], operatorLanes = [], rotati
   const self = ordinary.filter((lane) => lane === 'self');
   const business = ordinary.filter((lane) => lane !== 'self');
   const numericRotation = Number.isFinite(Number(rotation)) ? Math.trunc(Number(rotation)) : 0;
-  const offset = business.length
-    ? ((numericRotation % business.length) + business.length) % business.length
-    : 0;
+  const rotate = (values) => {
+    if (!values.length) return [];
+    const offset = ((numericRotation % values.length) + values.length) % values.length;
+    return [...values.slice(offset), ...values.slice(0, offset)];
+  };
   return [
-    ...operatorFirst,
-    ...business.slice(offset),
-    ...business.slice(0, offset),
+    ...rotate(operatorFirst),
+    ...rotate(business),
     ...self
   ];
 }
@@ -94,6 +104,9 @@ export function classifyLaneObservation(observation) {
   if (observation.observationSkipped === true) {
     return { lane, state:'deferred', runnable:false, reason:'observation_budget', operatorRequested };
   }
+  if (observation.localPrimaryProbe === true) {
+    return { lane, state:'pending', runnable:true, reason:'local_primary_probe', operatorRequested };
+  }
   if (observation.hasWork === true) return { lane, state:'pending', runnable:true, reason:'work_detected', operatorRequested };
   if (observation.error && RECOVERABLE.test(String(observation.error))) {
     return { lane, state:'recovery', runnable:true, reason:'recoverable_control_error', operatorRequested };
@@ -126,12 +139,19 @@ export function planHeartbeat(observations = [], limits = {}) {
     version:1,
     classified,
     running,
+    ranking:plan.ranking.map((item) => ({
+      rank:item.rank,
+      lane:item.lane,
+      priority:item.band,
+      score:item.score
+    })),
     dispatch:plan.selected.map((item) => ({
       lane:item.lane,
       priority:item.band,
       reason:classified.find((entry) => entry.lane === item.lane)?.reason ?? 'scheduled'
     })),
     deferred:plan.deferred.map(({item,reason}) => ({lane:item.lane,priority:item.band,reason})),
-    yieldCandidates:plan.yieldCandidates
+    yieldCandidates:plan.yieldCandidates,
+    externalPriorityDemand:plan.limits.reserveForExternal
   };
 }

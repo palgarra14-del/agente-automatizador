@@ -25,6 +25,7 @@ import {
   codexWorkerSecurityConfig,
   codexTurnFailureDiagnostics,
   codexApiKeyFromEnvironment,
+  codexSubscriptionSessionFallbackEligible,
   collectReadOnlyRepositoryContext,
   configFrom,
   doctor,
@@ -222,16 +223,34 @@ test('self project keeps a shell-free cross-platform typecheck command', async (
   assert.equal(configured.get('leadfinder').budgets.maxModelCalls, 6);
   assert.equal(configured.get('callflow').budgets.maxModelCalls, 6);
   for (const id of ['self', 'leadfinder', 'callflow', 'website-pilot']) {
-    assert.equal(configured.get(id).businessContext.version, 1);
-    assert.match(configured.get(id).businessContext.model, /LeadFinder.*Callflow.*website-pilot/i);
-    assert.ok(configured.get(id).businessContext.currentFocus.includes('Peluquerías'));
-    assert.ok(configured.get(id).businessContext.constraints.some((item) => /precios|ofertas|descuentos/i.test(item)));
+    const context = configured.get(id).businessContext;
+    assert.equal(context.version, 2);
+    assert.match(context.model, /LeadFinder.*Callflow.*Website Pilot/i);
+    assert.ok(context.currentFocus.includes('Peluquerías'));
+    assert.ok(context.constraints.some((item) => /APIs o servicios de pago/i.test(item)));
+    assert.equal(context.offer.currency, 'EUR');
+    assert.equal(context.offer.essential.minPrice, 350);
+    assert.equal(context.offer.essential.revisions, 1);
+    assert.equal(context.offer.professional.minPrice, 650);
+    assert.equal(context.offer.professional.revisions, 2);
+    assert.equal(context.offer.supportDays, 15);
+    assert.match(context.offer.paymentTerms, /50 % al inicio.*50 % antes/i);
+    assert.match(context.offer.deliveryWindow, /1–3 semanas/);
+    assert.ok(context.offer.extras.includes('SEO ampliado/local'));
   }
   assert.match(configured.get('leadfinder').businessContext.projectRole, /captación|prospectos/i);
   assert.match(configured.get('callflow').businessContext.projectRole, /llamadas|seguimiento/i);
   assert.match(configured.get('website-pilot').businessContext.projectRole, /demos|webs/i);
   assert.throws(() => project({ budgets: { maxModelCalls: 0 } }), /maxModelCalls must be an integer >= 1/);
   assert.throws(() => project({ businessContext: { version: 1, model: 'x', projectRole: 'y', unknown: true } }), /businessContext contains unknown fields/);
+  assert.throws(() => project({ businessContext: { version: 2, model: 'x', projectRole: 'y' } }), /offer is required/);
+  assert.equal(project({
+    businessContext: {
+      version: 1,
+      model: 'legacy compatible context',
+      projectRole: 'legacy role'
+    }
+  }).businessContext.version, 1);
 });
 
 test('self control-plane source and configuration require sensitive approval', async () => {
@@ -1628,7 +1647,8 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   }
   const fallbackResult = await new CodexSdkWorker({
     CodexClient: QuotaThenApiCodex,
-    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey }),
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey, OPENAI_API_KEY: openAiKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1', PAID_MODELS_EXPLICITLY_ENABLED: '1' }),
     codexHomeFactory: (env) => isolatedHome(env, true),
     platform: 'linux'
   }).execute({ objective: 'fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
@@ -1648,7 +1668,8 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   }
   const noSessionResult = await new CodexSdkWorker({
     CodexClient: ApiOnlyCodex,
-    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey }),
+    environment: () => ({ PATH: '/safe/bin', OPENAI_API_KEY: openAiKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1', PAID_MODELS_EXPLICITLY_ENABLED: '1' }),
     codexHomeFactory: (env) => isolatedHome(env, false),
     platform: 'linux'
   }).execute({ objective: 'no session fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
@@ -1657,6 +1678,23 @@ test('Codex routing prefers the logged-in session and uses paid API only as a bo
   assert.equal(noSessionResult.paidApiUsed, true);
   assert.equal(noSessionOptions.length, 1);
   assert.equal(noSessionOptions[0].apiKey, openAiKey);
+
+  const blockedOptions = [];
+  class BlockedApiFallbackCodex {
+    constructor(options) { blockedOptions.push(options); }
+    startThread() { return { id: 'thread-blocked', run: async () => { throw new Error('usage limit reached'); } }; }
+  }
+  const blockedResult = await new CodexSdkWorker({
+    CodexClient: BlockedApiFallbackCodex,
+    environment: () => ({ PATH: '/safe/bin', CODEX_API_KEY: codexKey,
+      CODEX_PAID_API_FALLBACK_ENABLED: '1' }),
+    codexHomeFactory: (env) => isolatedHome(env, true),
+    platform: 'linux'
+  }).execute({ objective: 'blocked fallback fixture' }, { workspace: process.cwd(), timeoutMs: 500 });
+  assert.equal(blockedResult.status, 'failed');
+  assert.match(blockedResult.output, /usage limit reached/);
+  assert.equal(blockedOptions.length, 1);
+  assert.equal(Object.hasOwn(blockedOptions[0], 'apiKey'), false);
 
   const transientOptions = [];
   class TransientCodex {
@@ -1681,7 +1719,7 @@ test('both writing and read-only Codex surfaces share the session-first cost rou
   const source = readFileSync(new URL('../src/core.js', import.meta.url), 'utf8');
   assert.equal((source.match(/await runCostAwareCodexTurn\(\{/g) ?? []).length, 2);
   assert.match(source, /refreshAuthFromSource/);
-  assert.match(source, /if \(signal\?\.aborted \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
+  assert.match(source, /if \(signal\?\.aborted \|\| !apiFallbackEnabled \|\| !apiKey \|\| !codexPaidFallbackEligible\(sessionError\?\.message\)\) throw sessionError;/);
   assert.match(source, /paidApiUsed: authentication === 'api'/);
   assert.match(source, /authMode: execution\.authMode \?\? \(execution\.executionMode === 'deterministic' \? 'deterministic' : null\)/);
   assert.match(source, /workerEvidence:[\s\S]*authMode: worker\.authMode \?\? null,[\s\S]*paidApiUsed: Boolean\(worker\.paidApiUsed\)/);
@@ -3085,4 +3123,19 @@ test('git control fingerprint detects temporary ref tampering even when final HE
   assert.notEqual(after.fingerprint, before.fingerprint);
   assert.ok(after.paths.some((path) => path === `refs/heads/${branchName}`));
   assert.ok(after.paths.some((path) => path === `logs/refs/heads/${branchName}`));
+});
+
+
+test('Codex session rescue requires approved subscription policy and respects the 20-percent reserve', () => {
+  const allowed = codexSubscriptionSessionFallbackEligible;
+  assert.equal(allowed({ MODEL_COST_POLICY: 'free_only' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '21' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '20' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '19' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: 'invalid' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '31', CODEX_SUBSCRIPTION_HEADROOM_PERCENT: 'invalid' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '31', CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '5' }), false);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'subscription_included', CODEX_SUBSCRIPTION_REMAINING_PERCENT: '20', CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1' }), true);
+  assert.equal(allowed({ MODEL_COST_POLICY: 'free_only', CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1' }), false);
 });

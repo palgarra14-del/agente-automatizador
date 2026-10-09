@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -884,8 +884,17 @@ export function configFrom(input, baseDirectory = process.cwd(), registry = defa
 
 export async function loadProjects(file, registry = defaultToolSkillRegistry) {
   const data = JSON.parse(await readFile(file, 'utf8'));
+  const sharedBusinessContext = data.businessContext ?? null;
   return new Map(data.projects.map((project) => {
-    const configured = configFrom(project, dirname(file), registry);
+    const projectBusinessContext = project.businessContext ?? null;
+    const businessContext = sharedBusinessContext
+      ? { ...sharedBusinessContext, ...(projectBusinessContext ?? {}) }
+      : projectBusinessContext;
+    const configured = configFrom(
+      businessContext ? { ...project, businessContext } : project,
+      dirname(file),
+      registry
+    );
     return [configured.id, configured];
   }));
 }
@@ -1149,23 +1158,59 @@ function assertObjectKeys(value, allowed, label) {
   if (unexpected.length) throw new Error(`${label} contains unknown fields: ${unexpected.join(', ')}`);
 }
 
+function normalizeBusinessOffer(value) {
+  if (value === undefined || value === null) return null;
+  assertObjectKeys(
+    value,
+    new Set(['currency', 'essential', 'professional', 'extras', 'paymentTerms', 'deliveryWindow', 'clientResponsibilities', 'ownership', 'supportDays']),
+    'businessContext.offer'
+  );
+  const packageFrom = (input, label) => {
+    assertObjectKeys(input, new Set(['minPrice', 'scope', 'revisions']), label);
+    const minPrice = Number(input.minPrice);
+    const revisions = Number(input.revisions);
+    if (!Number.isInteger(minPrice) || minPrice < 0) throw new Error(`${label}.minPrice must be a non-negative integer`);
+    if (!Number.isInteger(revisions) || revisions < 0 || revisions > 10) throw new Error(`${label}.revisions must be an integer between 0 and 10`);
+    return {
+      minPrice,
+      scope: boundedTextList(input.scope ?? [], `${label}.scope`, { required: true, max: 20, itemMax: 260 }),
+      revisions
+    };
+  };
+  return safeJson({
+    currency: boundedText(value.currency ?? 'EUR', 'businessContext.offer.currency', { required: true, max: 8 }),
+    essential: packageFrom(value.essential, 'businessContext.offer.essential'),
+    professional: packageFrom(value.professional, 'businessContext.offer.professional'),
+    extras: boundedTextList(value.extras ?? [], 'businessContext.offer.extras', { max: 20, itemMax: 180 }),
+    paymentTerms: boundedText(value.paymentTerms, 'businessContext.offer.paymentTerms', { required: true, max: 280 }),
+    deliveryWindow: boundedText(value.deliveryWindow, 'businessContext.offer.deliveryWindow', { required: true, max: 220 }),
+    clientResponsibilities: boundedTextList(value.clientResponsibilities ?? [], 'businessContext.offer.clientResponsibilities', { max: 12, itemMax: 240 }),
+    ownership: boundedText(value.ownership, 'businessContext.offer.ownership', { required: true, max: 280 }),
+    supportDays: positiveInteger(value.supportDays, 15, 'businessContext.offer.supportDays', 0)
+  });
+}
+
 export function normalizeBusinessContext(value) {
   if (value === undefined || value === null) return null;
   assertObjectKeys(
     value,
-    new Set(['version', 'model', 'projectRole', 'currentFocus', 'funnel', 'priorities', 'metrics', 'constraints']),
+    new Set(['version', 'model', 'projectRole', 'currentFocus', 'funnel', 'priorities', 'metrics', 'constraints', 'offer']),
     'businessContext'
   );
-  if (value.version !== undefined && value.version !== 1) throw new Error('businessContext.version must be 1');
+  const version = value.version ?? 1;
+  if (![1, 2].includes(version)) throw new Error('businessContext.version must be 1 or 2');
+  const offer = normalizeBusinessOffer(value.offer);
+  if (version === 2 && !offer) throw new Error('businessContext.offer is required for version 2');
   return safeJson({
-    version: 1,
+    version,
     model: boundedText(value.model, 'businessContext.model', { required: true, max: 1_500 }),
     projectRole: boundedText(value.projectRole, 'businessContext.projectRole', { required: true, max: 900 }),
     currentFocus: boundedTextList(value.currentFocus ?? [], 'businessContext.currentFocus', { max: 12, itemMax: 180 }),
     funnel: boundedTextList(value.funnel ?? [], 'businessContext.funnel', { max: 12, itemMax: 300 }),
     priorities: boundedTextList(value.priorities ?? [], 'businessContext.priorities', { max: 20, itemMax: 400 }),
     metrics: boundedTextList(value.metrics ?? [], 'businessContext.metrics', { max: 20, itemMax: 180 }),
-    constraints: boundedTextList(value.constraints ?? [], 'businessContext.constraints', { max: 20, itemMax: 400 })
+    constraints: boundedTextList(value.constraints ?? [], 'businessContext.constraints', { max: 20, itemMax: 400 }),
+    ...(offer ? { offer } : {})
   });
 }
 
@@ -2248,6 +2293,20 @@ export function evaluateDefinitionOfDone(plan) {
   return { ok: requirements.every((requirement) => requirement.ok), requirements };
 }
 
+function managedWorkspacePathState(path) {
+  try {
+    const details = lstatSync(path);
+    return details.isSymbolicLink() ? 'symlink' : 'present';
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    throw error;
+  }
+}
+
+function managedWorkspacePathUnavailable(path) {
+  return ['missing', 'symlink'].includes(managedWorkspacePathState(path));
+}
+
 function historicalWorkspaceIsRecoverable(workspace) {
   if (workspace === null) return true;
   if (!workspace || typeof workspace !== 'object' || workspace.managed !== true) return false;
@@ -2257,7 +2316,21 @@ function historicalWorkspaceIsRecoverable(workspace) {
   if (typeof workspace.workingBranch !== 'string' || !workspace.workingBranch) return false;
   if (!/^[a-f0-9]{40}$/i.test(workspace.baseHead ?? '')) return false;
   if (typeof workspace.remote !== 'string' || !workspace.remote) return false;
-  return !existsSync(workspace.path);
+  return managedWorkspacePathUnavailable(workspace.path);
+}
+
+function pristineWorkflowForWorkspaceReallocation(plan) {
+  if (!plan || typeof plan !== 'object' || plan.status !== WorkflowStepStatus.PENDING) return false;
+  if (plan.pausedAt !== null || plan.result !== null || plan.validation !== null || plan.dryRun !== false || plan.outputBytes !== 0) return false;
+  const usage = plan.modelUsage;
+  if (!usage || usage.calls !== 0 || usage.inputTokens !== 0 || usage.outputTokens !== 0 || usage.totalTokens !== 0 || usage.unknownUsageCalls !== 0 || !Array.isArray(usage.entries) || usage.entries.length !== 0) return false;
+  if (!Array.isArray(plan.steps) || !plan.steps.length) return false;
+  if (plan.steps[0].status !== WorkflowStepStatus.READY) return false;
+  if (plan.steps.slice(1).some((step) => step.status !== WorkflowStepStatus.PENDING)) return false;
+  if (plan.steps.some((step) => step.attempts !== 0 || step.evidence !== null || step.error !== null)) return false;
+  const bootstrap = plan.bootstrap;
+  if (!bootstrap || bootstrap.attempts !== 0 || !['pending', 'not_required'].includes(bootstrap.status) || bootstrap.completedAt !== null || bootstrap.evidence !== null || bootstrap.error !== null) return false;
+  return true;
 }
 
 function pristineHistoricalWorkflow(plan, leaseId) {
@@ -4137,7 +4210,9 @@ export class WorkflowEngine {
           current.currentBranch !== expected.branch ||
           current.initialHead !== expected.head ||
           current.remote !== expected.remote;
-        const filesChanged = Boolean(changeSet?.paths?.length) ||
+        const filesChanged =
+          !changeSet ||
+          changeSet.changeSetFingerprint !== interruptedStep.evidence?.workspaceBeforeFingerprint ||
           !protectedIgnored ||
           protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
         if (repositoryChanged || filesChanged) {
@@ -4182,8 +4257,37 @@ export class WorkflowEngine {
     const publicationCapability = this.registry.resolve(project, 'release.publish-reviewed-workflow', { surface: 'workflow' });
     const publicationEnabled = governedImplementationProfiles.has(plan.profile) && publicationCapability.available;
     if (plan.workspace) {
+      const allocationChanged =
+        typeof plan.workspace.path === 'string' &&
+        (resolve(plan.workspace.path) !== resolve(expected.workspace) ||
+         plan.workspace.managed !== expected.managed);
+      const sameProjectRepository =
+        plan.workspace.projectId === project.id &&
+        plan.workspace.repository?.owner === project.repository.owner &&
+        plan.workspace.repository?.name === project.repository.name;
+      const safelyReallocatable =
+        allocationChanged &&
+        sameProjectRepository &&
+        plan.workspace.managed === true &&
+        typeof plan.workspace.path === 'string' &&
+        resolve(plan.workspace.path) === plan.workspace.path &&
+        managedWorkspacePathUnavailable(plan.workspace.path) &&
+        pristineWorkflowForWorkspaceReallocation(plan);
+      if (safelyReallocatable) {
+        const staleWorkspacePath = plan.workspace.path;
+        await this.update(id, (saved) => {
+          if (!pristineWorkflowForWorkspaceReallocation(saved) ||
+              saved.workspace?.managed !== true ||
+              saved.workspace.path !== staleWorkspacePath ||
+              !managedWorkspacePathUnavailable(saved.workspace.path)) {
+            throw new Error('workflow_workspace_reallocation_state_changed');
+          }
+          saved.workspace = null;
+        });
+        return this.workspaceProject(id, project);
+      }
       validateWorkflowWorkspace(plan.workspace, project);
-      if (resolve(plan.workspace.path) !== resolve(expected.workspace) || plan.workspace.managed !== expected.managed) throw new Error('Workflow workspace does not match its project allocation');
+      if (allocationChanged) throw new Error('Workflow workspace does not match its project allocation');
       if (plan.workspace.managed) await assertSafePathChain(plan.workspace.path);
       const workspaceProject = projectAtWorkspace(project, plan.workspace.path);
       if (publicationEnabled) {
@@ -4291,6 +4395,75 @@ export class WorkflowEngine {
     const project = this.projects.get(observed.projectId);
     const expected = interruptedStep.evidence?.repositoryState;
     if (!observed.workspace || !expected) return null;
+
+    const capabilityContextChanged =
+      observed.registryFingerprint !== this.registry.fingerprint ||
+      observed.specialistRegistryFingerprint !== this.specialistRegistry.fingerprint ||
+      observed.projectSkillPolicyFingerprint !== this.registry.policyFingerprint(project.skills ?? {});
+    const implementation = observed.steps.find((step) => step.id === 'implementation');
+    const historicalWorkspaceEvidenceMismatch =
+      observed.workspace.managed === true &&
+      interruptedStep.skill === 'code.review' &&
+      implementation?.status === WorkflowStepStatus.COMPLETED &&
+      typeof implementation.evidence?.workspacePath === 'string' &&
+      implementation.evidence.workspacePath !== observed.workspace.path;
+
+    const retireInterruptedReadOnly = (reason, extraEvidence = {}) => this.update(id, (saved) => {
+      const step = saved.steps.find((item) => item.id === interruptedStep.id);
+      if (saved.status !== WorkflowStepStatus.RUNNING || step?.status !== WorkflowStepStatus.RUNNING) {
+        throw new Error('historical_interrupted_read_only_recovery_state_changed');
+      }
+      const startedCalls = saved.modelUsage.entries.filter((entry) =>
+        entry.status === 'started' &&
+        entry.surface === 'workflow' &&
+        entry.stepId === step.id &&
+        entry.attempt === step.attempts
+      );
+      if (startedCalls.length > 1) throw new Error('interrupted_read_only_model_reservation_ambiguous');
+      if (startedCalls.length === 1) {
+        completeModelCall(saved.modelUsage, startedCalls[0].id, null, 'failed', new Date(this.now()).toISOString());
+      }
+      step.status = WorkflowStepStatus.BLOCKED;
+      step.error = reason;
+      step.evidence = {
+        ...step.evidence,
+        type: 'historical-interrupted-execution',
+        ok: false,
+        recoveredAt: new Date(this.now()).toISOString(),
+        interruptedModelCallId: startedCalls[0]?.id ?? null,
+        retryAvailable: false,
+        historicalRecovery: true,
+        ...extraEvidence
+      };
+      saved.status = WorkflowStepStatus.BLOCKED;
+      saved.pausedAt = null;
+      saved.result = { error: step.error, stepId: step.id, historicalRecovery: true };
+    }, { deadlineAt: deadlineCapAt });
+
+    if (historicalWorkspaceEvidenceMismatch) {
+      return retireInterruptedReadOnly('historical_interrupted_read_only_workspace_reallocated', {
+        workspaceRecovery: {
+          observedWorkspacePath: observed.workspace.path,
+          implementationWorkspacePath: implementation.evidence.workspacePath
+        }
+      });
+    }
+
+    if (capabilityContextChanged &&
+        observed.workspace.managed === true &&
+        managedWorkspacePathUnavailable(observed.workspace.path)) {
+      return retireInterruptedReadOnly('historical_interrupted_read_only_capability_context_changed', {
+        capabilityContext: {
+          savedRegistryFingerprint: observed.registryFingerprint,
+          activeRegistryFingerprint: this.registry.fingerprint,
+          savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
+          activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+          savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
+          activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
+        }
+      });
+    }
+
     const workspaceProject = projectAtWorkspace(project, observed.workspace.path);
 
     let current = null;
@@ -4314,7 +4487,9 @@ export class WorkflowEngine {
       current.currentBranch !== expected.branch ||
       current.initialHead !== expected.head ||
       current.remote !== expected.remote;
-    const filesChanged = Boolean(changeSet?.paths?.length) ||
+    const filesChanged =
+      !changeSet ||
+      changeSet.changeSetFingerprint !== interruptedStep.evidence?.workspaceBeforeFingerprint ||
       !protectedIgnored ||
       protectedIgnored.fingerprint !== interruptedStep.evidence?.protectedIgnoredFingerprint;
 
@@ -4338,6 +4513,19 @@ export class WorkflowEngine {
         saved.pausedAt = null;
         saved.result = { error: step.error, stepId: step.id };
       }, { deadlineAt: deadlineCapAt });
+    }
+
+    if (capabilityContextChanged) {
+      return retireInterruptedReadOnly('historical_interrupted_read_only_capability_context_changed', {
+        capabilityContext: {
+          savedRegistryFingerprint: observed.registryFingerprint,
+          activeRegistryFingerprint: this.registry.fingerprint,
+          savedSpecialistRegistryFingerprint: observed.specialistRegistryFingerprint,
+          activeSpecialistRegistryFingerprint: this.specialistRegistry.fingerprint,
+          savedProjectSkillPolicyFingerprint: observed.projectSkillPolicyFingerprint,
+          activeProjectSkillPolicyFingerprint: this.registry.policyFingerprint(project.skills ?? {})
+        }
+      });
     }
 
     return this.update(id, (saved) => {
@@ -5065,6 +5253,8 @@ function multiModelGatewayEnvironment(environment = process.env) {
     'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'XDG_CONFIG_HOME',
     'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
     'CODEX_BIN',
+    'CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT',
+    'CODEX_SUBSCRIPTION_RESERVE_OVERRIDE',
     'OLLAMA_URL', 'OLLAMA_MODEL',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
     'COPILOT_BIN', 'COPILOT_FREE_MODEL', 'COPILOT_MAX_AI_CREDITS',
@@ -5080,6 +5270,7 @@ function multiModelGatewayEnvironment(environment = process.env) {
     ...Object.fromEntries(allowed.filter((name) => environment[name] !== undefined).map((name) => [name, environment[name]])),
     MODEL_COST_POLICY: requestedCostPolicy,
     PAID_MODELS_EXPLICITLY_ENABLED: '0',
+    CODEX_PAID_API_FALLBACK_ENABLED: '0',
     OPENCODE_FREE_ENABLED: '1',
     COPILOT_FREE_ENABLED: '1',
     CODEX_API_KEY: '',
@@ -5087,8 +5278,67 @@ function multiModelGatewayEnvironment(environment = process.env) {
   };
 }
 
+function boundedPathList(value) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .filter((path) => typeof path === 'string' && path.trim())
+    .map((path) => path.trim()))].sort();
+}
+
+function evidencePaths(task) {
+  return boundedPathList([
+    ...(Array.isArray(task?.inspectionEvidence?.inspectionEvidence?.relevantPaths)
+      ? task.inspectionEvidence.inspectionEvidence.relevantPaths : []),
+    ...(Array.isArray(task?.diagnosis?.diagnosis?.relevantPaths)
+      ? task.diagnosis.diagnosis.relevantPaths : [])
+  ]);
+}
+
+export function implementationTaskEnvelope(task = {}) {
+  const workflowProfile = task?.workflow?.profile ?? null;
+  const allowedPaths = boundedPathList(task?.scope?.allowedPaths);
+  const relevantPaths = evidencePaths(task);
+  const evidenceSources = [
+    task?.inspectionEvidence?.inspectionEvidence ? 'inspection' : null,
+    task?.diagnosis?.diagnosis ? 'diagnosis' : null,
+    task?.approvedPlanChange ? 'approved_plan' : null
+  ].filter(Boolean);
+  const explicitScale = [
+    task?.implementationEvidence?.changeScope,
+    task?.implementationEvidence?.role,
+    task?.changeScope,
+    task?.approvedPlanChange?.changeScope,
+    task?.approvedPlanChange?.role,
+    task?.diagnosis?.diagnosis?.changeScope
+  ].find((value) => typeof value === 'string' && value.trim()) ?? null;
+  const explicitDeepRefactor = [
+    explicitScale,
+    task?.implementationEvidence?.classification,
+    task?.approvedPlanChange?.classification
+  ].some((value) => ['deep_refactor', 'broad', 'large_refactor'].includes(String(value).trim().toLowerCase()));
+  const pathsWithinScope = relevantPaths.length > 0 && relevantPaths.every((path) =>
+    allowedPaths.length === 0 || allowedPaths.some((root) => path === root || path.startsWith(`${root.replace(/\/$/, '')}/`))
+  );
+  const boundedEvidence = relevantPaths.length >= 1 && relevantPaths.length <= 2 &&
+    pathsWithinScope && (evidenceSources.includes('diagnosis') || evidenceSources.includes('inspection'));
+  return {
+    workflowProfile,
+    allowedPaths,
+    relevantPaths,
+    evidenceSources,
+    approvedPlanAvailable: Boolean(task?.approvedPlanChange),
+    explicitScale,
+    pathsWithinScope,
+    boundedEvidence,
+    explicitDeepRefactor,
+    websiteBuild: workflowProfile === 'website-build' || task?.projectId === 'website-pilot'
+  };
+}
+
 function multiModelRoleForTask(task = {}) {
-  if (task?.workflow?.profile === 'website-build' || task?.projectId === 'website-pilot') return 'frontend_implementation';
+  const envelope = implementationTaskEnvelope(task);
+  if (envelope.websiteBuild) return 'frontend_implementation';
+  if (envelope.explicitDeepRefactor) return 'deep_refactor';
+  if (envelope.boundedEvidence) return 'code_fix';
   return 'long_horizon_implementation';
 }
 
@@ -5269,6 +5519,7 @@ export class MultiModelGatewayClient {
           resourceClass: parsed.resourceClass ?? null,
           providerSlot: parsed.providerSlot ?? null,
           routingScore: parsed.routingScore ?? null,
+          subscriptionQuota: parsed.subscriptionQuota ?? null,
           fallbackErrors: Array.isArray(parsed.fallbackErrors) ? parsed.fallbackErrors.slice(-8) : []
         }
       };
@@ -5586,11 +5837,29 @@ export function codexClientOptions(sourceEnvironment, isolatedHome, configOverri
   };
 }
 
+export function codexSubscriptionSessionFallbackEligible(environment = {}) {
+  if (environment.MODEL_COST_POLICY !== 'subscription_included') return false;
+  const override = /^(1|true|yes|on)$/i.test(String(environment.CODEX_SUBSCRIPTION_RESERVE_OVERRIDE ?? '').trim());
+  const supplied = ['CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT']
+    .filter((name) => Object.hasOwn(environment, name));
+  const values = supplied.map((name) => {
+    const raw = String(environment[name] ?? '').trim();
+    return raw === '' ? NaN : Number(raw);
+  });
+  if (!override && values.some((value) => !Number.isFinite(value) || value < 0 || value > 100)) return false;
+  return override || values.length === 0 || values.every((value) => value > 20);
+}
+
 export function codexPaidFallbackEligible(message) {
   const text = String(message ?? '');
   if (!text) return false;
   if (nonRetryableModelFailureCode(text)) return true;
   return /(?:\b429\b|rate[ _-]?limit|usage[ _-]?limit|too many requests|login required|not logged in|sign[ -]?in required|session expired|authentication required|authorization required|quota exceeded|plan limit)/i.test(text);
+}
+
+function codexPaidApiFallbackEnabled(environment = {}) {
+  return environment.CODEX_PAID_API_FALLBACK_ENABLED === '1' &&
+    environment.PAID_MODELS_EXPLICITLY_ENABLED === '1';
 }
 
 export function resolveCodexCliEntryPath({
@@ -5641,7 +5910,8 @@ async function runCostAwareCodexCliTurn({
   processRunner = runProcess,
   cliEntryPath = resolveCodexCliEntryPath()
 }) {
-  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const apiFallbackEnabled = codexPaidApiFallbackEnabled(sourceEnvironment);
+  const apiKey = apiFallbackEnabled ? codexApiKeyFromEnvironment(sourceEnvironment) : null;
   const sessionAvailable = isolatedHome?.authAvailable !== false;
   const deadlineAt = Date.now() + timeoutMs;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
@@ -5740,7 +6010,7 @@ async function runCostAwareCodexCliTurn({
     }
   }
 
-  if (sessionError?.timedOut || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  if (sessionError?.timedOut || !apiFallbackEnabled || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
   return run('api');
 }
 
@@ -5753,7 +6023,8 @@ async function runCostAwareCodexTurn({
   prompt,
   signal
 }) {
-  const apiKey = codexApiKeyFromEnvironment(sourceEnvironment);
+  const apiFallbackEnabled = codexPaidApiFallbackEnabled(sourceEnvironment);
+  const apiKey = apiFallbackEnabled ? codexApiKeyFromEnvironment(sourceEnvironment) : null;
   const sessionAvailable = isolatedHome?.authAvailable !== false;
 
   const run = async (authentication) => {
@@ -5826,7 +6097,7 @@ async function runCostAwareCodexTurn({
     }
   }
 
-  if (signal?.aborted || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
+  if (signal?.aborted || !apiFallbackEnabled || !apiKey || !codexPaidFallbackEligible(sessionError?.message)) throw sessionError;
   return run('api');
 }
 
@@ -6653,7 +6924,7 @@ export class CodexReadOnlySkillExecutor {
     return current;
   }
 
-  async execute(request, { workspace, timeoutMs }) {
+  async execute(request, { workspace, timeoutMs, allowPaidApiFallback = true }) {
     if (!this.supports(request.skill)) throw new Error(`skill_executor_unsupported:${request.skill}`);
     if (request.skill === 'code.inspect' && request.context?.deterministicInspection) {
       try {
@@ -6705,7 +6976,10 @@ export class CodexReadOnlySkillExecutor {
         };
       }
     }
-    const sourceEnvironment = this.environment();
+    const baseEnvironment = this.environment();
+    const sourceEnvironment = allowPaidApiFallback
+      ? baseEnvironment
+      : Object.fromEntries(Object.entries(baseEnvironment).filter(([name]) => !['CODEX_API_KEY', 'OPENAI_API_KEY'].includes(name)));
     const security = codexWorkerSecurityConfig({ writeAccess: false, pathValue: sourceEnvironment.PATH ?? '', platform: this.platform });
     if (!security.supported) {
       return { status: 'failed', ok: false, timedOut: false, outputBytes: 0, error: security.error };
@@ -6851,7 +7125,7 @@ export class MultiModelReadOnlySkillExecutor extends CodexReadOnlySkillExecutor 
       };
     } catch (error) {
       if (this.allowSessionFallback) {
-        const fallback = await super.execute(request, { workspace, timeoutMs });
+        const fallback = await super.execute(request, { workspace, timeoutMs, allowPaidApiFallback: false });
         return {
           ...fallback,
           modelRouting: {

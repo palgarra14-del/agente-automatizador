@@ -2,18 +2,43 @@
 import json, os, shutil, subprocess, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 
-def _tool_path(env_name, command, legacy_fallback):
-    return os.environ.get(env_name) or shutil.which(command) or legacy_fallback
+def _tool_path(env_name, command):
+    configured = os.environ.get(env_name)
+    if configured:
+        return configured
+    visible = shutil.which(command)
+    if visible:
+        return visible
 
-AGY=_tool_path("ANTIGRAVITY_CLI","agy","/home/pablo/.local/bin/agy")
+    # systemd runs with a deliberately restricted PATH, unlike interactive
+    # Fish/Bash shells. Discover only well-known locations under THIS user's
+    # home rather than preserving obsolete /home/<previous-user> fallbacks.
+    home = Path.home()
+    candidates = [
+        home / ".local/bin" / command,
+        home / ".opencode/bin" / command,
+        home / ".bun/bin" / command,
+        home / ".npm-global/bin" / command,
+        home / ".local/share/mise/shims" / command,
+    ]
+    nvm = home / ".nvm/versions/node"
+    if nvm.is_dir():
+        candidates.extend(sorted(nvm.glob("*/bin/" + command), reverse=True))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return command
+
+AGY=_tool_path("ANTIGRAVITY_CLI","agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 OLLAMA_AUTOSTART=os.environ.get("OLLAMA_AUTOSTART","1").strip().lower() in {"1","true","yes","on"}
 OLLAMA_START_TIMEOUT=max(1.0,min(8.0,float(os.environ.get("OLLAMA_START_TIMEOUT","4"))))
-CODEX=_tool_path("CODEX_BIN","codex","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
-OPENCODE=_tool_path("OPENCODE_BIN","opencode","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
+CODEX=_tool_path("CODEX_BIN","codex")
+OPENCODE=_tool_path("OPENCODE_BIN","opencode")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
-COPILOT=_tool_path("COPILOT_BIN","copilot","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
+OPENCODE_LOCAL_MODELS_ENABLED=os.environ.get("OPENCODE_LOCAL_MODELS_ENABLED","0").strip().lower() in {"1","true","yes","on"}
+COPILOT=_tool_path("COPILOT_BIN","copilot")
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
 COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
@@ -146,21 +171,23 @@ def _antigravity_stream_result(stdout):
 
 def antigravity_authenticated():
     now=time.monotonic()
-    if (
-        _ANTIGRAVITY_AUTH_CACHE["authenticated"]
-        and now-_ANTIGRAVITY_AUTH_CACHE["checkedAt"] < ANTIGRAVITY_AUTH_TTL
-    ):
-        return True
+    cached=_ANTIGRAVITY_AUTH_CACHE
+    # A failed availability probe must not be repeated once for every model
+    # in the same routing wave. A shorter negative TTL permits recovery.
+    ttl=ANTIGRAVITY_AUTH_TTL if cached["authenticated"] else min(30.0, ANTIGRAVITY_AUTH_TTL)
+    if cached["checkedAt"] > 0 and now-cached["checkedAt"] < ttl:
+        return cached["authenticated"]
     if not Path(AGY).is_file():
-        _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=False)
+        cached.update(checkedAt=now,authenticated=False)
         return False
     try:
-        proc=_run([AGY,"models"],timeout=60)
+        proc=_run([AGY,"models"],timeout=12)
     except ProviderUnavailable:
+        cached.update(checkedAt=time.monotonic(),authenticated=False)
         return False
     combined=(proc.stdout+"\n"+proc.stderr).lower()
     authenticated=proc.returncode==0 and "please sign in" not in combined and "sign in" not in combined
-    _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=authenticated)
+    cached.update(checkedAt=time.monotonic(),authenticated=authenticated)
     return authenticated
 
 def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=None,effort="medium",mode="plan"):
@@ -170,7 +197,7 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
     workdir.mkdir(parents=True,exist_ok=True)
     schema_file=None
     try:
-        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="agy-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="agy-schema-",delete=False,encoding="utf-8") as f:
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
         cmd=[
@@ -206,8 +233,10 @@ def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=N
 
 def opencode_model_is_free(model):
     value=str(model or "")
-    return value.startswith("ollama/") or (
+    return (
         value.startswith("opencode/") and value.endswith("-free")
+    ) or (
+        OPENCODE_LOCAL_MODELS_ENABLED and value.startswith("ollama/")
     )
 
 def _opencode_models_snapshot():
@@ -264,7 +293,12 @@ def _opencode_service_connection():
         raise ProviderUnavailable("opencode_service_password_missing")
     proc=_run([OPENCODE,"service","status"],timeout=10)
     if proc.returncode!=0:
-        raise ProviderUnavailable("opencode_service_unavailable")
+        started=_run([OPENCODE,"service","start"],timeout=15)
+        if started.returncode!=0:
+            raise ProviderUnavailable("opencode_service_unavailable")
+        proc=_run([OPENCODE,"service","status"],timeout=10)
+        if proc.returncode!=0:
+            raise ProviderUnavailable("opencode_service_unavailable")
     server=(proc.stdout or "").strip().splitlines()
     if not server:
         raise ProviderUnavailable("opencode_service_url_missing")
@@ -304,8 +338,8 @@ def opencode_structured(prompt,schema,cwd=None,timeout=180,model=None):
     env["OPENCODE_PASSWORD"]=password
     proc=_run([
         OPENCODE,"run","--server",server,"--auto",
-        "--model",str(model),"--format","json",task
-    ],cwd=workdir,timeout=min(timeout,OPENCODE_FREE_TIMEOUT),env=env)
+        "--model",str(model),"--format","json"
+    ],cwd=workdir,timeout=min(timeout,OPENCODE_FREE_TIMEOUT),input_text=task,env=env)
     if proc.returncode!=0:
         raise ProviderUnavailable("opencode_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(_opencode_text(proc.stdout),schema)
@@ -326,7 +360,6 @@ def copilot_structured(prompt,schema,cwd=None,timeout=180,model=None):
     selected=str(model or COPILOT_FREE_MODEL)
     cmd=[
         COPILOT,
-        "-p",task,
         "-s",
         "--output-format","text",
         "--model",selected,
@@ -338,7 +371,7 @@ def copilot_structured(prompt,schema,cwd=None,timeout=180,model=None):
         "--no-ask-user",
         "-C",str(workdir),
     ]
-    proc=_run(cmd,cwd=workdir,timeout=timeout)
+    proc=_run(cmd,cwd=workdir,timeout=timeout,input_text=task)
     if proc.returncode!=0:
         raise ProviderUnavailable("copilot_free_failed:"+((proc.stderr or proc.stdout)[-1200:]))
     return extract_structured(proc.stdout,schema)
@@ -362,10 +395,10 @@ def codex_structured(prompt,schema,cwd=None,timeout=180,model=None,effort=None,i
     schema_file=None
     output_file=None
     try:
-        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="codex-schema-",dir=workdir,delete=False,encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile("w",suffix=".json",prefix="codex-schema-",delete=False,encoding="utf-8") as f:
             json.dump(schema,f,ensure_ascii=False)
             schema_file=f.name
-        fd,output_file=tempfile.mkstemp(suffix=".json",prefix="codex-output-",dir=workdir)
+        fd,output_file=tempfile.mkstemp(suffix=".json",prefix="codex-output-")
         os.close(fd)
         cmd=_codex_base(workdir,model=model)
         if effort:

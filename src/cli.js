@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
-import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
+import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orchestrator, WorkflowEngine, codexSubscriptionSessionFallbackEligible, doctor, formatDoctor, loadProjects, maskSecrets, readBoundedRegularFile, report } from './core.js';
 import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
-import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
+import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue, githubIssueQueueAuthRejected } from './issue-queue.js';
 import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
 import { GitHubStateStore } from './cloud-state.js';
 import { AutonomousProjectImprovement } from './self-improvement.js';
 import { cloudRateLimitDeferral, runCloudDrainWithRecovery } from './cloud-drain-recovery.js';
+import { autonomousFallbackAllowed } from './cloud-drain.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
 import { schedulerYieldRequested } from './scheduler-yield.js';
+import { localGithubCooldownRemainingMs, saveLocalGithubCooldown } from './local-github-cooldown.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -33,9 +35,12 @@ if (command === 'doctor') {
 const store = new JsonStore(resolve('.agent/state.json'));
 const projects = await loadProjects(resolve('config/projects.json'));
 const orchestrator = new Orchestrator({ store });
+const subscriptionSessionFallback = codexSubscriptionSessionFallbackEligible(process.env);
 const workflowModelExecutors = {
-  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: false }),
-  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: false })
+  // Only an explicitly included subscription may use Codex session auth.
+  // API-paid fallback stays disabled in the gateway and individual workers.
+  skillExecutor: new MultiModelReadOnlySkillExecutor({ allowSessionFallback: subscriptionSessionFallback }),
+  codingWorker: new MultiModelCodingWorker({ allowSessionFallback: subscriptionSessionFallback })
 };
 const workflows = new WorkflowEngine({ store, projects, ...workflowModelExecutors });
 
@@ -376,7 +381,7 @@ try {
           await queue.ingestAdmissionIntents();
           const queueResult = await queue.tick();
           let autonomousResult = null;
-          if (autonomousSelfImprovement && (!queueResult || ['awaiting_start_approval', 'awaiting_workflow_approval'].includes(queueResult.status))) {
+          if (autonomousSelfImprovement && autonomousFallbackAllowed(queueResult)) {
             autonomousResult = await autonomousSelfImprovement.tick();
           }
           return { queueResult, autonomousResult };
@@ -394,6 +399,7 @@ try {
         try {
           await watchIssueQueue(queue, {
             pollIntervalMs: queueConfig.pollIntervalMs,
+            cooldownRemainingMs: localGithubCooldownRemainingMs,
             signal: controller.signal,
             beforeTick: async () => {
               const currentRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
@@ -407,6 +413,17 @@ try {
             },
             onError: async (error) => {
               console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
+              if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) {
+                try { saveLocalGithubCooldown(error.retryAfterMs); }
+                catch { console.error('github_shared_cooldown_persist_failed'); }
+              }
+              if (githubIssueQueueAuthRejected(error)) {
+                // Let systemd restart at its bounded cadence and obtain fresh auth.
+                // Do not spin with the rejected token or treat rate-limited 403 as auth.
+                console.error('github_issue_queue_auth_rejected_restarting');
+                controller.abort();
+                return;
+              }
               if (!autonomousSelfImprovement) return;
               try {
                 const autonomousResult = await autonomousSelfImprovement.tick();

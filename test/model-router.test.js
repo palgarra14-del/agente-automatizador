@@ -127,6 +127,32 @@ print(json.dumps(m.generate_structured("x",{"required":["ok"]},providers=("antig
   assert.match(result.errors[0],/antigravity/);
 });
 
+test('Ollama requests unload the local model immediately by default', () => {
+  const result=python(`
+import importlib.util,json
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.ollama_ready=lambda: True
+captured={}
+class Response:
+    status=200
+    def __enter__(self): return self
+    def __exit__(self,*args): return False
+    def read(self,*args): return json.dumps({"response":json.dumps({"ok":True})}).encode("utf-8")
+def fake_urlopen(request,timeout=None):
+    captured["payload"]=json.loads(request.data.decode("utf-8"))
+    return Response()
+m.urllib.request.urlopen=fake_urlopen
+value=m.ollama_structured(
+  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  num_predict=64
+)
+print(json.dumps({"value":value,"keepAlive":captured["payload"].get("keep_alive")}))
+`);
+  assert.equal(result.value.ok,true);
+  assert.equal(String(result.keepAlive),'0');
+});
+
 test('provider binaries prefer native PATH before legacy WSL fallbacks', () => {
   const result=python(`
 import importlib.util,json,os,tempfile
@@ -175,20 +201,60 @@ os.unlink(path)
   assert.deepEqual(result.models,['opencode/mimo-v2.6-flash-free','opencode/space-bunny-free']);
 });
 
-test('OpenCode free-only guard accepts only local or explicitly free hosted models', () => {
+test('OpenCode service connection self-heals one stopped local service', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+home=Path(tempfile.mkdtemp())
+(home/".config/opencode").mkdir(parents=True)
+(home/".config/opencode/service.json").write_text(json.dumps({"password":"secret-value"}))
+m.Path.home=lambda: home
+fd,path=tempfile.mkstemp(); os.close(fd)
+m.OPENCODE=path
+calls=[]
+def fake_run(args,**kwargs):
+    calls.append(args[1:])
+    if args[1:]==["service","status"] and calls.count(["service","status"])==1:
+        return subprocess.CompletedProcess(args,1,stdout="",stderr="stopped")
+    if args[1:]==["service","start"]:
+        return subprocess.CompletedProcess(args,0,stdout="",stderr="")
+    if args[1:]==["service","status"]:
+        return subprocess.CompletedProcess(args,0,stdout="http://127.0.0.1:49374\\n",stderr="")
+    raise AssertionError(args)
+m._run=fake_run
+url,password=m._opencode_service_connection()
+print(json.dumps({"url":url,"password":password,"calls":calls}))
+os.unlink(path)
+`);
+  assert.equal(result.url,'http://127.0.0.1:49374');
+  assert.equal(result.password,'secret-value');
+  assert.deepEqual(result.calls,[
+    ['service','status'],
+    ['service','start'],
+    ['service','status']
+  ]);
+});
+
+test('OpenCode free-only guard blocks hidden local models unless explicitly enabled', () => {
   const result=python(`
 import importlib.util,json
 spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+local_default=m.opencode_model_is_free("ollama/qwen2.5-coder:3b")
+m.OPENCODE_LOCAL_MODELS_ENABLED=True
 print(json.dumps({
   "hostedFree":m.opencode_model_is_free("opencode/ling-3.0-flash-fin-free"),
-  "local":m.opencode_model_is_free("ollama/qwen2.5-coder:3b"),
+  "localDefault":local_default,
+  "localOptIn":m.opencode_model_is_free("ollama/qwen2.5-coder:3b"),
   "ambiguous":m.opencode_model_is_free("opencode/big-pickle"),
   "paidLike":m.opencode_model_is_free("openai/gpt-5")
 }))
 `);
   assert.equal(result.hostedFree,true);
-  assert.equal(result.local,true);
+  assert.equal(result.localDefault,false);
+  assert.equal(result.localOptIn,true);
   assert.equal(result.ambiguous,false);
   assert.equal(result.paidLike,false);
 });
@@ -222,13 +288,15 @@ def fake_run(args,**kwargs):
     captured["args"]=args
     captured["password"]=kwargs.get("env",{}).get("OPENCODE_PASSWORD")
     captured["timeout"]=kwargs.get("timeout")
+    captured["input"]=kwargs.get("input_text")
     return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
 m._run=fake_run
+large_prompt="x"*300000
 value=m.opencode_structured(
-  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  large_prompt,{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
   cwd=tempfile.mkdtemp(),model="opencode/ling-3.0-flash-fin-free"
 )
-print(json.dumps({"value":value,"args":captured["args"],"password":captured["password"],"timeout":captured["timeout"]}))
+print(json.dumps({"value":value,"args":captured["args"],"password":captured["password"],"timeout":captured["timeout"],"inputLength":len(captured.get("input") or "")}))
 `);
   assert.equal(result.value.ok,true);
   assert.equal(result.password,'secret-value');
@@ -237,6 +305,53 @@ print(json.dumps({"value":value,"args":captured["args"],"password":captured["pas
   assert.ok(result.args.includes('http://127.0.0.1:49374'));
   assert.ok(!result.args.includes('--standalone'));
   assert.ok(!result.args.includes('secret-value'));
+  assert.ok(result.inputLength > 300000);
+  assert.ok(result.args.every(arg => arg.length < 10000));
+});
+
+test('provider schema and output temp files never dirty the project workspace', () => {
+  const result=python(`
+import importlib.util,json,tempfile,os,subprocess
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("router",${JSON.stringify(router)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+workdir=Path(tempfile.mkdtemp()).resolve()
+m.antigravity_authenticated=lambda: True
+agy_seen={}
+class P:
+    returncode=0
+    stdout=json.dumps({"event":"result","result":{"status":"SUCCESS","structured_output":{"ok":True}}})
+    stderr=''
+def agy_run(args,**kwargs):
+    agy_seen["schema"]=args[args.index("--json-schema")+1]
+    return P()
+m._run=agy_run
+schema={"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}
+m.antigravity_structured("x",schema,cwd=str(workdir),model="gemini-3.1-pro-high")
+
+fd,codex_path=tempfile.mkstemp(); os.close(fd)
+m.CODEX=codex_path
+codex_seen={}
+def codex_run(args,**kwargs):
+    codex_seen["schema"]=args[args.index("--output-schema")+1]
+    codex_seen["output"]=args[args.index("-o")+1]
+    Path(codex_seen["output"]).write_text('{"ok":true}',encoding="utf-8")
+    return subprocess.CompletedProcess(args,0,stdout="",stderr="")
+m._run=codex_run
+m.codex_structured("x",schema,cwd=str(workdir))
+os.unlink(codex_path)
+print(json.dumps({
+  "workspaceFiles":sorted(p.name for p in workdir.iterdir()),
+  "agySchemaParent":str(Path(agy_seen["schema"]).parent),
+  "codexSchemaParent":str(Path(codex_seen["schema"]).parent),
+  "codexOutputParent":str(Path(codex_seen["output"]).parent),
+  "workdir":str(workdir)
+}))
+`);
+  assert.deepEqual(result.workspaceFiles,[]);
+  assert.notEqual(result.agySchemaParent,result.workdir);
+  assert.notEqual(result.codexSchemaParent,result.workdir);
+  assert.notEqual(result.codexOutputParent,result.workdir);
 });
 
 test('Copilot Free provider is opt-in and disabled by default', () => {
@@ -262,16 +377,20 @@ m.COPILOT_MAX_AI_CREDITS=1
 captured={}
 def fake_run(args,**kwargs):
     captured["args"]=args
+    captured["input"]=kwargs.get("input_text")
     return subprocess.CompletedProcess(args,0,stdout='{"ok":true}',stderr='')
 m._run=fake_run
 value=m.copilot_structured(
-  "x",{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
+  "x"*200000,{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}},
   cwd=tempfile.mkdtemp(),model="auto"
 )
-print(json.dumps({"value":value,"args":captured["args"]}))
+print(json.dumps({"value":value,"args":captured["args"],"inputBytes":len(captured["input"].encode("utf-8"))}))
 os.unlink(path)
 `);
   assert.equal(result.value.ok,true);
+  assert.ok(result.inputBytes > 200000);
+  assert.ok(!result.args.includes('-p'));
+  assert.ok(!result.args.some((arg) => typeof arg === 'string' && arg.length > 10000));
   assert.ok(result.args.includes('--max-ai-credits'));
   assert.ok(result.args.includes('1'));
   assert.ok(result.args.includes('--mode'));

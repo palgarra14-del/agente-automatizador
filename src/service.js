@@ -30,8 +30,10 @@ function trustedServicePath(nodePath) {
 export function serviceRuntimeEnvironment(environment = {}) {
   const result = {};
   const allowed = [
-    'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
+    'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
     'MODEL_COST_POLICY',
+    'CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT',
+    'CODEX_SUBSCRIPTION_RESERVE_OVERRIDE',
     'ANTIGRAVITY_CLI', 'ANTIGRAVITY_AUTH_TTL',
     'CODEX_BIN',
     'OPENCODE_BIN', 'OPENCODE_FREE_TIMEOUT', 'OPENCODE_MODELS_TTL',
@@ -39,7 +41,7 @@ export function serviceRuntimeEnvironment(environment = {}) {
     'MODEL_PROVIDER_SLOT_WAIT_SECONDS', 'MODEL_PROVIDER_MAX_ANTIGRAVITY',
     'MODEL_PROVIDER_MAX_OPENCODE', 'MODEL_PROVIDER_MAX_CODEX'
   ];
-  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
+  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
   for (const name of allowed) {
     const value = environment[name];
     if (value === undefined) continue;
@@ -157,7 +159,9 @@ export function renderInboxServiceUnit({ repositoryRoot, nodePath, home = homedi
     `Environment=${systemdQuote(`HOME=${resolve(home)}`)}`,
     ...environmentLines,
     'Restart=always',
-    'RestartSec=3',
+    // Give the user-session credential store time to become available after boot.
+    // Keep the service inactive between attempts; never cache credentials in the unit.
+    'RestartSec=30s',
     'KillSignal=SIGTERM',
     'TimeoutStopSec=15',
     'UMask=0077',
@@ -548,9 +552,18 @@ const terminalUpgradeRequestStatuses = new Set(['completed', 'failed', 'blocked'
 export function assertOperatorUpgradeIdleState(state = {}) {
   const activeRun = Object.values(state.runs ?? {}).find((entry) => entry && !terminalUpgradeRunStatuses.has(entry.status));
   if (activeRun) throw new Error(`operator_upgrade_active_run:${activeRun.id ?? 'unknown'}`);
-  const activeWorkflow = Object.values(state.workflows ?? {}).find((entry) => entry && !terminalUpgradeWorkflowStatuses.has(entry.status));
+
+  const workflows = state.workflows ?? {};
+  const activeWorkflow = Object.values(workflows).find((entry) => entry && !terminalUpgradeWorkflowStatuses.has(entry.status));
   if (activeWorkflow) throw new Error(`operator_upgrade_active_workflow:${activeWorkflow.id ?? 'unknown'}`);
-  const activeRequest = Object.values(state.requests ?? {}).find((entry) => entry && !terminalUpgradeRequestStatuses.has(entry.status));
+
+  const activeRequest = Object.values(state.requests ?? {}).find((entry) => {
+    if (!entry || terminalUpgradeRequestStatuses.has(entry.status)) return false;
+    const workflowId = typeof entry.workflowId === 'string' && entry.workflowId ? entry.workflowId : null;
+    if (!workflowId) return true;
+    const workflow = workflows[workflowId];
+    return !workflow || !terminalUpgradeWorkflowStatuses.has(workflow.status);
+  });
   if (activeRequest) throw new Error(`operator_upgrade_active_request:${activeRequest.issueNumber ?? 'unknown'}`);
   return true;
 }

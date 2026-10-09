@@ -1,5 +1,7 @@
 # Engineering Orchestrator — v0.21
 
+> **Canonical operating sources:** current commercial truth and per-lane policy live in `config/projects.json`; the concise methodology and source-precedence rules live in `docs/OPERATING_MODEL.md`. Historical issues/PRs/docs are evidence, not authority when they conflict with those sources.
+
 A CLI-first, policy-governed engineering loop for registered repositories. It turns a small engineering objective into a reviewable pull request; it never merges a pull request or deploys production.
 
 ## What is real

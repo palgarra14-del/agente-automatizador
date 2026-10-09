@@ -39,7 +39,7 @@ print(json.dumps({
   assert.equal(result.creative, 'ag-sonnet-4.6');
   assert.equal(result.implementation, 'codex-astra');
   assert.equal(result.review, 'ag-opus-4.6');
-  assert.equal(result.quick, 'ag-gemini-3.8-flash');
+  assert.equal(result.quick, 'oc-muse-spark-1.3');
 });
 
 test('free-only cost policy blocks subscription candidates even when providers are available', () => {
@@ -73,7 +73,7 @@ print(json.dumps({
   assert.equal(result.frontend, 'ag-sonnet-4.6');
   assert.equal(result.orchestration, 'ag-gemini-3.8-flash');
   assert.equal(result.refactor, 'ag-opus-4.6');
-  assert.equal(result.bulk, 'ollama-qwen-3b');
+  assert.equal(result.bulk, 'oc-muse-spark-1.3');
 });
 
 test('subscription_included unlocks subscription quota without enabling generic paid candidates', () => {
@@ -97,6 +97,50 @@ print(json.dumps({
   assert.equal(result.codex, true);
   assert.equal(result.antigravity, true);
   assert.equal(result.opencode, true);
+});
+
+test('7B local fallback is blocked when the MSI lacks safe memory headroom', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.COST_POLICY="free_only"
+m.available_memory_mb=lambda: 6400
+print(json.dumps({
+  "seven":m.candidate_available("ollama-qwen-7b"),
+  "three":m.candidate_available("ollama-qwen-3b"),
+  "localPatch":m.rank_candidates("local_patch")[0]["candidate"],
+  "offline":m.rank_candidates("offline_analysis")[0]["candidate"]
+}))
+`);
+  assert.equal(result.seven, false);
+  assert.equal(result.three, true);
+  assert.equal(result.localPatch, 'ollama-qwen-3b');
+  assert.equal(result.offline, 'ollama-qwen-3b');
+});
+
+test('7B local fallback remains available when measured headroom is sufficient', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.COST_POLICY="free_only"
+m.available_memory_mb=lambda: 8000
+print(json.dumps({
+  "seven":m.candidate_available("ollama-qwen-7b"),
+  "localPatch":m.rank_candidates("local_patch")[0]["candidate"]
+}))
+`);
+  assert.equal(result.seven, true);
+  assert.equal(result.localPatch, 'ollama-qwen-7b');
 });
 
 test('allow_all does not unlock paid models without explicit second gate', () => {
@@ -168,6 +212,30 @@ print(json.dumps({"before":before,"after":after,"gemini":m.empirical_stats("crea
   assert.equal(result.after, 'ag-gemini-3.1-pro');
   assert.equal(result.gemini.samples, 8);
   assert.equal(result.gemini.successRate, 1);
+});
+
+test('faster equally-successful bulk worker can overcome a slightly higher prior, while final audit stays quality-dominant', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.STATE=Path(tempfile.mkdtemp()); m.PERFORMANCE=m.STATE/"perf.jsonl"
+for i in range(12):
+    m.record_outcome("structured_bulk","oc-mimo-2.6-flash",success=True,qa_pass=True,elapsed_seconds=5)
+    m.record_outcome("structured_bulk","oc-muse-spark-1.3",success=True,qa_pass=True,elapsed_seconds=180)
+    m.record_outcome("final_audit","ag-opus-4.6",success=True,qa_pass=True,elapsed_seconds=300,score_after=9.8)
+    m.record_outcome("final_audit","ag-gemini-3.1-pro",success=True,qa_pass=True,elapsed_seconds=30,score_after=8.7)
+bulk=m.routing_score("structured_bulk","oc-mimo-2.6-flash",0.98)[0]
+bulk_prior=m.routing_score("structured_bulk","oc-muse-spark-1.3",1.0)[0]
+final=m.rank_candidates("final_audit")[0]["candidate"]
+print(json.dumps({"bulkFaster":bulk>bulk_prior,"bulk":bulk,"bulkPrior":bulk_prior,"final":final}))
+`);
+  assert.equal(result.bulkFaster, true);
+  assert.equal(result.final, 'ag-opus-4.6');
 });
 
 test('fix routing separates visual polish from structural runtime defects', () => {

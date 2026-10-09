@@ -593,6 +593,46 @@ export function workflowFailureSummary(workflow) {
   };
 }
 
+export function githubRateLimitRetryAfterMs(response, nowMs = Date.now()) {
+  const header = (name) => response?.headers?.get?.(name) ?? null;
+  const retryAfter = header('retry-after');
+  if (retryAfter !== null && /^\d+(?:\.\d+)?$/.test(String(retryAfter).trim())) {
+    return Math.max(1_000, Math.ceil(Number(retryAfter) * 1_000));
+  }
+  const remaining = header('x-ratelimit-remaining');
+  const reset = Number(header('x-ratelimit-reset'));
+  if (String(remaining).trim() === '0' && Number.isFinite(reset) && reset > 0) {
+    return Math.max(1_000, Math.ceil((reset * 1_000) - nowMs + 1_000));
+  }
+  return null;
+}
+
+
+// GitHub secondary limits can return HTTP 403 with remaining > 0, or no
+// Retry-After header. Distinguish those from permission-related 403s.
+export async function githubIssueRateLimitRetryAfterMs(response) {
+  const known = githubRateLimitRetryAfterMs(response);
+  if (known !== null) return known;
+  if (response?.status === 429 ||
+      (response?.status === 403 && response?.headers?.get?.('x-ratelimit-remaining') === '0')) {
+    return 60_000;
+  }
+  if (response?.status !== 403) return null;
+  let body = '';
+  try {
+    const readable = typeof response.clone === 'function' ? response.clone() : response;
+    if (typeof readable?.text === 'function') body = String(await readable.text()).slice(0, 2048);
+  } catch { /* Non-readable error bodies must never fail the queue parser. */ }
+  return /secondary rate limit|rate limit exceeded|abuse detection/i.test(body) ? 60_000 : null;
+}
+
+// A 401 means the token held by the watcher was rejected. Recreate the watcher
+// under systemd so startup auth can read the current GitHub CLI credential.
+// Do not treat 403 as an auth-refresh signal: GitHub uses 403 for rate limits.
+export function githubIssueQueueAuthRejected(error) {
+  return error?.status === 401;
+}
+
 export class GitHubIssueChannel {
   constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 12_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
@@ -643,6 +683,8 @@ export class GitHubIssueChannel {
         if (!response.ok) {
           const error = new Error(`GitHub issue queue request failed: ${response.status}`);
           error.status = response.status;
+          const retryAfterMs = await githubIssueRateLimitRetryAfterMs(response);
+          if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
           throw error;
         }
         if (response.status === 204) return null;
@@ -651,8 +693,9 @@ export class GitHubIssueChannel {
         if (options.signal?.aborted) throw error;
         lastError = timeoutSignal.aborted ? new Error('github_issue_queue_request_timeout', { cause: error }) : error;
         const status = Number(error?.status ?? 0);
-        const transient = timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
-          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? ''));
+        const rateLimited = Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0;
+        const transient = !rateLimited && (timeoutSignal.aborted || status === 408 || status === 429 || status >= 500 ||
+          /(?:fetch failed|network|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|ETIMEDOUT)/i.test(String(error?.message ?? '')));
         if (!transient || attempt >= retryDelaysMs.length) throw lastError;
       } finally {
         clearTimeout(timeout);
@@ -991,6 +1034,7 @@ export class SupervisedIssueQueue {
     this.operatorBranch = operatorBranch;
     this.executionEnabled = executionEnabled;
     this.now = now;
+    this.parkedScanOffset = 0;
   }
 
   ownsProject(projectId) {
@@ -1017,8 +1061,8 @@ export class SupervisedIssueQueue {
     };
   }
 
-  async hasExecutionWork() {
-    const state = await this.store.load();
+  async hasExecutionWork(rootState = null) {
+    const state = rootState ?? await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     return Object.entries(state.requests ?? {}).some(([key, record]) =>
       key.startsWith(keyPrefix) &&
@@ -2256,8 +2300,8 @@ export class SupervisedIssueQueue {
       : this.initializeIssue(issue, parsed);
   }
 
-  async hasWork() {
-    const state = await this.store.load();
+  async hasWork(rootState = null, pendingAdmissionIntents = null) {
+    const state = rootState ?? await this.store.load();
     const keyPrefix = `${this.channel.repository.owner}/${this.channel.repository.name}#`;
     const terminal = new Set(['completed', 'failed', 'blocked', 'rejected']);
 
@@ -2267,7 +2311,12 @@ export class SupervisedIssueQueue {
       if (record.terminalNotification && !record.terminalNotification.sentAt) return true;
     }
 
-    if (this.includedProjectIds !== null) return (await this.pendingAdmissionIntents()).length > 0;
+    if (this.includedProjectIds !== null) {
+      const intents = Array.isArray(pendingAdmissionIntents)
+        ? pendingAdmissionIntents
+        : await this.pendingAdmissionIntents();
+      return intents.length > 0;
+    }
     const issues = await this.channel.openIssues();
     for (const issue of issues) {
       if (typeof issue.body !== 'string' || !issue.body.includes(ISSUE_REQUEST_MARKER)) continue;
@@ -2310,7 +2359,7 @@ export class SupervisedIssueQueue {
       }
     }
     let parkedResult = null;
-    const maxParkedScans = 20;
+    const parkedScanBudget = 3;
     const parkedStatuses = new Set(['awaiting_start_approval', 'awaiting_workflow_approval']);
     const activeEntries = Object.entries(state.requests ?? {})
       .filter(([key, record]) =>
@@ -2324,9 +2373,13 @@ export class SupervisedIssueQueue {
     const activeKeys = new Set(activeEntries.map(([key]) => key));
     const allParkedEntries = activeEntries.filter(([, record]) => parkedStatuses.has(record.status));
     const runnableEntries = activeEntries.filter(([, record]) => !parkedStatuses.has(record.status));
-    const parkedEntries = runnableEntries.length > 0 && allParkedEntries.length > maxParkedScans
-      ? []
-      : allParkedEntries.slice(0, maxParkedScans);
+    let parkedEntries = [];
+    if (allParkedEntries.length > 0 && !(runnableEntries.length > 0 && allParkedEntries.length > parkedScanBudget)) {
+      const count = Math.min(parkedScanBudget, allParkedEntries.length);
+      const offset = this.parkedScanOffset % allParkedEntries.length;
+      parkedEntries = Array.from({ length: count }, (_value, index) => allParkedEntries[(offset + index) % allParkedEntries.length]);
+      this.parkedScanOffset = (offset + count) % allParkedEntries.length;
+    }
     for (const [key, record] of [...parkedEntries, ...runnableEntries]) {
       const issue = await this.channel.issue(record.issueNumber);
       if (!issue ||
@@ -2403,18 +2456,46 @@ export class SupervisedIssueQueue {
   }
 }
 
-export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs) {
+export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, retryAfterMs = 0) {
   if (!Number.isInteger(failureStreak) || failureStreak < 1) throw new Error('issue_queue_failure_streak_invalid');
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
-  return Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
+  if (!Number.isFinite(retryAfterMs) || retryAfterMs < 0) throw new Error('issue_queue_retry_after_invalid');
+  // GitHub outages need progressive backoff independent of the healthy poll rate.
+  // A successful tick resets failureStreak and restores the normal cadence.
+  const ordinaryBackoffMs = Math.min(5 * 60_000, 1_000 * (2 ** Math.min(9, failureStreak - 1)));
+  const boundedRetryAfterMs = Math.min(6 * 60 * 60 * 1_000, Math.ceil(retryAfterMs));
+  return Math.max(ordinaryBackoffMs, boundedRetryAfterMs);
 }
 
-export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
+// Abort-aware waiting also protects a paused watcher from holding systemd
+// shutdown hostage while GitHub has requested a long backoff.
+async function waitForIssueQueuePoll(delayMs, signal) {
+  await new Promise((resolveSleep) => {
+    let timer = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      signal?.removeEventListener?.('abort', finish);
+      resolveSleep();
+    };
+    timer = setTimeout(finish, delayMs);
+    if (signal) {
+      if (signal.aborted) return finish();
+      signal.addEventListener?.('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    }
+  });
+}
+
+export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError, cooldownRemainingMs } = {}) {
   if (!queue || typeof queue.claimWatcherLease !== 'function' || typeof queue.releaseWatcherLease !== 'function') {
     throw new Error('watchIssueQueue requires a lease-capable queue');
   }
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
   if (beforeTick !== undefined && typeof beforeTick !== 'function') throw new Error('issue queue beforeTick must be a function');
+  if (cooldownRemainingMs !== undefined && typeof cooldownRemainingMs !== 'function') throw new Error('issue queue cooldownRemainingMs must be a function');
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
   let operationError = null;
@@ -2423,6 +2504,11 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
     while (!signal?.aborted) {
       if (beforeTick && await beforeTick() === false) break;
       if (signal?.aborted) break;
+      const cooldown = cooldownRemainingMs?.() ?? 0;
+      if (Number.isFinite(cooldown) && cooldown > 0) {
+        await waitForIssueQueuePoll(Math.min(cooldown, 20 * 60_000), signal);
+        continue;
+      }
       let sleepMs = pollIntervalMs;
       try {
         const result = await queue.tick();
@@ -2430,27 +2516,11 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
         await onTick?.(result);
       } catch (error) {
         failureStreak += 1;
-        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs);
+        sleepMs = issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, error?.retryAfterMs ?? 0);
         await onError?.(error);
       }
       if (signal?.aborted) break;
-      await new Promise((resolveSleep) => {
-        let timer = null;
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          if (timer !== null) clearTimeout(timer);
-          signal?.removeEventListener?.('abort', finish);
-          resolveSleep();
-        };
-        timer = setTimeout(finish, sleepMs);
-        if (signal) {
-          if (signal.aborted) return finish();
-          signal.addEventListener?.('abort', finish, { once: true });
-          if (signal.aborted) finish();
-        }
-      });
+      await waitForIssueQueuePoll(sleepMs, signal);
     }
   } catch (error) {
     operationError = error;

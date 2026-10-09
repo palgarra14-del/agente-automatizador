@@ -179,6 +179,10 @@ jobs:
     runs-on: [self-hosted, Linux, X64, agent-local]
     # Supervisor headroom only: internal self/drain budgets remain bounded separately.
     timeout-minutes: 60
+    env:
+      # Codex subscription is an authorized resource; paid API keys are never passed.
+      # Session fallback still enforces the 20% reserve when headroom is known.
+      MODEL_COST_POLICY: subscription_included
     steps:
       - name: Checkout trusted main
         uses: actions/checkout@v5

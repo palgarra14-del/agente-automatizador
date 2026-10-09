@@ -11,7 +11,8 @@ const DEFAULT_LINEAGE_VALIDATION_PACE_MS = 500;
 const GITHUB_READ_RATE_LIMIT_RETRY_DELAYS_MS = Object.freeze([60_000, 120_000]);
 const GITHUB_TRANSIENT_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
 const GITHUB_NETWORK_READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
-const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 12 * 60 * 1000;
+// Primary GitHub API quota can reset up to an hour later; do not wake every 12 minutes.
+const GITHUB_READ_RATE_LIMIT_MAX_DELAY_MS = 75 * 60 * 1000;
 const GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS = 30_000;
 const STATUS_PAGE_SIZE = 100;
 const EPOCH_STATUS_MAX_PAGES = 8;
@@ -480,13 +481,15 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          // A rate-limit reset beyond this job's deadline belongs to the
+          // delayed scheduler, not an in-run sleep or a generic timeout.
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           if (deadlineAt !== null) {
             if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
             const remainingMs = Math.floor(deadlineAt - this.now());
-            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
-          }
-          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
-            throw rateLimitError(response.status, delayMs);
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw rateLimitError(response.status, delayMs);
           }
           await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
@@ -584,13 +587,15 @@ export class GitHubStateStore extends JsonStore {
       if (fallbackDelayMs !== undefined) {
         const delayMs = await githubReadRateLimitDelayMs(response, fallbackDelayMs, this.now());
         if (delayMs !== null) {
+          // A rate-limit reset beyond this job's deadline belongs to the
+          // delayed scheduler, not an in-run sleep or a generic timeout.
+          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
+            throw rateLimitError(response.status, delayMs);
+          }
           if (deadlineAt !== null) {
             if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) throw new Error('cloud_state_deadline_invalid');
             const remainingMs = Math.floor(deadlineAt - this.now());
-            if (remainingMs <= 0 || delayMs >= remainingMs) throw new Error('workflow_deadline_cap_exceeded');
-          }
-          if (delayMs > GITHUB_READ_RATE_LIMIT_INLINE_WAIT_MAX_MS) {
-            throw rateLimitError(response.status, delayMs);
+            if (remainingMs <= 0 || delayMs >= remainingMs) throw rateLimitError(response.status, delayMs);
           }
           await this.sleepWithinDeadline(delayMs, deadlineAt);
           continue;
@@ -2405,6 +2410,38 @@ export class GitHubStateStore extends JsonStore {
 
   async save() {
     throw new Error('cloud_state_direct_save_forbidden');
+  }
+
+  async releaseExecutionLease(collection, id, leaseId) {
+    const retryDelaysMs = [250, 750];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await super.releaseExecutionLease(collection, id, leaseId);
+      } catch (error) {
+        let snapshot;
+        try {
+          snapshot = await this.readSnapshot({ repair: true });
+        } catch {
+          if (attempt < retryDelaysMs.length) {
+            this.hotLeaseSnapshot = null;
+            await this.sleep(retryDelaysMs[attempt]);
+            continue;
+          }
+          throw error;
+        }
+        const entity = snapshot.state?.[collection]?.[id];
+        if (!entity) throw error;
+        const currentLease = entity.executionLease ?? null;
+        this.cacheSnapshotForActiveLease(snapshot);
+        if (!currentLease) return true;
+        if (currentLease.leaseId !== leaseId) return false;
+        if (attempt < retryDelaysMs.length) {
+          await this.sleep(retryDelaysMs[attempt]);
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
   async mutateInternal(mutator, { requireLease, beforeCommit = null, deadlineAt = null }) {

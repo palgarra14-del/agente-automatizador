@@ -2,14 +2,16 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { criticalCiDemand, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
+import { localGithubCooldownRemainingMs } from '../src/local-github-cooldown.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 import { systemdRunEnvironmentArgs } from '../src/service.js';
 
 const execFileAsync = promisify(execFile);
 const repo = process.env.AGENT_REPOSITORY || 'palgarra14-del/agente-automatizador';
 const workflow = process.env.AGENT_CLOUD_WORKFLOW || 'agent-cloud.yml';
+const ciWorkflow = process.env.AGENT_CI_WORKFLOW || 'ci.yml';
 const cli = process.execPath;
 function boundedDuration(name, fallback, min, max) {
   const value = Number(process.env[name] || fallback);
@@ -17,8 +19,8 @@ function boundedDuration(name, fallback, min, max) {
   return Math.round(value);
 }
 
-const timeoutMs = boundedDuration('AGENT_HEARTBEAT_PEEK_TIMEOUT_MS', 20_000, 1_000, 60_000);
-const observationBudgetMs = boundedDuration('AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS', 35_000, 5_000, 120_000);
+const timeoutMs = boundedDuration('AGENT_HEARTBEAT_PEEK_TIMEOUT_MS', 60_000, 1_000, 60_000);
+const observationBudgetMs = boundedDuration('AGENT_HEARTBEAT_OBSERVATION_BUDGET_MS', 65_000, 5_000, 120_000);
 const dryRun = ['1','true','yes','on'].includes(String(process.env.AGENT_HEARTBEAT_DRY_RUN || '').toLowerCase());
 const executionMode = heartbeatExecutionMode(process.env.AGENT_HEARTBEAT_EXECUTION_MODE || 'cloud');
 
@@ -103,6 +105,19 @@ async function activeLanes(lanes) {
   return active;
 }
 
+async function queuedCriticalCiDemand() {
+  const result = await run('gh',[
+    'run','list','--repo',repo,'--workflow',ciWorkflow,'--limit','20',
+    '--json','name,status,event'
+  ],{timeout:15_000});
+  if (!result.ok) return 0;
+  try {
+    return Math.min(1, criticalCiDemand(JSON.parse(result.stdout)));
+  } catch {
+    return 0;
+  }
+}
+
 async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=timeoutMs) {
   const operatorRequested = operatorLanes.has(lane);
   if (active.has(lane)) return {lane,active:true,operatorRequested};
@@ -121,6 +136,32 @@ async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=time
 
 const config=await loadConfig();
 const allLanes=(config.cloudLanes ?? []).map((lane) => lane.id);
+// GitHub asked us to wait: do not even query control-plane endpoints while blocked.
+// No dispatch occurs; on the next timer cycle after expiry we re-check operator control.
+const localRetryAfterMs = executionMode === 'local-primary'
+  ? localGithubCooldownRemainingMs()
+  : 0;
+if (localRetryAfterMs > 0) {
+  console.log(JSON.stringify({
+    version: 1,
+    classified: allLanes.map((lane) => ({
+      lane, state: 'deferred', runnable: false, reason: 'rate_limit_cooldown'
+    })),
+    running: [],
+    ranking: [],
+    dispatch: [],
+    deferred: allLanes.map((lane) => ({ lane, reason: 'rate_limit_cooldown' })),
+    yieldCandidates: [],
+    yieldRequests: [],
+    dryRun,
+    executionMode,
+    dispatched: [],
+    rateLimitCooldown: allLanes,
+    retryAfterMs: localRetryAfterMs,
+    operatorControlChecked: false
+  }, null, 2));
+  process.exit(0);
+}
 const operatorControl=await loadOperatorControl(allLanes);
 const lanes=operatorControl.globalPause
   ? []
@@ -147,13 +188,35 @@ const operatorLanes=new Set(operatorRequestedLanes(operatorIssues,config));
 const observations=[];
 const observationStartedAt=Date.now();
 const observationRotation = Math.floor(Date.now() / 60_000);
+let deepObservations = 0;
+const maxDeepObservations = 1;
+let localPrimaryProbeAssigned = false;
 for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRotation)) {
-  if (active.has(lane)) {
+  if (active.has(lane) || cooldown.has(lane)) {
     observations.push(await observeLane(lane,active,cooldown,operatorLanes,1_000));
     continue;
   }
+  if (executionMode === 'local-primary') {
+    if (!localPrimaryProbeAssigned) {
+      localPrimaryProbeAssigned = true;
+      observations.push({
+        lane,
+        active:false,
+        operatorRequested:operatorLanes.has(lane),
+        localPrimaryProbe:true
+      });
+    } else {
+      observations.push({
+        lane,
+        active:false,
+        operatorRequested:operatorLanes.has(lane),
+        observationSkipped:true
+      });
+    }
+    continue;
+  }
   const remainingMs=observationBudgetMs-(Date.now()-observationStartedAt);
-  if (remainingMs < 1_000) {
+  if (deepObservations >= maxDeepObservations || remainingMs < 1_000) {
     observations.push({
       lane,
       active:false,
@@ -162,14 +225,17 @@ for (const lane of heartbeatObservationOrder(lanes,operatorLanes,observationRota
     });
     continue;
   }
+  deepObservations += 1;
   observations.push(await observeLane(lane,active,cooldown,operatorLanes,Math.min(timeoutMs,remainingMs)));
 }
 
 const maxHeavy=Number(process.env.AGENT_MAX_HEAVY || 3);
+const externalPriorityDemand = await queuedCriticalCiDemand();
 const plan=planHeartbeat(observations,{
   maxHeavy,
   maxBusinessHeavy:Number(process.env.AGENT_MAX_BUSINESS_HEAVY || maxHeavy),
-  maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1)
+  maxSelfHeavy:Number(process.env.AGENT_MAX_SELF_HEAVY || 1),
+  reserveForExternal:externalPriorityDemand
 });
 
 const yieldRequests = dryRun

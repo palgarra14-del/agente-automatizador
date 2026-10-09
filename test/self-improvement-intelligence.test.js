@@ -58,6 +58,41 @@ test('executor attempt exhaustion is classified as model execution debt', () => 
   assert.match(analysis.directive, /codex_home/);
 });
 
+test('business lanes keep orchestrator failures visible but do not spend commercial cycles on them', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('callflow') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'skill_executor_attempt_budget_exhausted', failureDetail: 'no_role_candidate_available', changedPaths: [] },
+      { status: 'failed', error: 'workflow_budget_deadline_exceeded', changedPaths: [] },
+      { status: 'failed', error: 'provider_temporarily_unavailable', changedPaths: [] },
+      { status: 'blocked', error: 'stale_autoranking_replan', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'continuous-improvement:opportunity');
+  for (const kind of ['reliability:model-execution', 'reliability:runtime-timeout', 'reliability:model-availability', 'reliability:control-plane']) {
+    const signal = analysis.signals.find((item) => item.kind === kind);
+    assert.ok(signal);
+    assert.equal(signal.actionable, false);
+    assert.match(signal.evidence, /self lane/);
+  }
+  const throughput = analysis.signals.find((item) => item.kind === 'throughput:no-recent-success');
+  assert.equal(throughput.actionable, false);
+});
+
+test('unclassified business implementation failures remain actionable instead of being hidden as infrastructure', () => {
+  const intelligence = new AutonomousGapIntelligence({ project: project('website-pilot') });
+  const analysis = intelligence.analyze({
+    history: [
+      { status: 'failed', error: 'workflow_implementation_attempt_budget_exhausted', changedPaths: [] }
+    ]
+  });
+
+  assert.equal(analysis.primary, 'reliability:other');
+  const signal = analysis.signals.find((item) => item.kind === 'reliability:other');
+  assert.equal(signal.actionable, true);
+});
+
 test('implementation no-change failures become a concrete autonomous priority', () => {
   const intelligence = new AutonomousGapIntelligence({ project: project('callflow') });
   const analysis = intelligence.analyze({
@@ -286,4 +321,183 @@ test('completed autonomous outcomes are learned by the selected gap before the n
   assert.equal(learned.successCount, 1);
   assert.equal(learned.failureCount, 0);
   assert.equal(learned.lastCompletedAt, '2026-09-30T00:10:00.000Z');
+});
+
+test('every terminal autonomous cycle persists an autoranking and the next iteration consumes it', async () => {
+  const now = Date.parse('2026-09-30T01:00:00Z');
+  const store = fakeStore({
+    autopilotSelfImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-rank-source',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-09-30T00:50:00.000Z'],
+      history: [],
+      lastIntelligence: {
+        version: 1,
+        projectId: 'self',
+        primary: 'reliability:verification',
+        signals: []
+      },
+      nextRanking: null,
+      gapMemory: [],
+      suspendedUntil: null,
+      updatedAt: '2026-09-30T00:50:00.000Z'
+    }
+  });
+  let analyzeCalls = 0;
+  let created = null;
+  const intelligence = {
+    analyze({ history, memory }) {
+      analyzeCalls += 1;
+      assert.equal(history.at(-1).workflowId, 'workflow-rank-source');
+      assert.equal(history.at(-1).status, 'completed');
+      const learned = memory.find((entry) => entry.kind === 'reliability:verification');
+      assert.equal(learned?.lastOutcome, 'completed');
+      return {
+        version: 1,
+        projectId: 'self',
+        primary: 'continuous-improvement:opportunity',
+        signals: [{
+          kind: 'continuous-improvement:opportunity',
+          score: 20,
+          actionable: true,
+          evidence: 'rank after terminal workflow'
+        }],
+        directive: 'Autoranking next iteration: improve the highest-evidence bounded opportunity.'
+      };
+    }
+  };
+  const workflowEngine = {
+    async get() {
+      return {
+        id: 'workflow-rank-source',
+        profile: 'autonomous-maintenance',
+        projectId: 'self',
+        status: 'completed',
+        result: null,
+        steps: [
+          { id: 'implementation', evidence: { changeSet: { paths: ['src/ranked.js'] } } },
+          { id: 'publication', evidence: null }
+        ]
+      };
+    },
+    async create(input) {
+      created = input;
+      return { id: 'workflow-rank-next' };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine,
+    operatorRevision: REV,
+    projectId: 'self',
+    intelligence,
+    now: () => now
+  });
+
+  const settled = await autopilot.tick();
+  assert.equal(settled.status, 'completed');
+  assert.equal(analyzeCalls, 1);
+  const ranking = store.state.autopilotSelfImprovement.nextRanking;
+  assert.equal(ranking.primary, 'continuous-improvement:opportunity');
+  assert.equal(ranking.trigger, 'workflow_terminal');
+  assert.equal(ranking.afterWorkflowId, 'workflow-rank-source');
+  assert.equal(ranking.generatedAt, '2026-09-30T01:00:00.000Z');
+
+  const nextId = await autopilot.createWorkflow();
+  assert.equal(nextId, 'workflow-rank-next');
+  assert.equal(analyzeCalls, 1);
+  assert.match(created.goal, /Autoranking next iteration/);
+  assert.equal(store.state.autopilotSelfImprovement.nextRanking, null);
+  assert.equal(
+    store.state.autopilotSelfImprovement.lastIntelligence.primary,
+    'continuous-improvement:opportunity'
+  );
+});
+
+
+test('business workflow replans before implementation when its saved priority becomes infrastructure-owned', async () => {
+  const now = Date.parse('2026-10-07T11:10:00Z');
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-stale-business-ranking',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-10-07T11:00:00.000Z'],
+      history: [
+        {
+          workflowId: 'workflow-old-failure',
+          status: 'failed',
+          error: 'skill_executor_attempt_budget_exhausted',
+          failureDetail: 'no_role_candidate_available',
+          changedPaths: [],
+          baseRevision: REV,
+          completedAt: '2026-10-07T10:55:00.000Z'
+        }
+      ],
+      lastIntelligence: {
+        version: 1,
+        projectId: 'leadfinder',
+        primary: 'reliability:model-execution',
+        signals: []
+      },
+      nextRanking: null,
+      gapMemory: [],
+      suspendedUntil: null,
+      updatedAt: '2026-10-07T11:00:00.000Z'
+    }
+  });
+  const intelligence = new AutonomousGapIntelligence({ project: project('leadfinder') });
+  let cancelled = false;
+  let ran = false;
+  const basePlan = {
+    id: 'workflow-stale-business-ranking',
+    profile: 'autonomous-maintenance',
+    projectId: 'leadfinder',
+    status: 'pending',
+    result: null,
+    steps: [
+      { id: 'inspect-project', status: 'ready', attempts: 1, evidence: { type: 'executor-start' }, error: null },
+      { id: 'implementation', status: 'pending', attempts: 0, evidence: null, error: null },
+      { id: 'publication', status: 'pending', attempts: 0, evidence: null, error: null }
+    ]
+  };
+  const workflowEngine = {
+    async get() { return JSON.parse(JSON.stringify(basePlan)); },
+    async cancel(id, options) {
+      assert.equal(id, basePlan.id);
+      assert.equal(options.reason, 'stale_autoranking_replan');
+      cancelled = true;
+      const plan = JSON.parse(JSON.stringify(basePlan));
+      plan.status = 'blocked';
+      plan.result = { error: 'stale_autoranking_replan', stepId: 'inspect-project' };
+      plan.steps[0].status = 'blocked';
+      plan.steps[0].error = 'stale_autoranking_replan';
+      return plan;
+    },
+    async run() {
+      ran = true;
+      throw new Error('stale business workflow should have been replanned before execution');
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine,
+    operatorRevision: REV,
+    projectId: 'leadfinder',
+    intelligence,
+    now: () => now
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(cancelled, true);
+  assert.equal(ran, false);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.replanRecommended, true);
+  assert.equal(result.stalePrimary, 'reliability:model-execution');
+  assert.equal(store.state.autopilotProjectImprovement.activeWorkflowId, null);
+  assert.equal(store.state.autopilotProjectImprovement.nextRanking.primary, 'continuous-improvement:opportunity');
 });

@@ -35,6 +35,9 @@ import {
   workflowApprovalFingerprint,
   workflowBindingFingerprint,
   workflowFailureSummary,
+  githubRateLimitRetryAfterMs,
+  githubIssueRateLimitRetryAfterMs,
+  githubIssueQueueAuthRejected,
   issueQueueFailureBackoffMs,
   watchIssueQueue
 } from '../src/issue-queue.js';
@@ -681,9 +684,49 @@ test('cloud queue bounds approval-gated scans so a large parked backlog cannot m
   };
 
   const result = await queue.tick();
-  assert.equal(scans, 20);
+  assert.equal(scans, 3);
   assert.equal(result.issueNumber, 1);
   assert.equal(result.status, 'awaiting_start_approval');
+});
+
+test('cloud queue rotates bounded approval scans so parked requests are not starved', async () => {
+  const records = {};
+  for (let number = 1; number <= 5; number += 1) {
+    records[`palgarra14-del/agente-automatizador#${number}`] = {
+      issueNumber: number, issueId: 5000 + number, author: 'palgarra14-del',
+      request: { projectId: 'callflow' }, status: 'awaiting_start_approval'
+    };
+  }
+  const store = { load: async () => ({ requests: records }) };
+  const channel = {
+    repository: { owner: 'palgarra14-del', name: 'agente-automatizador' },
+    issue: async (number) => ({
+      number,
+      id: 5000 + number,
+      state: 'open',
+      body: requestBody(),
+      user: { login: 'palgarra14-del' }
+    })
+  };
+  const queue = new SupervisedIssueQueue({
+    store,
+    projects: new Map(),
+    workflowEngine: {},
+    channel,
+    allowedActors: ['palgarra14-del'],
+    includedProjectIds: ['callflow']
+  });
+  const seen = [];
+  queue.processIssue = async (issue) => {
+    seen.push(issue.number);
+    return { status: 'awaiting_start_approval', issueNumber: issue.number };
+  };
+
+  await queue.tick();
+  assert.deepEqual(seen, [1, 2, 3]);
+  seen.length = 0;
+  await queue.tick();
+  assert.deepEqual(seen, [4, 5, 1]);
 });
 
 test('execution work detection ignores approvals and rejects invalid execution mode', async () => {
@@ -2229,13 +2272,90 @@ test('watcher survives a transient queue error and processes a later tick', asyn
   assert.deepEqual(observed, [{ status: 'awaiting_start_approval', issueNumber: 41 }]);
 });
 
+test('watcher releases its singleton lease before controlled 401 auth restart', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const queue = leaseableTestQueue({
+    async tick() {
+      attempts += 1;
+      throw Object.assign(new Error('GitHub rejected the current session'), { status: 401 });
+    }
+  });
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+    onError: (error) => {
+      if (githubIssueQueueAuthRejected(error)) controller.abort();
+    }
+  });
+  assert.equal(attempts, 1, 'a rejected token must not be polled repeatedly');
+  const lease = await queue.claimWatcherLease();
+  assert.equal(await queue.releaseWatcherLease(lease.leaseId), true);
+});
+
 test('issue queue watcher retries transient failures sooner than the normal poll while backing off safely', () => {
   assert.equal(issueQueueFailureBackoffMs(1, 15_000), 1_000);
   assert.equal(issueQueueFailureBackoffMs(2, 15_000), 2_000);
   assert.equal(issueQueueFailureBackoffMs(3, 15_000), 4_000);
   assert.equal(issueQueueFailureBackoffMs(4, 15_000), 8_000);
-  assert.equal(issueQueueFailureBackoffMs(5, 15_000), 15_000);
-  assert.equal(issueQueueFailureBackoffMs(9, 30_000), 16_000);
+  assert.equal(issueQueueFailureBackoffMs(5, 15_000), 16_000);
+  assert.equal(issueQueueFailureBackoffMs(6, 15_000), 32_000);
+  assert.equal(issueQueueFailureBackoffMs(9, 30_000), 256_000);
+  assert.equal(issueQueueFailureBackoffMs(10, 30_000), 300_000);
+  assert.equal(issueQueueFailureBackoffMs(30, 30_000), 300_000);
+  assert.equal(issueQueueFailureBackoffMs(1, 15_000, 90_000), 90_000);
+  assert.equal(issueQueueFailureBackoffMs(1, 15_000, 24 * 60 * 60 * 1_000), 6 * 60 * 60 * 1_000);
+});
+
+test('GitHub rate limit headers produce a bounded retry delay', () => {
+  const headers = (values) => ({ get: (name) => values[name] ?? null });
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'retry-after': '12' }) }, 0), 12_000);
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '120' }) }, 100_000), 21_000);
+  assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '10', 'x-ratelimit-reset': '120' }) }, 100_000), null);
+});
+
+test('rejected watcher credentials refresh only on HTTP 401, never rate-limit or timeout', () => {
+  assert.equal(githubIssueQueueAuthRejected({ status: 401 }), true);
+  assert.equal(githubIssueQueueAuthRejected({ status: 403, retryAfterMs: 60_000 }), false);
+  assert.equal(githubIssueQueueAuthRejected({ status: 429, retryAfterMs: 60_000 }), false);
+  assert.equal(githubIssueQueueAuthRejected(new Error('github_issue_queue_request_timeout')), false);
+  assert.equal(githubIssueQueueAuthRejected(null), false);
+});
+
+test('GitHub issue rate-limit detection distinguishes secondary 403 from forbidden 403', async () => {
+  const headers = (values) => ({ get: (name) => values[name] ?? null });
+  const empty = headers({});
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 429, headers: empty }), 60_000);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: empty,
+    clone() { return { text: async () => 'You have exceeded a secondary rate limit.' }; }
+  }), 60_000);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: empty,
+    clone() { return { text: async () => 'Resource not accessible by integration' }; }
+  }), null);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 401, headers: empty }), null);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: headers({ 'x-ratelimit-remaining': '0' }) }), 60_000);
+});
+
+test('watcher observes shared GitHub cooldown before making any API calls', async () => {
+  let polls = 0;
+  let checked = 0;
+  const controller = new AbortController();
+  const queue = leaseableTestQueue({
+    async tick() {
+      polls += 1;
+      controller.abort();
+      return null;
+    }
+  });
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+    cooldownRemainingMs: () => (++checked === 1 ? 5 : 0)
+  });
+  assert.equal(polls, 1);
+  assert.ok(checked >= 2);
+  const lease = await queue.claimWatcherLease();
+  assert.equal(await queue.releaseWatcherLease(lease.leaseId), true);
 });
 
 test('watch loop removes abort listeners after ordinary poll sleeps', async () => {
@@ -2314,6 +2434,32 @@ test('GitHubIssueChannel uses bounded pagination and authenticated issue-comment
   assert.equal(calls[0].options.headers.Authorization.includes('ghp_fixtureSecret'), true);
   assert.equal(calls[2].options.method, 'POST');
   assert.equal(JSON.parse(calls[2].options.body).body, 'status');
+});
+
+test('GitHubIssueChannel surfaces rate-limit delay without rapid GET retries', async () => {
+  let calls = 0;
+  const channel = new GitHubIssueChannel({
+    token: 'ghp_fixtureSecret',
+    repository: { owner: 'x', name: 'y' },
+    fetchImpl: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => name === 'retry-after' ? '90' : null },
+        json: async () => ({})
+      };
+    }
+  });
+  await assert.rejects(
+    channel.request('/repos/x/y/issues'),
+    (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.retryAfterMs, 90_000);
+      return true;
+    }
+  );
+  assert.equal(calls, 1);
 });
 
 test('GitHubIssueChannel combines caller cancellation with its own request deadline', async () => {

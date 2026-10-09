@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   AUTONOMOUS_PROJECT_POLICIES,
-  AutonomousProjectImprovement
+  AutonomousProjectImprovement,
+  autonomousWorkflowScopeCompatible
 } from '../src/self-improvement.js';
 
 const REV = 'a'.repeat(40);
@@ -56,7 +57,7 @@ test('every business lane has an explicit bounded autonomous policy', () => {
     assert.ok(policy.goal.length > 80, projectId);
     assert.ok(policy.scope.allowedPaths.length > 0, projectId);
     assert.ok(policy.scope.forbiddenPaths.length > 0, projectId);
-    assert.equal(policy.maxStartsPer24h, 24);
+    assert.equal(policy.maxStartsPer24h, projectId === 'self' ? 6 : 12);
   }
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.callflow.scope.forbiddenPaths.includes('google-apps-script'), true);
   assert.equal(AUTONOMOUS_PROJECT_POLICIES.leadfinder.scope.forbiddenPaths.includes('.github'), true);
@@ -117,6 +118,7 @@ test('external autopilot never auto-approves sensitive implementation changes', 
     id: 'workflow-sensitive',
     profile: 'autonomous-maintenance',
     projectId: 'callflow',
+    scope: clone(AUTONOMOUS_PROJECT_POLICIES.callflow.scope),
     status: 'awaiting_approval',
     result: null,
     steps: [{
@@ -168,4 +170,88 @@ test('external autopilot never auto-approves sensitive implementation changes', 
   assert.equal(result.humanGateStepId, 'implementation');
   assert.equal(approvals, 0);
   assert.equal(cancellations, 1);
+});
+
+
+test('autonomous workflow scope compatibility permits only equal or stricter persisted authority', () => {
+  const policy = AUTONOMOUS_PROJECT_POLICIES['website-pilot'].scope;
+  assert.equal(autonomousWorkflowScopeCompatible({
+    allowedPaths: ['index.html', 'docs'],
+    forbiddenPaths: [...policy.forbiddenPaths, 'docs/generated']
+  }, policy), true);
+  assert.equal(autonomousWorkflowScopeCompatible({
+    allowedPaths: [...policy.allowedPaths, 'scripts'],
+    forbiddenPaths: [...policy.forbiddenPaths]
+  }, policy), false);
+  assert.equal(autonomousWorkflowScopeCompatible({
+    allowedPaths: ['docs'],
+    forbiddenPaths: []
+  }, {
+    allowedPaths: ['docs'],
+    forbiddenPaths: ['docs/private']
+  }), false);
+});
+
+test('external autopilot retires a persisted workflow with stale broader scope before execution', async () => {
+  const store = fakeStore({
+    autopilotProjectImprovement: {
+      version: 1,
+      activeWorkflowId: 'workflow-stale-scope',
+      activeBaseRevision: REV,
+      sequence: 1,
+      starts: ['2026-10-07T00:30:00.000Z'],
+      history: [],
+      suspendedUntil: null,
+      updatedAt: null
+    }
+  });
+  const policy = AUTONOMOUS_PROJECT_POLICIES['website-pilot'];
+  const plan = {
+    id: 'workflow-stale-scope',
+    profile: 'autonomous-maintenance',
+    projectId: 'website-pilot',
+    scope: {
+      allowedPaths: [...policy.scope.allowedPaths, 'scripts'],
+      forbiddenPaths: policy.scope.forbiddenPaths.filter((path) => path !== 'scripts')
+    },
+    status: 'pending',
+    result: null,
+    steps: []
+  };
+  let runs = 0;
+  let cancellations = 0;
+  const engine = {
+    async get() { return clone(plan); },
+    async run() {
+      runs += 1;
+      throw new Error('stale workflow must never execute');
+    },
+    async cancel(id, options) {
+      cancellations += 1;
+      assert.equal(id, 'workflow-stale-scope');
+      assert.equal(options.reason, 'autonomous_workflow_scope_policy_changed');
+      return {
+        ...clone(plan),
+        status: 'blocked',
+        result: { error: options.reason },
+        steps: []
+      };
+    }
+  };
+  const autopilot = new AutonomousProjectImprovement({
+    store,
+    workflowEngine: engine,
+    operatorRevision: REV,
+    projectId: 'website-pilot',
+    now: () => Date.parse('2026-10-07T00:40:00Z')
+  });
+
+  const result = await autopilot.tick();
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.scopePolicyChanged, true);
+  assert.equal(runs, 0);
+  assert.equal(cancellations, 1);
+  assert.equal(store.state.autopilotProjectImprovement.activeWorkflowId, null);
+  assert.equal(store.state.autopilotProjectImprovement.history.at(-1).error, 'autonomous_workflow_scope_policy_changed');
 });

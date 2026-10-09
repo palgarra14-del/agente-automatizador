@@ -9,11 +9,14 @@ const SELF_COOLDOWN_MS = 30 * 60 * 1000;
 const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_MAX_STARTS_PER_24H = 24;
+const PROVIDER_BACKOFF_BASE_MS = 30 * 60 * 1000;
+const PROVIDER_BACKOFF_MAX_MS = 2 * 60 * 60 * 1000;
+const SELF_MAX_STARTS_PER_24H = 6;
+const PROJECT_MAX_STARTS_PER_24H = 12;
 const MAX_CONSECUTIVE_FAILURE_RETRIES = 3;
 const HISTORY_LIMIT = 20;
 const GAP_MEMORY_LIMIT = 12;
-const MAX_STARTS_PER_24H = DEFAULT_MAX_STARTS_PER_24H;
+const MAX_STARTS_PER_24H = SELF_MAX_STARTS_PER_24H;
 
 export const AUTONOMOUS_MAINTENANCE_SCOPE = Object.freeze({
   allowedPaths: Object.freeze(['src', 'test/autonomous']),
@@ -44,7 +47,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   self: Object.freeze({
     stateKey: SELF_STATE_KEY,
     cooldownMs: SELF_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: SELF_MAX_STARTS_PER_24H,
     goal: AUTONOMOUS_MAINTENANCE_GOAL,
     scope: AUTONOMOUS_MAINTENANCE_SCOPE,
     allowSensitiveImplementation: true
@@ -52,7 +55,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   leadfinder: Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative LeadFinder main and implement exactly one bounded improvement that increases qualified lead throughput, contact-data quality, niche targeting, deduplication, prioritization, observability or reliable handoff into Callflow. Prefer measurable fixes and regression coverage over speculative refactors. Work only on safe application/docs paths, never secrets, workflow control, dependencies, deployment configuration or production data. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['src', 'docs']),
@@ -63,7 +66,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   callflow: Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative Callflow main and implement exactly one bounded improvement that increases sales-call throughput, lead prioritization, outcome capture, follow-up discipline, operator usability or feedback quality back to LeadFinder. Prefer deterministic UX/data-quality fixes with tests. Do not touch Apps Script, API/config secrets, deployment configuration, package metadata or external communications. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['app.js', 'prospect.js', 'prospect-utils.js', 'callflow-navigation.js', 'index.html', 'styles.css', 'closing.css', 'tests']),
@@ -74,7 +77,7 @@ export const AUTONOMOUS_PROJECT_POLICIES = Object.freeze({
   'website-pilot': Object.freeze({
     stateKey: PROJECT_STATE_KEY,
     cooldownMs: PROJECT_COOLDOWN_MS,
-    maxStartsPer24h: DEFAULT_MAX_STARTS_PER_24H,
+    maxStartsPer24h: PROJECT_MAX_STARTS_PER_24H,
     goal: "Inspect authoritative Website Pilot main and implement exactly one bounded improvement that makes the existing demo/site portfolio more professional, responsive, accessible, conversion-oriented, distinctive or faster to reuse for qualified local-business leads. Preserve factual honesty and existing routes. Prefer fixes supported by tests or rendered evidence. Do not touch dependency, deployment or secret-bearing control files. Publish reviewable work only; never merge or deploy production.",
     scope: Object.freeze({
       allowedPaths: Object.freeze(['index.html', 'assets', 'barberia', 'galeria', 'servicios', 'test', 'docs', '404.html', 'robots.txt', 'sitemap.xml']),
@@ -99,8 +102,10 @@ function emptyAutopilot() {
     starts: [],
     history: [],
     lastIntelligence: null,
+    nextRanking: null,
     gapMemory: [],
     suspendedUntil: null,
+    suspensionReason: null,
     updatedAt: null
   };
 }
@@ -185,6 +190,22 @@ function pathAllowedForAutopilot(path, scope = AUTONOMOUS_MAINTENANCE_SCOPE) {
   return allowed && !forbidden;
 }
 
+export function autonomousWorkflowScopeCompatible(workflowScope = {}, policyScope = AUTONOMOUS_MAINTENANCE_SCOPE) {
+  const workflowAllowed = Array.isArray(workflowScope?.allowedPaths) ? workflowScope.allowedPaths : [];
+  const workflowForbidden = Array.isArray(workflowScope?.forbiddenPaths) ? workflowScope.forbiddenPaths : [];
+  const currentAllowed = Array.isArray(policyScope?.allowedPaths) ? policyScope.allowedPaths : [];
+  const currentForbidden = Array.isArray(policyScope?.forbiddenPaths) ? policyScope.forbiddenPaths : [];
+  if (!workflowAllowed.length || !currentAllowed.length) return false;
+  if (!workflowAllowed.every((root) => typeof root === 'string' && pathAllowedForAutopilot(root, policyScope))) return false;
+  return currentForbidden.every((forbiddenRoot) => {
+    const reachable = workflowAllowed.some((allowedRoot) => pathWithin(allowedRoot, forbiddenRoot));
+    if (!reachable) return true;
+    return workflowForbidden.some((blockedRoot) =>
+      typeof blockedRoot === 'string' && pathWithin(blockedRoot, forbiddenRoot)
+    );
+  });
+}
+
 function pristineWorkflowForDeadlineRefresh(plan) {
   return Boolean(
     plan &&
@@ -239,15 +260,41 @@ function billingUnavailableError(error) {
   return /(billing|auth(?:entication|orization)?|api[_-]?key|quota|credit)/i.test(String(error ?? ''));
 }
 
-function nextBillingBackoffMs(state) {
+function failureText(summary) {
+  return [summary?.error, summary?.failureDetail].filter(Boolean).join(' | ');
+}
+
+function providerCapacityUnavailableError(error) {
+  return /no_role_candidate_available|provider_capacity_timeout|runtime_cooldown|no_eligible_model_candidate/i.test(String(error ?? ''));
+}
+
+function consecutiveUnavailabilityBackoffMs(state, predicate, baseMs, maxMs) {
   let consecutivePriorFailures = 0;
   for (let index = state.history.length - 1; index >= 0; index -= 1) {
-    if (!billingUnavailableError(state.history[index]?.error)) break;
+    if (!predicate(failureText(state.history[index]))) break;
     consecutivePriorFailures += 1;
   }
-  return Math.min(
-    BILLING_BACKOFF_BASE_MS * (2 ** Math.min(consecutivePriorFailures, 2)),
-    BILLING_BACKOFF_MAX_MS
+  return Math.min(baseMs * (2 ** Math.min(consecutivePriorFailures, 3)), maxMs);
+}
+
+function nextBillingBackoffMs(state) {
+  return consecutiveUnavailabilityBackoffMs(state, billingUnavailableError, BILLING_BACKOFF_BASE_MS, BILLING_BACKOFF_MAX_MS);
+}
+
+function nextProviderBackoffMs(state) {
+  return consecutiveUnavailabilityBackoffMs(state, providerCapacityUnavailableError, PROVIDER_BACKOFF_BASE_MS, PROVIDER_BACKOFF_MAX_MS);
+}
+
+function workflowCanReplanBeforeImplementation(plan) {
+  const implementation = plan?.steps?.find((step) => step.id === 'implementation');
+  return Boolean(
+    plan &&
+    !TERMINAL.has(plan.status) &&
+    implementation &&
+    ['pending', 'ready'].includes(implementation.status) &&
+    implementation.attempts === 0 &&
+    implementation.evidence === null &&
+    implementation.error === null
   );
 }
 
@@ -368,62 +415,100 @@ export class AutonomousProjectImprovement {
     return true;
   }
 
-  revisionAdvanceBypassesDailyCap(state, starts = this.recentStarts(state)) {
-    if (starts.length < this.maxStartsPer24h) return false;
-    const latest = state.history.at(-1);
-    const lastStartAt = Date.parse(starts.at(-1) ?? '');
-    const completedAt = Date.parse(latest?.completedAt ?? '');
-    return Number.isFinite(lastStartAt) &&
-      Number.isFinite(completedAt) &&
-      completedAt >= lastStartAt &&
-      typeof latest?.baseRevision === 'string' &&
-      /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
-      latest.baseRevision.toLowerCase() !== this.operatorRevision;
-  }
-
   revisionAdvanceBypassesSuspension(state) {
+    // A code revision does not replenish a model's exhausted capacity or quota.
+    if (['billing_or_auth_unavailable', 'model_capacity_unavailable'].includes(state.suspensionReason)) return false;
     const latest = state.history.at(-1);
     return typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
       latest.baseRevision.toLowerCase() !== this.operatorRevision;
   }
 
-  async hasWork() {
-    const state = await this.readState();
+  async hasWork(rootState = null) {
+    const state = rootState === null
+      ? await this.readState()
+      : normalizeAutopilot(rootState?.[this.stateKey], this.maxStartsPer24h);
     if (state.activeWorkflowId) return true;
     if (state.suspendedUntil &&
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return false;
     const starts = this.recentStarts(state);
-    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return false;
+    if (starts.length >= this.maxStartsPer24h) return false;
     if (this.cooldownApplies(state, starts)) return false;
     return true;
   }
 
   async settle(plan, { baseRevision }) {
     const summary = resultSummary(plan);
-    const billingUnavailable = billingUnavailableError(summary.error);
+    const terminalFailure = failureText(summary);
+    const billingUnavailable = billingUnavailableError(terminalFailure);
+    const providerUnavailable = !billingUnavailable && providerCapacityUnavailableError(terminalFailure);
     const completedAt = new Date(this.now()).toISOString();
-    return this.writeState((state) => ({
-      ...state,
-      activeWorkflowId: null,
-      activeBaseRevision: null,
-      history: [...state.history, {
+    return this.writeState((state) => {
+      const history = [...state.history, {
         ...summary,
         baseRevision,
         completedAt
-      }].slice(-HISTORY_LIMIT),
-      gapMemory: rememberGapOutcome(
+      }].slice(-HISTORY_LIMIT);
+      const gapMemory = rememberGapOutcome(
         state.gapMemory,
         state.lastIntelligence?.primary ?? null,
         summary.status,
         completedAt,
         summary.error
-      ),
-      suspendedUntil: billingUnavailable
-        ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
-        : null
-    }));
+      );
+      const settledState = {
+        ...state,
+        history,
+        gapMemory
+      };
+      let nextRanking = null;
+      if (this.intelligence) {
+        try {
+          const analysis = this.intelligence.analyze({
+            history,
+            recentProposalPaths: this.recentProposalPaths(settledState),
+            memory: gapMemory
+          });
+          nextRanking = analysis ? {
+            version: analysis.version,
+            projectId: analysis.projectId,
+            primary: analysis.primary,
+            signals: analysis.signals,
+            directive: analysis.directive,
+            generatedAt: completedAt,
+            trigger: 'workflow_terminal',
+            afterWorkflowId: summary.workflowId
+          } : null;
+        } catch (error) {
+          nextRanking = {
+            version: 1,
+            projectId: this.projectId,
+            primary: null,
+            signals: [],
+            directive: null,
+            generatedAt: completedAt,
+            trigger: 'workflow_terminal',
+            afterWorkflowId: summary.workflowId,
+            error: String(error?.message ?? error).replace(/\s+/g, ' ').trim().slice(0, 240)
+          };
+        }
+      }
+      return {
+        ...settledState,
+        activeWorkflowId: null,
+        activeBaseRevision: null,
+        nextRanking,
+        suspendedUntil: billingUnavailable
+          ? new Date(this.now() + nextBillingBackoffMs(state)).toISOString()
+          : providerUnavailable
+            ? new Date(this.now() + nextProviderBackoffMs(state)).toISOString()
+            : null,
+        suspensionReason: billingUnavailable
+          ? 'billing_or_auth_unavailable'
+          : providerUnavailable ? 'model_capacity_unavailable' : null
+      };
+    });
   }
 
   async createWorkflow() {
@@ -433,11 +518,23 @@ export class AutonomousProjectImprovement {
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return null;
     const starts = this.recentStarts(state);
-    if (starts.length >= this.maxStartsPer24h && !this.revisionAdvanceBypassesDailyCap(state, starts)) return null;
+    if (starts.length >= this.maxStartsPer24h) return null;
     if (this.cooldownApplies(state, starts)) return null;
 
     const recentProposalPaths = this.recentProposalPaths(state);
-    const gapAnalysis = this.intelligence?.analyze({
+    const queuedRanking = state.nextRanking &&
+      state.nextRanking.projectId === this.projectId &&
+      state.nextRanking.primary &&
+      typeof state.nextRanking.directive === 'string'
+      ? {
+          version: state.nextRanking.version,
+          projectId: state.nextRanking.projectId,
+          primary: state.nextRanking.primary,
+          signals: Array.isArray(state.nextRanking.signals) ? state.nextRanking.signals : [],
+          directive: state.nextRanking.directive
+        }
+      : null;
+    const gapAnalysis = queuedRanking ?? this.intelligence?.analyze({
       history: state.history,
       recentProposalPaths,
       memory: state.gapMemory
@@ -475,10 +572,12 @@ export class AutonomousProjectImprovement {
         primary: gapAnalysis.primary,
         signals: gapAnalysis.signals
       } : null,
+      nextRanking: null,
       gapMemory: gapAnalysis
         ? rememberGapAnalysis(current.gapMemory, gapAnalysis, startedAt)
         : current.gapMemory,
-      suspendedUntil: null
+      suspendedUntil: null,
+      suspensionReason: null
     }));
     return workflow.id;
   }
@@ -525,6 +624,51 @@ export class AutonomousProjectImprovement {
       if (TERMINAL.has(plan.status)) {
         await this.settle(plan, { baseRevision });
         return { ...resultSummary(plan), status: plan.status };
+      }
+
+      if (this.projectId !== 'self' &&
+          this.intelligence &&
+          state.lastIntelligence?.primary &&
+          workflowCanReplanBeforeImplementation(plan) &&
+          typeof this.workflowEngine.cancel === 'function') {
+        const refreshed = this.intelligence.analyze({
+          history: state.history,
+          recentProposalPaths: this.recentProposalPaths(state),
+          memory: state.gapMemory
+        });
+        const previousSignal = refreshed?.signals?.find((signal) =>
+          signal.kind === state.lastIntelligence.primary
+        );
+        if (previousSignal?.actionable === false) {
+          const stalePrimary = state.lastIntelligence.primary;
+          const cancelled = await this.workflowEngine.cancel(workflowId, {
+            reason: 'stale_autoranking_replan',
+            deadlineCapAt: tickDeadlineAt
+          });
+          await this.settle(cancelled, { baseRevision });
+          return {
+            ...resultSummary(cancelled),
+            status: cancelled.status,
+            replanRecommended: true,
+            stalePrimary
+          };
+        }
+      }
+
+      if (!autonomousWorkflowScopeCompatible(plan.scope, this.scope)) {
+        if (typeof this.workflowEngine.cancel !== 'function') {
+          throw new Error('autonomous_workflow_scope_policy_changed');
+        }
+        const cancelled = await this.workflowEngine.cancel(workflowId, {
+          reason: 'autonomous_workflow_scope_policy_changed',
+          deadlineCapAt: tickDeadlineAt
+        });
+        await this.settle(cancelled, { baseRevision });
+        return {
+          ...resultSummary(cancelled),
+          status: cancelled.status,
+          scopePolicyChanged: true
+        };
       }
 
       if (plan.status === 'awaiting_approval') {

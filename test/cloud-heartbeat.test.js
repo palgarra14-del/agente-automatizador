@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyLaneObservation, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+import { classifyLaneObservation, criticalCiDemand, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
+
+test('critical CI demand counts only waiting CI runs', () => {
+  assert.equal(criticalCiDemand([
+    {name:'CI',status:'queued'},
+    {name:'CI',status:'pending'},
+    {name:'CI',status:'in_progress'},
+    {name:'CI',status:'completed'},
+    {name:'Agent Cloud Worker',status:'queued'}
+  ]),2);
+});
 
 test('heartbeat classifies recoverable control errors as runnable recovery', () => {
   const state=classifyLaneObservation({lane:'leadfinder',error:'cloud_state_github_request_failed'});
@@ -15,7 +25,10 @@ test('heartbeat does not retry non-recoverable control failures blindly', () => 
 });
 
 test('heartbeat defers expired local GitHub auth to scheduled cloud recovery', () => {
-  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 403'), true);
+  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 401'), true);
+  assert.equal(heartbeatControlAuthUnavailable('github_cli_auth_required'), true);
+  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 403'), false);
+  assert.equal(heartbeatControlAuthUnavailable('cloud_state_github_rate_limited:403'), false);
   assert.equal(heartbeatControlAuthUnavailable('security_policy_violation'), false);
   const state=classifyLaneObservation({lane:'callflow',controlUnavailable:true,operatorRequested:true});
   assert.deepEqual(state,{
@@ -23,6 +36,17 @@ test('heartbeat defers expired local GitHub auth to scheduled cloud recovery', (
     state:'deferred',
     runnable:false,
     reason:'local_control_auth_unavailable',
+    operatorRequested:true
+  });
+});
+
+test('local-primary heartbeat can hand one lane to the governed drain without a duplicate deep peek', () => {
+  const state=classifyLaneObservation({lane:'callflow',localPrimaryProbe:true,operatorRequested:true});
+  assert.deepEqual(state,{
+    lane:'callflow',
+    state:'pending',
+    runnable:true,
+    reason:'local_primary_probe',
     operatorRequested:true
   });
 });
@@ -87,6 +111,23 @@ test('heartbeat rotates ordinary business observation order so a slow earlier la
   );
 });
 
+test('heartbeat rotates multiple operator-requested business lanes instead of starving later lanes', () => {
+  const lanes=['self','website-pilot','leadfinder','callflow'];
+  const operator=new Set(['callflow','leadfinder','website-pilot']);
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,0),
+    ['callflow','leadfinder','website-pilot','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,1),
+    ['leadfinder','website-pilot','callflow','self']
+  );
+  assert.deepEqual(
+    heartbeatObservationOrder(lanes,operator,2),
+    ['website-pilot','callflow','leadfinder','self']
+  );
+});
+
 test('heartbeat observation rotation is bounded for large and negative counters', () => {
   const lanes=['callflow','leadfinder','website-pilot','self'];
   assert.deepEqual(
@@ -130,6 +171,22 @@ test('heartbeat fills all runner capacity with business before self', () => {
   assert.deepEqual(plan.deferred,[{lane:'self',priority:'maintenance',reason:'global_capacity'}]);
 });
 
+
+test('heartbeat surfaces the current autoranking before dispatch', () => {
+  const plan=planHeartbeat([
+    {lane:'self',hasWork:true},
+    {lane:'website-pilot',hasWork:true},
+    {lane:'leadfinder',hasWork:true},
+    {lane:'callflow',hasWork:true}
+  ],{maxHeavy:2,maxBusinessHeavy:2,maxSelfHeavy:1});
+
+  assert.deepEqual(plan.ranking.map((item)=>item.lane),[
+    'callflow','leadfinder','website-pilot','self'
+  ]);
+  assert.deepEqual(plan.ranking.map((item)=>item.rank),[1,2,3,4]);
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['callflow','leadfinder']);
+});
+
 test('active business work leaves the last runner for waiting business before self', () => {
   const plan=planHeartbeat([
     {lane:'callflow',active:true},
@@ -139,6 +196,31 @@ test('active business work leaves the last runner for waiting business before se
   ]);
   assert.deepEqual(plan.dispatch.map((item)=>item.lane),['website-pilot']);
   assert.equal(plan.deferred.find((item)=>item.lane==='self').reason,'global_capacity');
+});
+
+test('queued CI reserves spare runner capacity from self maintenance', () => {
+  const plan=planHeartbeat([
+    {lane:'callflow',active:true},
+    {lane:'leadfinder',active:true},
+    {lane:'self',hasWork:true}
+  ],{
+    reserveForExternal:1
+  });
+  assert.deepEqual(plan.dispatch,[]);
+  assert.equal(plan.deferred[0].lane,'self');
+  assert.equal(plan.deferred[0].reason,'external_priority_capacity');
+  assert.equal(plan.externalPriorityDemand,1);
+});
+
+test('self recovery still outranks queued CI pressure', () => {
+  const plan=planHeartbeat([
+    {lane:'callflow',active:true},
+    {lane:'leadfinder',active:true},
+    {lane:'self',error:'cloud_state_github_request_failed'}
+  ],{
+    reserveForExternal:1
+  });
+  assert.deepEqual(plan.dispatch.map((item)=>item.lane),['self']);
 });
 
 test('active lane is never dispatched twice', () => {

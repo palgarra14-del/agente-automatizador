@@ -43,8 +43,54 @@ print(json.dumps({
     hosted: 'hosted_free',
     workhorse: 'workhorse_free',
     deep: 'deep_free',
-    paid: 'paid'
+    paid: 'subscription_quota'
   });
+});
+
+test('subscription quota governor blocks at the reserve and exposes unknown telemetry', () => {
+  const result = python(`
+import importlib.util,json,sys,os
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.COST_POLICY="subscription_included"
+os.environ["CODEX_SUBSCRIPTION_REMAINING_PERCENT"]="20"
+blocked=m.candidate_available("codex-astra")
+state=m.subscription_quota_snapshot()
+os.environ.pop("CODEX_SUBSCRIPTION_REMAINING_PERCENT")
+unknown=m.subscription_quota_snapshot()
+print(json.dumps({"blocked":blocked,"state":state,"unknown":unknown,"class":m.candidate_resource_class("codex-astra")}))
+`);
+  assert.equal(result.blocked, false);
+  assert.equal(result.state.reserveReached, true);
+  assert.equal(result.state.remainingPercent, 20);
+  assert.equal(result.unknown.state, 'unknown');
+  assert.equal(result.unknown.eligible, true);
+  assert.equal(result.class, 'subscription_quota');
+});
+
+test('invalid subscription telemetry is fail-closed unless reserve override is explicit', () => {
+  const result = python(`
+import importlib.util,json,sys,os
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.COST_POLICY="subscription_included"
+os.environ["CODEX_SUBSCRIPTION_REMAINING_PERCENT"]="not-a-percent"
+blocked=m.subscription_quota_snapshot()
+os.environ["CODEX_SUBSCRIPTION_RESERVE_OVERRIDE"]="1"
+allowed=m.subscription_quota_snapshot()
+print(json.dumps({"blocked":blocked,"allowed":allowed}))
+`);
+  assert.equal(result.blocked.state, 'invalid');
+  assert.equal(result.blocked.eligible, false);
+  assert.equal(result.allowed.state, 'invalid');
+  assert.equal(result.allowed.eligible, true);
 });
 
 test('provider broker exposes conservative cross-process concurrency defaults', () => {
@@ -145,4 +191,30 @@ print(json.dumps({
     assert.ok(firstDeep > workhorseFallback);
     assert.equal(ranked[firstDeep].wave, 1);
   }
+});
+
+
+test('normal high-volume roles keep Ollama in the final heavy-local wave', () => {
+  const result = python(`
+import importlib.util,json,sys,tempfile
+from pathlib import Path
+base=str(Path(${JSON.stringify(orchestrator)}).parent)
+sys.path.insert(0,base)
+spec=importlib.util.spec_from_file_location("o",${JSON.stringify(orchestrator)})
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.provider_available=lambda provider,model=None: True
+m.PERFORMANCE=Path(tempfile.mkdtemp())/"perf.jsonl"
+m.COST_POLICY="free_only"
+def order(role):
+  return [{"candidate":x["candidate"],"wave":x["resourceWave"]} for x in m.rank_candidates(role)]
+print(json.dumps({"quick":order("quick_qa"),"bulk":order("structured_bulk")}))
+`);
+  for (const role of ['quick','bulk']) {
+    const ranked = result[role];
+    const ollama = ranked.find((item) => item.candidate === 'ollama-qwen-3b');
+    assert.ok(ollama);
+    assert.equal(ollama.wave, Math.max(...ranked.map((item) => item.wave)));
+    assert.notEqual(ranked[0].candidate, 'ollama-qwen-3b');
+  }
+  assert.equal(result.bulk[0].candidate, 'oc-muse-spark-1.3');
 });

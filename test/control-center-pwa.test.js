@@ -40,7 +40,7 @@ test('Control Center advertises install metadata and native install prompt', () 
   assert.match(html, /id="installAppBtn"/);
   assert.match(app, /beforeinstallprompt/);
   assert.match(app, /appinstalled/);
-  assert.match(app, /navigator\.serviceWorker\.register\('\/sw\.js'\)/);
+  assert.match(app, /navigator\.serviceWorker\.register\('\/sw\.js'/);
 });
 
 test('service worker precaches install assets and evicts obsolete caches', () => {

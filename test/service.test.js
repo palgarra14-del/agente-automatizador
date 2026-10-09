@@ -104,6 +104,9 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
       GH_CONFIG_DIR: '/home/pablo/.config/gh-custom',
       CODEX_HOME: '/home/pablo/.codex-custom',
       MODEL_COST_POLICY: 'subscription_included',
+      CODEX_SUBSCRIPTION_REMAINING_PERCENT: '42',
+      CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '37',
+      CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1',
       ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
       CODEX_BIN: '/usr/bin/codex',
       OPENCODE_BIN: '/usr/bin/opencode',
@@ -117,11 +120,16 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /managed-by=engineering-orchestrator:v1/);
   assert.match(unit, /ExecStart=.*src\/cli\.js.*inbox watch/);
   assert.match(unit, /Restart=always/);
+  assert.match(unit, /RestartSec=30s/);
+  assert.match(unit, /StartLimitBurst=10/);
   assert.match(unit, /WantedBy=default\.target/);
   assert.match(unit, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
   assert.match(unit, /CODEX_HOME=\/home\/pablo\/\.codex-custom/);
   assert.match(unit, /MODEL_COST_POLICY=subscription_included/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_REMAINING_PERCENT=42/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_HEADROOM_PERCENT=37/);
+  assert.match(unit, /CODEX_SUBSCRIPTION_RESERVE_OVERRIDE=1/);
   assert.match(unit, /ANTIGRAVITY_CLI=\/home\/pablo\/\.local\/bin\/agy/);
   assert.match(unit, /CODEX_BIN=\/usr\/bin\/codex/);
   assert.match(unit, /OPENCODE_BIN=\/usr\/bin\/opencode/);
@@ -131,7 +139,11 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
 
 test('systemd transient jobs inherit only approved non-secret provider configuration', () => {
   const args = systemdRunEnvironmentArgs({
+    XDG_STATE_HOME: '/tmp/model-shared-state',
     MODEL_COST_POLICY: 'subscription_included',
+    CODEX_SUBSCRIPTION_REMAINING_PERCENT: '21',
+    CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '22',
+    CODEX_SUBSCRIPTION_RESERVE_OVERRIDE: '1',
     ANTIGRAVITY_CLI: '/home/pablo/.local/bin/agy',
     CODEX_BIN: '/usr/bin/codex',
     OPENCODE_BIN: '/usr/bin/opencode',
@@ -142,7 +154,11 @@ test('systemd transient jobs inherit only approved non-secret provider configura
     PAID_MODELS_EXPLICITLY_ENABLED: '1'
   });
   assert.deepEqual(args, [
+    '--setenv=XDG_STATE_HOME=/tmp/model-shared-state',
     '--setenv=MODEL_COST_POLICY=subscription_included',
+    '--setenv=CODEX_SUBSCRIPTION_REMAINING_PERCENT=21',
+    '--setenv=CODEX_SUBSCRIPTION_HEADROOM_PERCENT=22',
+    '--setenv=CODEX_SUBSCRIPTION_RESERVE_OVERRIDE=1',
     '--setenv=ANTIGRAVITY_CLI=/home/pablo/.local/bin/agy',
     '--setenv=CODEX_BIN=/usr/bin/codex',
     '--setenv=OPENCODE_BIN=/usr/bin/opencode',
@@ -622,8 +638,23 @@ test('operator upgrade unsafe Git config pattern is accepted by real git', async
 
 test('operator upgrade idle gate treats only live work as active', () => {
   assert.throws(() => assertOperatorUpgradeIdleState({ requests: { a: { status: 'running', issueNumber: 42 } } }), /operator_upgrade_active_request:42/);
-  assert.throws(() => assertOperatorUpgradeIdleState({ workflows: { w: { id: 'w', status: 'awaiting_approval' } } }), /operator_upgrade_active_workflow:w/);
-  assert.equal(assertOperatorUpgradeIdleState({ workflows: { w: { status: 'blocked' } }, requests: { a: { status: 'rejected' } }, runs: { r: { status: 'failed' } } }), true);
+  assert.throws(() => assertOperatorUpgradeIdleState({
+    requests: { a: { status: 'running', issueNumber: 43, workflowId: 'missing' } }
+  }), /operator_upgrade_active_request:43/);
+  assert.throws(() => assertOperatorUpgradeIdleState({
+    workflows: { w: { id: 'w', status: 'awaiting_approval' } },
+    requests: { a: { status: 'running', issueNumber: 44, workflowId: 'w' } }
+  }), /operator_upgrade_active_workflow:w/);
+  assert.equal(assertOperatorUpgradeIdleState({
+    workflows: { w: { id: 'w', status: 'blocked' } },
+    requests: { a: { status: 'running', issueNumber: 125, workflowId: 'w' } },
+    runs: { r: { status: 'failed' } }
+  }), true);
+  assert.equal(assertOperatorUpgradeIdleState({
+    workflows: { w: { status: 'blocked' } },
+    requests: { a: { status: 'rejected' } },
+    runs: { r: { status: 'failed' } }
+  }), true);
 });
 
 test('operator upgrade lease rejects a concurrent live upgrader before external work', async () => {
