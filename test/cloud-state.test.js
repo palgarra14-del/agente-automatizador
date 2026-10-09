@@ -866,7 +866,7 @@ test('cloud-state yields immediately on a long GitHub rate-limit reset', async (
           get(name) {
             const key = String(name).toLowerCase();
             if (key === 'x-ratelimit-remaining') return '0';
-            if (key === 'x-ratelimit-reset') return '70';
+            if (key === 'x-ratelimit-reset') return '3600';
             return null;
           }
         },
@@ -879,7 +879,7 @@ test('cloud-state yields immediately on a long GitHub rate-limit reset', async (
 
   await assert.rejects(
     () => store.refSha('tags/test'),
-    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 61_000
+    (error) => error?.message === 'cloud_state_github_rate_limited:403' && error?.retryAfterMs === 3_591_000
   );
   assert.equal(reads, 1);
   assert.deepEqual(sleeps, []);
