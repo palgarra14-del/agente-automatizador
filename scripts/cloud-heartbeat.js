@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { criticalCiDemand, heartbeatControlAuthUnavailable, heartbeatExecutionMode, heartbeatObservationOrder, heartbeatRunLane, localCloudUnitName, operatorRequestedLanes, planHeartbeat } from '../src/cloud-heartbeat.js';
 import { globalPauseEnabled, parsePausedLanes } from '../src/operator-control.js';
+import { localGithubCooldownRemainingMs } from '../src/local-github-cooldown.js';
 import { syncSchedulerYieldRequests } from '../src/scheduler-yield.js';
 import { systemdRunEnvironmentArgs } from '../src/service.js';
 
@@ -135,6 +136,32 @@ async function observeLane(lane,active,cooldown,operatorLanes,peekTimeoutMs=time
 
 const config=await loadConfig();
 const allLanes=(config.cloudLanes ?? []).map((lane) => lane.id);
+// GitHub asked us to wait: do not even query control-plane endpoints while blocked.
+// No dispatch occurs; on the next timer cycle after expiry we re-check operator control.
+const localRetryAfterMs = executionMode === 'local-primary'
+  ? localGithubCooldownRemainingMs()
+  : 0;
+if (localRetryAfterMs > 0) {
+  console.log(JSON.stringify({
+    version: 1,
+    classified: allLanes.map((lane) => ({
+      lane, state: 'deferred', runnable: false, reason: 'rate_limit_cooldown'
+    })),
+    running: [],
+    ranking: [],
+    dispatch: [],
+    deferred: allLanes.map((lane) => ({ lane, reason: 'rate_limit_cooldown' })),
+    yieldCandidates: [],
+    yieldRequests: [],
+    dryRun,
+    executionMode,
+    dispatched: [],
+    rateLimitCooldown: allLanes,
+    retryAfterMs: localRetryAfterMs,
+    operatorControlChecked: false
+  }, null, 2));
+  process.exit(0);
+}
 const operatorControl=await loadOperatorControl(allLanes);
 const lanes=operatorControl.globalPause
   ? []
