@@ -2271,6 +2271,27 @@ test('watcher survives a transient queue error and processes a later tick', asyn
   assert.deepEqual(observed, [{ status: 'awaiting_start_approval', issueNumber: 41 }]);
 });
 
+test('watcher releases its singleton lease before controlled 401 auth restart', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const queue = leaseableTestQueue({
+    async tick() {
+      attempts += 1;
+      throw Object.assign(new Error('GitHub rejected the current session'), { status: 401 });
+    }
+  });
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+    onError: (error) => {
+      if (githubIssueQueueAuthRejected(error)) controller.abort();
+    }
+  });
+  assert.equal(attempts, 1, 'a rejected token must not be polled repeatedly');
+  const lease = await queue.claimWatcherLease();
+  assert.equal(await queue.releaseWatcherLease(lease.leaseId), true);
+});
+
 test('issue queue watcher retries transient failures sooner than the normal poll while backing off safely', () => {
   assert.equal(issueQueueFailureBackoffMs(1, 15_000), 1_000);
   assert.equal(issueQueueFailureBackoffMs(2, 15_000), 2_000);
