@@ -159,7 +159,9 @@ export function renderInboxServiceUnit({ repositoryRoot, nodePath, home = homedi
     `Environment=${systemdQuote(`HOME=${resolve(home)}`)}`,
     ...environmentLines,
     'Restart=always',
-    'RestartSec=3',
+    // Give the user-session credential store time to become available after boot.
+    // Keep the service inactive between attempts; never cache credentials in the unit.
+    'RestartSec=30s',
     'KillSignal=SIGTERM',
     'TimeoutStopSec=15',
     'UMask=0077',
