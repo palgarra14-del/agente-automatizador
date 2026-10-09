@@ -9,6 +9,7 @@ import {
   AUTO_UPGRADE_TIMER_NAME,
   INBOX_SERVICE_NAME,
   assertOperatorUpgradeIdleState,
+  assertUpgradeGitDirectory,
   autoUpgradeInboxService,
   autoUpgradeTimerStatus,
   ensureGitHubToken,
@@ -561,6 +562,7 @@ function upgradeFixtureRunner({ root, oldSha = 'a'.repeat(40), newSha = 'b'.repe
 
 async function prepareManagedUpgradeService(home, root) {
   const dir = join(home, '.config', 'systemd', 'user');
+  await mkdir(join(root, '.git'), { recursive: true });
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, INBOX_SERVICE_NAME), renderInboxServiceUnit({ repositoryRoot: root, nodePath: process.execPath, home }));
 }
@@ -667,6 +669,47 @@ test('operator upgrade lease rejects a concurrent live upgrader before external 
     await assert.rejects(upgradeInboxService({ ...upgradeOptions(home, '/tmp/unused', async (command, args) => { calls.push([command, ...args]); return { exitCode: 0, stdout: '', stderr: '' }; }) }), /operator_upgrade_in_progress/);
     assert.deepEqual(calls, []);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('operator upgrade accepts genuine linked worktrees and rejects tampered Git pointers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-upgrade-worktree-'));
+  const base = join(dir, 'base');
+  const runtime = join(dir, 'runtime');
+  const git = (args, cwd = dir) => {
+    const output = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    assert.equal(output.status, 0, 'git ' + args.join(' ') + ': ' + output.stderr);
+    return output.stdout.trim();
+  };
+  const commandRunner = async (command, args, options) => {
+    assert.equal(command, 'git');
+    const output = spawnSync(command, args, { cwd: options.cwd, env: options.env, encoding: 'utf8' });
+    return { exitCode: output.status, stdout: output.stdout, stderr: output.stderr };
+  };
+  try {
+    git(['init', '-b', 'development', base]);
+    git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'seed'], base);
+    git(['worktree', 'add', '-b', 'main', runtime], base);
+    const gitDirectory = git(['rev-parse', '--absolute-git-dir'], runtime);
+    const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], runtime);
+    const marker = join(runtime, '.git');
+    const pointer = await readFile(marker, 'utf8');
+    const backlinkFile = join(gitDirectory, 'gitdir');
+    const backlink = await readFile(backlinkFile, 'utf8');
+    const params = { root: runtime, gitDirectory, commandRunner, env: { PATH: process.env.PATH, HOME: dir } };
+    assert.equal(join(common, 'worktrees'), join(gitDirectory, '..'));
+    await assert.doesNotReject(assertUpgradeGitDirectory(params));
+    await assert.rejects(assertUpgradeGitDirectory({ ...params, gitDirectory: join(dir, 'untrusted') }), /operator_upgrade_git_directory_mismatch/);
+    await writeFile(marker, 'gitdir: /tmp/untrusted.git\n');
+    await assert.rejects(assertUpgradeGitDirectory(params), /operator_upgrade_git_directory_mismatch/);
+    await writeFile(marker, pointer);
+    await writeFile(backlinkFile, '/tmp/other-worktree/.git\n');
+    await assert.rejects(assertUpgradeGitDirectory(params), /operator_upgrade_git_directory_mismatch/);
+    await writeFile(backlinkFile, backlink);
+    const badRunner = async (command, args, options) => args.join(' ') === 'rev-parse --path-format=absolute --git-common-dir'
+      ? { exitCode: 0, stdout: join(dir, 'other', '.git') + '\n', stderr: '' }
+      : commandRunner(command, args, options);
+    await assert.rejects(assertUpgradeGitDirectory({ ...params, commandRunner: badRunner }), /operator_upgrade_git_directory_mismatch/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('operator upgrade verifies GitHub review and CI before exact fast-forward', async () => {
