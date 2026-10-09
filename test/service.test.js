@@ -139,6 +139,7 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
 
 test('systemd transient jobs inherit only approved non-secret provider configuration', () => {
   const args = systemdRunEnvironmentArgs({
+    XDG_STATE_HOME: '/tmp/model-shared-state',
     MODEL_COST_POLICY: 'subscription_included',
     CODEX_SUBSCRIPTION_REMAINING_PERCENT: '21',
     CODEX_SUBSCRIPTION_HEADROOM_PERCENT: '22',
@@ -153,6 +154,7 @@ test('systemd transient jobs inherit only approved non-secret provider configura
     PAID_MODELS_EXPLICITLY_ENABLED: '1'
   });
   assert.deepEqual(args, [
+    '--setenv=XDG_STATE_HOME=/tmp/model-shared-state',
     '--setenv=MODEL_COST_POLICY=subscription_included',
     '--setenv=CODEX_SUBSCRIPTION_REMAINING_PERCENT=21',
     '--setenv=CODEX_SUBSCRIPTION_HEADROOM_PERCENT=22',
