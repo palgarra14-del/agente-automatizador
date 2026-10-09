@@ -49,6 +49,27 @@ test('cloud drain reports parked workspace integrity rather than successful idle
   assert.equal(result.iterations[0].autonomousResult.workflowId, 'workflow-stale-source');
 });
 
+test('governed queue work completes independently before autonomous integrity block', async () => {
+  const queue = scriptedQueue([
+    { status: 'running', issueNumber: 17 },
+    { status: 'completed', issueNumber: 17 },
+    null
+  ]);
+  let attempts = 0;
+  const autonomousSelfImprovement = {
+    async tick() {
+      attempts += 1;
+      return { status: 'workspace_integrity_blocked', workflowId: 'historical-workflow' };
+    },
+    async hasWork() { return false; }
+  };
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+  assert.equal(queue.calls.tick, 3);
+  assert.equal(attempts, 1, 'a blocked autonomous workflow is not retried after each queue step');
+  assert.deepEqual(result.iterations.slice(0, 2).map((x) => x.queueResult.status), ['running', 'completed']);
+  assert.equal(result.stopReason, 'workspace_integrity_blocked');
+});
+
 test('cloud drain keeps advancing governed queue work until the lane is idle', async () => {
   const queue = scriptedQueue([
     { status: 'running', issueNumber: 1 },
