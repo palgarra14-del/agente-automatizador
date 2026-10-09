@@ -36,6 +36,7 @@ import {
   workflowBindingFingerprint,
   workflowFailureSummary,
   githubRateLimitRetryAfterMs,
+  githubIssueQueueAuthRejected,
   issueQueueFailureBackoffMs,
   watchIssueQueue
 } from '../src/issue-queue.js';
@@ -2289,6 +2290,14 @@ test('GitHub rate limit headers produce a bounded retry delay', () => {
   assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'retry-after': '12' }) }, 0), 12_000);
   assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '120' }) }, 100_000), 21_000);
   assert.equal(githubRateLimitRetryAfterMs({ headers: headers({ 'x-ratelimit-remaining': '10', 'x-ratelimit-reset': '120' }) }, 100_000), null);
+});
+
+test('rejected watcher credentials refresh only on HTTP 401, never rate-limit or timeout', () => {
+  assert.equal(githubIssueQueueAuthRejected({ status: 401 }), true);
+  assert.equal(githubIssueQueueAuthRejected({ status: 403, retryAfterMs: 60_000 }), false);
+  assert.equal(githubIssueQueueAuthRejected({ status: 429, retryAfterMs: 60_000 }), false);
+  assert.equal(githubIssueQueueAuthRejected(new Error('github_issue_queue_request_timeout')), false);
+  assert.equal(githubIssueQueueAuthRejected(null), false);
 });
 
 test('watch loop removes abort listeners after ordinary poll sleeps', async () => {
