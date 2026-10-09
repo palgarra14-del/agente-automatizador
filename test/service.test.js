@@ -189,7 +189,8 @@ test('auto-upgrade units are bounded, persistent, and never persist GitHub crede
   assert.match(service, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
 
   assert.match(timer, /managed-by=engineering-orchestrator:v1/);
-  assert.match(timer, /OnBootSec=2min/);
+  assert.match(timer, /OnActiveSec=2min/);
+  assert.doesNotMatch(timer, /OnBootSec=/);
   assert.match(timer, /OnUnitActiveSec=2min/);
   assert.match(timer, /RandomizedDelaySec=20s/);
   assert.match(timer, /Persistent=true/);
