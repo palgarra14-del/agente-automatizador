@@ -2,6 +2,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { githubRateLimitWaitFromDrain, saveLocalGithubCooldown } from '../src/local-github-cooldown.js';
 
 const laneIndex = process.argv.indexOf('--lane');
 const lane = laneIndex >= 0 ? process.argv[laneIndex + 1] : '';
@@ -29,7 +30,23 @@ const child = spawn(process.execPath, ['src/cli.js', 'inbox', 'cloud-drain', '--
     GITHUB_TOKEN: token,
     AGENT_GITHUB_TOKEN: process.env.AGENT_GITHUB_TOKEN || token
   },
-  stdio: 'inherit'
+  stdio: ['inherit', 'pipe', 'inherit']
+});
+
+// Preserve existing stdout and capture only bounded structured drain results.
+const captured = [];
+let capturedBytes = 0;
+let oversized = false;
+child.stdout.on('data', (chunk) => {
+  process.stdout.write(chunk);
+  if (oversized) return;
+  capturedBytes += chunk.length;
+  if (capturedBytes > 256 * 1024) {
+    oversized = true;
+    captured.length = 0;
+  } else {
+    captured.push(chunk);
+  }
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
@@ -42,6 +59,17 @@ child.on('error', () => {
   process.exitCode = 1;
 });
 
-child.on('exit', (code, signal) => {
+child.on('close', (code, signal) => {
+  if (!oversized) {
+    const waitMs = githubRateLimitWaitFromDrain(Buffer.concat(captured).toString('utf8'));
+    if (waitMs !== null) {
+      try {
+        saveLocalGithubCooldown(waitMs);
+        console.error(`local_github_rate_limit_cooldown_ms=${waitMs}`);
+      } catch (error) {
+        console.error(`local_github_cooldown_persist_failed: ${error.message}`);
+      }
+    }
+  }
   process.exitCode = signal ? 1 : (code ?? 1);
 });
