@@ -14,6 +14,7 @@ import { cloudRateLimitDeferral, runCloudDrainWithRecovery } from './cloud-drain
 import { autonomousFallbackAllowed } from './cloud-drain.js';
 import { cloudPeekHasWork } from './cloud-peek.js';
 import { schedulerYieldRequested } from './scheduler-yield.js';
+import { localGithubCooldownRemainingMs, saveLocalGithubCooldown } from './local-github-cooldown.js';
 
 const args = process.argv.slice(2);
 const take = (name) => {
@@ -398,6 +399,7 @@ try {
         try {
           await watchIssueQueue(queue, {
             pollIntervalMs: queueConfig.pollIntervalMs,
+            cooldownRemainingMs: localGithubCooldownRemainingMs,
             signal: controller.signal,
             beforeTick: async () => {
               const currentRevision = await readCheckoutRevision({ repositoryRoot: watcherRepositoryRoot });
@@ -411,6 +413,10 @@ try {
             },
             onError: async (error) => {
               console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
+              if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs > 0) {
+                try { saveLocalGithubCooldown(error.retryAfterMs); }
+                catch { console.error('github_shared_cooldown_persist_failed'); }
+              }
               if (githubIssueQueueAuthRejected(error)) {
                 // Let systemd restart at its bounded cadence and obtain fresh auth.
                 // Do not spin with the rejected token or treat rate-limited 403 as auth.
