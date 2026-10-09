@@ -33,6 +33,22 @@ test('autonomous fallback is allowed only for safe parked queue states', () => {
   assert.equal(autonomousFallbackAllowed({ status: 'running' }), false);
 });
 
+test('cloud drain reports parked workspace integrity rather than successful idle', async () => {
+  const queue = scriptedQueue([null]);
+  const autonomousSelfImprovement = {
+    async tick() {
+      return { status: 'workspace_integrity_blocked', workflowId: 'workflow-stale-source' };
+    },
+    async hasWork() { return false; }
+  };
+  const result = await runCloudDrain({ queue, autonomousSelfImprovement });
+  assert.equal(result.stopReason, 'workspace_integrity_blocked');
+  assert.equal(result.remainingWork, true);
+  assert.equal(result.continuationRecommended, false);
+  assert.equal(result.iterations.length, 1);
+  assert.equal(result.iterations[0].autonomousResult.workflowId, 'workflow-stale-source');
+});
+
 test('cloud drain keeps advancing governed queue work until the lane is idle', async () => {
   const queue = scriptedQueue([
     { status: 'running', issueNumber: 1 },
