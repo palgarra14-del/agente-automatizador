@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-const MAX_WAIT_MS = 20 * 60 * 1000;
+// Match Cloud State's bounded one-hour-plus rate-limit reset window.
+const MAX_WAIT_MS = 75 * 60 * 1000;
 const DEFAULT_WAIT_MS = 60_000;
 
 export function localGithubCooldownPath(env = process.env) {
