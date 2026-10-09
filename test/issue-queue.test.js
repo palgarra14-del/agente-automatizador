@@ -2275,8 +2275,11 @@ test('issue queue watcher retries transient failures sooner than the normal poll
   assert.equal(issueQueueFailureBackoffMs(2, 15_000), 2_000);
   assert.equal(issueQueueFailureBackoffMs(3, 15_000), 4_000);
   assert.equal(issueQueueFailureBackoffMs(4, 15_000), 8_000);
-  assert.equal(issueQueueFailureBackoffMs(5, 15_000), 15_000);
-  assert.equal(issueQueueFailureBackoffMs(9, 30_000), 16_000);
+  assert.equal(issueQueueFailureBackoffMs(5, 15_000), 16_000);
+  assert.equal(issueQueueFailureBackoffMs(6, 15_000), 32_000);
+  assert.equal(issueQueueFailureBackoffMs(9, 30_000), 256_000);
+  assert.equal(issueQueueFailureBackoffMs(10, 30_000), 300_000);
+  assert.equal(issueQueueFailureBackoffMs(30, 30_000), 300_000);
   assert.equal(issueQueueFailureBackoffMs(1, 15_000, 90_000), 90_000);
   assert.equal(issueQueueFailureBackoffMs(1, 15_000, 24 * 60 * 60 * 1_000), 6 * 60 * 60 * 1_000);
 });
