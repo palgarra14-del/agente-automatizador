@@ -171,21 +171,23 @@ def _antigravity_stream_result(stdout):
 
 def antigravity_authenticated():
     now=time.monotonic()
-    if (
-        _ANTIGRAVITY_AUTH_CACHE["authenticated"]
-        and now-_ANTIGRAVITY_AUTH_CACHE["checkedAt"] < ANTIGRAVITY_AUTH_TTL
-    ):
-        return True
+    cached=_ANTIGRAVITY_AUTH_CACHE
+    # A failed availability probe must not be repeated once for every model
+    # in the same routing wave. A shorter negative TTL permits recovery.
+    ttl=ANTIGRAVITY_AUTH_TTL if cached["authenticated"] else min(30.0, ANTIGRAVITY_AUTH_TTL)
+    if cached["checkedAt"] > 0 and now-cached["checkedAt"] < ttl:
+        return cached["authenticated"]
     if not Path(AGY).is_file():
-        _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=False)
+        cached.update(checkedAt=now,authenticated=False)
         return False
     try:
-        proc=_run([AGY,"models"],timeout=60)
+        proc=_run([AGY,"models"],timeout=12)
     except ProviderUnavailable:
+        cached.update(checkedAt=time.monotonic(),authenticated=False)
         return False
     combined=(proc.stdout+"\n"+proc.stderr).lower()
     authenticated=proc.returncode==0 and "please sign in" not in combined and "sign in" not in combined
-    _ANTIGRAVITY_AUTH_CACHE.update(checkedAt=now,authenticated=authenticated)
+    cached.update(checkedAt=time.monotonic(),authenticated=authenticated)
     return authenticated
 
 def antigravity_structured(prompt,schema,cwd=None,timeout=180,model=None,agent=None,effort="medium",mode="plan"):
