@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -2275,6 +2276,34 @@ test('trusted persistent managed workspace root is outside Actions checkout and 
       () => trustedManagedWorkspaceRoot(projectRoot, '.agent-workspaces', override),
       /managedWorkspaceRoot_external_override_untrusted/
     );
+  }
+});
+
+test('persistent managed workspace survives real Git checkout cleanup', async () => {
+  const fixture = await mkdtemp(join(tmpdir(), 'agent-persistent-clean-'));
+  const checkout = join(fixture, 'runner', '_work', 'repo');
+  const home = join(fixture, 'home');
+  const persistent = join(home, '.local', 'share', 'engineering-orchestrator-managed-workspaces');
+  try {
+    await mkdir(checkout, { recursive: true });
+    const created = spawnSync('git', ['init', '--quiet', checkout], { encoding: 'utf8' });
+    assert.equal(created.status, 0, created.stderr);
+    await writeFile(join(checkout, '.gitignore'), '.agent-workspaces/\n');
+    const ephemeral = join(checkout, '.agent-workspaces', 'leadfinder', 'run-123');
+    const durable = join(persistent, 'leadfinder', 'run-123');
+    await mkdir(ephemeral, { recursive: true });
+    await mkdir(durable, { recursive: true });
+    await writeFile(join(ephemeral, 'evidence.json'), '{"temporary":true}\n');
+    await writeFile(join(durable, 'evidence.json'), '{"persistent":true}\n');
+    assert.equal(trustedManagedWorkspaceRoot(checkout, '.agent-workspaces', persistent, home), persistent);
+
+    const clean = spawnSync('git', ['-C', checkout, 'clean', '-ffdx'], { encoding: 'utf8' });
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.equal(existsSync(ephemeral), false, 'transient ignored workspace must be cleaned');
+    assert.equal(existsSync(durable), true, 'out-of-checkout workspace must survive');
+    assert.equal((await readFile(join(durable, 'evidence.json'), 'utf8')).trim(), '{"persistent":true}');
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
   }
 });
 
