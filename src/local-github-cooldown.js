@@ -53,7 +53,7 @@ function withCooldownWriteLock(path, operation) {
       } catch (staleError) {
         if (!['ENOENT', 'ENOTEMPTY'].includes(staleError.code)) throw staleError;
       }
-      if (Date.now() - start > 2_000) throw new Error('github_cooldown_lock_busy');
+      if (Date.now() - start > 2_000) throw new Error('github_cooldown_lock_busy', { cause: error });
       Atomics.wait(pause, 0, 0, 10);
     }
   }
