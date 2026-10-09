@@ -25,7 +25,10 @@ test('heartbeat does not retry non-recoverable control failures blindly', () => 
 });
 
 test('heartbeat defers expired local GitHub auth to scheduled cloud recovery', () => {
-  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 403'), true);
+  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 401'), true);
+  assert.equal(heartbeatControlAuthUnavailable('github_cli_auth_required'), true);
+  assert.equal(heartbeatControlAuthUnavailable('GitHub issue queue request failed: 403'), false);
+  assert.equal(heartbeatControlAuthUnavailable('cloud_state_github_rate_limited:403'), false);
   assert.equal(heartbeatControlAuthUnavailable('security_policy_violation'), false);
   const state=classifyLaneObservation({lane:'callflow',controlUnavailable:true,operatorRequested:true});
   assert.deepEqual(state,{
