@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   CodexReadOnlySkillExecutor,
   CodexSdkWorker,
@@ -51,7 +51,8 @@ import {
   transition,
   websiteBlueprintForBrief,
   websiteBlueprintIdForCategory,
-  managedWorkspacePath
+  managedWorkspacePath,
+  trustedManagedWorkspaceRoot
 } from '../src/core.js';
 
 function project(overrides = {}) {
@@ -2258,6 +2259,23 @@ test('managed workspaces are isolated under the configured root and clone only t
   assert.deepEqual(calls[0].args.slice(0, 6), ['clone', '--origin', 'origin', '--branch', 'main', 'https://github.com/owner/leadfinder.git']);
   assert.throws(() => configFrom({ ...configured, managedWorkspaceRoot: '../../escape' }, join(root, 'host', 'config')));
   assert.throws(() => managedWorkspacePath(configured, '../other-project'));
+});
+
+test('trusted persistent managed workspace root is outside Actions checkout and rejects arbitrary overrides', () => {
+  const projectRoot = resolve(tmpdir(), 'agent-fixture-checkout');
+  const trusted = resolve(homedir(), '.local/share/engineering-orchestrator-managed-workspaces');
+  assert.equal(trustedManagedWorkspaceRoot(projectRoot), resolve(projectRoot, '.agent-workspaces'));
+  assert.equal(trustedManagedWorkspaceRoot(projectRoot, '.agent-workspaces', trusted), trusted);
+  assert.throws(
+    () => trustedManagedWorkspaceRoot(projectRoot, '../../outside', trusted),
+    /managedWorkspaceRoot must stay below the project root/
+  );
+  for (const override of ['.agent-workspaces', '', '/tmp/agent-workspaces', trusted + '-other', null]) {
+    assert.throws(
+      () => trustedManagedWorkspaceRoot(projectRoot, '.agent-workspaces', override),
+      /managedWorkspaceRoot_external_override_untrusted/
+    );
+  }
 });
 
 test('managed workspace prepare reuses a valid interrupted clone and quarantines a partial clone', async () => {
