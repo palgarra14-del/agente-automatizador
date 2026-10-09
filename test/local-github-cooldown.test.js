@@ -31,7 +31,10 @@ test('local drain cooldown only accepts explicit GitHub 403 or 429 rate limits',
   )), 60000);
   assert.equal(githubRateLimitWaitFromDrain(drainResult(
     'rate_limited', 'cloud_state_github_rate_limited:403', 50 * 60 * 1000
-  )), 20 * 60 * 1000);
+  )), 50 * 60 * 1000 + 2_000);
+  assert.equal(githubRateLimitWaitFromDrain(drainResult(
+    'rate_limited', 'cloud_state_github_rate_limited:403', 3 * 60 * 60 * 1000
+  )), 75 * 60 * 1000);
   assert.equal(githubRateLimitWaitFromDrain(drainResult('duration_limit', 'cloud_state_github_rate_limited:403', 10000)), null);
   assert.equal(githubRateLimitWaitFromDrain(drainResult('rate_limited', 'cloud_state_github_request_failed:503', 10000)), null);
   assert.equal(githubRateLimitWaitFromDrain('not json'), null);
