@@ -2434,7 +2434,9 @@ export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, retryA
   if (!Number.isInteger(failureStreak) || failureStreak < 1) throw new Error('issue_queue_failure_streak_invalid');
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
   if (!Number.isFinite(retryAfterMs) || retryAfterMs < 0) throw new Error('issue_queue_retry_after_invalid');
-  const ordinaryBackoffMs = Math.min(pollIntervalMs, 1_000 * (2 ** Math.min(4, failureStreak - 1)));
+  // GitHub outages need progressive backoff independent of the healthy poll rate.
+  // A successful tick resets failureStreak and restores the normal cadence.
+  const ordinaryBackoffMs = Math.min(5 * 60_000, 1_000 * (2 ** Math.min(9, failureStreak - 1)));
   const boundedRetryAfterMs = Math.min(6 * 60 * 60 * 1_000, Math.ceil(retryAfterMs));
   return Math.max(ordinaryBackoffMs, boundedRetryAfterMs);
 }
