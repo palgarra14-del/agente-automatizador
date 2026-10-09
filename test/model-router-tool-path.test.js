@@ -53,7 +53,7 @@ test('unavailable Antigravity is probed once per routing wave and rechecked afte
   try {
     const agy = join(home, '.local/bin/agy');
     mkdirSync(resolve(agy, '..'), { recursive: true });
-    writeFileSync(agy, '#!/bin/sh\\nexit 0\\n');
+    writeFileSync(agy, '#!/bin/sh\nexit 0\n');
     chmodSync(agy, 0o700);
     const script = [
       'import json, sys, time, types',
@@ -72,7 +72,7 @@ test('unavailable Antigravity is probed once per routing wave and rechecked afte
       'assert model_router.antigravity_authenticated() is False',
       'assert calls == [12, 12], calls',
       'print("ok")'
-    ].join('\\n');
+    ].join('\n');
     const result = spawnSync('python3', ['-c', script, routerDir, agy], {
       env: { ...process.env, HOME: home, PYTHONDONTWRITEBYTECODE: '1' },
       encoding: 'utf8', timeout: 15_000
