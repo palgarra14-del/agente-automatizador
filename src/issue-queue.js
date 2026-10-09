@@ -607,6 +607,13 @@ export function githubRateLimitRetryAfterMs(response, nowMs = Date.now()) {
   return null;
 }
 
+// A 401 means the token held by the watcher was rejected. Recreate the watcher
+// under systemd so startup auth can read the current GitHub CLI credential.
+// Do not treat 403 as an auth-refresh signal: GitHub uses 403 for rate limits.
+export function githubIssueQueueAuthRejected(error) {
+  return error?.status === 401;
+}
+
 export class GitHubIssueChannel {
   constructor({ token = process.env.GITHUB_TOKEN, fetchImpl = fetch, repository, requestTimeoutMs = 12_000 } = {}) {
     if (!repository?.owner || !repository?.name) throw new Error('issue channel repository is required');
