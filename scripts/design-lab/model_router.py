@@ -2,19 +2,43 @@
 import json, os, shutil, subprocess, tempfile, time, urllib.error, urllib.request
 from pathlib import Path
 
-def _tool_path(env_name, command, legacy_fallback):
-    return os.environ.get(env_name) or shutil.which(command) or legacy_fallback
+def _tool_path(env_name, command):
+    configured = os.environ.get(env_name)
+    if configured:
+        return configured
+    visible = shutil.which(command)
+    if visible:
+        return visible
 
-AGY=_tool_path("ANTIGRAVITY_CLI","agy","/home/pablo/.local/bin/agy")
+    # systemd runs with a deliberately restricted PATH, unlike interactive
+    # Fish/Bash shells. Discover only well-known locations under THIS user's
+    # home rather than preserving obsolete /home/<previous-user> fallbacks.
+    home = Path.home()
+    candidates = [
+        home / ".local/bin" / command,
+        home / ".opencode/bin" / command,
+        home / ".bun/bin" / command,
+        home / ".npm-global/bin" / command,
+        home / ".local/share/mise/shims" / command,
+    ]
+    nvm = home / ".nvm/versions/node"
+    if nvm.is_dir():
+        candidates.extend(sorted(nvm.glob("*/bin/" + command), reverse=True))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return command
+
+AGY=_tool_path("ANTIGRAVITY_CLI","agy")
 OLLAMA_URL=os.environ.get("OLLAMA_URL","http://127.0.0.1:11434")
 OLLAMA_MODEL=os.environ.get("OLLAMA_MODEL","qwen2.5-coder:3b")
 OLLAMA_AUTOSTART=os.environ.get("OLLAMA_AUTOSTART","1").strip().lower() in {"1","true","yes","on"}
 OLLAMA_START_TIMEOUT=max(1.0,min(8.0,float(os.environ.get("OLLAMA_START_TIMEOUT","4"))))
-CODEX=_tool_path("CODEX_BIN","codex","/home/pablo/projects/agente-automatizador/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex")
-OPENCODE=_tool_path("OPENCODE_BIN","opencode","/home/pablo/.nvm/versions/node/v22.23.2/lib/node_modules/@opencode/cli/bin/opencode.exe")
+CODEX=_tool_path("CODEX_BIN","codex")
+OPENCODE=_tool_path("OPENCODE_BIN","opencode")
 OPENCODE_FREE_ENABLED=os.environ.get("OPENCODE_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 OPENCODE_LOCAL_MODELS_ENABLED=os.environ.get("OPENCODE_LOCAL_MODELS_ENABLED","0").strip().lower() in {"1","true","yes","on"}
-COPILOT=_tool_path("COPILOT_BIN","copilot","/home/pablo/.nvm/versions/node/v22.23.2/bin/copilot")
+COPILOT=_tool_path("COPILOT_BIN","copilot")
 COPILOT_FREE_ENABLED=os.environ.get("COPILOT_FREE_ENABLED","0").strip().lower() in {"1","true","yes","on"}
 COPILOT_FREE_MODEL=os.environ.get("COPILOT_FREE_MODEL","auto")
 COPILOT_MAX_AI_CREDITS=max(1,int(os.environ.get("COPILOT_MAX_AI_CREDITS","1")))
