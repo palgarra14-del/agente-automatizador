@@ -4,7 +4,7 @@ import { JsonStore, MultiModelCodingWorker, MultiModelReadOnlySkillExecutor, Orc
 import { DurableCloudWorkflowEngine } from './cloud-workflow-engine.js';
 import { defaultToolSkillRegistry } from './capabilities.js';
 import { defaultSpecialistRegistry } from './specialists.js';
-import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue } from './issue-queue.js';
+import { GitHubIssueChannel, SupervisedIssueQueue, loadIssueQueueConfig, watchIssueQueue, githubIssueQueueAuthRejected } from './issue-queue.js';
 import { autoUpgradeInboxService, ensureGitHubToken, installInboxService, readCheckoutRevision, restartInboxService, serviceStatus, syncInboxService, uninstallInboxService, upgradeInboxService } from './service.js';
 import { syncWslWakeup, uninstallWslWakeup, wslWakeupStatus } from './wsl-wakeup.js';
 import { projectRuntimeStatus, syncProjectRuntimes } from './runtime.js';
@@ -411,6 +411,13 @@ try {
             },
             onError: async (error) => {
               console.error(`issue-queue tick failed: ${maskSecrets(error.message)}`);
+              if (githubIssueQueueAuthRejected(error)) {
+                // Let systemd restart at its bounded cadence and obtain fresh auth.
+                // Do not spin with the rejected token or treat rate-limited 403 as auth.
+                console.error('github_issue_queue_auth_rejected_restarting');
+                controller.abort();
+                return;
+              }
               if (!autonomousSelfImprovement) return;
               try {
                 const autonomousResult = await autonomousSelfImprovement.tick();
