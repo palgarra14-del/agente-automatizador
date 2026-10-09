@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -64,4 +65,45 @@ test('cooldown survives independently of worker processes and never shortens an 
 test('local state follows XDG and does not embed credentials', () => {
   assert.equal(localGithubCooldownPath({HOME:'/tmp/home'}), '/tmp/home/.local/state/engineering-orchestrator/github-rate-limit.json');
   assert.equal(localGithubCooldownPath({HOME:'/tmp/home',XDG_STATE_HOME:'/tmp/state'}), '/tmp/state/engineering-orchestrator/github-rate-limit.json');
+});
+
+
+test('parallel workers persist the longest rate-limit reset without last-writer races', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestrator-cooldown-parallel-'));
+  const file = join(dir, 'github.json');
+  try {
+    const url = new URL('../src/local-github-cooldown.js', import.meta.url).href;
+    const script = [
+      'import {saveLocalGithubCooldown} from ' + JSON.stringify(url),
+      'saveLocalGithubCooldown(Number(process.argv[2]), process.argv[1], 5000)'
+    ].join(';');
+    const waits = [2_000, 18_000, 4_000, 9_000, 22_000, 6_000];
+    const exits = await Promise.all(waits.map((wait) => new Promise((resolve) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script, file, String(wait)], {
+        stdio: ['ignore', 'ignore', 'pipe']
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+      child.on('error', (error) => resolve({ code: -1, stderr: String(error) }));
+      child.on('close', (code) => resolve({ code, stderr }));
+    })));
+    for (const result of exits) assert.equal(result.code, 0, result.stderr);
+    assert.equal(localGithubCooldownRemainingMs(file, 5000), 22_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stale cooldown writer lock is safely recovered after a crash', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestrator-cooldown-stale-'));
+  const file = join(dir, 'github.json');
+  try {
+    mkdirSync(file + '.lock');
+    const before = new Date(Date.now() - 30_000);
+    utimesSync(file + '.lock', before, before);
+    assert.equal(saveLocalGithubCooldown(30_000, file, 5000), true);
+    assert.equal(localGithubCooldownRemainingMs(file, 5000), 30_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
