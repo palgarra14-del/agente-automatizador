@@ -30,7 +30,7 @@ function trustedServicePath(nodePath) {
 export function serviceRuntimeEnvironment(environment = {}) {
   const result = {};
   const allowed = [
-    'XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
+    'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'GH_CONFIG_DIR', 'GH_HOST', 'CODEX_HOME', 'LANG', 'LC_ALL',
     'MODEL_COST_POLICY',
     'CODEX_SUBSCRIPTION_REMAINING_PERCENT', 'CODEX_SUBSCRIPTION_HEADROOM_PERCENT',
     'CODEX_SUBSCRIPTION_RESERVE_OVERRIDE',
@@ -41,7 +41,7 @@ export function serviceRuntimeEnvironment(environment = {}) {
     'MODEL_PROVIDER_SLOT_WAIT_SECONDS', 'MODEL_PROVIDER_MAX_ANTIGRAVITY',
     'MODEL_PROVIDER_MAX_OPENCODE', 'MODEL_PROVIDER_MAX_CODEX'
   ];
-  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
+  const absolutePaths = new Set(['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'GH_CONFIG_DIR', 'CODEX_HOME', 'ANTIGRAVITY_CLI', 'CODEX_BIN', 'OPENCODE_BIN']);
   for (const name of allowed) {
     const value = environment[name];
     if (value === undefined) continue;
