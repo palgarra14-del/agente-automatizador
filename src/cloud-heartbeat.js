@@ -13,7 +13,7 @@ export function criticalCiDemand(runs = []) {
 }
 const HEARTBEAT_LANE_ORDER = Object.freeze(['callflow','leadfinder','website-pilot','self']);
 const HEARTBEAT_EXECUTION_MODES = new Set(['cloud','local-primary']);
-const CONTROL_AUTH_UNAVAILABLE = /github_cli_auth_required|GitHub issue queue request failed: (?:401|403)|bad credentials|requires authentication|token[^\n]{0,80}invalid/i;
+const CONTROL_AUTH_UNAVAILABLE = /github_cli_auth_required|GitHub issue queue request failed: 401|bad credentials|requires authentication|token[^\n]{0,80}invalid/i;
 
 export function heartbeatExecutionMode(value = 'cloud') {
   const mode = String(value || 'cloud').trim().toLowerCase();
