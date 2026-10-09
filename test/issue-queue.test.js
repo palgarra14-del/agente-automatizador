@@ -36,6 +36,7 @@ import {
   workflowBindingFingerprint,
   workflowFailureSummary,
   githubRateLimitRetryAfterMs,
+  githubIssueRateLimitRetryAfterMs,
   githubIssueQueueAuthRejected,
   issueQueueFailureBackoffMs,
   watchIssueQueue
@@ -2319,6 +2320,42 @@ test('rejected watcher credentials refresh only on HTTP 401, never rate-limit or
   assert.equal(githubIssueQueueAuthRejected({ status: 429, retryAfterMs: 60_000 }), false);
   assert.equal(githubIssueQueueAuthRejected(new Error('github_issue_queue_request_timeout')), false);
   assert.equal(githubIssueQueueAuthRejected(null), false);
+});
+
+test('GitHub issue rate-limit detection distinguishes secondary 403 from forbidden 403', async () => {
+  const headers = (values) => ({ get: (name) => values[name] ?? null });
+  const empty = headers({});
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 429, headers: empty }), 60_000);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: empty,
+    clone() { return { text: async () => 'You have exceeded a secondary rate limit.' }; }
+  }), 60_000);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: empty,
+    clone() { return { text: async () => 'Resource not accessible by integration' }; }
+  }), null);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 401, headers: empty }), null);
+  assert.equal(await githubIssueRateLimitRetryAfterMs({ status: 403, headers: headers({ 'x-ratelimit-remaining': '0' }) }), 60_000);
+});
+
+test('watcher observes shared GitHub cooldown before making any API calls', async () => {
+  let polls = 0;
+  let checked = 0;
+  const controller = new AbortController();
+  const queue = leaseableTestQueue({
+    async tick() {
+      polls += 1;
+      controller.abort();
+      return null;
+    }
+  });
+  await watchIssueQueue(queue, {
+    pollIntervalMs: 1_000,
+    signal: controller.signal,
+    cooldownRemainingMs: () => (++checked === 1 ? 5 : 0)
+  });
+  assert.equal(polls, 1);
+  assert.ok(checked >= 2);
+  const lease = await queue.claimWatcherLease();
+  assert.equal(await queue.releaseWatcherLease(lease.leaseId), true);
 });
 
 test('watch loop removes abort listeners after ordinary poll sleeps', async () => {
