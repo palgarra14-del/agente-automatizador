@@ -167,6 +167,11 @@ export async function runCloudDrain({
 
     const queueHasWork = await queue.hasWork();
 
+    if (autonomousResult?.status === 'workspace_integrity_blocked' && !queueHasWork) {
+      stopReason = 'workspace_integrity_blocked';
+      break;
+    }
+
     if (!queueHasWork && !autonomousHasWork) {
       stopReason = 'idle';
       break;
@@ -183,7 +188,7 @@ export async function runCloudDrain({
   let remainingWork;
   if (stopReason === 'idle') {
     remainingWork = false;
-  } else if (stopReason === 'human_gate' || stopReason === 'autonomous_failure') {
+  } else if (stopReason === 'human_gate' || stopReason === 'autonomous_failure' || stopReason === 'workspace_integrity_blocked') {
     remainingWork = true;
   } else {
     const queueHasWork = await queue.hasWork();

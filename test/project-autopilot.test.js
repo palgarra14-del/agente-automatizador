@@ -99,6 +99,33 @@ test('external project autopilot creates a project-bound autonomous workflow and
   assert.equal(await autopilot.hasWork(), true);
 });
 
+test('workspace integrity mismatch parks only autonomous filler and preserves the historical workflow', async () => {
+  const now = Date.parse('2026-10-09T18:00:00Z');
+  const workflowId = 'workflow-stale-source';
+  const store = fakeStore({ autopilotProjectImprovement: {
+    activeWorkflowId: workflowId, activeBaseRevision: REV,
+    starts: [new Date(now - 10_000).toISOString()], history: [],
+    suspensionReason: null, suspendedUntil: null
+  } });
+  let reads = 0;
+  const autopilot = new AutonomousProjectImprovement({
+    store, projectId: 'leadfinder', operatorRevision: REV, now: () => now,
+    workflowTimeoutMs: 60_000,
+    workflowEngine: { async get() { reads += 1; throw new Error('cloud_workspace_rebind_source_changed'); } }
+  });
+  assert.equal(await autopilot.hasWork(), true);
+  const first = await autopilot.tick();
+  assert.equal(first.status, 'workspace_integrity_blocked');
+  assert.equal(first.workflowId, workflowId);
+  assert.equal(store.state.autopilotProjectImprovement.activeWorkflowId, workflowId);
+  assert.equal(store.state.autopilotProjectImprovement.suspensionReason, 'workspace_integrity_blocked');
+  assert.equal(Date.parse(store.state.autopilotProjectImprovement.suspendedUntil), now + 24 * 60 * 60 * 1000);
+  assert.equal(await autopilot.hasWork(), false);
+  assert.equal((await autopilot.tick()).status, 'workspace_integrity_blocked');
+  assert.equal(reads, 1, 'a parked workflow must not retry on each dispatch');
+  assert.equal(store.state.autopilotProjectImprovement.history.length, 0);
+});
+
 test('external autopilot never auto-approves sensitive implementation changes', async () => {
   const store = fakeStore({
     autopilotProjectImprovement: {
