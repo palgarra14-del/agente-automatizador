@@ -120,6 +120,8 @@ test('systemd unit is persistent, uses absolute paths, and contains no GitHub se
   assert.match(unit, /managed-by=engineering-orchestrator:v1/);
   assert.match(unit, /ExecStart=.*src\/cli\.js.*inbox watch/);
   assert.match(unit, /Restart=always/);
+  assert.match(unit, /RestartSec=30s/);
+  assert.match(unit, /StartLimitBurst=10/);
   assert.match(unit, /WantedBy=default\.target/);
   assert.match(unit, /PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/pablo\/\.nvm\/versions\/node\/v22\.23\.2\/bin/);
   assert.match(unit, /GH_CONFIG_DIR=\/home\/pablo\/\.config\/gh-custom/);
