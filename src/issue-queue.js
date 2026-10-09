@@ -607,6 +607,25 @@ export function githubRateLimitRetryAfterMs(response, nowMs = Date.now()) {
   return null;
 }
 
+
+// GitHub secondary limits can return HTTP 403 with remaining > 0, or no
+// Retry-After header. Distinguish those from permission-related 403s.
+export async function githubIssueRateLimitRetryAfterMs(response) {
+  const known = githubRateLimitRetryAfterMs(response);
+  if (known !== null) return known;
+  if (response?.status === 429 ||
+      (response?.status === 403 && response?.headers?.get?.('x-ratelimit-remaining') === '0')) {
+    return 60_000;
+  }
+  if (response?.status !== 403) return null;
+  let body = '';
+  try {
+    const readable = typeof response.clone === 'function' ? response.clone() : response;
+    if (typeof readable?.text === 'function') body = String(await readable.text()).slice(0, 2048);
+  } catch { /* Non-readable error bodies must never fail the queue parser. */ }
+  return /secondary rate limit|rate limit exceeded|abuse detection/i.test(body) ? 60_000 : null;
+}
+
 // A 401 means the token held by the watcher was rejected. Recreate the watcher
 // under systemd so startup auth can read the current GitHub CLI credential.
 // Do not treat 403 as an auth-refresh signal: GitHub uses 403 for rate limits.
@@ -664,7 +683,7 @@ export class GitHubIssueChannel {
         if (!response.ok) {
           const error = new Error(`GitHub issue queue request failed: ${response.status}`);
           error.status = response.status;
-          const retryAfterMs = githubRateLimitRetryAfterMs(response);
+          const retryAfterMs = await githubIssueRateLimitRetryAfterMs(response);
           if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
           throw error;
         }
@@ -2448,12 +2467,35 @@ export function issueQueueFailureBackoffMs(failureStreak, pollIntervalMs, retryA
   return Math.max(ordinaryBackoffMs, boundedRetryAfterMs);
 }
 
-export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError } = {}) {
+// Abort-aware waiting also protects a paused watcher from holding systemd
+// shutdown hostage while GitHub has requested a long backoff.
+async function waitForIssueQueuePoll(delayMs, signal) {
+  await new Promise((resolveSleep) => {
+    let timer = null;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      signal?.removeEventListener?.('abort', finish);
+      resolveSleep();
+    };
+    timer = setTimeout(finish, delayMs);
+    if (signal) {
+      if (signal.aborted) return finish();
+      signal.addEventListener?.('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    }
+  });
+}
+
+export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, beforeTick, onTick, onError, cooldownRemainingMs } = {}) {
   if (!queue || typeof queue.claimWatcherLease !== 'function' || typeof queue.releaseWatcherLease !== 'function') {
     throw new Error('watchIssueQueue requires a lease-capable queue');
   }
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 1_000) throw new Error('issue queue pollIntervalMs must be at least 1000');
   if (beforeTick !== undefined && typeof beforeTick !== 'function') throw new Error('issue queue beforeTick must be a function');
+  if (cooldownRemainingMs !== undefined && typeof cooldownRemainingMs !== 'function') throw new Error('issue queue cooldownRemainingMs must be a function');
   if (signal?.aborted) return;
   const lease = await queue.claimWatcherLease();
   let operationError = null;
@@ -2462,6 +2504,11 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
     while (!signal?.aborted) {
       if (beforeTick && await beforeTick() === false) break;
       if (signal?.aborted) break;
+      const cooldown = cooldownRemainingMs?.() ?? 0;
+      if (Number.isFinite(cooldown) && cooldown > 0) {
+        await waitForIssueQueuePoll(Math.min(cooldown, 20 * 60_000), signal);
+        continue;
+      }
       let sleepMs = pollIntervalMs;
       try {
         const result = await queue.tick();
@@ -2473,23 +2520,7 @@ export async function watchIssueQueue(queue, { pollIntervalMs = 15_000, signal, 
         await onError?.(error);
       }
       if (signal?.aborted) break;
-      await new Promise((resolveSleep) => {
-        let timer = null;
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          if (timer !== null) clearTimeout(timer);
-          signal?.removeEventListener?.('abort', finish);
-          resolveSleep();
-        };
-        timer = setTimeout(finish, sleepMs);
-        if (signal) {
-          if (signal.aborted) return finish();
-          signal.addEventListener?.('abort', finish, { once: true });
-          if (signal.aborted) finish();
-        }
-      });
+      await waitForIssueQueuePoll(sleepMs, signal);
     }
   } catch (error) {
     operationError = error;
