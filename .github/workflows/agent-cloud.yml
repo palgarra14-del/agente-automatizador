@@ -113,6 +113,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
+      - name: Pin managed workspace storage outside transient Actions checkouts
+        shell: bash
+        run: |
+          echo "AGENT_MANAGED_WORKSPACE_ROOT=$HOME/.local/share/engineering-orchestrator-managed-workspaces" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts
@@ -144,6 +148,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { ref: main, persist-credentials: false }
+      - name: Pin managed workspace storage outside transient Actions checkouts
+        shell: bash
+        run: |
+          echo "AGENT_MANAGED_WORKSPACE_ROOT=$HOME/.local/share/engineering-orchestrator-managed-workspaces" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts
