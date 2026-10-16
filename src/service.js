@@ -786,6 +786,30 @@ async function releaseUpgradeLease(lockFile, lease) {
   return true;
 }
 
+export async function assertUpgradeGitDirectory({ root, gitDirectory, commandRunner, env }) {
+  const marker = resolve(root, '.git');
+  const mismatch = () => new Error('operator_upgrade_git_directory_mismatch');
+  let markerStat;
+  try { markerStat = await lstat(marker); } catch { throw mismatch(); }
+  if (markerStat.isDirectory()) {
+    if (resolve(gitDirectory) !== marker) throw mismatch();
+    return;
+  }
+  // Linked worktrees use a regular .git pointer file rather than a directory.
+  if (!markerStat.isFile()) throw mismatch();
+  let pointer;
+  try { pointer = await readFile(marker, 'utf8'); } catch { throw mismatch(); }
+  const link = /^gitdir: ([^\r\n]+)\r?\n?$/.exec(pointer);
+  if (!link || resolve(root, link[1]) !== resolve(gitDirectory)) throw mismatch();
+
+  const common = (await checkedUpgradeCommand(commandRunner, 'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, env })).stdout.trim();
+  if (dirname(resolve(gitDirectory)) !== resolve(common, 'worktrees')) throw mismatch();
+  let backLink;
+  try { backLink = await readFile(resolve(gitDirectory, 'gitdir'), 'utf8'); } catch { throw mismatch(); }
+  if (resolve(backLink.trim()) !== marker) throw mismatch();
+}
+
 async function performInboxServiceUpgrade({
   repositoryRoot,
   expectedRepository,
@@ -814,7 +838,7 @@ async function performInboxServiceUpgrade({
   const repository = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', '--show-toplevel'], { cwd: root, env })).stdout.trim();
   if (resolve(repository) !== root) throw new Error('operator_upgrade_repository_root_mismatch');
   const gitDirectory = (await checkedUpgradeCommand(commandRunner, 'git', ['rev-parse', '--absolute-git-dir'], { cwd: root, env })).stdout.trim();
-  if (resolve(gitDirectory) !== resolve(root, '.git')) throw new Error('operator_upgrade_git_directory_mismatch');
+  await assertUpgradeGitDirectory({ root, gitDirectory, commandRunner, env });
   const unsafeGitConfig = await checkedUpgradeCommand(
     commandRunner,
     'git',
