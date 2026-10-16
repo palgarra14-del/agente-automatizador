@@ -712,6 +712,28 @@ test('operator upgrade accepts genuine linked worktrees and rejects tampered Git
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('operator upgrade accepts the actual Arch Actions runner worktree without modifying it', async (t) => {
+  if (process.env.RUNNER_NAME !== 'ARCH-orchestrator') {
+    t.skip('only the named Arch runner can verify its persistent runtime worktree');
+    return;
+  }
+  const root = join(process.env.HOME, '.local', 'share', 'engineering-orchestrator-runtime');
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  const git = (args) => {
+    const output = spawnSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 10_000 });
+    assert.equal(output.status, 0, 'git ' + args.join(' ') + ': ' + output.stderr);
+    return output.stdout.trim();
+  };
+  // Read-only host regression: no systemctl, Git writes, secrets, or installer side effects.
+  assert.equal(git(['rev-parse', '--show-toplevel']), root);
+  const gitDirectory = git(['rev-parse', '--absolute-git-dir']);
+  const commandRunner = async (_command, args, options) => {
+    const output = spawnSync('git', args, { cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: 10_000 });
+    return { exitCode: output.status, stdout: output.stdout, stderr: output.stderr };
+  };
+  await assert.doesNotReject(assertUpgradeGitDirectory({ root, gitDirectory, commandRunner, env }));
+});
+
 test('operator upgrade verifies GitHub review and CI before exact fast-forward', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-upgrade-ok-'));
   const root = await mkdtemp(join(tmpdir(), 'agent-upgrade-repo-'));
