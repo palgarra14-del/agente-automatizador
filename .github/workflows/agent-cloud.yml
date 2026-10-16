@@ -255,7 +255,17 @@ jobs:
         run: |
           RESULT_FILE="$RUNNER_TEMP/cloud-drain-$AGENT_CLOUD_LANE.json"
           set +e
-          timeout --signal=TERM --kill-after=30s 25m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          # A laptop suspending mid-job can leave Actions credentials invalid on resume.
+          # Hold a sleep inhibitor only for this bounded drain; do not change the
+          # operator-controlled Night Mode or the machine's global sleep policy.
+          INHIBITOR=()
+          if command -v systemd-inhibit >/dev/null 2>&1 && \
+             systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain true >/dev/null 2>&1; then
+            INHIBITOR=(systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain)
+          else
+            echo "::warning::$AGENT_CLOUD_LANE could not acquire sleep inhibitor; enable Night Mode to prevent host suspend"
+          fi
+          timeout --signal=TERM --kill-after=30s 25m "${INHIBITOR[@]}" node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
           DRAIN_EXIT="$?"
           set -e
           case "$DRAIN_EXIT" in
