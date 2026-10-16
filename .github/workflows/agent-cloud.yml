@@ -265,7 +265,7 @@ jobs:
           else
             echo "::warning::$AGENT_CLOUD_LANE could not acquire sleep inhibitor; enable Night Mode to prevent host suspend"
           fi
-          timeout --signal=TERM --kill-after=30s 25m "${INHIBITOR[@]}" node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
+          "${INHIBITOR[@]}" timeout --signal=TERM --kill-after=30s 25m node src/cli.js inbox cloud-drain --lane "$AGENT_CLOUD_LANE" > "$RESULT_FILE"
           DRAIN_EXIT="$?"
           set -e
           case "$DRAIN_EXIT" in
