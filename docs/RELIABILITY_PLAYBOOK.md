@@ -29,3 +29,25 @@ The anonymized operator journal audit covered 114,152 log entries and found 951 
 Keep the exact CI SHA, human-reviewed diff, installed runtime SHA and post-rollout sample in the incident record. States: `identified` -> `fixed_in_pr` -> `ci_verified` -> `runtime_verified` -> `regression_guarded`. Only a real post-rollout test can establish `runtime_verified`.
 
 Outstanding architecture work must reuse #204/#359 for Cloud State, #433/#452 for runners/failover, #439 for quota metering, and #468 for Website Pilot verification. Do not create overlapping ownerless watchdogs or silently revive superseded designs.
+
+## Permanent managed workspaces vs transient GitHub Actions checkout
+
+On self-hosted Arch runners, `actions/checkout` can clean ignored
+`.agent-workspaces/` beneath the repository checkout. Persisted workflows
+must not rely on that directory. In the `cloud-once` job, the
+`AGENT_MANAGED_WORKSPACE_ROOT` environment override is pinned to the operator
+home's `.local/share/engineering-orchestrator-managed-workspaces` folder,
+outside `$GITHUB_WORKSPACE`. The config rejects arbitrary external paths.
+Before cloning or reusing an existing workspace, the normal symlink-free path
+and Git integrity gates still apply.
+
+Historical workspaces are **not** migrated by deleting, resetting, or blindly
+copying directories. First verify project/repository identity, working branch,
+base SHA, remote and clean status against authoritative workflow evidence.
+A source that fails integrity checks remains blocked and retained for manual
+review. Old workspaces can be retired only after verified evidence retention.
+
+Do not call a CI-green change runtime-verified until a fresh self-hosted
+cloud-once task establishes the stable root, survives a subsequent checkout,
+and completes a governed work unit without deleting the managed workspace.
+
