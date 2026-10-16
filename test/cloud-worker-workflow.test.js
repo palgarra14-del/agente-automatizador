@@ -315,7 +315,8 @@ test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   assert.match(drainStep, /systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain true/);
   assert.match(drainStep, /INHIBITOR=\(systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain\)/);
   assert.match(drainStep, /could not acquire sleep inhibitor; enable Night Mode/);
-  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 25m "\$\{INHIBITOR\[@\]\}" node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  // Timeout must remain the direct supervisor of node (not the inhibitor).
+  assert.match(workflow, /"\$\{INHIBITOR\[@\]\}" timeout --signal=TERM --kill-after=30s 25m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
   assert.doesNotMatch(workflow, /systemctl --user (enable|start|restart) agent-night-mode/);
   assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
