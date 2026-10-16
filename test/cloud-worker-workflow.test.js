@@ -307,7 +307,16 @@ test('autonomous self-maintenance failures cannot masquerade as a successful clo
 test('cloud supervisor headroom does not widen autonomous work budgets', () => {
   const drain = readFileSync(new URL('../src/cloud-drain.js', import.meta.url), 'utf8');
   assert.match(drain, /const DEFAULT_MAX_DURATION_MS = 20 \* 60 \* 1000;/);
-  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 25m node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  // The bounded drain must hold the sleep blocker only while it runs, not globally.
+  // If logind cannot provide the inhibitor, execution still proceeds with a warning.
+  const drainStep = workflow.slice(workflow.indexOf('- name: Drain governed cloud work continuously'));
+  assert.match(drainStep, /INHIBITOR=\(\)/);
+  assert.match(drainStep, /command -v systemd-inhibit/);
+  assert.match(drainStep, /systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain true/);
+  assert.match(drainStep, /INHIBITOR=\(systemd-inhibit --what=sleep --mode=block --why=agent-cloud-drain\)/);
+  assert.match(drainStep, /could not acquire sleep inhibitor; enable Night Mode/);
+  assert.match(workflow, /timeout --signal=TERM --kill-after=30s 25m "\$\{INHIBITOR\[@\]\}" node src\/cli\.js inbox cloud-drain --lane "\$AGENT_CLOUD_LANE"/);
+  assert.doesNotMatch(workflow, /systemctl --user (enable|start|restart) agent-night-mode/);
   assert.match(workflow, /# Supervisor headroom only: internal self\/drain budgets remain bounded separately\.\n\s+timeout-minutes: 60/);
   assert.equal(self.budgets.maxRuntimeMinutes, 18);
 });
