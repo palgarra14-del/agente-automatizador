@@ -1626,8 +1626,9 @@ export class GitHubStateStore extends JsonStore {
 
     const previousStatusAnchorSha = previousRegistration?.statusAnchorSha ?? null;
     const { statusAnchorSha, authorityAnchorSha } = await this.createEpochStatusAnchors(epoch, previousStatusAnchorSha);
-    await this.claimEpochAnchorRef(this.epochAnchorTag(epoch), statusAnchorSha);
-
+    // Write and verify immutable registration evidence before exposing the tag.
+    // If posting the status fails, the unreferenced commit is harmless; a
+    // published tag must never point to an unregistered metadata epoch.
     const registrationError = await this.appendEpochStatus(
       statusAnchorSha,
       this.epochRegistrationContext(),
@@ -1640,6 +1641,12 @@ export class GitHubStateStore extends JsonStore {
       )
     );
     if (registrationError) throw new Error('cloud_state_epoch_registration_append_failed', { cause: registrationError });
+    const evidenced = await this.readEpochBundle(statusAnchorSha, previousStatusAnchorSha);
+    if (evidenced.registration.authorityAnchorSha !== authorityAnchorSha ||
+        evidenced.registration.anchorSha !== stateAnchorSha) {
+      throw new Error('cloud_state_epoch_registration_unproven');
+    }
+    await this.claimEpochAnchorRef(this.epochAnchorTag(epoch), statusAnchorSha);
 
     if (previousRegistration) {
       const nextError = await this.appendEpochStatus(
