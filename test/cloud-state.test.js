@@ -87,6 +87,7 @@ function fakeGitHub() {
   const statusesBySha = new Map();
   const workflowRuns = new Map();
   const truncatedBlobs = new Set();
+  let delayedEpochOneReads = 0;
   let precreateNextClaim = false;
   let loseNextClaimResponse = false;
   let claimCreateCount = 0;
@@ -280,6 +281,12 @@ function fakeGitHub() {
       const page = Number(url.searchParams.get('page') ?? '1');
       const start = (page - 1) * perPage;
       const statuses = statusesBySha.get(targetSha) ?? [];
+      if (delayedEpochOneReads > 0 &&
+          statuses.some(status => /\\/epoch$/i.test(status.context || '') &&
+            String(status.description || '').startsWith('e=1;'))) {
+        delayedEpochOneReads -= 1;
+        return response(200, []);
+      }
       return response(200, statuses.slice(start, start + perPage).map(cloneState));
     }
     const statusPost = /^\/statuses\/([a-f0-9]{40})$/i.exec(path);
@@ -542,6 +549,7 @@ function fakeGitHub() {
     failNextClaimWrite,
     failNextMainRead,
     precreateNextClaim() { precreateNextClaim = true; },
+    delayEpochOneRegistrationReads(count) { delayedEpochOneReads = count; },
     loseNextClaimResponse() { loseNextClaimResponse = true; },
     moveMainAfterClaimAuthorityRead(commitSha) {
       assert.ok(commits.has(commitSha));
@@ -1778,6 +1786,22 @@ test('missing immutable next link blocks authority until governed repair verifie
 
   const g257 = await publishMarker(fresh, 'g257');
   assert.equal(fake.envelopeAt(g257).generation, 257);
+});
+
+test('epoch registration waits for GitHub status visibility before claiming tag', async () => {
+  const fake = fakeGitHub();
+  const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacy);
+  const sleeps = [];
+  const store = storeFor(fake, { sleep: async (ms) => { sleeps.push(ms); } });
+  const g256 = await publishMarker(store, 'g256');
+
+  fake.delayEpochOneRegistrationReads(2);
+  const g257 = await publishMarker(store, 'g257-visible');
+  assert.equal(fake.envelopeAt(g257).generation, 257);
+  assert.deepEqual(sleeps.filter(ms => ms < 2000), [250, 500]);
+  assert.ok(fake.tagSha(store.epochAnchorTag(1)));
+  assert.equal((await store.readRootEvidence()).registrationByEpoch.get(1).anchorSha, g256);
 });
 
 test('registration status failure never publishes an epoch tag and clean retry completes', async () => {
