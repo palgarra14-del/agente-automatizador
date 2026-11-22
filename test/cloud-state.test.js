@@ -1841,6 +1841,9 @@ test('repair-only recovers an orphaned epoch tag with no registration and preser
   // Emulate a historical tag-first crash (the older writer left a tag with
   // no registration); the new writer itself never publishes this shape.
   const prior = (await store.readRootEvidence()).registrations.at(-1);
+  // In the old writer, g257 rollout sealed epoch 0 before claiming the
+  // orphaned epoch-1 tag. Reconstruct that seal explicitly in the fixture.
+  installSeal(fake, store, prior, g256, 256);
   const orphanSha = fake.makeMetadataCommit({
     previousStatusAnchorSha: prior.statusAnchorSha,
     message: store.epochMetadataMessage(1)
@@ -1880,6 +1883,9 @@ test('repair refuses forged orphan epoch metadata without adding authority', asy
   // Emulate a historical tag-first crash (the older writer left a tag with
   // no registration); the new writer itself never publishes this shape.
   const prior = (await store.readRootEvidence()).registrations.at(-1);
+  // In the old writer, g257 rollout sealed epoch 0 before claiming the
+  // orphaned epoch-1 tag. Reconstruct that seal explicitly in the fixture.
+  installSeal(fake, store, prior, g256, 256);
   const orphanSha = fake.makeMetadataCommit({
     previousStatusAnchorSha: prior.statusAnchorSha,
     message: store.epochMetadataMessage(1)
@@ -1901,6 +1907,9 @@ test('repair refuses unregistered epoch when published ref mirrors disagree', as
   // Emulate a historical tag-first crash (the older writer left a tag with
   // no registration); the new writer itself never publishes this shape.
   const prior = (await store.readRootEvidence()).registrations.at(-1);
+  // In the old writer, g257 rollout sealed epoch 0 before claiming the
+  // orphaned epoch-1 tag. Reconstruct that seal explicitly in the fixture.
+  installSeal(fake, store, prior, g256, 256);
   const orphanSha = fake.makeMetadataCommit({
     previousStatusAnchorSha: prior.statusAnchorSha,
     message: store.epochMetadataMessage(1)
