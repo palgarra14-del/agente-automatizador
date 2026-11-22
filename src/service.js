@@ -211,7 +211,8 @@ export function renderAutoUpgradeTimerUnit() {
     'Description=Periodic verified Engineering Orchestrator upgrade check',
     '',
     '[Timer]',
-    'OnBootSec=2min',
+    // Schedule relative to timer activation so a late enable/restart always has a next run.
+    'OnActiveSec=2min',
     'OnUnitActiveSec=2min',
     'RandomizedDelaySec=20s',
     'Persistent=true',
