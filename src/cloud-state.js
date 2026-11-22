@@ -1311,6 +1311,97 @@ export class GitHubStateStore extends JsonStore {
     return { registration, seal, next };
   }
 
+  /**
+   * Recover an epoch metadata tag left behind after its tag claim succeeded but
+   * its registration-status append failed. This is an additive, repair-only path.
+   * Do not trust the tag on its own: verify immutable parent, message, tree,
+   * sealed lineage and all three published refs before writing any metadata.
+   */
+  async recoverUnregisteredEpochAnchor(statusAnchorSha, previousRegistration, previousSeal) {
+    const epoch = previousRegistration.epoch + 1;
+    const expectedTag = this.epochAnchorTag(epoch);
+    const observedTag = await this.refSha('tags/' + encodeURIComponent(expectedTag));
+    if (observedTag !== statusAnchorSha) throw new Error('cloud_state_epoch_orphan_tag_moved');
+    if (!previousSeal || previousSeal.generation !== epochEndGeneration(previousRegistration.epoch) ||
+        epochForGeneration(previousSeal.generation + 1) !== epoch) {
+      throw new Error('cloud_state_epoch_orphan_seal_invalid');
+    }
+
+    const [previous, orphan, refs] = await Promise.all([
+      this.readCommit(previousRegistration.statusAnchorSha),
+      this.readCommit(statusAnchorSha),
+      this.readRefs()
+    ]);
+    const treeSha = assertSha(orphan?.tree?.sha, 'cloud_state_epoch_orphan_anchor_invalid');
+    if (orphan.parents.length !== 1 ||
+        assertSha(orphan.parents[0]?.sha, 'cloud_state_epoch_orphan_anchor_invalid') !== previousRegistration.statusAnchorSha ||
+        orphan.message !== this.epochMetadataMessage(epoch) ||
+        treeSha !== assertSha(previous?.tree?.sha, 'cloud_state_epoch_orphan_anchor_invalid')) {
+      throw new Error('cloud_state_epoch_orphan_anchor_invalid');
+    }
+    if (refs.stateSha !== previousSeal.stateSha ||
+        refs.checkpointSha !== previousSeal.stateSha ||
+        refs.witnessSha !== previousSeal.stateSha) {
+      throw new Error('cloud_state_epoch_orphan_refs_unproven');
+    }
+
+    const sealedEnvelope = await this.readEnvelopeAt(previousSeal.stateSha);
+    if (sealedEnvelope.version !== 2 || sealedEnvelope.generation !== previousSeal.generation) {
+      throw new Error('cloud_state_epoch_orphan_seal_mismatch');
+    }
+    await this.validateLineageAnchor(sealedEnvelope, { baseWitnessSha: previousSeal.baseWitnessSha });
+
+    const statusesUrl = '/commits/' + statusAnchorSha + '/statuses?per_page=' + STATUS_PAGE_SIZE + '&page=1';
+    const untouched = await this.request(statusesUrl);
+    if (!Array.isArray(untouched) || untouched.length !== 0) {
+      throw new Error('cloud_state_epoch_orphan_status_conflict');
+    }
+    if (await this.refSha('tags/' + encodeURIComponent(expectedTag)) !== statusAnchorSha) {
+      throw new Error('cloud_state_epoch_orphan_tag_moved');
+    }
+
+    // Deterministic recovery identity prevents concurrent identical repair
+    // attempts from generating conflicting authority anchors.
+    const identity = {
+      name: LANE_ROOT_AUTHOR_NAME, email: LANE_ROOT_AUTHOR_EMAIL, date: LANE_ROOT_AUTHOR_DATE
+    };
+    const authorityMessage = this.epochAuthorityMessage(epoch);
+    const created = await this.request('/git/commits', {
+      method: 'POST',
+      body: {
+        message: authorityMessage, tree: treeSha, parents: [statusAnchorSha],
+        author: identity, committer: identity
+      }
+    });
+    const authorityAnchorSha = assertSha(created?.sha, 'cloud_state_epoch_orphan_authority_invalid');
+    const authority = await this.readCommit(authorityAnchorSha);
+    if (authority.parents.length !== 1 || authority.parents[0]?.sha !== statusAnchorSha ||
+        authority.message !== authorityMessage || authority.tree?.sha !== treeSha) {
+      throw new Error('cloud_state_epoch_orphan_authority_invalid');
+    }
+
+    // A competing writer may have repaired the same tag while we prepared the
+    // commit. Fail closed rather than append an alternative registration.
+    const after = await this.request(statusesUrl);
+    if (!Array.isArray(after) || after.length !== 0 ||
+        await this.refSha('tags/' + encodeURIComponent(expectedTag)) !== statusAnchorSha) {
+      throw new Error('cloud_state_epoch_orphan_status_conflict');
+    }
+    const description = this.registrationDescription(
+      epoch, previousSeal.stateSha, previousSeal.generation, previousSeal.generation + 1, authorityAnchorSha
+    );
+    const postError = await this.appendEpochStatus(statusAnchorSha, this.epochRegistrationContext(), description);
+    if (postError) throw new Error('cloud_state_epoch_orphan_registration_append_failed', { cause: postError });
+
+    const repaired = await this.readEpochBundle(statusAnchorSha, previousRegistration.statusAnchorSha);
+    if (repaired.registration.epoch !== epoch ||
+        repaired.registration.anchorSha !== previousSeal.stateSha ||
+        repaired.registration.authorityAnchorSha !== authorityAnchorSha) {
+      throw new Error('cloud_state_epoch_orphan_registration_invalid');
+    }
+    return repaired;
+  }
+
   async readRootEvidence({ repairLinks = false } = {}) {
     const laneRoot = await this.laneRootCommit();
     if (!laneRoot) {
@@ -1363,7 +1454,13 @@ export class GitHubStateStore extends JsonStore {
       if (!nextStatusAnchorSha && bundle.seal) {
         const discovered = await this.refSha(`tags/${encodeURIComponent(this.epochAnchorTag(registration.epoch + 1))}`);
         if (discovered) {
-          const nextBundle = await this.readEpochBundle(discovered, registration.statusAnchorSha);
+          let nextBundle;
+          try {
+            nextBundle = await this.readEpochBundle(discovered, registration.statusAnchorSha);
+          } catch (error) {
+            if (!repairLinks || error?.message !== 'cloud_state_epoch_registration_missing') throw error;
+            nextBundle = await this.recoverUnregisteredEpochAnchor(discovered, registration, bundle.seal);
+          }
           if (nextBundle.registration.epoch !== registration.epoch + 1 ||
               nextBundle.registration.anchorSha !== bundle.seal.stateSha ||
               nextBundle.registration.baseGeneration !== bundle.seal.generation ||
