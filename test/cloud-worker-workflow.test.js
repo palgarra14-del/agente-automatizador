@@ -34,6 +34,26 @@ test('temporary quota-outage mode pins every cloud job to the private local runn
   assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/);
 });
 
+test('managed workspace root is pinned before state-bound CLI in admission, recovery and drain', () => {
+  const jobs = [
+    ['admit', 'recover', 'cloud-admit'],
+    ['recover', 'cloud-once', 'cloud-recover'],
+    ['cloud-once', null, 'cloud-prepare']
+  ];
+  for (const [name, nextJob, command] of jobs) {
+    const start = workflow.indexOf('  ' + name + ':');
+    const end = nextJob ? workflow.indexOf('  ' + nextJob + ':', start) : workflow.length;
+    assert.ok(start !== -1 && end > start, 'job boundary ' + name);
+    const job = workflow.slice(start, end);
+    const pin = job.indexOf('echo "AGENT_MANAGED_WORKSPACE_ROOT=$HOME/.local/share/engineering-orchestrator-managed-workspaces" >> "$GITHUB_ENV"');
+    const stateBoundCli = job.indexOf('node src/cli.js inbox ' + command);
+    assert.ok(pin >= 0 && stateBoundCli > pin, 'root must be established before ' + command);
+    assert.equal(job.split('AGENT_MANAGED_WORKSPACE_ROOT=').length - 1, 1, 'exactly one root per job: ' + name);
+  }
+  const route = workflow.slice(workflow.indexOf('  route:'), workflow.indexOf('  admit:'));
+  assert.doesNotMatch(route, /AGENT_MANAGED_WORKSPACE_ROOT/);
+});
+
 test('trusted main updates do not consume a runner for self-maintenance', () => {
   assert.doesNotMatch(workflow, /^\s*push:/m);
   assert.doesNotMatch(workflow, /github\.event_name == 'push'/);
