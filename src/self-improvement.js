@@ -7,6 +7,7 @@ const PROJECT_STATE_KEY = 'autopilotProjectImprovement';
 const TERMINAL = new Set(['completed', 'failed', 'blocked']);
 const SELF_COOLDOWN_MS = 30 * 60 * 1000;
 const PROJECT_COOLDOWN_MS = 2 * 60 * 1000;
+const WORKSPACE_INTEGRITY_BACKOFF_MS = 24 * 60 * 60 * 1000;
 const BILLING_BACKOFF_BASE_MS = 6 * 60 * 60 * 1000;
 const BILLING_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
 const PROVIDER_BACKOFF_BASE_MS = 30 * 60 * 1000;
@@ -417,7 +418,7 @@ export class AutonomousProjectImprovement {
 
   revisionAdvanceBypassesSuspension(state) {
     // A code revision does not replenish a model's exhausted capacity or quota.
-    if (['billing_or_auth_unavailable', 'model_capacity_unavailable'].includes(state.suspensionReason)) return false;
+    if (['billing_or_auth_unavailable', 'model_capacity_unavailable', 'workspace_integrity_blocked'].includes(state.suspensionReason)) return false;
     const latest = state.history.at(-1);
     return typeof latest?.baseRevision === 'string' &&
       /^[a-f0-9]{40}$/i.test(latest.baseRevision) &&
@@ -428,7 +429,7 @@ export class AutonomousProjectImprovement {
     const state = rootState === null
       ? await this.readState()
       : normalizeAutopilot(rootState?.[this.stateKey], this.maxStartsPer24h);
-    if (state.activeWorkflowId) return true;
+    if (state.activeWorkflowId && state.suspensionReason !== 'workspace_integrity_blocked') return true;
     if (state.suspendedUntil &&
         Date.parse(state.suspendedUntil) > this.now() &&
         !this.revisionAdvanceBypassesSuspension(state)) return false;
@@ -582,11 +583,33 @@ export class AutonomousProjectImprovement {
     return workflow.id;
   }
 
+  async parkWorkspaceIntegrityFailure(workflowId, error) {
+    if (error?.message !== 'cloud_workspace_rebind_source_changed') throw error;
+    await this.writeState((current) => {
+      if (current.activeWorkflowId !== workflowId) throw error;
+      return {
+        ...current,
+        // Do not alter the Git worktree, clear the workflow, or discard evidence.
+        suspendedUntil: new Date(this.now() + WORKSPACE_INTEGRITY_BACKOFF_MS).toISOString(),
+        suspensionReason: 'workspace_integrity_blocked'
+      };
+    });
+    return { status: 'workspace_integrity_blocked', workflowId, error: error.message };
+  }
+
   async tick({ deadlineCapAt = null } = {}) {
     if (deadlineCapAt !== null && (!Number.isFinite(deadlineCapAt) || deadlineCapAt <= 0)) {
       throw new Error('autonomous_self_improvement_deadline_invalid');
     }
     let state = await this.readState();
+    if (state.activeWorkflowId && state.suspensionReason === 'workspace_integrity_blocked' &&
+        Date.parse(state.suspendedUntil) > this.now()) {
+      return {
+        status: 'workspace_integrity_blocked',
+        workflowId: state.activeWorkflowId,
+        error: 'cloud_workspace_rebind_source_changed'
+      };
+    }
 
     let workflowId = state.activeWorkflowId;
     if (!workflowId) {
@@ -601,7 +624,12 @@ export class AutonomousProjectImprovement {
     const localDeadlineAt = this.now() + this.workflowTimeoutMs;
     const tickDeadlineAt = deadlineCapAt === null ? localDeadlineAt : Math.min(localDeadlineAt, deadlineCapAt);
     for (let transition = 0; transition < 4; transition += 1) {
-      let plan = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
+      let plan;
+      try {
+        plan = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
+      } catch (error) {
+        return this.parkWorkspaceIntegrityFailure(workflowId, error);
+      }
       if (!plan) {
         await this.writeState((current) => ({
           ...current,
@@ -727,7 +755,12 @@ export class AutonomousProjectImprovement {
       return { ...resultSummary(plan), status: plan.status };
     }
 
-    const current = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
+    let current;
+    try {
+      current = await this.workflowEngine.get(workflowId, { deadlineCapAt: tickDeadlineAt });
+    } catch (error) {
+      return this.parkWorkspaceIntegrityFailure(workflowId, error);
+    }
     return { ...resultSummary(current), status: current?.status ?? 'transition_budget_exhausted' };
   }
 }
