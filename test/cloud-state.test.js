@@ -282,7 +282,7 @@ function fakeGitHub() {
       const start = (page - 1) * perPage;
       const statuses = statusesBySha.get(targetSha) ?? [];
       if (delayedEpochOneReads > 0 &&
-          statuses.some(status => /\\/epoch$/i.test(status.context || '') &&
+          statuses.some(status => /\/epoch$/i.test(status.context || '') &&
             String(status.description || '').startsWith('e=1;'))) {
         delayedEpochOneReads -= 1;
         return response(200, []);
