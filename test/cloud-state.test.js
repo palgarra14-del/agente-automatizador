@@ -1780,6 +1780,79 @@ test('missing immutable next link blocks authority until governed repair verifie
   assert.equal(fake.envelopeAt(g257).generation, 257);
 });
 
+test('repair-only recovers an orphaned epoch tag with no registration and preserves sealed lineage', async () => {
+  const fake = fakeGitHub();
+  const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacy);
+  const store = storeFor(fake);
+  const g256 = await publishMarker(store, 'g256');
+
+  fake.failNextAnyStatusWrite(500, (body) =>
+    body.context === store.epochRegistrationContextName && String(body.description).startsWith('e=1;')
+  );
+  await assert.rejects(() => publishMarker(store, 'g257-crash'), /epoch_registration_append_failed/);
+  const orphanSha = fake.tagSha(store.epochAnchorTag(1));
+  assert.ok(orphanSha, 'unregistered epoch anchor was claimed before the crash');
+  assert.equal(fake.statuses(orphanSha).length, 0);
+  assert.equal(fake.tagSha(stateTag), g256);
+
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.load(), /epoch_registration_missing/);
+  const recovered = await fresh.readSnapshot({ repair: true });
+  assert.equal(recovered.state.marker, 'g256');
+  assert.equal(fake.tagSha(stateTag), g256, 'repair never advances published state');
+  const root = await fresh.readRootEvidence();
+  const restored = root.registrationByEpoch.get(1);
+  assert.ok(restored);
+  assert.equal(restored.anchorSha, g256);
+  assert.equal(restored.baseGeneration, 256);
+  assert.equal(root.registrations.length, 2);
+  assert.equal(fake.statuses(orphanSha).filter(s => s.context === fresh.epochRegistrationContextName).length, 1);
+  assert.equal(fake.statuses(root.registrations[0].statusAnchorSha)
+    .filter(s => s.context === fresh.epochNextContextName).length, 1);
+  const second = await fresh.readSnapshot({ repair: true });
+  assert.equal(second.state.marker, 'g256');
+  assert.equal(fake.statuses(orphanSha).filter(s => s.context === fresh.epochRegistrationContextName).length, 1);
+  const g257 = await publishMarker(fresh, 'g257');
+  assert.equal(fake.envelopeAt(g257).generation, 257);
+});
+
+test('repair refuses forged orphan epoch metadata without adding authority', async () => {
+  const fake = fakeGitHub();
+  const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacy);
+  const store = storeFor(fake);
+  const g256 = await publishMarker(store, 'g256');
+  fake.failNextAnyStatusWrite(500, (body) =>
+    body.context === store.epochRegistrationContextName && String(body.description).startsWith('e=1;')
+  );
+  await assert.rejects(() => publishMarker(store, 'g257-crash'), /epoch_registration_append_failed/);
+  const orphanSha = fake.tagSha(store.epochAnchorTag(1));
+  fake.setCommitMessage(orphanSha, 'foreign metadata');
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /epoch_orphan_anchor_invalid/);
+  assert.equal(fake.tagSha(stateTag), g256);
+  assert.equal(fake.statuses(orphanSha).length, 0);
+});
+
+test('repair refuses unregistered epoch when published ref mirrors disagree', async () => {
+  const fake = fakeGitHub();
+  const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
+  fake.forceTag(stateTag, legacy);
+  const store = storeFor(fake);
+  const g256 = await publishMarker(store, 'g256');
+  fake.failNextAnyStatusWrite(500, (body) =>
+    body.context === store.epochRegistrationContextName && String(body.description).startsWith('e=1;')
+  );
+  await assert.rejects(() => publishMarker(store, 'g257-crash'), /epoch_registration_append_failed/);
+  const orphanSha = fake.tagSha(store.epochAnchorTag(1));
+  fake.forceTag(checkpointTag, legacy);
+  const fresh = storeFor(fake, { ownerId: 'github:2:1' });
+  await assert.rejects(() => fresh.readSnapshot({ repair: true }), /epoch_orphan_refs_unproven/);
+  assert.equal(fake.tagSha(stateTag), g256);
+  assert.equal(fake.statuses(orphanSha).length, 0);
+});
+
 test('orphan next-epoch registration before generation claim is harmless and reusable', async () => {
   const fake = fakeGitHub();
   const legacy = fake.makeStateCommit({ generation: 255, state: blankState('legacy'), version: 1 });
